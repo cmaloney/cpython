@@ -1568,8 +1568,6 @@ _Py_fopen_obj(PyObject *path, const char *mode)
     return f;
 }
 
-_Thread_local int pass_count;
-
 /* Read count bytes from fd into buf.
 
    On success, return the number of read bytes, it can be lower than count.
@@ -1585,6 +1583,71 @@ _Thread_local int pass_count;
    Release the GIL to call read(). The caller must hold the GIL. */
 Py_ssize_t
 _Py_read(int fd, void *buf, size_t count)
+{
+    Py_ssize_t n;
+    int err;
+    int async_err = 0;
+
+    assert(PyGILState_Check());
+
+    /* _Py_read() must not be called with an exception set, otherwise the
+     * caller may think that read() was interrupted by a signal and the signal
+     * handler raised an exception. */
+    assert(!PyErr_Occurred());
+
+    if (count > _PY_READ_MAX) {
+        count = _PY_READ_MAX;
+    }
+
+    _Py_BEGIN_SUPPRESS_IPH
+    do {
+        Py_BEGIN_ALLOW_THREADS
+        errno = 0;
+#ifdef MS_WINDOWS
+        n = read(fd, buf, (int)count);
+#else
+        n = read(fd, buf, count);
+#endif
+        /* save/restore errno because PyErr_CheckSignals()
+         * and PyErr_SetFromErrno() can modify it */
+        err = errno;
+        Py_END_ALLOW_THREADS
+    } while (n < 0 && err == EINTR &&
+            !(async_err = PyErr_CheckSignals()));
+    _Py_END_SUPPRESS_IPH
+
+    if (async_err) {
+        /* read() was interrupted by a signal (failed with EINTR)
+         * and the Python signal handler raised an exception */
+        errno = err;
+        assert(errno == EINTR && PyErr_Occurred());
+        return -1;
+    }
+    if (n < 0) {
+        PyErr_SetFromErrno(PyExc_OSError);
+        errno = err;
+        return -1;
+    }
+
+    return n;
+}
+
+
+/* Read count bytes from fd into buf.
+
+   On success, return the number of read bytes, it can be lower than count.
+   If the current file offset is at or past the end of file, no bytes are read,
+   and read() returns zero.
+
+   On error, raise an exception, set errno and return -1.
+
+   When interrupted by a signal (read() fails with EINTR), retry the syscall.
+   If the Python signal handler raises an exception, the function returns -1
+   (the syscall is not retried).
+
+   Release the GIL to call read(). The caller must hold the GIL. */
+Py_ssize_t
+_Py_read2(int fd, void *buf, size_t count, size_t offset)
 {
     Py_ssize_t n;
     int err = 0;
@@ -1604,8 +1667,8 @@ _Py_read(int fd, void *buf, size_t count)
     _Py_BEGIN_SUPPRESS_IPH
     do {
         Py_BEGIN_ALLOW_THREADS
-#ifdef MS_WINDOWS
         errno = 0;
+#ifdef MS_WINDOWS
         n = read(fd, buf, (int)count);
         /* save/restore errno because PyErr_CheckSignals()
          * and PyErr_SetFromErrno() can modify it */
@@ -1626,19 +1689,26 @@ _Py_read(int fd, void *buf, size_t count)
         // TODO: Handle errors
         sqe = io_uring_get_sqe(&ring);
         assert(sqe);
-        io_uring_prep_read(sqe, fd, buf, count, 0);
+        io_uring_prep_read(sqe, fd, buf, count, offset);
+        // dprintf(2, "Attempting to read: %ld\n", count);
         assert(io_uring_submit_and_wait(&ring, 1) >= 0);
         int ret = 0;
         ret = io_uring_wait_cqe(&ring, &cqe);
         assert(ret >= 0);
-        n = cqe->res;
-        dprintf(2, "errorcode: %d, count: %ld, data: ", err, count);
-        write(2, buf, (count > 1000? 1000 : count));
-        write(2, "\n", 1);
+        if (cqe->res >= 0) {
+            n = cqe->res;
+            errno = 0;
+        } else {
+            n = -1;
+            err = errno;
+        }
+        // dprintf(2, "errorcode: %d, n: %ld, data: ", err, n);
+        // if (err == 0) {
+        //     write(2, buf, (count > 200? 200 : count));
+        // }
+        // write(2, "\n", 1);
         io_uring_cqe_seen(&ring, cqe);
         io_uring_queue_exit(&ring);
-        ++pass_count;
-        assert(pass_count < 3);
 #endif
         Py_END_ALLOW_THREADS
     } while (n < 0 && err == EINTR &&
