@@ -879,6 +879,8 @@ if test x$MULTIARCH != x; then
 fi
 AC_SUBST(MULTIARCH_CPPFLAGS)
 
+LDFLAGS="${LDFLAGS} -luring"
+
 AC_MSG_CHECKING([for -Wl,--no-as-needed])
 save_LDFLAGS="$LDFLAGS"
 LDFLAGS="$LDFLAGS -Wl,--no-as-needed"

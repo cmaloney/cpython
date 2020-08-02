@@ -34,6 +34,12 @@ extern int winerror_to_errno(int);
 int _Py_open_cloexec_works = -1;
 #endif
 
+/* TODO: Guard with a HAVE_URING_H
+    also: typeof usage in liburing... Not supported by clang..
+*/
+#define typeof __typeof__
+#include "liburing.h"
+
 
 static int
 get_surrogateescape(_Py_error_handler errors, int *surrogateescape)
@@ -1562,6 +1568,8 @@ _Py_fopen_obj(PyObject *path, const char *mode)
     return f;
 }
 
+_Thread_local int pass_count;
+
 /* Read count bytes from fd into buf.
 
    On success, return the number of read bytes, it can be lower than count.
@@ -1579,7 +1587,7 @@ Py_ssize_t
 _Py_read(int fd, void *buf, size_t count)
 {
     Py_ssize_t n;
-    int err;
+    int err = 0;
     int async_err = 0;
 
     assert(PyGILState_Check());
@@ -1596,15 +1604,42 @@ _Py_read(int fd, void *buf, size_t count)
     _Py_BEGIN_SUPPRESS_IPH
     do {
         Py_BEGIN_ALLOW_THREADS
-        errno = 0;
 #ifdef MS_WINDOWS
+        errno = 0;
         n = read(fd, buf, (int)count);
-#else
-        n = read(fd, buf, count);
-#endif
         /* save/restore errno because PyErr_CheckSignals()
          * and PyErr_SetFromErrno() can modify it */
         err = errno;
+#else
+        struct io_uring ring;
+        // TODO: Improve read all in the presence of io_uring significantly.
+        // TODO: Move all available calls to use the io_uring pieces.
+        // TODO: Pre-register file.
+        // TODO: Pre-register buffer.
+        // TODO: Do only once.
+        assert(io_uring_queue_init(16, &ring, 0) >= 0);
+        struct io_uring_sqe *sqe = 0;
+        struct io_uring_cqe *cqe = 0;
+        // TODO: Pre-register the fd on open for all
+        // read mode files.
+        // TODO: Re-use the sqe/cqe?
+        // TODO: Handle errors
+        sqe = io_uring_get_sqe(&ring);
+        assert(sqe);
+        io_uring_prep_read(sqe, fd, buf, count, 0);
+        assert(io_uring_submit_and_wait(&ring, 1) >= 0);
+        int ret = 0;
+        ret = io_uring_wait_cqe(&ring, &cqe);
+        assert(ret >= 0);
+        n = cqe->res;
+        dprintf(2, "errorcode: %d, count: %ld, data: ", err, count);
+        write(2, buf, (count > 1000? 1000 : count));
+        write(2, "\n", 1);
+        io_uring_cqe_seen(&ring, cqe);
+        io_uring_queue_exit(&ring);
+        ++pass_count;
+        assert(pass_count < 3);
+#endif
         Py_END_ALLOW_THREADS
     } while (n < 0 && err == EINTR &&
             !(async_err = PyErr_CheckSignals()));

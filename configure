@@ -5372,6 +5372,8 @@ if test x$MULTIARCH != x; then
 fi
 
 
+LDFLAGS="${LDFLAGS} -luring"
+
 { $as_echo "$as_me:${as_lineno-$LINENO}: checking for -Wl,--no-as-needed" >&5
 $as_echo_n "checking for -Wl,--no-as-needed... " >&6; }
 save_LDFLAGS="$LDFLAGS"
