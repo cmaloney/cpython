@@ -104,7 +104,7 @@ PyAPI_FUNC(Py_ssize_t) _Py_read(
     void *buf,
     size_t count);
 
-PyAPI_FUNC(Py_ssize_t) _Py_read2(
+PyAPI_FUNC(Py_ssize_t) _Py_read_rest(
     int fd,
     void *buf,
     size_t count,

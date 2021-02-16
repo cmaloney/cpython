@@ -372,9 +372,12 @@ class IOTest(unittest.TestCase):
         self.assertEqual(f.tell(), 10)
         self.assertRaises(TypeError, f.seek, 0.0)
         if buffered:
+            print("\nSeek to 0, read whole thing")
             f.seek(0)
             self.assertEqual(f.read(), b"hello world\n")
+            print("seek to 6")
             f.seek(6)
+            print("Expecting world\n")
             self.assertEqual(f.read(), b"world\n")
             self.assertEqual(f.read(), b"")
             f.seek(0)

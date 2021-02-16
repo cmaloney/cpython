@@ -1647,7 +1647,7 @@ _Py_read(int fd, void *buf, size_t count)
 
    Release the GIL to call read(). The caller must hold the GIL. */
 Py_ssize_t
-_Py_read2(int fd, void *buf, size_t count, size_t offset)
+_Py_read_rest(int fd, void *buf, size_t count, size_t offset)
 {
     Py_ssize_t n;
     int err = 0;
@@ -1702,11 +1702,11 @@ _Py_read2(int fd, void *buf, size_t count, size_t offset)
             n = -1;
             err = errno;
         }
-        // dprintf(2, "errorcode: %d, n: %ld, data: ", err, n);
-        // if (err == 0) {
-        //     write(2, buf, (count > 200? 200 : count));
-        // }
-        // write(2, "\n", 1);
+        dprintf(2, "errorcode: %d, n: %ld, pos: %ld, count: %ld, data: ", err, n, offset, count);
+        if (err == 0 && count < 100) {
+            write(2, buf, (n > 200? 200 : n));
+        }
+        write(2, "\n", 1);
         io_uring_cqe_seen(&ring, cqe);
         io_uring_queue_exit(&ring);
 #endif

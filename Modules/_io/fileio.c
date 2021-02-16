@@ -747,7 +747,7 @@ _io_FileIO_readall_impl(fileio *self)
             }
         }
 
-        n = _Py_read2(self->fd,
+        n = _Py_read_rest(self->fd,
                      PyBytes_AS_STRING(result) + bytes_read,
                      bufsize - bytes_read, pos);
 
@@ -766,7 +766,7 @@ _io_FileIO_readall_impl(fileio *self)
         }
         bytes_read += n;
         pos += n;
-        // dprintf(2, "Read %ld bytes target %ld, currently at %ld\n", bytes_read, bufsize, pos);
+        dprintf(2, "Read %ld bufsize %ld, currently at %ld\n", bytes_read, bufsize, pos);
     }
 
     if (PyBytes_GET_SIZE(result) > bytes_read) {
