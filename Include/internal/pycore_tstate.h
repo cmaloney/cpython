@@ -8,6 +8,11 @@ extern "C" {
 #  error "this header requires Py_BUILD_CORE define"
 #endif
 
+// FIXME cmaloney: HAS_URING
+// NOTE: liburing.h includes stdbool.h
+#include <liburing.h>
+
+
 #include "pycore_freelist.h"      // struct _Py_freelist_state
 #include "pycore_mimalloc.h"      // struct _mimalloc_thread_state
 
@@ -23,6 +28,10 @@ typedef struct _PyThreadStateImpl {
     struct _mimalloc_thread_state mimalloc;
     struct _Py_freelist_state freelist_state;
 #endif
+
+    /* IO ring*/
+    // FIXME cmaloney: HAS_URING
+    struct io_uring ring;
 
 } _PyThreadStateImpl;
 

@@ -6786,6 +6786,10 @@ if test x$MULTIARCH != x; then
 fi
 
 
+
+LDFLAGS="${LDFLAGS} -luring"
+
+
 { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for PEP 11 support tier" >&5
 printf %s "checking for PEP 11 support tier... " >&6; }
 case $host/$ac_cv_cc_name in #(

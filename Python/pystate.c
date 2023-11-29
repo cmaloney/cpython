@@ -19,6 +19,7 @@
 #include "pycore_runtime_init.h"  // _PyRuntimeState_INIT
 #include "pycore_sysmodule.h"     // _PySys_Audit()
 #include "pycore_obmalloc.h"      // _PyMem_obmalloc_state_on_heap()
+#include <liburing.h>
 
 /* --------------------------------------------------------------------------
 CAUTION
@@ -1339,6 +1340,15 @@ init_threadstate(_PyThreadStateImpl *_tstate,
         tstate->state = _Py_THREAD_SUSPENDED;
     }
 
+    // Setup io_uring queues
+    // FIXME(cmaloney): Should this happen in pylifecycle.c
+    // decision point: Is this configurable at runtime, compile time, or both?
+    int io_uring_errcode = io_uring_queue_init(64, &_tstate->ring, 0);
+    if(io_uring_errcode != 0) {
+        printf("errno: %d\n", io_uring_errcode);
+        Py_FatalError("unable to initialize io_uring");
+    }
+
     tstate->_status.initialized = 1;
 }
 
@@ -1606,6 +1616,10 @@ tstate_delete_common(PyThreadState *tstate)
         }
     }
     HEAD_UNLOCK(runtime);
+
+    // FIXME: Must be a better way to get back to this...
+    _PyThreadStateImpl *_tstate = (_PyThreadStateImpl *)tstate;
+    io_uring_queue_exit(&_tstate->ring);
 
     // XXX Unbind in PyThreadState_Clear(), or earlier
     // (and assert not-equal here)?

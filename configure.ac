@@ -958,6 +958,11 @@ if test x$MULTIARCH != x; then
 fi
 AC_SUBST([MULTIARCH_CPPFLAGS])
 
+
+dnl FIXME cmaloney: Actually check for liburing
+LDFLAGS="${LDFLAGS} -luring"
+
+
 dnl Support tiers according to https://peps.python.org/pep-0011/
 dnl
 dnl NOTE: Windows support tiers are defined in PC/pyconfig.h.

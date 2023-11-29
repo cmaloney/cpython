@@ -195,6 +195,7 @@ extern PyTypeObject _PyExc_MemoryError;
 #define _PyThreadStateImpl_INIT \
     { \
         .base = _PyThreadState_INIT, \
+        .ring = {0}, \
     }
 
 #define _PyThreadState_INIT \
