@@ -13,6 +13,9 @@ extern "C" {
 #include "pycore_mimalloc.h"      // struct _mimalloc_thread_state
 #include "pycore_qsbr.h"          // struct qsbr
 
+// FIXME: Conditional on uring support
+#include <liburing.h>
+
 
 static inline void
 _PyThreadState_SetWhence(PyThreadState *tstate, int whence)
@@ -41,6 +44,10 @@ typedef struct _PyThreadStateImpl {
 #if defined(Py_REF_DEBUG) && defined(Py_GIL_DISABLED)
     Py_ssize_t reftotal;  // this thread's total refcount operations
 #endif
+
+    // FIXME: Conditional on uring support
+    struct io_uring ring;
+
 
 } _PyThreadStateImpl;
 

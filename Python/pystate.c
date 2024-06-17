@@ -20,6 +20,7 @@
 #include "pycore_runtime_init.h"  // _PyRuntimeState_INIT
 #include "pycore_sysmodule.h"     // _PySys_Audit()
 #include "pycore_obmalloc.h"      // _PyMem_obmalloc_state_on_heap()
+#include <liburing.h>
 
 /* --------------------------------------------------------------------------
 CAUTION
@@ -1506,6 +1507,15 @@ init_threadstate(_PyThreadStateImpl *_tstate,
     if (interp->stoptheworld.requested || _PyRuntime.stoptheworld.requested) {
         // Start in the suspended state if there is an ongoing stop-the-world.
         tstate->state = _Py_THREAD_SUSPENDED;
+    }
+
+    // FIXME(cmaloney): Make setable via a variable for number of entires w/
+    // a baseline barrier
+    // FIXME(cmaloney): Do we want other flags here?
+    int ret = io_uring_queue_init(32, &_tstate->ring, 0);
+    if (ret < 0) {
+        fprintf(stderr, "queue_init: %s\n", strerror(-ret));
+        Py_FatalError("Unable to initialize io_uring. Try ");
     }
 
     tstate->_status.initialized = 1;
