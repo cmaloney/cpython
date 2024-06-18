@@ -363,14 +363,7 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
         line_buffering = 0;
 
     if (buffering < 0) {
-        PyObject *blksize_obj;
-        blksize_obj = PyObject_GetAttr(raw, &_Py_ID(_blksize));
-        if (blksize_obj == NULL)
-            goto error;
-        buffering = PyLong_AsLong(blksize_obj);
-        Py_DECREF(blksize_obj);
-        if (buffering == -1 && PyErr_Occurred())
-            goto error;
+        buffering = DEFAULT_BUFFER_SIZE;
     }
     if (buffering < 0) {
         PyErr_SetString(PyExc_ValueError,

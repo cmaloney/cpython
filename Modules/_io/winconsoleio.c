@@ -1160,7 +1160,6 @@ static PyGetSetDef winconsoleio_getsetlist[] = {
 };
 
 static PyMemberDef winconsoleio_members[] = {
-    {"_blksize", Py_T_UINT, offsetof(winconsoleio, blksize), 0},
     {"_finalizing", Py_T_BOOL, offsetof(winconsoleio, finalizing), 0},
     {"__weaklistoffset__", Py_T_PYSSIZET, offsetof(winconsoleio, weakreflist), Py_READONLY},
     {"__dictoffset__", Py_T_PYSSIZET, offsetof(winconsoleio, dict), Py_READONLY},

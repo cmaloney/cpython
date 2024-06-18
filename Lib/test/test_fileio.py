@@ -71,16 +71,6 @@ class AutoFileTests:
             self.assertRaises((AttributeError, TypeError),
                               setattr, f, attr, 'oops')
 
-    @unittest.skipIf(is_wasi, "WASI does not expose st_blksize.")
-    def testBlksize(self):
-        # test private _blksize attribute
-        blksize = io.DEFAULT_BUFFER_SIZE
-        # try to get preferred blksize from stat.st_blksize, if available
-        if hasattr(os, 'fstat'):
-            fst = os.fstat(self.f.fileno())
-            blksize = getattr(fst, 'st_blksize', blksize)
-        self.assertEqual(self.f._blksize, blksize)
-
     # verify readinto
     def testReadintoByteArray(self):
         self.f.write(bytes([1, 2, 0, 255]))

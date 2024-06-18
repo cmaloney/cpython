@@ -71,7 +71,6 @@ typedef struct {
     signed int seekable : 2; /* -1 means unknown */
     unsigned int closefd : 1;
     char finalizing;
-    unsigned int blksize;
     PyObject *weakreflist;
     PyObject *dict;
 } fileio;
@@ -195,7 +194,6 @@ fileio_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
         self->writable = 0;
         self->appending = 0;
         self->seekable = -1;
-        self->blksize = 0;
         self->closefd = 1;
         self->weakreflist = NULL;
     }
@@ -449,7 +447,6 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
 #endif
     }
 
-    self->blksize = DEFAULT_BUFFER_SIZE;
     Py_BEGIN_ALLOW_THREADS
     fstat_result = _Py_fstat_noraise(self->fd, &fdfstat);
     Py_END_ALLOW_THREADS
@@ -478,10 +475,6 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
             goto error;
         }
 #endif /* defined(S_ISDIR) */
-#ifdef HAVE_STRUCT_STAT_ST_BLKSIZE
-        if (fdfstat.st_blksize > 1)
-            self->blksize = fdfstat.st_blksize;
-#endif /* HAVE_STRUCT_STAT_ST_BLKSIZE */
     }
 
 #if defined(MS_WINDOWS) || defined(__CYGWIN__)
@@ -1212,7 +1205,6 @@ static PyGetSetDef fileio_getsetlist[] = {
 };
 
 static PyMemberDef fileio_members[] = {
-    {"_blksize", Py_T_UINT, offsetof(fileio, blksize), 0},
     {"_finalizing", Py_T_BOOL, offsetof(fileio, finalizing), 0},
     {"__weaklistoffset__", Py_T_PYSSIZET, offsetof(fileio, weakreflist), Py_READONLY},
     {"__dictoffset__", Py_T_PYSSIZET, offsetof(fileio, dict), Py_READONLY},
