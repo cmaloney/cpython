@@ -72,7 +72,7 @@ typedef struct {
     unsigned int closefd : 1;
     char finalizing;
     unsigned int blksize;
-    int size_estimated;
+    Py_off_t size_estimated;
     PyObject *weakreflist;
     PyObject *dict;
 } fileio;
@@ -484,7 +484,8 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
         if (fdfstat.st_blksize > 1)
             self->blksize = fdfstat.st_blksize;
 #endif /* HAVE_STRUCT_STAT_ST_BLKSIZE */
-        self->size_estimated = fdfstat.st_size;
+        if (fdfstat.st_size < PY_SSIZE_T_MAX)
+            self->size_estimated = (Py_off_t)fdfstat.st_size;
     }
 
 #if defined(MS_WINDOWS) || defined(__CYGWIN__)
@@ -719,33 +720,36 @@ _io_FileIO_readall_impl(fileio *self)
     if (self->fd < 0)
         return err_closed();
 
-    end = (Py_off_t)self->size_estimated;
-    bufsize = SMALLCHUNK;
-    if (end > 0 && end < PY_SSIZE_T_MAX) {
-        // the file is expected to be known small size, optimistically
-        // Try for a single read of the whole thing rather than doing
-        // multiple system calls.
-        bufsize = end + 1;
-        pos = -1;
+    end = self->size_estimated;
+    if (end <= 0) {
+        /* Use a default size and resize as needed. */
+        bufsize = SMALLCHUNK;
     } else {
-        // The file is large, try and avoid calling read() repeatedly by
-        // getting the precise size of the file up front.
-    Py_BEGIN_ALLOW_THREADS
-    _Py_BEGIN_SUPPRESS_IPH
-#ifdef MS_WINDOWS
-    pos = _lseeki64(self->fd, 0L, SEEK_CUR);
-#else
-    pos = lseek(self->fd, 0L, SEEK_CUR);
-#endif
-    _Py_END_SUPPRESS_IPH
-    Py_END_ALLOW_THREADS
+        /* This is probably a real file, so we try to allocate a
+        buffer one byte larger than the rest of the file.  If the
+        calculation is right then we should get EOF without having
+        to enlarge the buffer. */
+        bufsize = (size_t)(end) + 1;
 
-        if (end > 0 && end >= pos && pos >= 0 && end - pos < PY_SSIZE_T_MAX) {
-            /* This is probably a real file, so we try to allocate a
-            buffer one byte larger than the rest of the file.  If the
-            calculation is right then we should get EOF without having
-            to enlarge the buffer. */
-            bufsize = (size_t)(end - pos + 1);
+        /* While a lot of code does open().read() to get the whole contents
+        of a file it is possible a caller seeks/reads a ways into the file
+        then calls readall() to get the rest, which would result in reading
+        more than required. Guard against that for larger files where we expect
+        the I/O time to dominate anyways while keeping small files fast. */
+        if (bufsize > 65536) {
+            Py_BEGIN_ALLOW_THREADS
+            _Py_BEGIN_SUPPRESS_IPH
+#ifdef MS_WINDOWS
+            pos = _lseeki64(self->fd, 0L, SEEK_CUR);
+#else
+            pos = lseek(self->fd, 0L, SEEK_CUR);
+#endif
+            _Py_END_SUPPRESS_IPH
+            Py_END_ALLOW_THREADS
+
+            if (end >= pos && pos >= 0 && end - pos < PY_SSIZE_T_MAX) {
+                bufsize = bufsize - pos;
+            }
         }
     }
 
