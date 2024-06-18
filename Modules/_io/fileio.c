@@ -710,17 +710,26 @@ static PyObject *
 _io_FileIO_readall_impl(fileio *self)
 /*[clinic end generated code: output=faa0292b213b4022 input=dbdc137f55602834]*/
 {
-    struct _Py_stat_struct status;
     Py_off_t pos, end;
     PyObject *result;
     Py_ssize_t bytes_read = 0;
     Py_ssize_t n;
     size_t bufsize;
-    int fstat_result;
 
     if (self->fd < 0)
         return err_closed();
 
+    end = (Py_off_t)self->size_estimated;
+    bufsize = SMALLCHUNK;
+    if (end > 0 && end < PY_SSIZE_T_MAX) {
+        // the file is expected to be known small size, optimistically
+        // Try for a single read of the whole thing rather than doing
+        // multiple system calls.
+        bufsize = end + 1;
+        pos = -1;
+    } else {
+        // The file is large, try and avoid calling read() repeatedly by
+        // getting the precise size of the file up front.
     Py_BEGIN_ALLOW_THREADS
     _Py_BEGIN_SUPPRESS_IPH
 #ifdef MS_WINDOWS
@@ -731,15 +740,13 @@ _io_FileIO_readall_impl(fileio *self)
     _Py_END_SUPPRESS_IPH
     Py_END_ALLOW_THREADS
 
-    end = (Py_off_t)self->size_estimated;
-    if (end > 0 && end >= pos && pos >= 0 && end - pos < PY_SSIZE_T_MAX) {
-        /* This is probably a real file, so we try to allocate a
-           buffer one byte larger than the rest of the file.  If the
-           calculation is right then we should get EOF without having
-           to enlarge the buffer. */
-        bufsize = (size_t)(end - pos + 1);
-    } else {
-        bufsize = SMALLCHUNK;
+        if (end > 0 && end >= pos && pos >= 0 && end - pos < PY_SSIZE_T_MAX) {
+            /* This is probably a real file, so we try to allocate a
+            buffer one byte larger than the rest of the file.  If the
+            calculation is right then we should get EOF without having
+            to enlarge the buffer. */
+            bufsize = (size_t)(end - pos + 1);
+        }
     }
 
     result = PyBytes_FromStringAndSize(NULL, bufsize);
@@ -781,7 +788,6 @@ _io_FileIO_readall_impl(fileio *self)
             return NULL;
         }
         bytes_read += n;
-        pos += n;
     }
 
     if (PyBytes_GET_SIZE(result) > bytes_read) {
