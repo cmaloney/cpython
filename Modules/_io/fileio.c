@@ -72,6 +72,7 @@ typedef struct {
     unsigned int closefd : 1;
     char finalizing;
     unsigned int blksize;
+    int size_estimated;
     PyObject *weakreflist;
     PyObject *dict;
 } fileio;
@@ -196,6 +197,7 @@ fileio_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
         self->appending = 0;
         self->seekable = -1;
         self->blksize = 0;
+        self->size_estimated = -1;
         self->closefd = 1;
         self->weakreflist = NULL;
     }
@@ -482,6 +484,7 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
         if (fdfstat.st_blksize > 1)
             self->blksize = fdfstat.st_blksize;
 #endif /* HAVE_STRUCT_STAT_ST_BLKSIZE */
+        self->size_estimated = fdfstat.st_size;
     }
 
 #if defined(MS_WINDOWS) || defined(__CYGWIN__)
@@ -726,14 +729,9 @@ _io_FileIO_readall_impl(fileio *self)
     pos = lseek(self->fd, 0L, SEEK_CUR);
 #endif
     _Py_END_SUPPRESS_IPH
-    fstat_result = _Py_fstat_noraise(self->fd, &status);
     Py_END_ALLOW_THREADS
 
-    if (fstat_result == 0)
-        end = status.st_size;
-    else
-        end = (Py_off_t)-1;
-
+    end = (Py_off_t)self->size_estimated;
     if (end > 0 && end >= pos && pos >= 0 && end - pos < PY_SSIZE_T_MAX) {
         /* This is probably a real file, so we try to allocate a
            buffer one byte larger than the rest of the file.  If the
