@@ -346,13 +346,27 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
 
     /* buffering */
     if (buffering < 0) {
-        PyObject *res = PyObject_CallMethodNoArgs(raw, &_Py_ID(isatty));
-        if (res == NULL)
-            goto error;
-        isatty = PyObject_IsTrue(res);
-        Py_DECREF(res);
-        if (isatty < 0)
-            goto error;
+        PyObject *is_reg_obj;
+        int is_reg = 0;
+        /* Regular files are never ttys, save a system call in that case
+           because it is fairly common (Read a file off disk) */
+        is_reg_obj = PyObject_GetAttr(raw, &_Py_ID(_is_reg));
+        if (is_reg_obj != NULL && PyObject_IsTrue(is_reg_obj)) {
+            isatty = 0;
+        }
+        else {
+            /* Can't shortcut, do a tty syscall */
+            PyObject *res = PyObject_CallMethodNoArgs(raw, &_Py_ID(isatty));
+            if (res == NULL) {
+                goto error;
+            }
+            isatty = PyObject_IsTrue(res);
+            Py_DECREF(res);
+            if (isatty < 0) {
+                goto error;
+            }
+        }
+        Py_DECREF(is_reg_obj);
     }
 
     if (buffering == 1 || isatty) {

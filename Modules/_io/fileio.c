@@ -73,6 +73,7 @@ typedef struct {
     char finalizing;
     unsigned int blksize;
     Py_off_t size_estimated;
+    unsigned int is_reg;
     PyObject *weakreflist;
     PyObject *dict;
 } fileio;
@@ -487,7 +488,11 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
         if (fdfstat.st_size < PY_SSIZE_T_MAX) {
             self->size_estimated = (Py_off_t)fdfstat.st_size;
         }
+
+        self->is_reg = S_ISREG(fdfstat.st_mode);
     }
+
+
 
 #if defined(MS_WINDOWS) || defined(__CYGWIN__)
     /* don't translate newlines (\r\n <=> \n) */
@@ -1224,6 +1229,7 @@ static PyGetSetDef fileio_getsetlist[] = {
 
 static PyMemberDef fileio_members[] = {
     {"_blksize", Py_T_UINT, offsetof(fileio, blksize), 0},
+    {"_is_reg", Py_T_UINT, offsetof(fileio, is_reg), 0},
     {"_finalizing", Py_T_BOOL, offsetof(fileio, finalizing), 0},
     {"__weaklistoffset__", Py_T_PYSSIZET, offsetof(fileio, weakreflist), Py_READONLY},
     {"__dictoffset__", Py_T_PYSSIZET, offsetof(fileio, dict), Py_READONLY},
