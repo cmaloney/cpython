@@ -852,8 +852,6 @@ _buffered_init(buffered *self)
         self->buffer_mask = self->buffer_size - 1;
     else
         self->buffer_mask = 0;
-    if (_buffered_raw_tell(self) == -1)
-        PyErr_Clear();
     return 0;
 }
 
