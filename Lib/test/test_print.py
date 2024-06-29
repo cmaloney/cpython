@@ -3,6 +3,7 @@ import sys
 from io import StringIO
 
 from test import support
+from test.support import strace_helper
 
 NotDefined = object()
 
@@ -128,6 +129,12 @@ class TestPrint(unittest.TestCase):
             def flush(self):
                 raise RuntimeError
         self.assertRaises(RuntimeError, print, 1, file=noflush(), flush=True)
+
+    def test_print_syscalls(self):
+        self.assertEqual(
+            strace_helper.get_syscalls("""print("p1"); print("p2")""", ["--trace=write"]),
+            ['write'],
+            "Two print calls by default shold be two writes",)
 
 
 class TestPy2MigrationHint(unittest.TestCase):
