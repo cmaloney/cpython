@@ -132,9 +132,10 @@ class TestPrint(unittest.TestCase):
 
     def test_print_syscalls(self):
         self.assertEqual(
-            strace_helper.get_syscalls("""print("p1"); print("p2")""", ["--trace=write"]),
-            ['write'],
-            "Two print calls by default shold be two writes",)
+            strace_helper.get_syscalls("""print("p1"); print(type(sys.stdin)); 1 + 1; print("p2")""", ["--trace=write"],
+                                       prelude="import sys"),
+            ['write', 'write'],
+            "print of a whole line shold flush to output")
 
 
 class TestPy2MigrationHint(unittest.TestCase):
