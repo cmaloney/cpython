@@ -151,6 +151,20 @@ class TestFileMethods(LargeFileTest):
                 f.seek(pos)
                 self.assertTrue(f.seekable())
 
+    @bigmemtest(size=size, memuse=2, dry_run=False)
+    def test_seek_readall(self):
+        # Seek which doesn't change position should readall successfully
+        # with minimal calls.
+        with self.open(TESTFN, 'rb') as f:
+            self.assertEqual(os.lseek(f.fileno(), 0, 0), 0)
+
+        # Seek which changes position should readall successfully.
+        raise NotImplementedError()
+    
+    @bigmemtest(size=size, memuse=2, dry_run=False)
+    def test_truncate_readall():
+        # TODO: Memory usage check
+        raise NotImplementedError()
 
 def skip_no_disk_space(path, required):
     def decorator(fun):
