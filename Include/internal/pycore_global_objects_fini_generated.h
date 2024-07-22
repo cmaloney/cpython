@@ -1024,6 +1024,7 @@ _PyStaticObjects_CheckRefcnt(PyInterpreterState *interp) {
     _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(keyfile));
     _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(keys));
     _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(kind));
+    _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(known_abs_pos));
     _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(kw));
     _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(kw1));
     _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(kw2));

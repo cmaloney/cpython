@@ -637,14 +637,23 @@ _io_FileIO_seekable_impl(fileio *self)
     if (self->fd < 0)
         return err_closed();
     if (self->seekable < 0) {
-        /* portable_lseek() sets the seekable attribute */
-        PyObject *pos = portable_lseek(self, NULL, SEEK_CUR, false);
-        assert(self->seekable >= 0);
-        if (pos == NULL) {
-            PyErr_Clear();
+        // At open every file is statd, try using the stat result to
+        // determine seekability to save a system call.
+        // Imply from stat result rather than seeking if possible.
+        if (self->stat_atopen != NULL && S_ISREG(self->stat_atopen->st_mode)) {
+
+            self->seekable == 1;
         }
         else {
-            Py_DECREF(pos);
+            /* portable_lseek() sets the seekable attribute */
+            PyObject *pos = portable_lseek(self, NULL, SEEK_CUR, false);
+            assert(self->seekable >= 0);
+            if (pos == NULL) {
+                PyErr_Clear();
+            }
+            else {
+                Py_DECREF(pos);
+            }
         }
     }
     return PyBool_FromLong((long) self->seekable);

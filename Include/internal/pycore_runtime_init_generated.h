@@ -1022,6 +1022,7 @@ extern "C" {
     INIT_ID(keyfile), \
     INIT_ID(keys), \
     INIT_ID(kind), \
+    INIT_ID(known_abs_pos), \
     INIT_ID(kw), \
     INIT_ID(kw1), \
     INIT_ID(kw2), \

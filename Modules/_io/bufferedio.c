@@ -16,6 +16,20 @@
 
 #include "_iomodule.h"
 
+// FIXME: Share this between posixmodule and bufferedio.
+static int
+Py_off_t_converter(PyObject *arg, void *addr)
+{
+#ifdef HAVE_LARGEFILE_SUPPORT
+    *((Py_off_t *)addr) = PyLong_AsLongLong(arg);
+#else
+    *((Py_off_t *)addr) = PyLong_AsLong(arg);
+#endif
+    if (PyErr_Occurred())
+        return 0;
+    return 1;
+}
+
 /*[clinic input]
 module _io
 class _io._BufferedIOBase "PyObject *" "clinic_state()->PyBufferedIOBase_Type"
@@ -821,7 +835,7 @@ _buffered_raw_seek(buffered *self, Py_off_t target, int whence)
 }
 
 static int
-_buffered_init(buffered *self)
+_buffered_init(buffered *self, Py_off_t known_abs_pos)
 {
     Py_ssize_t n;
     if (self->buffer_size <= 0) {
@@ -852,8 +866,14 @@ _buffered_init(buffered *self)
         self->buffer_mask = self->buffer_size - 1;
     else
         self->buffer_mask = 0;
-    if (_buffered_raw_tell(self) == -1)
-        PyErr_Clear();
+    if (known_abs_pos >= 0) {
+        self->abs_pos = known_abs_pos;
+    }
+    else {
+       if (_buffered_raw_tell(self) == -1) {
+            PyErr_Clear();
+       }
+    }
     return 0;
 }
 
@@ -1563,14 +1583,17 @@ static void _bufferedreader_reset_buf(buffered *self)
 _io.BufferedReader.__init__
     raw: object
     buffer_size: Py_ssize_t(c_default="DEFAULT_BUFFER_SIZE") = DEFAULT_BUFFER_SIZE
+    *
+    known_abs_pos: Py_off_t = -1
 
 Create a new buffered reader using the given readable raw IO object.
 [clinic start generated code]*/
 
 static int
 _io_BufferedReader___init___impl(buffered *self, PyObject *raw,
-                                 Py_ssize_t buffer_size)
-/*[clinic end generated code: output=cddcfefa0ed294c4 input=fb887e06f11b4e48]*/
+                                 Py_ssize_t buffer_size,
+                                 Py_off_t known_abs_pos)
+/*[clinic end generated code: output=1d62c628332b0203 input=a5cfdd816a1b1120]*/
 {
     self->ok = 0;
     self->detached = 0;
@@ -1585,7 +1608,7 @@ _io_BufferedReader___init___impl(buffered *self, PyObject *raw,
     self->readable = 1;
     self->writable = 0;
 
-    if (_buffered_init(self) < 0)
+    if (_buffered_init(self, known_abs_pos) < 0)
         return -1;
     _bufferedreader_reset_buf(self);
 
@@ -1915,6 +1938,8 @@ _bufferedwriter_reset_buf(buffered *self)
 _io.BufferedWriter.__init__
     raw: object
     buffer_size: Py_ssize_t(c_default="DEFAULT_BUFFER_SIZE") = DEFAULT_BUFFER_SIZE
+    *
+    known_abs_pos: Py_off_t = -1
 
 A buffer for a writeable sequential RawIO object.
 
@@ -1925,8 +1950,9 @@ DEFAULT_BUFFER_SIZE.
 
 static int
 _io_BufferedWriter___init___impl(buffered *self, PyObject *raw,
-                                 Py_ssize_t buffer_size)
-/*[clinic end generated code: output=c8942a020c0dee64 input=914be9b95e16007b]*/
+                                 Py_ssize_t buffer_size,
+                                 Py_off_t known_abs_pos)
+/*[clinic end generated code: output=88e350ad0bb13f69 input=55f2d4f532355a96]*/
 {
     self->ok = 0;
     self->detached = 0;
@@ -1942,7 +1968,7 @@ _io_BufferedWriter___init___impl(buffered *self, PyObject *raw,
     self->writable = 1;
 
     self->buffer_size = buffer_size;
-    if (_buffered_init(self) < 0)
+    if (_buffered_init(self, known_abs_pos) < 0)
         return -1;
     _bufferedwriter_reset_buf(self);
     self->pos = 0;
@@ -2234,6 +2260,8 @@ _io.BufferedRWPair.__init__
     writer: object
     buffer_size: Py_ssize_t(c_default="DEFAULT_BUFFER_SIZE") = DEFAULT_BUFFER_SIZE
     /
+    *
+    known_abs_pos: Py_off_t = -1
 
 A buffered reader and writer object together.
 
@@ -2248,8 +2276,9 @@ DEFAULT_BUFFER_SIZE.
 
 static int
 _io_BufferedRWPair___init___impl(rwpair *self, PyObject *reader,
-                                 PyObject *writer, Py_ssize_t buffer_size)
-/*[clinic end generated code: output=327e73d1aee8f984 input=620d42d71f33a031]*/
+                                 PyObject *writer, Py_ssize_t buffer_size,
+                                 Py_off_t known_abs_pos)
+/*[clinic end generated code: output=a7b2ce85d26007af input=436a2e00c179eb92]*/
 {
     _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
     if (_PyIOBase_check_readable(state, reader, Py_True) == NULL) {
@@ -2435,6 +2464,8 @@ bufferedrwpair_closed_get(rwpair *self, void *context)
 _io.BufferedRandom.__init__
     raw: object
     buffer_size: Py_ssize_t(c_default="DEFAULT_BUFFER_SIZE") = DEFAULT_BUFFER_SIZE
+    *
+    known_abs_pos: Py_off_t = -1
 
 A buffered interface to random access streams.
 
@@ -2445,8 +2476,9 @@ defaults to DEFAULT_BUFFER_SIZE.
 
 static int
 _io_BufferedRandom___init___impl(buffered *self, PyObject *raw,
-                                 Py_ssize_t buffer_size)
-/*[clinic end generated code: output=d3d64eb0f64e64a3 input=a4e818fb86d0e50c]*/
+                                 Py_ssize_t buffer_size,
+                                 Py_off_t known_abs_pos)
+/*[clinic end generated code: output=560a0b40135cd61e input=ed8ef073ded269f2]*/
 {
     self->ok = 0;
     self->detached = 0;
@@ -2468,7 +2500,7 @@ _io_BufferedRandom___init___impl(buffered *self, PyObject *raw,
     self->readable = 1;
     self->writable = 1;
 
-    if (_buffered_init(self) < 0)
+    if (_buffered_init(self, known_abs_pos) < 0)
         return -1;
     _bufferedreader_reset_buf(self);
     _bufferedwriter_reset_buf(self);
