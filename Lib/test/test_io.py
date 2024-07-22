@@ -2021,10 +2021,6 @@ class BufferedWriterTest(unittest.TestCase, CommonBufferedTests):
         # Silence destructor error
         bufio.close = lambda: None
 
-    def test_max_buffer_size_removal(self):
-        with self.assertRaises(TypeError):
-            self.tp(self.MockRawIO(), 8, 12)
-
     def test_write_error_on_close(self):
         raw = self.MockRawIO()
         def bad_write(b):
@@ -2111,10 +2107,6 @@ class BufferedRWPairTest(unittest.TestCase):
     def test_detach(self):
         pair = self.tp(self.MockRawIO(), self.MockRawIO())
         self.assertRaises(self.UnsupportedOperation, pair.detach)
-
-    def test_constructor_max_buffer_size_removal(self):
-        with self.assertRaises(TypeError):
-            self.tp(self.MockRawIO(), self.MockRawIO(), 8, 12)
 
     def test_constructor_with_not_readable(self):
         class NotReadable(MockRawIO):

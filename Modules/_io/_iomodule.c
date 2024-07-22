@@ -211,7 +211,6 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
     int line_buffering, is_number, isatty = 0;
 
     PyObject *raw, *modeobj = NULL, *buffer, *wrapper, *result = NULL, *path_or_fd = NULL;
-    PyObject *bufferedio_args = NULL, *bufferedio_kwargs = NULL;
 
     is_number = PyNumber_Check(file);
 
@@ -411,25 +410,11 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
         }
 
 
-        bufferedio_args = Py_BuildValue("(Oi)", raw, buffering);
-        if (bufferedio_args == NULL) {
-            goto error;
-        }
-
         // FIXME: This should only get set for seekable files.. (S_ISREG?)
         // FIXME: we actually know when appending since we know the file
         // size that was seeked to, but ignore for the moment.
         Py_off_t known_abs_pos = (appending != 0? -1 : 0);
-        bufferedio_kwargs = Py_BuildValue("{s:n}", "known_abs_pos",
-            known_abs_pos);
-        if (bufferedio_kwargs == NULL) {
-            Py_DECREF(bufferedio_args);
-            goto error;
-        }
-        buffer = PyObject_Call(
-            Buffered_class, bufferedio_args, bufferedio_kwargs);
-        Py_DECREF(bufferedio_args);
-        Py_DECREF(bufferedio_kwargs);
+        buffer = PyObject_CallFunction(Buffered_class, "Oii", raw, buffering, known_abs_pos);
     }
     if (buffer == NULL)
         goto error;

@@ -1583,7 +1583,6 @@ static void _bufferedreader_reset_buf(buffered *self)
 _io.BufferedReader.__init__
     raw: object
     buffer_size: Py_ssize_t(c_default="DEFAULT_BUFFER_SIZE") = DEFAULT_BUFFER_SIZE
-    *
     known_abs_pos: Py_off_t = -1
 
 Create a new buffered reader using the given readable raw IO object.
@@ -1593,7 +1592,7 @@ static int
 _io_BufferedReader___init___impl(buffered *self, PyObject *raw,
                                  Py_ssize_t buffer_size,
                                  Py_off_t known_abs_pos)
-/*[clinic end generated code: output=1d62c628332b0203 input=a5cfdd816a1b1120]*/
+/*[clinic end generated code: output=1d62c628332b0203 input=71555857cb848f3f]*/
 {
     self->ok = 0;
     self->detached = 0;
@@ -1938,7 +1937,6 @@ _bufferedwriter_reset_buf(buffered *self)
 _io.BufferedWriter.__init__
     raw: object
     buffer_size: Py_ssize_t(c_default="DEFAULT_BUFFER_SIZE") = DEFAULT_BUFFER_SIZE
-    *
     known_abs_pos: Py_off_t = -1
 
 A buffer for a writeable sequential RawIO object.
@@ -1952,7 +1950,7 @@ static int
 _io_BufferedWriter___init___impl(buffered *self, PyObject *raw,
                                  Py_ssize_t buffer_size,
                                  Py_off_t known_abs_pos)
-/*[clinic end generated code: output=88e350ad0bb13f69 input=55f2d4f532355a96]*/
+/*[clinic end generated code: output=88e350ad0bb13f69 input=4f01c2f2269a9129]*/
 {
     self->ok = 0;
     self->detached = 0;
@@ -2259,9 +2257,8 @@ _io.BufferedRWPair.__init__
     reader: object
     writer: object
     buffer_size: Py_ssize_t(c_default="DEFAULT_BUFFER_SIZE") = DEFAULT_BUFFER_SIZE
-    /
-    *
     known_abs_pos: Py_off_t = -1
+    /
 
 A buffered reader and writer object together.
 
@@ -2278,7 +2275,7 @@ static int
 _io_BufferedRWPair___init___impl(rwpair *self, PyObject *reader,
                                  PyObject *writer, Py_ssize_t buffer_size,
                                  Py_off_t known_abs_pos)
-/*[clinic end generated code: output=a7b2ce85d26007af input=436a2e00c179eb92]*/
+/*[clinic end generated code: output=a7b2ce85d26007af input=d2b5722e6490cfe7]*/
 {
     _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
     if (_PyIOBase_check_readable(state, reader, Py_True) == NULL) {
@@ -2464,7 +2461,6 @@ bufferedrwpair_closed_get(rwpair *self, void *context)
 _io.BufferedRandom.__init__
     raw: object
     buffer_size: Py_ssize_t(c_default="DEFAULT_BUFFER_SIZE") = DEFAULT_BUFFER_SIZE
-    *
     known_abs_pos: Py_off_t = -1
 
 A buffered interface to random access streams.
@@ -2478,7 +2474,7 @@ static int
 _io_BufferedRandom___init___impl(buffered *self, PyObject *raw,
                                  Py_ssize_t buffer_size,
                                  Py_off_t known_abs_pos)
-/*[clinic end generated code: output=560a0b40135cd61e input=ed8ef073ded269f2]*/
+/*[clinic end generated code: output=560a0b40135cd61e input=990e7e2f89f545fa]*/
 {
     self->ok = 0;
     self->detached = 0;

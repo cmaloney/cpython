@@ -928,8 +928,7 @@ exit:
 }
 
 PyDoc_STRVAR(_io_BufferedReader___init____doc__,
-"BufferedReader(raw, buffer_size=DEFAULT_BUFFER_SIZE, *,\n"
-"               known_abs_pos=-1)\n"
+"BufferedReader(raw, buffer_size=DEFAULT_BUFFER_SIZE, known_abs_pos=-1)\n"
 "--\n"
 "\n"
 "Create a new buffered reader using the given readable raw IO object.");
@@ -976,7 +975,7 @@ _io_BufferedReader___init__(PyObject *self, PyObject *args, PyObject *kwargs)
     Py_ssize_t buffer_size = DEFAULT_BUFFER_SIZE;
     Py_off_t known_abs_pos = -1;
 
-    fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser, 1, 2, 0, argsbuf);
+    fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser, 1, 3, 0, argsbuf);
     if (!fastargs) {
         goto exit;
     }
@@ -1001,14 +1000,10 @@ _io_BufferedReader___init__(PyObject *self, PyObject *args, PyObject *kwargs)
             goto skip_optional_pos;
         }
     }
-skip_optional_pos:
-    if (!noptargs) {
-        goto skip_optional_kwonly;
-    }
     if (!Py_off_t_converter(fastargs[2], &known_abs_pos)) {
         goto exit;
     }
-skip_optional_kwonly:
+skip_optional_pos:
     return_value = _io_BufferedReader___init___impl((buffered *)self, raw, buffer_size, known_abs_pos);
 
 exit:
@@ -1016,8 +1011,7 @@ exit:
 }
 
 PyDoc_STRVAR(_io_BufferedWriter___init____doc__,
-"BufferedWriter(raw, buffer_size=DEFAULT_BUFFER_SIZE, *,\n"
-"               known_abs_pos=-1)\n"
+"BufferedWriter(raw, buffer_size=DEFAULT_BUFFER_SIZE, known_abs_pos=-1)\n"
 "--\n"
 "\n"
 "A buffer for a writeable sequential RawIO object.\n"
@@ -1068,7 +1062,7 @@ _io_BufferedWriter___init__(PyObject *self, PyObject *args, PyObject *kwargs)
     Py_ssize_t buffer_size = DEFAULT_BUFFER_SIZE;
     Py_off_t known_abs_pos = -1;
 
-    fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser, 1, 2, 0, argsbuf);
+    fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser, 1, 3, 0, argsbuf);
     if (!fastargs) {
         goto exit;
     }
@@ -1093,14 +1087,10 @@ _io_BufferedWriter___init__(PyObject *self, PyObject *args, PyObject *kwargs)
             goto skip_optional_pos;
         }
     }
-skip_optional_pos:
-    if (!noptargs) {
-        goto skip_optional_kwonly;
-    }
     if (!Py_off_t_converter(fastargs[2], &known_abs_pos)) {
         goto exit;
     }
-skip_optional_kwonly:
+skip_optional_pos:
     return_value = _io_BufferedWriter___init___impl((buffered *)self, raw, buffer_size, known_abs_pos);
 
 exit:
@@ -1141,8 +1131,8 @@ exit:
 }
 
 PyDoc_STRVAR(_io_BufferedRWPair___init____doc__,
-"BufferedRWPair(reader, writer, buffer_size=DEFAULT_BUFFER_SIZE, /, *,\n"
-"               known_abs_pos=-1)\n"
+"BufferedRWPair(reader, writer, buffer_size=DEFAULT_BUFFER_SIZE,\n"
+"               known_abs_pos=-1, /)\n"
 "--\n"
 "\n"
 "A buffered reader and writer object together.\n"
@@ -1164,53 +1154,28 @@ static int
 _io_BufferedRWPair___init__(PyObject *self, PyObject *args, PyObject *kwargs)
 {
     int return_value = -1;
-    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
-
-    #define NUM_KEYWORDS 1
-    static struct {
-        PyGC_Head _this_is_not_used;
-        PyObject_VAR_HEAD
-        PyObject *ob_item[NUM_KEYWORDS];
-    } _kwtuple = {
-        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
-        .ob_item = { &_Py_ID(known_abs_pos), },
-    };
-    #undef NUM_KEYWORDS
-    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
-
-    #else  // !Py_BUILD_CORE
-    #  define KWTUPLE NULL
-    #endif  // !Py_BUILD_CORE
-
-    static const char * const _keywords[] = {"", "", "", "known_abs_pos", NULL};
-    static _PyArg_Parser _parser = {
-        .keywords = _keywords,
-        .fname = "BufferedRWPair",
-        .kwtuple = KWTUPLE,
-    };
-    #undef KWTUPLE
-    PyObject *argsbuf[4];
-    PyObject * const *fastargs;
-    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
-    Py_ssize_t noptargs = nargs + (kwargs ? PyDict_GET_SIZE(kwargs) : 0) - 2;
+    PyTypeObject *base_tp = clinic_state()->PyBufferedRWPair_Type;
     PyObject *reader;
     PyObject *writer;
     Py_ssize_t buffer_size = DEFAULT_BUFFER_SIZE;
     Py_off_t known_abs_pos = -1;
 
-    fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser, 2, 3, 0, argsbuf);
-    if (!fastargs) {
+    if ((Py_IS_TYPE(self, base_tp) ||
+         Py_TYPE(self)->tp_new == base_tp->tp_new) &&
+        !_PyArg_NoKeywords("BufferedRWPair", kwargs)) {
         goto exit;
     }
-    reader = fastargs[0];
-    writer = fastargs[1];
-    if (nargs < 3) {
-        goto skip_optional_posonly;
+    if (!_PyArg_CheckPositional("BufferedRWPair", PyTuple_GET_SIZE(args), 2, 4)) {
+        goto exit;
     }
-    noptargs--;
+    reader = PyTuple_GET_ITEM(args, 0);
+    writer = PyTuple_GET_ITEM(args, 1);
+    if (PyTuple_GET_SIZE(args) < 3) {
+        goto skip_optional;
+    }
     {
         Py_ssize_t ival = -1;
-        PyObject *iobj = _PyNumber_Index(fastargs[2]);
+        PyObject *iobj = _PyNumber_Index(PyTuple_GET_ITEM(args, 2));
         if (iobj != NULL) {
             ival = PyLong_AsSsize_t(iobj);
             Py_DECREF(iobj);
@@ -1220,14 +1185,13 @@ _io_BufferedRWPair___init__(PyObject *self, PyObject *args, PyObject *kwargs)
         }
         buffer_size = ival;
     }
-skip_optional_posonly:
-    if (!noptargs) {
-        goto skip_optional_kwonly;
+    if (PyTuple_GET_SIZE(args) < 4) {
+        goto skip_optional;
     }
-    if (!Py_off_t_converter(fastargs[3], &known_abs_pos)) {
+    if (!Py_off_t_converter(PyTuple_GET_ITEM(args, 3), &known_abs_pos)) {
         goto exit;
     }
-skip_optional_kwonly:
+skip_optional:
     return_value = _io_BufferedRWPair___init___impl((rwpair *)self, reader, writer, buffer_size, known_abs_pos);
 
 exit:
@@ -1235,8 +1199,7 @@ exit:
 }
 
 PyDoc_STRVAR(_io_BufferedRandom___init____doc__,
-"BufferedRandom(raw, buffer_size=DEFAULT_BUFFER_SIZE, *,\n"
-"               known_abs_pos=-1)\n"
+"BufferedRandom(raw, buffer_size=DEFAULT_BUFFER_SIZE, known_abs_pos=-1)\n"
 "--\n"
 "\n"
 "A buffered interface to random access streams.\n"
@@ -1287,7 +1250,7 @@ _io_BufferedRandom___init__(PyObject *self, PyObject *args, PyObject *kwargs)
     Py_ssize_t buffer_size = DEFAULT_BUFFER_SIZE;
     Py_off_t known_abs_pos = -1;
 
-    fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser, 1, 2, 0, argsbuf);
+    fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser, 1, 3, 0, argsbuf);
     if (!fastargs) {
         goto exit;
     }
@@ -1312,17 +1275,13 @@ _io_BufferedRandom___init__(PyObject *self, PyObject *args, PyObject *kwargs)
             goto skip_optional_pos;
         }
     }
-skip_optional_pos:
-    if (!noptargs) {
-        goto skip_optional_kwonly;
-    }
     if (!Py_off_t_converter(fastargs[2], &known_abs_pos)) {
         goto exit;
     }
-skip_optional_kwonly:
+skip_optional_pos:
     return_value = _io_BufferedRandom___init___impl((buffered *)self, raw, buffer_size, known_abs_pos);
 
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=e6c040ea307ee251 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=6181470a31033b4f input=a9049054013a1b77]*/
