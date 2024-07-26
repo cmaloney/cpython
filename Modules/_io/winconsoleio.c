@@ -1015,7 +1015,7 @@ _io__WindowsConsoleIO_write_impl(winconsoleio *self, PyTypeObject *cls,
 
        This is a soft cap / wlen may be higher, but that is
        okay because it isn't a hard OS limit in Windows 8+. */
-    len = _Py_LimitConsoleWriteSize(b->buf, len, WRITE_LIMIT_CONSOLE);
+    len = (DWORD)_Py_LimitConsoleWriteSize(b->buf, len, WRITE_LIMIT_CONSOLE);
 
     Py_BEGIN_ALLOW_THREADS
     wlen = MultiByteToWideChar(CP_UTF8, 0, b->buf, len, NULL, 0);
