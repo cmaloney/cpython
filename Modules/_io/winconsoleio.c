@@ -1003,9 +1003,8 @@ _io__WindowsConsoleIO_write_impl(winconsoleio *self, PyTypeObject *cls,
         return PyLong_FromLong(0);
     }
     /* Ensure len fits in a DWORD. This cap is larger than the write
-       limit because utf-8 strings can't be split at any arbitrary byte
-       boundary. _Py_LimitConsoleWriteSize will do a split that
-       pays attention to character boundaries. */
+       limit because it doesn't respect utf-8 characters boundaries.
+       It relies on _Py_LimitConsoleWriteSize to do a character split. */
     if (b->len > WRITE_LIMIT_CONSOLE * 2)
         len = WRITE_LIMIT_CONSOLE * 2;
     else
