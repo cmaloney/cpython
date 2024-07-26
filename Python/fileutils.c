@@ -3144,7 +3144,8 @@ _find_last_utf8_boundary(const char *buf, size_t len)
 
    This does a "soft cap" (not exact number of utf-16 bytes, but close
    enough) to maintain responsiveness of consoles on Windows (gh-121940). */
-size_t _Py_LimitConsoleWriteSize(const void *buf, size_t requested_size, size_t cap_size) {
+DWORD _Py_LimitConsoleWriteSize(const void *buf, DWORD requested_size,
+                                DWORD cap_size) {
     if (requested_size <= cap_size) {
         return requested_size;
     }
