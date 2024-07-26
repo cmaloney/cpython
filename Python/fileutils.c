@@ -1935,8 +1935,8 @@ _Py_write_impl(int fd, const void *buf, size_t count, int gil_held)
     _Py_BEGIN_SUPPRESS_IPH
 #ifdef MS_WINDOWS
     /* isatty is guarded because it's expensive / don't want it
-       in common case of writing lots of data to non-consoles. See 
-       gh-121940 */
+       in common case of writing DEFAULT_BUFFER_SIZE to
+       non-consols (gh-121940) */
     if (count > WRITE_LIMIT_INTERACTIVE) {
         if (gil_held) {
             Py_BEGIN_ALLOW_THREADS
