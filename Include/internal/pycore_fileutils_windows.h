@@ -93,8 +93,8 @@ static inline BOOL _Py_GetFileInformationByName_ErrorIsTrustworthy(int error)
     return FALSE;
 }
 
-DWORD _Py_LimitConsoleWriteSize(const void *buf, DWORD requested_size,
-                                DWORD cap_size);
+size_t _Py_LimitConsoleWriteSize(const void *buf, size_t requested_size,
+                                 size_t cap_size);
 
 #endif
 
