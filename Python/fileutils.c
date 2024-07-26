@@ -3113,8 +3113,8 @@ _Py_IsValidFD(int fd)
 }
 
 #ifdef MS_WINDOWS
-static DWORD
-_find_last_utf8_boundary(const char *buf, DWORD len)
+static size_t
+_find_last_utf8_boundary(const char *buf, size_t len)
 {
     /* This function never returns 0, returns the original len instead */
     DWORD count = 1;
@@ -3154,7 +3154,7 @@ size_t _Py_LimitConsoleWriteSize(const void *buf, size_t requested_size, size_t 
        Splitting utf-8 can't be done at arbitrary byte boundaries
        because that results in broken utf-8 byte sequences being
        presented to the user. */
-    return _find_last_utf8_boundary(buf, cap_size)
+    return _find_last_utf8_boundary(buf, cap_size);
 }
 
 #endif
