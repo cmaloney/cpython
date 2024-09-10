@@ -1799,7 +1799,7 @@ class FileIO(RawIOBase):
 
         Normally isatty always makes a system call. In the case of open() there
         is a _inside the same python call_ stat result which we can use to
-        skip that system call for non-character files. Outsid of that context
+        skip that system call for non-character files. Outside of that context
         this is subject to TOCTOU issues (the FD has been returned to user code
         and arbitrary syscalls could have happened).
         """
