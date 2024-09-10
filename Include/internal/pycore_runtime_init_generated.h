@@ -757,6 +757,7 @@ extern "C" {
     INIT_ID(_initializing), \
     INIT_ID(_io), \
     INIT_ID(_is_text_encoding), \
+    INIT_ID(_isatty_openonly), \
     INIT_ID(_layout_), \
     INIT_ID(_length_), \
     INIT_ID(_limbo), \
