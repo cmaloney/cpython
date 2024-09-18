@@ -132,6 +132,11 @@ internal_close(fileio *self)
         _Py_END_SUPPRESS_IPH
         Py_END_ALLOW_THREADS
     }
+    /* invalidate stat cache as fd has changed. */
+    if (self->stat_atopen != NULL) {
+        PyMem_Free(self->stat_atopen);
+        self->stat_atopen = NULL;
+    }
     if (err < 0) {
         errno = save_errno;
         PyErr_SetFromErrno(PyExc_OSError);
@@ -273,8 +278,14 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
             if (internal_close(self) < 0)
                 return -1;
         }
-        else
+        else {
             self->fd = -1;
+            /* Deallocate stat cache which was for a previous fd. */
+            if (self->stat_atopen != NULL) {
+                PyMem_Free(self->stat_atopen);
+                self->stat_atopen = NULL;
+            }
+        }
     }
 
     if (PyBool_Check(nameobj)) {
