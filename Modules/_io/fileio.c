@@ -132,6 +132,14 @@ internal_close(fileio *self)
         _Py_END_SUPPRESS_IPH
         Py_END_ALLOW_THREADS
     }
+
+    /* If stat cache is present, clear it as we're no longer attached to the
+       fd it was for. */
+    if (self->stat_atopen != NULL) {
+        PyMem_Free(self->stat_atopen);
+        self->stat_atopen = NULL;
+    }
+
     if (err < 0) {
         errno = save_errno;
         PyErr_SetFromErrno(PyExc_OSError);
@@ -163,6 +171,13 @@ _io_FileIO_close_impl(fileio *self, PyTypeObject *cls)
                                      &_Py_ID(close), (PyObject *)self);
     if (!self->closefd) {
         self->fd = -1;
+
+        /* If stat cache is present, clear it as we're no longer attached to the
+        fd it was for. */
+        if (self->stat_atopen != NULL) {
+            PyMem_Free(self->stat_atopen);
+            self->stat_atopen = NULL;
+        }
         return res;
     }
 
@@ -273,8 +288,9 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
             if (internal_close(self) < 0)
                 return -1;
         }
-        else
+        else {
             self->fd = -1;
+        }
     }
 
     if (PyBool_Check(nameobj)) {
@@ -457,10 +473,14 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
 #endif
     }
 
-    self->stat_atopen = PyMem_New(struct _Py_stat_struct, 1);
+    /* Allocate space for stat result if needed. __init__ may be called on a
+       constructed fileio which already has a space allocated, */
     if (self->stat_atopen == NULL) {
-        PyErr_NoMemory();
-        goto error;
+        self->stat_atopen = PyMem_New(struct _Py_stat_struct, 1);
+        if (self->stat_atopen == NULL) {
+            PyErr_NoMemory();
+            goto error;
+        }
     }
     Py_BEGIN_ALLOW_THREADS
     fstat_result = _Py_fstat_noraise(self->fd, self->stat_atopen);
