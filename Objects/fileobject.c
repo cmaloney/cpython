@@ -2,6 +2,7 @@
 
 #include "Python.h"
 #include "pycore_call.h"          // _PyObject_CallNoArgs()
+#include "pycore_long.h"          // _PyLong_GetZero()
 #include "pycore_runtime.h"       // _PyRuntime
 
 #ifdef HAVE_UNISTD_H
@@ -506,11 +507,26 @@ PyFile_OpenCodeObject(PyObject *path)
     if (hook) {
         f = hook(path, _PyRuntime.open_code_userdata);
     } else {
+        PyObject *mode = PyUnicode_InternFromString("rb");
+        if (mode == NULL) {
+            return NULL;
+        }
+
+        PyObject *kwnames = PyTuple_Pack(1, &_Py_ID(buffering));
+        if (!kwnames) {
+            Py_DECREF(mode);
+            return NULL;
+        }
+
         PyObject *open = _PyImport_GetModuleAttrString("_io", "open");
         if (open) {
-            f = PyObject_CallFunction(open, "Os", path, "rb");
+            PyObject *args[3] = {path, mode, _PyLong_GetZero()};
+            f = PyObject_Vectorcall(open, args, 2, kwnames);
             Py_DECREF(open);
         }
+
+        Py_DECREF(kwnames);
+        Py_DECREF(mode);
     }
 
     return f;
