@@ -10,7 +10,6 @@
 #include "Python.h"
 
 #include <sys/types.h>
-#include <sys/stat.h>
 #include <fcntl.h>
 
 /* Some Linux systems install gdbm/ndbm.h, but not ndbm.h.  This supports

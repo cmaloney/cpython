@@ -63,7 +63,6 @@ my_getallocationgranularity (void)
 
 #ifdef UNIX
 #include <sys/mman.h>
-#include <sys/stat.h>
 
 #if defined(HAVE_SYSCONF) && defined(_SC_PAGESIZE)
 static int

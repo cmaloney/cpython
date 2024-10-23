@@ -15,9 +15,6 @@
 #ifdef HAVE_SYS_TYPES_H
 #  include <sys/types.h>
 #endif
-#if defined(HAVE_SYS_STAT_H)
-#  include <sys/stat.h>           // stat()
-#endif
 #ifdef HAVE_SYS_SYSCALL_H
 #  include <sys/syscall.h>
 #endif

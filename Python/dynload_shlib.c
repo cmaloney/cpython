@@ -7,7 +7,6 @@
 #include "pycore_importdl.h"
 
 #include <sys/types.h>
-#include <sys/stat.h>
 
 #if defined(__NetBSD__)
 #include <sys/param.h>

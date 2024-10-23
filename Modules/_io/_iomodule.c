@@ -20,10 +20,6 @@
 #include <sys/types.h>
 #endif /* HAVE_SYS_TYPES_H */
 
-#ifdef HAVE_SYS_STAT_H
-#include <sys/stat.h>
-#endif /* HAVE_SYS_STAT_H */
-
 #ifdef MS_WINDOWS
 #include <windows.h>
 #endif

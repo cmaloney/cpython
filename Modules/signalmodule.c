@@ -37,9 +37,6 @@
 #ifdef HAVE_SYS_SYSCALL_H
 #  include <sys/syscall.h>        // __NR_pidfd_send_signal
 #endif
-#ifdef HAVE_SYS_STAT_H
-#  include <sys/stat.h>
-#endif
 #ifdef HAVE_SYS_TIME_H
 #  include <sys/time.h>           // setitimer()
 #endif

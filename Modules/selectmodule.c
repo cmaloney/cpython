@@ -27,7 +27,6 @@
 #include <sys/resource.h>
 #include <sys/devpoll.h>
 #include <sys/types.h>
-#include <sys/stat.h>
 #include <fcntl.h>
 #endif
 
