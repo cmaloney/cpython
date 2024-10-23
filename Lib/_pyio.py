@@ -285,7 +285,7 @@ def _open_code_with_warning(path):
     import warnings
     warnings.warn("_pyio.open_code() may not be using hooks",
                   RuntimeWarning, 2)
-    return open(path, "rb")
+    return open(path, "rb", buffering=0)
 
 try:
     open_code = io.open_code
