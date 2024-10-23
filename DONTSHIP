@@ -1,0 +1,145 @@
+This doesn't fix everything. It might break a lot
+
+ -> Used a _lot_ of places copy/pasta
+ -> does change API
+
+Better approaches:
+    1. Refactor tokenizer
+        -> Encoding/decoding _outside_ of core tokenization loop
+        -> Position tracking _outside_ of core tokenization loop?
+        -> FILE* -> buffer creation
+        -> readline -> buffer creation
+            -> the tok per type APIs are nice!
+            -> Unfortunately the FILE* is everywhere...
+        -> Unify PEP 263 handling + shebang handling
+        -> Once read buffer of whole data once, just use that rather than
+           re-reading (Truly cached file passed around)
+        -> Currently code _agressively_ re-opens.
+    2. Make BufferedIO cheaper
+    3. This would help SourceLoader / importer, but it would be a lot better to
+       fix underlyings _first_. BufferedIO fast would just be nice in general.
+
+tokenizer:
+    -> Old
+    -> Performance sensitive (tokens/s matters a _lot_)
+    -> Operates on "underflow"
+        -> underflow means "Get me more data"
+    -> Probably not tuned recently?
+    -> If we have the whole source already, just use it!?!?!?!
+
+
+
+Thought/high level:
+1. If we have a small file, just read it in full into a BUFSIZ buffer and pass
+   that through the compiler stack w/ filename along side for "nice" errors.
+    -> can not pass filename and later "Add" / staple on as well
+        -> Location "stapler" / annotator? (ex. offset -> line + col)
+2. _PyTokenizer_check_bom can ideally just happen _once_ on the fully read set
+   of bytes...
+3. Move non-utf8 locale handling _out_ of the tokenizer
+    -> generate utf8 blocks and pass in
+    -> BOM detection and handling is _outside_ tokenizer
+        -> strings must be utf8?
+4. Lookup table for col_offset, end_col_offset, lineno, end_lineno
+    -> decode from start and end ?
+        -> less running state?
+5. Drop fp from `tok_state`
+    -> Rely on abstraction out of tok_state
+    -> in general, `underflow` function
+        -> can encapsulate for us...
+
+Additional questions:
+1. Implicit ending newline?
+2. PEP 263?
+
+
+
+
+Thought 2:
+Build a new "cached reader" which is _muchhhh_ simpler than FromFile...
+    -> Not based around FILE*
+    -> Not requiring full python 3 I/O stack...
+
+Always have one up to BUFSIZ of bytes available
+    -> Handle PEP 0263 Encoding specification if required
+        -> BOM
+        -> Encoding comment
+    -> Handle locale vs. utf encoding if needed
+    -> Figure out BOM, wrap if needed
+    -> Consume first line if needed (_outside of tokenizer_)
+    -> keep track as py buffers?
+
+    tokenizer is _always_ handed this buffer
+
+BLAAARRH
+    tokenizer emits python objects because of course it does
+        -> would need to have lookup for lines be fully removed...
+            -> and that would very break an old API that would better be left alone...
+
+
+Q: Could we make a python native tokenizer now?
+
+
+in general: Not well contained
+Probably not easy to put that genie back in the bottle...
+    1. FILE* API is public
+    2. UTF8 vs. other encoding sources and PEP 263 must be supported
+    3. First line skips / #! handling
+
+
+
+
+
+TODO:
+
+Core: builtin_compile_impl
+    -> _Py_SourceAsString
+    -> Always loads in full
+
+SEarching for `read_code`
+    1. Interpreter pymain_run_file
+    2. run_pyc_file
+    3. _get_code_from_file
+    4. cProfile:  compile(fp.read())
+    5. ModuleFinder -> What guarantees?
+    6. PDB: compile(fp.read())
+    7. profile: compile(fp.read())
+    8. runpy: _get_code_from_file(), compile(fp.read())
+    9. site: pth_content = f.read()
+    10. trace: compile(fp.read())
+    11. zipimport: Much special, much hard
+    12. importlib _bootstrap_external, reads whole file in `get_data` inside FileLoader()
+
+
+followup: py_compile, compileall
+
+
+FILE* sources:
+    _PyParser_ASTFromFile
+    _PyParser_InteractiveASTFromFile
+
+
+1. C read_code() underlying source files
+2. C FILE* source files (Interpreter and C API)
+3. compile() with source code passed / read externally from C
+
+
+important:
+    -> Need to be able to _PyPegen_run_parser_from_file_pointer?
+    -> tok_readline_raw?
+
+
+whyyyy:
+    fp_setreadl -> We turn the filepointer into a StreamReader...
+
+
+
+thought:
+    _PyTokenizer_FromFile
+
+    should go away...
+    the value is we maybe reduce memory a bit because we don't have the whole
+    file in memory at the same time we're tokenizing it?
+
+    NOTE: Is used for _all_interactive tokenizing?
+        -> can we move to "here's the current line" buffer?
