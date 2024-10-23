@@ -12,9 +12,6 @@
 #  include <bcrypt.h>
 #else
 #  include <fcntl.h>              // O_RDONLY
-#  ifdef HAVE_SYS_STAT_H
-#    include <sys/stat.h>
-#  endif
 #  ifdef HAVE_LINUX_RANDOM_H
 #    include <linux/random.h>     // GRND_NONBLOCK
 #  endif
