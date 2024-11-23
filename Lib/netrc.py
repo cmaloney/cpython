@@ -2,22 +2,12 @@
 
 # Module and documentation by Eric S. Raymond, 21 Dec 1998
 
-import os, stat
+import os
+import resource
+import stat
+import sys
 
 __all__ = ["netrc", "NetrcParseError"]
-
-
-def _can_security_check():
-    # On WASI, getuid() is indicated as a stub but it may also be missing.
-    return os.name == 'posix' and hasattr(os, 'getuid')
-
-
-def _getpwuid(uid):
-    try:
-        import pwd
-        return pwd.getpwuid(uid)[0]
-    except (ImportError, LookupError):
-        return f'uid {uid}'
 
 
 class NetrcParseError(Exception):
@@ -32,49 +22,251 @@ class NetrcParseError(Exception):
         return "%s (%s, line %s)" % (self.msg, self.filename, self.lineno)
 
 
-class _netrclex:
-    def __init__(self, fp):
-        self.lineno = 1
-        self.instream = fp
-        self.whitespace = "\n\t\r "
-        self.pushback = []
+def _process_escapes(token):
+    """Single-pass escape removal to avoid copies."""
+    unescaped = ""
+    for char in token:
+        if char == "\\":
+            continue
+        unescaped += char
+    return unescaped
 
-    def _read_char(self):
-        ch = self.instream.read(1)
-        if ch == "\n":
-            self.lineno += 1
-        return ch
 
-    def get_token(self):
-        if self.pushback:
-            return self.pushback.pop(0)
-        token = ""
-        fiter = iter(self._read_char, "")
-        for ch in fiter:
-            if ch in self.whitespace:
-                continue
-            if ch == '"':
-                for ch in fiter:
-                    if ch == '"':
-                        return token
-                    elif ch == "\\":
-                        ch = self._read_char()
-                    token += ch
-            else:
-                if ch == "\\":
-                    ch = self._read_char()
-                token += ch
-                for ch in fiter:
-                    if ch in self.whitespace:
-                        return token
-                    elif ch == "\\":
-                        ch = self._read_char()
-                    token += ch
-        return token
+_whitespace = "\n\t\r "
 
-    def push_token(self, token):
-        self.pushback.append(token)
 
+class _rune_iter:
+    """Cache current byte, advance() to get next. "" as EOF."""
+    def __init__(self, corpus) -> None:
+        self.corpus = corpus
+        self.position = 0
+        self._corpus_len = len(self.corpus)  # cached to reduce cost
+
+        # Prime first rune.
+        self.advance(0)
+
+    def at_end(self):
+        return self.position == self._corpus_len
+
+    def _tombstone(self):
+        self.current = ""
+        self.position = self._corpus_len
+
+    def advance(self, /, count=1):
+        self.position += count
+        if self.position >= self._corpus_len:
+            self._tombstone()
+        else:
+            self.current = self.corpus[self.position]
+
+    def advance_through(self, substr):
+        """Find the next given string, if hit EOF consume everything.
+
+        Returns true if substr was found."""
+        found = self.corpus.find(substr, self.position)
+        if found == -1:
+            self._tombstone()
+            return False
+
+        self.position = found
+        self.current = self.corpus[self.position]
+        return True
+
+
+class _token_iter:
+    """Cache current token, next() to get next, "" as EOF."""
+    def __init__(self, file, corpus) -> None:
+        self.file = file
+        self.runes = _rune_iter(corpus)
+
+        self.consumed = 0
+        self.current = ""
+        self._find_next_token(allow_comments=True)
+
+    def _compute_lineno(self):
+        return self.runes.corpus[:self.consumed].count("\n")
+
+    def _materialize(self, offset=0, *, has_escape=False):
+        self.current = \
+            self.runes.corpus[self.consumed+offset:self.runes.position]
+
+        if has_escape:
+            self.current = _process_escapes(self.current)
+
+        return self.current
+
+    def _find_next_token(self, *, allow_comments: bool):
+        """Move to the start of the next token, but don't consume."""
+        while self.runes.current:
+            self.consumed = self.runes.position
+
+            match self.runes.current:
+                case '#' if allow_comments:  # Comment, advance and no token.
+                    self.runes.advance_through("\n")
+                case '"':  # Quoted token
+                    self.runes.advance()  # Skip start quote
+                    has_escape = False
+                    while self.runes.current:
+                        match self.runes.current:
+                            case '\\':  # Skip escape and escaped rune.
+                                self.runes.advance(2)
+                                has_escape = True
+                            case '"':  # End quote
+                                # Don't include start quote in token.
+                                self._materialize(1, has_escape=has_escape)
+                                self.runes.advance()  # move past end quote
+                                return
+                            case _:
+                                self.runes.advance()
+                    # EOF before end quote.
+                    # FIXME(cmaloney): Needs a test case.
+                    raise self.make_error(
+                        "Quoted string missing end quote %r" % \
+                            self._materialize())
+                case c if c in _whitespace:  # Whitespace, advance and no token.
+                    while self.runes.current in _whitespace \
+                            and self.runes.current:  # EOF "" is in _whitespace
+                        self.runes.advance()
+                case _:  # Unquoted token, read until unescaped whitespace.
+                    has_escape = False
+                    while self.runes.current not in _whitespace:
+                        match self.runes.current:
+                            case '\\':
+                                self.runes.advance(2)
+                                has_escape = True
+                            case _:
+                                self.runes.advance()
+
+                    self._materialize(has_escape=has_escape)
+                    return
+        # EOF
+        self.current = ""
+
+    def advance_default(self):
+        """Handle the special-case 'default' which has no value after."""
+        self._find_next_token(allow_comments=True)
+
+    def advance_macro(self):
+        """Macros aren't standard tokens.
+
+        Macros are everything until the next "\n\n"
+        """
+        self.consumed = self.runes.position
+        if not self.runes.advance_through('\n\n'):
+            # End of file before next newline.
+            raise self.make_error(
+                "Macro definition missing null line terminator.")
+        self.runes.advance()  # First "\n" of end "\n\n" is part of macro
+        body = self._materialize(1)
+        self.runes.advance()  # Discard second "\n"
+        self._find_next_token(allow_comments=True)
+        return body
+
+    def advance_value(self):
+        """Just read a key (login, password, etc.) and now reading its value.
+
+        Value is a required token which can start with any character. Even if
+        it looks like a comment, it is not a comment.
+        """
+        # Consume the keyword, next token is the value. The value may be an
+        # unquoted literal that starts with '#' so don't allow comments.
+        self._find_next_token(allow_comments=False)
+        value = self.current
+        self._find_next_token(allow_comments=True)
+        return value
+
+    def make_error(self, msg):
+        raise NetrcParseError(msg, self.file, self._compute_lineno())
+
+class _netrcparser:
+    def __init__(self, filename, contents):
+        self.tokens = _token_iter(filename, contents)
+
+    def _parse_macro(self):
+        """Macros: have a name, end with double newline.
+
+        They are "lexed" as one block until the newline which is different than
+        how the tokenizer normally works."""
+        # TODO(fixme): Name here can contain a `#`, needs tests
+        self.tokens._find_next_token(allow_comments=False)
+        name = self.tokens.current
+        body = self.tokens.advance_macro()
+        return (name, body.splitlines(keepends=True))
+
+    def _parse_machine(self):
+        login = account = password = ''
+        while True:
+            match self.tokens.current:
+                case 'login' | 'user':
+                    login = self.tokens.advance_value()
+                case 'account':
+                    account = self.tokens.advance_value()
+                case 'password':
+                    password = self.tokens.advance_value()
+                case '' | 'machine' | 'default' | 'macdef':
+                    return (login, account, password)
+                case _ as unhandled:
+                    raise self.tokens.make_error("bad follower token %r" % unhandled)
+
+    def populate(self, netrc):
+        while top_entry := self.tokens.current:
+            match top_entry:
+                case "default":
+                    self.tokens.advance_default()
+                    netrc.hosts["default"] = self._parse_machine()
+                case "machine":
+                    machine = self.tokens.advance_value()
+                    netrc.hosts[machine] = self._parse_machine()
+                case "macdef":
+                    name, value = self._parse_macro()
+                    netrc.macros[name] = value
+                case "":
+                    break
+                case _ as unhandled:
+                    raise self.tokens.make_error("bad toplevel token %r" % unhandled)
+
+        if not self.tokens.runes.at_end():
+            raise self.tokens.make_error("netrc parser error, didn't reach end")
+
+def _security_check(fp):
+    """Validate netrc file is only readable by current user."""
+    prop = os.fstat(fp.fileno())
+    if prop.st_uid != os.getuid():
+        import pwd
+        try:
+            fowner = pwd.getpwuid(prop.st_uid)[0]
+        except KeyError:
+            fowner = 'uid %s' % prop.st_uid
+        try:
+            user = pwd.getpwuid(os.getuid())[0]
+        except KeyError:
+            user = 'uid %s' % os.getuid()
+        raise NetrcParseError(
+            (f"~/.netrc file owner ({fowner}, {user}) does not match"
+                " current user"))
+    if (prop.st_mode & (stat.S_IRWXG | stat.S_IRWXO)):
+        raise NetrcParseError(
+            "~/.netrc access too permissive: access"
+            " permissions must restrict access to only"
+            " the owner")
+
+
+def _populate_netrc(netrc, filename, fp, default_netrc):
+    # NOTE: Relies on universal newlines to count lineno and normalize line
+    # endings across platforms.
+    if fp.newlines not in (None, '\n'):
+        raise parser.tokens.make_error("doesn't support alternate file newlines.")
+
+    parser = _netrcparser(filename, fp.read())
+    parser.populate(netrc)
+
+    if os.name == 'posix' and default_netrc:
+        for machine in netrc.hosts.values():
+            # All non-anonymous logins which have a password should trigger
+            # check. Check only needs to happen once per file.
+            if machine[0] != 'anonymous' and machine[2] != '':
+                _security_check(fp)
+                break  # Just checks file permissions, only need to run once.
 
 class netrc:
     def __init__(self, file=None):
@@ -85,90 +277,10 @@ class netrc:
         self.macros = {}
         try:
             with open(file, encoding="utf-8") as fp:
-                self._parse(file, fp, default_netrc)
+                _populate_netrc(self, file, fp, default_netrc)
         except UnicodeDecodeError:
             with open(file, encoding="locale") as fp:
-                self._parse(file, fp, default_netrc)
-
-    def _parse(self, file, fp, default_netrc):
-        lexer = _netrclex(fp)
-        while 1:
-            # Look for a machine, default, or macdef top-level keyword
-            saved_lineno = lexer.lineno
-            toplevel = tt = lexer.get_token()
-            if not tt:
-                break
-            elif tt[0] == '#':
-                if lexer.lineno == saved_lineno and len(tt) == 1:
-                    lexer.instream.readline()
-                continue
-            elif tt == 'machine':
-                entryname = lexer.get_token()
-            elif tt == 'default':
-                entryname = 'default'
-            elif tt == 'macdef':
-                entryname = lexer.get_token()
-                self.macros[entryname] = []
-                while 1:
-                    line = lexer.instream.readline()
-                    if not line:
-                        raise NetrcParseError(
-                            "Macro definition missing null line terminator.",
-                            file, lexer.lineno)
-                    if line == '\n':
-                        # a macro definition finished with consecutive new-line
-                        # characters. The first \n is encountered by the
-                        # readline() method and this is the second \n.
-                        break
-                    self.macros[entryname].append(line)
-                continue
-            else:
-                raise NetrcParseError(
-                    "bad toplevel token %r" % tt, file, lexer.lineno)
-
-            if not entryname:
-                raise NetrcParseError("missing %r name" % tt, file, lexer.lineno)
-
-            # We're looking at start of an entry for a named machine or default.
-            login = account = password = ''
-            self.hosts[entryname] = {}
-            while 1:
-                prev_lineno = lexer.lineno
-                tt = lexer.get_token()
-                if tt.startswith('#'):
-                    if lexer.lineno == prev_lineno:
-                        lexer.instream.readline()
-                    continue
-                if tt in {'', 'machine', 'default', 'macdef'}:
-                    self.hosts[entryname] = (login, account, password)
-                    lexer.push_token(tt)
-                    break
-                elif tt == 'login' or tt == 'user':
-                    login = lexer.get_token()
-                elif tt == 'account':
-                    account = lexer.get_token()
-                elif tt == 'password':
-                    password = lexer.get_token()
-                else:
-                    raise NetrcParseError("bad follower token %r" % tt,
-                                          file, lexer.lineno)
-            self._security_check(fp, default_netrc, self.hosts[entryname][0])
-
-    def _security_check(self, fp, default_netrc, login):
-        if _can_security_check() and default_netrc and login != "anonymous":
-            prop = os.fstat(fp.fileno())
-            current_user_id = os.getuid()
-            if prop.st_uid != current_user_id:
-                fowner = _getpwuid(prop.st_uid)
-                user = _getpwuid(current_user_id)
-                raise NetrcParseError(
-                    f"~/.netrc file owner ({fowner}) does not match"
-                    f" current user ({user})")
-            if (prop.st_mode & (stat.S_IRWXG | stat.S_IRWXO)):
-                raise NetrcParseError(
-                    "~/.netrc access too permissive: access"
-                    " permissions must restrict access to only"
-                    " the owner")
+                _populate_netrc(self, file, fp, default_netrc)
 
     def authenticators(self, host):
         """Return a (user, account, password) tuple for given host."""
@@ -196,4 +308,10 @@ class netrc:
         return rep
 
 if __name__ == '__main__':
-    print(netrc())
+    if len(sys.argv) == 2:
+        # FIXME/TODO: Removed print (it's half the runtime...)
+        netrc(sys.argv[1])
+        # DEBUG:
+        # print(f"{resource.getrusage(resource.RUSAGE_SELF).ru_maxrss =}")
+    else:
+        print(netrc())
