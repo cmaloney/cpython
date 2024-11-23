@@ -2,7 +2,9 @@
 
 # Module and documentation by Eric S. Raymond, 21 Dec 1998
 
-import os, stat
+import os
+import stat
+import sys
 
 __all__ = ["netrc", "NetrcParseError"]
 
@@ -189,4 +191,7 @@ class netrc:
         return rep
 
 if __name__ == '__main__':
-    print(netrc())
+    if len(sys.argv) == 2:
+        print(netrc(sys.argv[1]))
+    else:
+        print(netrc())
