@@ -51,39 +51,42 @@ class _netrcparse:
         self.next_token = None
         self.bytes_consumed = 0
 
-    def get_lineno(self):
+    def _compute_lineno(self):
         return self.all_text[:self.bytes_consumed].count("\n")
 
     def _make_error(self, msg):
-        return NetrcParseError(msg, self.file, self.get_lineno())
+        return NetrcParseError(msg, self.file, self._compute_lineno())
 
     def _consume(self):
         self.bytes_consumed += self.next_token_end
+        # FIXME(cmaloney): Pretty sure this line is causing most the slowness...
         self.remaining = self.remaining[self.next_token_end:]
         # assert self.bytes_consumed + len(self.remaining) == len(self.all_text), \
         #    "Shouldn't be loosing data ever."
         self.next_token_end = 0
         self.next_token = None
 
-
     def _lex_quotes(self):
         """Read until quote that is not preceeded by an escape."""
+        # Eat first quote
         self.next_token_end += 1
         while True:
-            next_newline = self.remaining[self.next_token_end:].find('"')
-            match next_newline:
-                case -1:
-                    # TODO/FIXME: This wasn't handled in old code...
-                    raise self._make_error("TODO: Unexpected quote end %r" % self.remaining)
-                case _ as offset:
-                    # If the newline was escaped, ignore it
-                    if self.remaining[self.next_token_end+offset-1] == '\\':
-                        continue
-                    # Found end of string, return the string contents.
-                    unquoted = self.remaining[1:self.next_token_end-1]
+            match self.remaining[self.next_token_end]:
+                case '\\':
+                    # Escape and skip next
+                    # FIXME: Validate EOF behavior
+                    self.next_token_end += 2
+                case '"':
+                    unquoted = self.remaining[1:self.next_token_end]
+                    self.next_token_end += 1
                     return _process_escapes(unquoted)
+                case _:
+                    self.next_token_end += 1
 
-    def _find_next_token(self):
+            if self.next_token_end > len(self.remaining):
+                raise self._make_error("Quotation didn't end %r" % self.remaining)
+
+    def _find_next_token(self, comment_as_token: bool):
         """Move to the start of the next token, but don't consume."""
 
         while True:
@@ -96,7 +99,7 @@ class _netrcparse:
 
             match self.remaining[0]:
                 # Comments
-                case '#':
+                case '#' if comment_as_token is False:
                     match self.remaining.find("\n"):
                         case -1:
                             # Comment into EOF, no further tokens.
@@ -120,7 +123,8 @@ class _netrcparse:
                 case _:
                     # Read until whitespace which doesn't have an escape.
                     self.next_token_end += 1
-                    while self.remaining[self.next_token_end] not in self.whitespace:
+                    while self.next_token_end < len(self.remaining) \
+                        and self.remaining[self.next_token_end] not in self.whitespace:
                         # Skip all escaped characters
                         if self.remaining[self.next_token_end] == '\\':
                             # FIXME/TODO: This will error at EOF currently.
@@ -130,14 +134,14 @@ class _netrcparse:
 
                     return _process_escapes(self.remaining[:self.next_token_end])
 
-
-    def _peek_token(self):
+    # FIXME: I hate comment_as_token, it's sooo ugly...
+    def _peek_token(self, comment_as_token: bool):
         """Move to the start of the next token, but don't consume."""
         # Already have a peeked token
         if self.next_token is not None:
             return self.next_token
 
-        self.next_token = self._find_next_token()
+        self.next_token = self._find_next_token(comment_as_token=comment_as_token)
         assert self.next_token is not None, \
             "Should have gotten a token or exception."
         assert not self.remaining or self.next_token_end != 0, \
@@ -147,32 +151,35 @@ class _netrcparse:
         return self.next_token
 
 
-    def _consume_token(self):
+    def _consume_token(self, comment_as_token: bool = False):
         """Consume and return the next token."""
-        token = self._peek_token()
+        token = self._peek_token(comment_as_token=comment_as_token)
         self._consume()
         return token
 
     def _parse_macro(self):
         """Macros: have a name, end with double newline."""
-        macro_name = self._consume_token()
-        # TODO, FIXME: Assert that the next byte after macro_name is a newline
+        name = self._consume_token()
+        # TODO, FIXME: Assert that the next byte after name is a newline
         #              and consume it.
+        self.next_token_end += 1
+        # Started with the double newline...
+        if self.remaining[self.next_token_end+1] == "\n":
+            return (name, body)
         while True:
             # Start of this loop, last byte was always a newline.
-            next_newline = self.remaining[self.next_token_end:].find('\n')
+            next_newline = self.remaining.find('\n\n', self.next_token_end)
             match next_newline:
                 case -1:
                     # End of file before next newline.
                     raise self._make_error(
                         "Macro definition missing null line terminator.")
-                case 0:
-                    # Two newlines in a row indicates end of macro.
-                    self.next_token_end += 1
-                    return (macro_name, self._consume_token())
                 case _ as next_newline:
                     # Text in the macro
                     self.next_token_end += next_newline
+                    body = self.remaining[1:self.next_token_end]
+                    self._consume()
+                    return (name, body.splitlines(keepends=True))
 
     def _parse_machine(self, default):
         # Default doesn't get any machine name, so just use default as the
@@ -180,22 +187,22 @@ class _netrcparse:
         if default:
             machine = "default"
         else:
-            machine = self._consume_token()
+            machine = self._consume_token(comment_as_token=True)
 
         login = account = password = ''
 
         while True:
             # DEBUG: print(f"_parse_machine state {machine, (login, account, password)}")
-            match self._peek_token():
+            match self._peek_token(comment_as_token=False):
                 case 'login' | 'user':
                     self._consume()
-                    login = self._consume_token()
+                    login = self._consume_token(comment_as_token=True)
                 case 'account':
                     self._consume()
-                    account = self._consume_token()
+                    account = self._consume_token(comment_as_token=True)
                 case 'password':
                     self._consume()
-                    password = self._consume_token()
+                    password = self._consume_token(comment_as_token=True)
                 case '' | 'machine' | 'default' | 'macdef':
                     return machine, (login, account, password)
                 case _ as unhandled:
@@ -249,8 +256,8 @@ class netrc:
 
         # FIXME/TODO: Should this be a set of usernames? Shuld it be
         # called/checked for every machine entry?
-        one_entry = next(iter(self.hosts.keys()))
-        self._security_check(fp, default_netrc, self.hosts[one_entry][0])
+        for machine in self.hosts.values():
+            self._security_check(fp, default_netrc, machine[0])
 
     def _security_check(self, fp, default_netrc, login):
         if os.name == 'posix' and default_netrc and login != "anonymous":
