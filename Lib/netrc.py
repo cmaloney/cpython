@@ -80,16 +80,18 @@ class _netrcparse:
         """Read until quote that is not preceeded by an escape."""
         # Eat first quote
         self.next_token_end += 1
+        has_escape = False
         while True:
             match self._next_byte():
                 case '\\':
                     # Escape and skip next
                     # FIXME: Validate EOF behavior
                     self.next_token_end += 2
+                    has_escape = True
                 case '"':
                     unquoted = self._materilize_token(1, 0)
                     self.next_token_end += 1
-                    return _process_escapes(unquoted)
+                    return _process_escapes(unquoted) if has_escape else unquoted
                 case _:
                     self.next_token_end += 1
 
@@ -133,16 +135,19 @@ class _netrcparse:
                 case _:
                     # Read until whitespace which doesn't have an escape.
                     self.next_token_end += 1
+                    has_escape = False
                     while not self._at_end() \
                         and self._next_byte() not in self.whitespace:
                         # Skip all escaped characters
                         if self._next_byte() == '\\':
                             # FIXME/TODO: This will error at EOF currently.
                             self.next_token_end += 1
+                            has_escape = True
 
                         self.next_token_end += 1
 
-                    return _process_escapes(self._materilize_token(0, 0))
+                    token = self._materilize_token(0, 0)
+                    return _process_escapes(token) if has_escape else token
 
     # FIXME: I hate comment_as_token, it's sooo ugly...
     def _peek_token(self, comment_as_token: bool):
@@ -246,6 +251,7 @@ class netrc:
         # called/checked for every machine entry?
         # FIXME/TODO: Only check for every distinct login once....
         # FIXME/TODO: Only stat once...
+        # FIXME: THIS NEEDS TO BE CALLED for every user where `password` is set.
         for machine in self.hosts.values():
             self._security_check(fp, default_netrc, machine[0])
 
