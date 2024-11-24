@@ -188,16 +188,8 @@ class _netrcparse:
                     self._consume()
                     return (name, body.splitlines(keepends=True))
 
-    def _parse_machine(self, default):
-        # Default doesn't get any machine name, so just use default as the
-        # machine name.
-        if default:
-            machine = "default"
-        else:
-            machine = self._consume_token(comment_as_token=True)
-
+    def _parse_machine(self):
         login = account = password = ''
-
         while True:
             match self._peek_token(comment_as_token=False):
                 case 'login' | 'user':
@@ -210,7 +202,7 @@ class _netrcparse:
                     self._consume()
                     password = self._consume_token(comment_as_token=True)
                 case '' | 'machine' | 'default' | 'macdef':
-                    return machine, (login, account, password)
+                    return (login, account, password)
                 case _ as unhandled:
                     raise self._make_error("bad follower token %r" % unhandled)
 
@@ -235,11 +227,11 @@ class netrc:
             match parser._consume_token():
                 case "default":
                     parser._consume()
-                    host, data = parser._parse_machine(True)
-                    self.hosts[host] = data
+                    machine = "default"
+                    self.hosts[machine] = parser._parse_machine()
                 case "machine":
-                    host, data = parser._parse_machine(False)
-                    self.hosts[host] = data
+                    machine = parser._consume_token(comment_as_token=True)
+                    self.hosts[machine] = parser._parse_machine()
                 case "macdef":
                     name, value = parser._parse_macro()
                     self.macros[name] = value
