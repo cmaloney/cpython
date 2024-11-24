@@ -26,8 +26,7 @@ def _process_escapes(token):
 
     Most netrc keywords don't contain escapes. (ex. machine, user, login, ...)
     """
-    if "\\" not in token:
-        return token
+    assert "\\" in token
 
     unescaped = ""
     for char in token:
@@ -41,11 +40,10 @@ class _netrcparse:
     def __init__(self, file, fp):
         # NOTE: Relies on universal newlines to count lineno post-parse as well
         # as normalize line endings across platforms.
-        self.instream = fp
         assert fp.newlines is None, "Doesn't allow arbitrary readline."
         self.file = file
         self.whitespace = "\n\t\r "
-        self.all_text = self.instream.read()
+        self.all_text = fp.read()
         self.bytes_consumed = self.next_token_end = 0
         self.next_token = None
         self.total_byes = len(self.all_text)
@@ -75,28 +73,6 @@ class _netrcparse:
     def _consume(self):
         self.bytes_consumed = self.next_token_end
         self.next_token = None
-
-    def _lex_quotes(self):
-        """Read until quote that is not preceeded by an escape."""
-        # Eat first quote
-        self.next_token_end += 1
-        has_escape = False
-        while True:
-            match self._next_byte():
-                case '\\':
-                    # Escape and skip next
-                    # FIXME: Validate EOF behavior
-                    self.next_token_end += 2
-                    has_escape = True
-                case '"':
-                    unquoted = self._materilize_token(1, 0)
-                    self.next_token_end += 1
-                    return _process_escapes(unquoted) if has_escape else unquoted
-                case _:
-                    self.next_token_end += 1
-
-            if self._at_end():
-                raise self._make_error("Quotation didn't end %r" % self._materilize_token(0, 0))
 
     def _find_next_token(self, comment_as_token: bool):
         """Move to the start of the next token, but don't consume."""
@@ -131,10 +107,26 @@ class _netrcparse:
 
                 # Tokens, either quoted or literals
                 case '"':
-                    return self._lex_quotes()
+                    self.next_token_end += 1
+                    has_escape = False
+                    while True:
+                        match self._next_byte():
+                            case '\\':
+                                # Escape and skip next
+                                # FIXME: Validate EOF behavior
+                                self.next_token_end += 2
+                                has_escape = True
+                            case '"':
+                                unquoted = self._materilize_token(1, 0)
+                                self.next_token_end += 1
+                                return _process_escapes(unquoted) if has_escape else unquoted
+                            case _ as c:
+                                self.next_token_end += 1
+
+                        if self._at_end():
+                            raise self._make_error("Quotation didn't end %r" % self._materilize_token(0, 0))
                 case _:
                     # Read until whitespace which doesn't have an escape.
-                    self.next_token_end += 1
                     has_escape = False
                     while not self._at_end() \
                         and self._next_byte() not in self.whitespace:
@@ -252,30 +244,35 @@ class netrc:
         # FIXME/TODO: Only check for every distinct login once....
         # FIXME/TODO: Only stat once...
         # FIXME: THIS NEEDS TO BE CALLED for every user where `password` is set.
-        for machine in self.hosts.values():
-            self._security_check(fp, default_netrc, machine[0])
+        if os.name == 'posix' and default_netrc:
+            for machine in self.hosts.values():
+                # All non-anonymous logins which have a password should trigger
+                # check. Check only needs to happen once per file.
+                if machine[0] != 'anonymous' and machine[2] != '':
+                    self._security_check(fp)
+                    break
 
-    def _security_check(self, fp, default_netrc, login):
-        if os.name == 'posix' and default_netrc and login != "anonymous":
-            prop = os.fstat(fp.fileno())
-            if prop.st_uid != os.getuid():
-                import pwd
-                try:
-                    fowner = pwd.getpwuid(prop.st_uid)[0]
-                except KeyError:
-                    fowner = 'uid %s' % prop.st_uid
-                try:
-                    user = pwd.getpwuid(os.getuid())[0]
-                except KeyError:
-                    user = 'uid %s' % os.getuid()
-                raise NetrcParseError(
-                    (f"~/.netrc file owner ({fowner}, {user}) does not match"
-                     " current user"))
-            if (prop.st_mode & (stat.S_IRWXG | stat.S_IRWXO)):
-                raise NetrcParseError(
-                    "~/.netrc access too permissive: access"
-                    " permissions must restrict access to only"
-                    " the owner")
+    def _security_check(self, fp):
+        """Validate netrc file is only readable by current user."""
+        prop = os.fstat(fp.fileno())
+        if prop.st_uid != os.getuid():
+            import pwd
+            try:
+                fowner = pwd.getpwuid(prop.st_uid)[0]
+            except KeyError:
+                fowner = 'uid %s' % prop.st_uid
+            try:
+                user = pwd.getpwuid(os.getuid())[0]
+            except KeyError:
+                user = 'uid %s' % os.getuid()
+            raise NetrcParseError(
+                (f"~/.netrc file owner ({fowner}, {user}) does not match"
+                    " current user"))
+        if (prop.st_mode & (stat.S_IRWXG | stat.S_IRWXO)):
+            raise NetrcParseError(
+                "~/.netrc access too permissive: access"
+                " permissions must restrict access to only"
+                " the owner")
 
     def authenticators(self, host):
         """Return a (user, account, password) tuple for given host."""
