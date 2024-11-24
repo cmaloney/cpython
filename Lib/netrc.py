@@ -22,7 +22,7 @@ class NetrcParseError(Exception):
 
 
 def _process_escapes(token):
-    """Single-pass escape removal to avoid copies.
+    """Single-pass escape removal to minimize copies.
 
     Most netrc keywords don't contain escapes. (ex. machine, user, login, ...)
     """
