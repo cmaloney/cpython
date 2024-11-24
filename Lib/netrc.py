@@ -46,10 +46,10 @@ class _netrcparse:
         self.file = file
         self.whitespace = "\n\t\r "
         self.all_text = self.instream.read()
-        self.remaining = self.all_text
         self.next_token_end = 0
         self.next_token = None
         self.bytes_consumed = 0
+        self.total_byes = len(self.all_text)
 
     def _compute_lineno(self):
         return self.all_text[:self.bytes_consumed].count("\n")
@@ -57,14 +57,17 @@ class _netrcparse:
     def _make_error(self, msg):
         return NetrcParseError(msg, self.file, self._compute_lineno())
 
+    def _at_end(self):
+        return self.bytes_consumed + self.next_token_end >= self.total_byes
+
     def _next_byte(self, offset=0):
+        # ow, this apparently hurts a lot...
         return self.all_text[self.bytes_consumed + self.next_token_end + offset]
 
     def _next_find(self, substr, offset=0):
         new_method = self.all_text.find(substr, self.bytes_consumed + offset)
         if new_method != -1:
             new_method = new_method - self.bytes_consumed
-        assert new_method == self.remaining.find(substr, offset)
         return new_method
 
     def _materilize_token(self, start_offset, end_offset):
@@ -72,10 +75,6 @@ class _netrcparse:
 
     def _consume(self):
         self.bytes_consumed += self.next_token_end
-        # FIXME(cmaloney): Pretty sure this line is causing most the slowness...
-        self.remaining = self.remaining[self.next_token_end:]
-        # assert self.bytes_consumed + len(self.remaining) == len(self.all_text), \
-        #    "Shouldn't be loosing data ever."
         self.next_token_end = 0
         self.next_token = None
 
@@ -96,8 +95,8 @@ class _netrcparse:
                 case _:
                     self.next_token_end += 1
 
-            if self.next_token_end > len(self.remaining):
-                raise self._make_error("Quotation didn't end %r" % self.remaining)
+            if self._at_end():
+                raise self._make_error("Quotation didn't end %r" % self._materilize_token(0, 0))
 
     def _find_next_token(self, comment_as_token: bool):
         """Move to the start of the next token, but don't consume."""
@@ -107,7 +106,7 @@ class _netrcparse:
                 "Shouldn't be in a token / last token should be consumed."
 
             # End of file/buffer
-            if not self.remaining:
+            if self._at_end():
                 return ""
 
             match self._next_byte():
@@ -116,7 +115,7 @@ class _netrcparse:
                     match self._next_find("\n"):
                         case -1:
                             # Comment into EOF, no further tokens.
-                            self.next_token_end += len(self.remaining)
+                            self.next_token_end = self.total_byes - self.bytes_consumed
                         case _ as next_newline:
                             self.next_token_end += next_newline
                     self._consume()
@@ -125,7 +124,7 @@ class _netrcparse:
                 case c if c in self.whitespace:
                     # Find first non-whitespace.
                     # FIXME/TODO: Can we do a faster find method?
-                    while self.next_token_end < len(self.remaining) \
+                    while not self._at_end() \
                         and self._next_byte() in c:
                         self.next_token_end += 1
                     self._consume()
@@ -136,7 +135,7 @@ class _netrcparse:
                 case _:
                     # Read until whitespace which doesn't have an escape.
                     self.next_token_end += 1
-                    while self.next_token_end < len(self.remaining) \
+                    while not self._at_end() \
                         and self._next_byte() not in self.whitespace:
                         # Skip all escaped characters
                         if self._next_byte() == '\\':
@@ -157,10 +156,9 @@ class _netrcparse:
         self.next_token = self._find_next_token(comment_as_token=comment_as_token)
         assert self.next_token is not None, \
             "Should have gotten a token or exception."
-        assert not self.remaining or self.next_token_end != 0, \
+        assert self._at_end() or self.next_token_end != 0, \
             "Should either have no data remaining, or "
 
-        # DEBUG: print(f"{self.next_token=!r}, {self.remaining[:20] = }")
         return self.next_token
 
 
