@@ -125,7 +125,7 @@ class _netrcparse:
                     # Find first non-whitespace.
                     # FIXME/TODO: Can we do a faster find method?
                     while not self._at_end() \
-                        and self._next_byte() in c:
+                        and self._next_byte() in self.whitespace:
                         self.next_token_end += 1
                     self._consume()
 
