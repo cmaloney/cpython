@@ -58,10 +58,14 @@ class _netrcparse:
         return NetrcParseError(msg, self.file, self._compute_lineno())
 
     def _next_byte(self, offset=0):
-        return self.all_text[self.bytes_consumed + self.next_token_end+offset]
+        return self.all_text[self.bytes_consumed + self.next_token_end + offset]
 
     def _next_find(self, substr, offset=0):
-        return self.all_text.find(substr, self.bytes_consumed)
+        new_method = self.all_text.find(substr, self.bytes_consumed + offset)
+        if new_method != -1:
+            new_method = new_method - self.bytes_consumed
+        assert new_method == self.remaining.find(substr, offset)
+        return new_method
 
     def _materilize_token(self, start_offset, end_offset):
         return self.all_text[self.bytes_consumed+start_offset:self.bytes_consumed+self.next_token_end+end_offset]
@@ -109,7 +113,7 @@ class _netrcparse:
             match self._next_byte():
                 # Comments
                 case '#' if comment_as_token is False:
-                    match self.remaining.find("\n"):
+                    match self._next_find("\n"):
                         case -1:
                             # Comment into EOF, no further tokens.
                             self.next_token_end += len(self.remaining)
@@ -177,7 +181,7 @@ class _netrcparse:
             return (name, body)
         while True:
             # Start of this loop, last byte was always a newline.
-            next_newline = self.remaining.find('\n\n', self.next_token_end)
+            next_newline = self._next_find('\n\n', self.next_token_end)
             match next_newline:
                 case -1:
                     # End of file before next newline.
