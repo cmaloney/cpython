@@ -60,9 +60,9 @@ class _netrcparse:
     def _at_end(self):
         return self.bytes_consumed + self.next_token_end >= self.total_byes
 
-    def _next_byte(self, offset=0):
+    def _next_byte(self):
         # ow, this apparently hurts a lot...
-        return self.all_text[self.bytes_consumed + self.next_token_end + offset]
+        return self.all_text[self.bytes_consumed + self.next_token_end]
 
     def _next_find(self, substr, offset=0):
         new_method = self.all_text.find(substr, self.bytes_consumed + offset)
@@ -175,8 +175,6 @@ class _netrcparse:
         #              and consume it.
         self.next_token_end += 1
         # Started with the double newline...
-        if self._next_byte(1) == "\n":
-            return (name, body)
         while True:
             # Start of this loop, last byte was always a newline.
             next_newline = self._next_find('\n\n', self.next_token_end)
