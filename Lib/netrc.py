@@ -147,7 +147,7 @@ class _netrcparse:
         assert not self.remaining or self.next_token_end != 0, \
             "Should either have no data remaining, or "
 
-        # DEBUG: print(f"TOKEN {self.next_token}, {self.remaining[:20] = }")
+        # DEBUG: print(f"{self.next_token=!r}, {self.remaining[:20] = }")
         return self.next_token
 
 
@@ -192,7 +192,6 @@ class _netrcparse:
         login = account = password = ''
 
         while True:
-            # DEBUG: print(f"_parse_machine state {machine, (login, account, password)}")
             match self._peek_token(comment_as_token=False):
                 case 'login' | 'user':
                     self._consume()
@@ -256,6 +255,8 @@ class netrc:
 
         # FIXME/TODO: Should this be a set of usernames? Shuld it be
         # called/checked for every machine entry?
+        # FIXME/TODO: Only check for every distinct login once....
+        # FIXME/TODO: Only stat once...
         for machine in self.hosts.values():
             self._security_check(fp, default_netrc, machine[0])
 
