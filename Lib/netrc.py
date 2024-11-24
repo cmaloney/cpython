@@ -214,23 +214,6 @@ class _netrcparse:
                 case _ as unhandled:
                     raise self._make_error("bad follower token %r" % unhandled)
 
-    def entries(self):
-        while True:
-            match self._consume_token():
-                case "default":
-                    self._consume()
-                    yield "machine", self._parse_machine(True)
-                case "machine":
-                    self._consume()
-                    yield "machine", self._parse_machine(False)
-                case "macdef":
-                    self._consume()
-                    yield "macdef", self._parse_macro()
-                case "":
-                    return
-                case _ as unhandled:
-                    raise self._make_error("bad toplevel token %r" % unhandled)
-
 
 class netrc:
     def __init__(self, file=None):
@@ -248,15 +231,22 @@ class netrc:
 
     def _parse(self, file, fp, default_netrc):
         parser = _netrcparse(file, fp)
-        for kind, entry in parser.entries():
-            match kind:
+        while True:
+            match parser._consume_token():
+                case "default":
+                    parser._consume()
+                    host, data = parser._parse_machine(True)
+                    self.hosts[host] = data
                 case "machine":
-                    self.hosts[entry[0]] = entry[1]
+                    host, data = parser._parse_machine(False)
+                    self.hosts[host] = data
                 case "macdef":
-                    self.macros[entry[0]] = entry[1]
+                    name, value = parser._parse_macro()
+                    self.macros[name] = value
+                case "":
+                    break
                 case _ as unhandled:
-                    raise NetrcParseError(
-                        "bad parser return %r" % unhandled, file, self.lineno)
+                    raise parser._make_error("bad toplevel token %r" % unhandled)
 
         # FIXME/TODO: Assert hit end of file.
 
