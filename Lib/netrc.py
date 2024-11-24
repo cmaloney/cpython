@@ -46,9 +46,8 @@ class _netrcparse:
         self.file = file
         self.whitespace = "\n\t\r "
         self.all_text = self.instream.read()
-        self.next_token_end = 0
+        self.bytes_consumed = self.next_token_end = 0
         self.next_token = None
-        self.bytes_consumed = 0
         self.total_byes = len(self.all_text)
 
     def _compute_lineno(self):
@@ -58,24 +57,23 @@ class _netrcparse:
         return NetrcParseError(msg, self.file, self._compute_lineno())
 
     def _at_end(self):
-        return self.bytes_consumed + self.next_token_end >= self.total_byes
+        return self.next_token_end >= self.total_byes
 
     def _next_byte(self):
         # ow, this apparently hurts a lot...
-        return self.all_text[self.bytes_consumed + self.next_token_end]
+        return self.all_text[self.next_token_end]
 
     def _next_find(self, substr, offset=0):
-        new_method = self.all_text.find(substr, self.bytes_consumed + offset)
+        new_method = self.all_text.find(substr, self.next_token_end)
         if new_method != -1:
             new_method = new_method - self.bytes_consumed
         return new_method
 
     def _materilize_token(self, start_offset, end_offset):
-        return self.all_text[self.bytes_consumed+start_offset:self.bytes_consumed+self.next_token_end+end_offset]
+        return self.all_text[self.bytes_consumed+start_offset:self.next_token_end+end_offset]
 
     def _consume(self):
-        self.bytes_consumed += self.next_token_end
-        self.next_token_end = 0
+        self.bytes_consumed = self.next_token_end
         self.next_token = None
 
     def _lex_quotes(self):
@@ -102,7 +100,7 @@ class _netrcparse:
         """Move to the start of the next token, but don't consume."""
 
         while True:
-            assert self.next_token_end == 0, \
+            assert self.next_token_end == self.bytes_consumed, \
                 "Shouldn't be in a token / last token should be consumed."
 
             # End of file/buffer
@@ -115,7 +113,7 @@ class _netrcparse:
                     match self._next_find("\n"):
                         case -1:
                             # Comment into EOF, no further tokens.
-                            self.next_token_end = self.total_byes - self.bytes_consumed
+                            self.next_token_end = self.total_byes
                         case _ as next_newline:
                             self.next_token_end += next_newline
                     self._consume()
@@ -156,8 +154,8 @@ class _netrcparse:
         self.next_token = self._find_next_token(comment_as_token=comment_as_token)
         assert self.next_token is not None, \
             "Should have gotten a token or exception."
-        assert self._at_end() or self.next_token_end != 0, \
-            "Should either have no data remaining, or "
+        assert self._at_end() or self.next_token_end != self.bytes_consumed, \
+            "Should either have no data remaining, or be in a token"
 
         return self.next_token
 
@@ -177,7 +175,7 @@ class _netrcparse:
         # Started with the double newline...
         while True:
             # Start of this loop, last byte was always a newline.
-            next_newline = self._next_find('\n\n', self.next_token_end)
+            next_newline = self._next_find('\n\n')
             match next_newline:
                 case -1:
                     # End of file before next newline.
