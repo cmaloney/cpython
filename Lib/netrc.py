@@ -57,6 +57,15 @@ class _netrcparse:
     def _make_error(self, msg):
         return NetrcParseError(msg, self.file, self._compute_lineno())
 
+    def _next_byte(self, offset=0):
+        return self.all_text[self.bytes_consumed + self.next_token_end+offset]
+
+    def _next_find(self, substr, offset=0):
+        return self.all_text.find(substr, self.bytes_consumed)
+
+    def _materilize_token(self, start_offset, end_offset):
+        return self.all_text[self.bytes_consumed+start_offset:self.bytes_consumed+self.next_token_end+end_offset]
+
     def _consume(self):
         self.bytes_consumed += self.next_token_end
         # FIXME(cmaloney): Pretty sure this line is causing most the slowness...
@@ -71,13 +80,13 @@ class _netrcparse:
         # Eat first quote
         self.next_token_end += 1
         while True:
-            match self.remaining[self.next_token_end]:
+            match self._next_byte():
                 case '\\':
                     # Escape and skip next
                     # FIXME: Validate EOF behavior
                     self.next_token_end += 2
                 case '"':
-                    unquoted = self.remaining[1:self.next_token_end]
+                    unquoted = self._materilize_token(1, 0)
                     self.next_token_end += 1
                     return _process_escapes(unquoted)
                 case _:
@@ -97,7 +106,7 @@ class _netrcparse:
             if not self.remaining:
                 return ""
 
-            match self.remaining[0]:
+            match self._next_byte():
                 # Comments
                 case '#' if comment_as_token is False:
                     match self.remaining.find("\n"):
@@ -113,7 +122,7 @@ class _netrcparse:
                     # Find first non-whitespace.
                     # FIXME/TODO: Can we do a faster find method?
                     while self.next_token_end < len(self.remaining) \
-                        and self.remaining[self.next_token_end] in c:
+                        and self._next_byte() in c:
                         self.next_token_end += 1
                     self._consume()
 
@@ -124,15 +133,15 @@ class _netrcparse:
                     # Read until whitespace which doesn't have an escape.
                     self.next_token_end += 1
                     while self.next_token_end < len(self.remaining) \
-                        and self.remaining[self.next_token_end] not in self.whitespace:
+                        and self._next_byte() not in self.whitespace:
                         # Skip all escaped characters
-                        if self.remaining[self.next_token_end] == '\\':
+                        if self._next_byte() == '\\':
                             # FIXME/TODO: This will error at EOF currently.
                             self.next_token_end += 1
 
                         self.next_token_end += 1
 
-                    return _process_escapes(self.remaining[:self.next_token_end])
+                    return _process_escapes(self._materilize_token(0, 0))
 
     # FIXME: I hate comment_as_token, it's sooo ugly...
     def _peek_token(self, comment_as_token: bool):
@@ -164,7 +173,7 @@ class _netrcparse:
         #              and consume it.
         self.next_token_end += 1
         # Started with the double newline...
-        if self.remaining[self.next_token_end+1] == "\n":
+        if self._next_byte(1) == "\n":
             return (name, body)
         while True:
             # Start of this loop, last byte was always a newline.
@@ -177,7 +186,7 @@ class _netrcparse:
                 case _ as next_newline:
                     # Text in the macro
                     self.next_token_end += next_newline
-                    body = self.remaining[1:self.next_token_end]
+                    body = self._materilize_token(1,0)
                     self._consume()
                     return (name, body.splitlines(keepends=True))
 
@@ -309,6 +318,7 @@ class netrc:
 
 if __name__ == '__main__':
     if len(sys.argv) == 2:
-        print(netrc(sys.argv[1]))
+        # FIXME/TODO: Removed print
+        netrc(sys.argv[1])
     else:
         print(netrc())
