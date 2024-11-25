@@ -49,13 +49,32 @@ class _rune_iter:
         # Prime first rune.
         self.advance(0)
 
+    def _tombstone(self):
+        self.current = ""
+        self.at_end = True
+        self.position = self._corpus_len
+
+
     def advance(self, count=1):
         self.position += count
         if self.position >= self._corpus_len:
-            self.current = ""
-            self.at_end = True
+            self._tombstone()
         else:
             self.current = self.corpus[self.position]
+
+    def advance_through(self, substr):
+        """Find the next given string, if hit EOF consume everything.
+
+        Returns true if substr was found."""
+        pos = self.corpus.find(substr, self.position)
+        if pos == -1 or pos >= self._corpus_len:
+            self._tombstone()
+            return False
+
+        self.position = pos
+        self.current = self.corpus[self.position]
+        return True
+
 
 class _token_iter:
     """Cache current token, next() to get next, "" as EOF."""
@@ -65,10 +84,14 @@ class _token_iter:
         self.advance()
 
     def advance(self, skip_comments=True):
-        self.current = None
+        """Consume the last token, find the next"""
+        self.consumed = self.runes.position
 
-    def materialize(self, start_offset):
-        pass
+
+        raise NotImplementedError()
+
+    def materialize(self, start_offset=0):
+        return self.runes.corpus[self.consumed+start_offset,self.runes.position]
 
 
 class _netrcparse:
@@ -89,12 +112,8 @@ class _netrcparse:
     def _make_error(self, msg):
         return NetrcParseError(msg, self.file, self._compute_lineno())
 
-    def _next_find(self, substr):
-        pos = self.all_text.find(substr, self.runes.position)
-        return pos - self.bytes_consumed if pos != -1 else pos
-
-    def _materialize_token(self, start_offset=0):
-        return self.all_text[self.bytes_consumed+start_offset:self.runes.position]
+    def _materialize_token(self, start_offset=0, end_offset=0):
+        return self.all_text[self.bytes_consumed+start_offset:self.runes.position+end_offset]
 
     def _consume(self):
         self.bytes_consumed = self.runes.position
@@ -108,13 +127,7 @@ class _netrcparse:
                 case "":  # EOF
                     return ""
                 case '#' if skip_comments:  # Comments
-                    print("A")
-                    match self._next_find("\n"):
-                        case -1:
-                            # Comment into EOF, no further tokens.
-                            self.runes.advance(self.total_bytes)
-                        case _ as next_newline:
-                            self.runes.advance(next_newline)
+                    self.runes.advance_through("\n")
                     self._consume()
                 case c if c in _whitespace:  # Whitespace between tokens
                     # Eat until no longer whitespace
@@ -127,6 +140,7 @@ class _netrcparse:
                             case _ as rune if rune in _whitespace:
                                 self.runes.advance()
                             case _:
+                                # non-whitespace
                                 self._consume()
                                 break
                 case '"':  # Tokens, either quoted or literals
@@ -197,24 +211,18 @@ class _netrcparse:
         """Macros: have a name, end with double newline."""
         # TODO(fixme): Name here can contain a `#`, needs tests
         name = self._consume_token()
-        # TODO, FIXME: Assert that the next byte after name is a newline
-        #              and consume it.
-        self.runes.advance()
-        # Started with the double newline...
+        # TODO, FIXME: Assert that the next byte after name is a newline.
         while True:
-            # Start of this loop, last byte was always a newline.
-            next_newline = self._next_find('\n\n')
-            match next_newline:
-                case -1:
-                    # End of file before next newline.
-                    raise self._make_error(
-                        "Macro definition missing null line terminator.")
-                case _ as next_newline:
-                    # Text in the macro
-                    self.runes.advance(next_newline)
-                    body = self._materialize_token(1)
-                    self._consume()
-                    return (name, body.splitlines(keepends=True))
+            if not self.runes.advance_through('\n\n'):
+                # End of file before next newline.
+                raise self._make_error(
+                    "Macro definition missing null line terminator.")
+            self.runes.advance()  # First newline is part of macro
+            body = self._materialize_token(1)
+            self.runes.advance()  # Discard second newline
+            self._consume()
+            print(f"{body!r}")
+            return (name, body.splitlines(keepends=True))
 
     def _parse_machine(self):
         login = account = password = ''
