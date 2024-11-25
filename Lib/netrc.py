@@ -57,7 +57,7 @@ class _netrcparse:
     def _at_end(self):
         return self.next_token_end >= self.total_byes
 
-    def _next_find(self, substr, offset=0):
+    def _next_find(self, substr):
         new_method = self.all_text.find(substr, self.next_token_end)
         if new_method != -1:
             new_method = new_method - self.bytes_consumed
