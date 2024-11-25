@@ -35,6 +35,7 @@ def _process_escapes(token):
         unescaped += char
     return unescaped
 
+_whitespace = "\n\t\r "
 
 class _netrcparse:
     def __init__(self, file, fp):
@@ -42,11 +43,10 @@ class _netrcparse:
         # as normalize line endings across platforms.
         assert fp.newlines is None, "Doesn't allow arbitrary readline."
         self.file = file
-        self.whitespace = "\n\t\r "
         self.all_text = fp.read()
         self.bytes_consumed = self.next_token_end = 0
         self.next_token = None
-        self.total_byes = len(self.all_text)
+        self.total_bytes = len(self.all_text)
 
     def _compute_lineno(self):
         return self.all_text[:self.bytes_consumed].count("\n")
@@ -55,7 +55,7 @@ class _netrcparse:
         return NetrcParseError(msg, self.file, self._compute_lineno())
 
     def _at_end(self):
-        return self.next_token_end >= self.total_byes
+        return self.next_token_end >= self.total_bytes
 
     def _next_find(self, substr):
         new_method = self.all_text.find(substr, self.next_token_end)
@@ -87,17 +87,17 @@ class _netrcparse:
                     match self._next_find("\n"):
                         case -1:
                             # Comment into EOF, no further tokens.
-                            self.next_token_end = self.total_byes
+                            self.next_token_end = self.total_bytes
                         case _ as next_newline:
                             self.next_token_end += next_newline
                     self._consume()
 
                 # Whitespace
-                case c if c in self.whitespace:
+                case c if c in _whitespace:
                     # Find first non-whitespace.
                     # FIXME/TODO: Can we do a faster find method?
                     while not self._at_end() \
-                        and self.all_text[self.next_token_end] in self.whitespace:
+                        and self.all_text[self.next_token_end] in _whitespace:
                         self.next_token_end += 1
                     self._consume()
 
@@ -125,7 +125,7 @@ class _netrcparse:
                     # Read until whitespace which doesn't have an escape.
                     has_escape = False
                     while not self._at_end() \
-                        and self.all_text[self.next_token_end] not in self.whitespace:
+                        and self.all_text[self.next_token_end] not in _whitespace:
                         # Skip all escaped characters
                         if self.all_text[self.next_token_end] == '\\':
                             # FIXME/TODO: This will error at EOF currently.
@@ -200,6 +200,27 @@ class _netrcparse:
                 case _ as unhandled:
                     raise self._make_error("bad follower token %r" % unhandled)
 
+    def populate(self, netrc):
+        while True:
+            match self._consume_token(skip_comments=True):
+                case "default":
+                    self._consume()
+                    netrc.hosts["default"] = self._parse_machine()
+                case "machine":
+                    machine = self._consume_token()
+                    netrc.hosts[machine] = self._parse_machine()
+                case "macdef":
+                    name, value = self._parse_macro()
+                    netrc.macros[name] = value
+                case "":
+                    break
+                case _ as unhandled:
+                    raise self._make_error("bad toplevel token %r" % unhandled)
+
+        if not self._at_end():
+            raise self._make_error("netrc parser error, didn't reach end")
+
+
 
 class netrc:
     def __init__(self, file=None):
@@ -217,30 +238,8 @@ class netrc:
 
     def _parse(self, file, fp, default_netrc):
         parser = _netrcparse(file, fp)
-        while True:
-            match parser._consume_token(skip_comments=True):
-                case "default":
-                    parser._consume()
-                    machine = "default"
-                    self.hosts[machine] = parser._parse_machine()
-                case "machine":
-                    machine = parser._consume_token()
-                    self.hosts[machine] = parser._parse_machine()
-                case "macdef":
-                    name, value = parser._parse_macro()
-                    self.macros[name] = value
-                case "":
-                    break
-                case _ as unhandled:
-                    raise parser._make_error("bad toplevel token %r" % unhandled)
+        parser.populate(self)
 
-        # FIXME/TODO: Assert hit end of file.
-
-        # FIXME/TODO: Should this be a set of usernames? Shuld it be
-        # called/checked for every machine entry?
-        # FIXME/TODO: Only check for every distinct login once....
-        # FIXME/TODO: Only stat once...
-        # FIXME: THIS NEEDS TO BE CALLED for every user where `password` is set.
         if os.name == 'posix' and default_netrc:
             for machine in self.hosts.values():
                 # All non-anonymous logins which have a password should trigger
