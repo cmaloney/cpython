@@ -78,71 +78,41 @@ class _rune_iter:
 
 class _token_iter:
     """Cache current token, next() to get next, "" as EOF."""
-    def __init__(self, corpus) -> None:
-        self.runes = _rune_iter(corpus)
-        self.consumed = 0
-        self.advance()
-
-    def advance(self, skip_comments=True):
-        """Consume the last token, find the next"""
-        self.consumed = self.runes.position
-
-
-        raise NotImplementedError()
-
-    def materialize(self, start_offset=0):
-        return self.runes.corpus[self.consumed+start_offset,self.runes.position]
-
-
-class _netrcparse:
-    def __init__(self, file, fp):
-        # NOTE: Relies on universal newlines to count lineno post-parse as well
-        # as normalize line endings across platforms.
-        assert fp.newlines is None, "Doesn't allow arbitrary readline."
+    def __init__(self, file, corpus) -> None:
         self.file = file
-        self.all_text = fp.read()
-        self.bytes_consumed = 0
-        self.next_token = None
-        self.total_bytes = len(self.all_text)
-        self.runes = _rune_iter(self.all_text)
+        self.runes = _rune_iter(corpus)
+
+        self.consumed = 0
+        self.current = None
+        self._advance(allow_comments=True)
 
     def _compute_lineno(self):
-        return self.all_text[:self.bytes_consumed].count("\n")
+        return self.runes.corpus[:self.consumed].count("\n")
 
-    def _make_error(self, msg):
-        return NetrcParseError(msg, self.file, self._compute_lineno())
+    def _materialize(self, start_offset=0):
+        return self.runes.corpus[self.consumed+start_offset:self.runes.position]
 
-    def _materialize_token(self, start_offset=0):
-        return self.all_text[self.bytes_consumed+start_offset:self.runes.position]
-
-    def _consume(self):
-        self.bytes_consumed = self.runes.position
-        self.next_token = None
-
-    def _find_next_token(self, skip_comments: bool):
+    def _find_next_token(self, allow_comments: bool):
         """Move to the start of the next token, but don't consume."""
-
         while True:
+            self.consumed = self.runes.position
+
             match self.runes.current:
                 case "":  # EOF
                     return ""
-                case '#' if skip_comments:  # Comments
+                case '#' if allow_comments:  # Comments, advance and no token
                     self.runes.advance_through("\n")
-                    self._consume()
-                case c if c in _whitespace:  # Whitespace between tokens
-                    # Eat until no longer whitespace
-                    # FIXME/TODO: Can we do a faster find method?
+                    continue
+                case c if c in _whitespace:  # Whitespace, advance and no token
                     while True:
                         match self.runes.current:
                             case '':  # EOF
-                                self._consume()
                                 break
                             case _ as rune if rune in _whitespace:
                                 self.runes.advance()
                             case _:
-                                # non-whitespace
-                                self._consume()
                                 break
+                    continue
                 case '"':  # Tokens, either quoted or literals
                     # Skip start quote
                     self.runes.advance()
@@ -155,14 +125,14 @@ class _netrcparse:
                                 self.runes.advance(2)
                                 has_escape = True
                             case '"':
-                                unquoted = self._materialize_token(1)
+                                unquoted = self._materialize(1)
                                 self.runes.advance()
                                 return _process_escapes(unquoted) if has_escape else unquoted
                             case '':
                                 # EOF
                                 # FIXME(cmaloney): Needs a test case.
-                                raise self._make_error("Quotation didn't end %r" % self._materialize_token())
-                            case _ as c:
+                                raise self.make_error("Quotation didn't end %r" % self._materialize())
+                            case _:
                                 self.runes.advance()
                 case _:
                     # Read until whitespace which doesn't have an escape.
@@ -182,74 +152,99 @@ class _netrcparse:
 
                         self.runes.advance()
 
-                    token = self._materialize_token()
+                    token = self._materialize()
                     return _process_escapes(token) if has_escape else token
 
-    # FIXME: I hate skip_comments, it's sooo ugly...
-    def _peek_token(self, skip_comments: bool):
-        """Move to the start of the next token, but don't consume."""
-        # Already have a peeked token
-        if self.next_token is not None:
-            return self.next_token
-
-        self.next_token = self._find_next_token(skip_comments=skip_comments)
-        assert self.next_token is not None, \
+    def _advance(self, *, allow_comments):
+        """Consume the last token, find the next"""
+        self.current = self._find_next_token(allow_comments)
+        # DEBUG: print(f"{self.current=!r}")
+        assert self.current is not None, \
             "Should have gotten a token or exception."
-        assert self.runes.at_end or self.runes.position != self.bytes_consumed, \
+        assert self.runes.at_end or self.runes.position != self.consumed, \
             "Should either have no data remaining, or be in a token"
 
-        return self.next_token
+    def advance_keyword(self):
+        self._advance(allow_comments=True)
 
+    def advance_macro(self):
+        """Macros aren't standard tokens.
 
-    def _consume_token(self, skip_comments: bool = False):
-        """Consume and return the next token."""
-        token = self._peek_token(skip_comments=skip_comments)
-        self._consume()
-        return token
-
-    def _parse_macro(self):
-        """Macros: have a name, end with double newline."""
-        # TODO(fixme): Name here can contain a `#`, needs tests
-        name = self._consume_token()
-        # TODO, FIXME: Assert that the next byte after name is a newline.
+        Macros are everything until the next `\n\n`"""
+        self.consumed = self.runes.position
+        # Manually advance until find `\n\n`
         while True:
             if not self.runes.advance_through('\n\n'):
                 # End of file before next newline.
-                raise self._make_error(
+                raise self.make_error(
                     "Macro definition missing null line terminator.")
             self.runes.advance()  # First newline is part of macro
-            body = self._materialize_token(1)
+            body = self._materialize(1)
             self.runes.advance()  # Discard second newline
-            self._consume()
+            self._advance(allow_comments=True)
             print(f"{body!r}")
-            return (name, body.splitlines(keepends=True))
+            return body
+
+    def advance_value(self):
+        """Just read a key {login, account, ex.} and now reading its value.
+
+        Value is a required token which can start with any character. Even if
+        it looks like a comment, it is not a comment.
+        """
+        # Consume the keyword,
+        self._advance(allow_comments=False)
+        # Consume the value. The value may be an unquoted literal that starts
+        # with '#' so don't allow comments.
+        value = self.current
+        self._advance(allow_comments=True)
+        return value
+
+    def make_error(self, msg):
+        raise NetrcParseError(msg, self.file, self._compute_lineno())
+
+class _netrcparse:
+    def __init__(self, file, fp):
+        # NOTE: Relies on universal newlines to count lineno post-parse as well
+        # as normalize line endings across platforms.
+        assert fp.newlines is None, "Doesn't allow arbitrary readline."
+        self.tokens = _token_iter(file, fp.read())
+
+    def _parse_macro(self):
+        """Macros: have a name, end with double newline.
+
+        They are "lexed" as one block until the newline which is different than
+        how the tokenizer normally works."""
+        # TODO(fixme): Name here can contain a `#`, needs tests
+        self.tokens._advance(allow_comments=False)
+        name = self.tokens.current
+        body = self.tokens.advance_macro()
+        return (name, body.splitlines(keepends=True))
 
     def _parse_machine(self):
         login = account = password = ''
         while True:
-            match self._peek_token(skip_comments=True):
+            match self.tokens.current:
                 case 'login' | 'user':
-                    self._consume()
-                    login = self._consume_token()
+                    login = self.tokens.advance_value()
                 case 'account':
-                    self._consume()
-                    account = self._consume_token()
+                    account = self.tokens.advance_value()
                 case 'password':
-                    self._consume()
-                    password = self._consume_token()
+                    password = self.tokens.advance_value()
                 case '' | 'machine' | 'default' | 'macdef':
+                    # FIXME: Would it be better to make the match consume, then
+                    # this do a "put back"?
                     return (login, account, password)
                 case _ as unhandled:
-                    raise self._make_error("bad follower token %r" % unhandled)
+                    raise self.tokens.make_error("bad follower token %r" % unhandled)
 
     def populate(self, netrc):
-        while True:
-            match self._consume_token(skip_comments=True):
+        while top_entry := self.tokens.current:
+            match top_entry:
                 case "default":
-                    self._consume()
+                    self.tokens.advance_keyword()
                     netrc.hosts["default"] = self._parse_machine()
                 case "machine":
-                    machine = self._consume_token()
+                    machine = self.tokens.advance_value()
                     netrc.hosts[machine] = self._parse_machine()
                 case "macdef":
                     name, value = self._parse_macro()
@@ -257,10 +252,10 @@ class _netrcparse:
                 case "":
                     break
                 case _ as unhandled:
-                    raise self._make_error("bad toplevel token %r" % unhandled)
+                    raise self.tokens.make_error("bad toplevel token %r" % unhandled)
 
-        if not self.runes.at_end:
-            raise self._make_error("netrc parser error, didn't reach end")
+        if not self.tokens.runes.at_end:
+            raise self.tokens.make_error("netrc parser error, didn't reach end")
 
 
 
