@@ -63,7 +63,7 @@ class _netrcparse:
             new_method = new_method - self.bytes_consumed
         return new_method
 
-    def _materilize_token(self, start_offset, end_offset):
+    def _materialize_token(self, start_offset, end_offset):
         return self.all_text[self.bytes_consumed+start_offset:self.next_token_end+end_offset]
 
     def _consume(self):
@@ -113,14 +113,15 @@ class _netrcparse:
                                 self.next_token_end += 2
                                 has_escape = True
                             case '"':
-                                unquoted = self._materilize_token(1, 0)
+                                unquoted = self._materialize_token(1, 0)
                                 self.next_token_end += 1
                                 return _process_escapes(unquoted) if has_escape else unquoted
                             case _ as c:
                                 self.next_token_end += 1
 
                         if self._at_end():
-                            raise self._make_error("Quotation didn't end %r" % self._materilize_token(0, 0))
+                            # FIXME(cmaloney): Needs a test case.
+                            raise self._make_error("Quotation didn't end %r" % self._materialize_token(0, 0))
                 case _:
                     # Read until whitespace which doesn't have an escape.
                     has_escape = False
@@ -134,7 +135,7 @@ class _netrcparse:
 
                         self.next_token_end += 1
 
-                    token = self._materilize_token(0, 0)
+                    token = self._materialize_token(0, 0)
                     return _process_escapes(token) if has_escape else token
 
     # FIXME: I hate skip_comments, it's sooo ugly...
@@ -178,7 +179,7 @@ class _netrcparse:
                 case _ as next_newline:
                     # Text in the macro
                     self.next_token_end += next_newline
-                    body = self._materilize_token(1,0)
+                    body = self._materialize_token(1,0)
                     self._consume()
                     return (name, body.splitlines(keepends=True))
 
