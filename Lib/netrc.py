@@ -112,8 +112,8 @@ class _netrcparse:
     def _make_error(self, msg):
         return NetrcParseError(msg, self.file, self._compute_lineno())
 
-    def _materialize_token(self, start_offset=0, end_offset=0):
-        return self.all_text[self.bytes_consumed+start_offset:self.runes.position+end_offset]
+    def _materialize_token(self, start_offset=0):
+        return self.all_text[self.bytes_consumed+start_offset:self.runes.position]
 
     def _consume(self):
         self.bytes_consumed = self.runes.position
@@ -161,7 +161,7 @@ class _netrcparse:
                             case '':
                                 # EOF
                                 # FIXME(cmaloney): Needs a test case.
-                                raise self._make_error("Quotation didn't end %r" % self._materialize_token(0))
+                                raise self._make_error("Quotation didn't end %r" % self._materialize_token())
                             case _ as c:
                                 self.runes.advance()
                 case _:
