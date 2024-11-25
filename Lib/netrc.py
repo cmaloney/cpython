@@ -39,34 +39,34 @@ _whitespace = "\n\t\r "
 
 
 class _rune_iter:
-    """Cache current byte, next() to get next byte. """
+    """Cache current byte, advance() to get next. "" as EOF."""
     def __init__(self, corpus) -> None:
         self.corpus = corpus
         self.position = 0
         self._corpus_len = len(self.corpus)
         self.at_end = False
 
-        # Prime rune.
-        next(self)
+        # Prime first rune.
+        self.advance(0)
 
-    def __iter__(self):
-        return self
-
-    def _fill(self):
+    def advance(self, count=1):
+        self.position += count
         if self.position >= self._corpus_len:
             self.current = ""
             self.at_end = True
-            raise StopIteration()
-        self.current = self.corpus[self.position]
+        else:
+            self.current = self.corpus[self.position]
 
-    def __next__(self):
-        self.position += 1
-        self._fill()
-        return self.current
+class _token_iter:
+    """Cache current token, next() to get next, "" as EOF."""
+    def __init__(self, corpus) -> None:
+        self.runes = _rune_iter(corpus)
+        self.consumed = 0
+        self.advance()
 
-    def skip(self, count):
-        self.position += count
-        self._fill()
+    def advance(self, skip_comments=True):
+        self.current = None
+
 
 
 class _netrcparse:
@@ -76,7 +76,7 @@ class _netrcparse:
         assert fp.newlines is None, "Doesn't allow arbitrary readline."
         self.file = file
         self.all_text = fp.read()
-        self.bytes_consumed = self.next_token_end = 0
+        self.bytes_consumed = 0
         self.next_token = None
         self.total_bytes = len(self.all_text)
         self.runes = _rune_iter(self.all_text)
@@ -87,86 +87,84 @@ class _netrcparse:
     def _make_error(self, msg):
         return NetrcParseError(msg, self.file, self._compute_lineno())
 
-    def _at_end(self):
-        return self.next_token_end >= self.total_bytes
-
     def _next_find(self, substr):
-        new_method = self.all_text.find(substr, self.next_token_end)
-        if new_method != -1:
-            new_method = new_method - self.bytes_consumed
-        return new_method
+        pos = self.all_text.find(substr, self.runes.position)
+        return pos - self.bytes_consumed if pos != -1 else pos
 
     def _materialize_token(self, start_offset, end_offset):
-        return self.all_text[self.bytes_consumed+start_offset:self.next_token_end+end_offset]
+        return self.all_text[self.bytes_consumed+start_offset:self.runes.position+end_offset]
 
     def _consume(self):
-        self.bytes_consumed = self.next_token_end
+        self.bytes_consumed = self.runes.position
         self.next_token = None
 
     def _find_next_token(self, skip_comments: bool):
         """Move to the start of the next token, but don't consume."""
 
         while True:
-            assert self.next_token_end == self.bytes_consumed, \
-                "Shouldn't be in a token / last token should be consumed."
-
-            # End of file/buffer
-            if self._at_end():
-                return ""
-
-            match self.all_text[self.next_token_end]:
-                # Comments
-                case '#' if skip_comments is True:
+            match self.runes.current:
+                case "":  # EOF
+                    return ""
+                case '#' if skip_comments:  # Comments
+                    print("A")
                     match self._next_find("\n"):
                         case -1:
                             # Comment into EOF, no further tokens.
-                            self.next_token_end = self.total_bytes
+                            self.runes.advance(self.total_bytes)
                         case _ as next_newline:
-                            self.next_token_end += next_newline
+                            self.runes.advance(next_newline)
                     self._consume()
-
-                # Whitespace
-                case c if c in _whitespace:
-                    # Find first non-whitespace.
+                case c if c in _whitespace:  # Whitespace between tokens
+                    # Eat until no longer whitespace
                     # FIXME/TODO: Can we do a faster find method?
-                    while not self._at_end() \
-                        and self.all_text[self.next_token_end] in _whitespace:
-                        self.next_token_end += 1
-                    self._consume()
-
-                # Tokens, either quoted or literals
-                case '"':
-                    self.next_token_end += 1
+                    while True:
+                        match self.runes.current:
+                            case '':  # EOF
+                                self._consume()
+                                break
+                            case _ as rune if rune in _whitespace:
+                                self.runes.advance()
+                            case _:
+                                self._consume()
+                                break
+                case '"':  # Tokens, either quoted or literals
+                    # Skip start quote
+                    self.runes.advance()
                     has_escape = False
                     while True:
-                        match self.all_text[self.next_token_end]:
+                        match self.runes.current:
                             case '\\':
                                 # Escape and skip next
                                 # FIXME: Validate EOF behavior
-                                self.next_token_end += 2
+                                self.runes.advance(2)
                                 has_escape = True
                             case '"':
                                 unquoted = self._materialize_token(1, 0)
-                                self.next_token_end += 1
+                                self.runes.advance()
                                 return _process_escapes(unquoted) if has_escape else unquoted
+                            case '':
+                                # EOF
+                                # FIXME(cmaloney): Needs a test case.
+                                raise self._make_error("Quotation didn't end %r" % self._materialize_token(0, 0))
                             case _ as c:
-                                self.next_token_end += 1
-
-                        if self._at_end():
-                            # FIXME(cmaloney): Needs a test case.
-                            raise self._make_error("Quotation didn't end %r" % self._materialize_token(0, 0))
+                                self.runes.advance()
                 case _:
                     # Read until whitespace which doesn't have an escape.
+                    # FIXME: Change to match statement
                     has_escape = False
-                    while not self._at_end() \
-                        and self.all_text[self.next_token_end] not in _whitespace:
-                        # Skip all escaped characters
-                        if self.all_text[self.next_token_end] == '\\':
-                            # FIXME/TODO: This will error at EOF currently.
-                            self.next_token_end += 1
-                            has_escape = True
+                    while self.runes.current not in _whitespace:
+                        # EOF
+                        if self.runes.current == '':
+                            break
 
-                        self.next_token_end += 1
+                        # Skip all escaped characters
+                        if self.runes.current == '\\':
+                            # FIXME/TODO: This will error at EOF currently.
+                            self.runes.advance(2)
+                            has_escape = True
+                            continue
+
+                        self.runes.advance()
 
                     token = self._materialize_token(0, 0)
                     return _process_escapes(token) if has_escape else token
@@ -181,7 +179,7 @@ class _netrcparse:
         self.next_token = self._find_next_token(skip_comments=skip_comments)
         assert self.next_token is not None, \
             "Should have gotten a token or exception."
-        assert self._at_end() or self.next_token_end != self.bytes_consumed, \
+        assert self.runes.at_end or self.runes.position != self.bytes_consumed, \
             "Should either have no data remaining, or be in a token"
 
         return self.next_token
@@ -199,7 +197,7 @@ class _netrcparse:
         name = self._consume_token()
         # TODO, FIXME: Assert that the next byte after name is a newline
         #              and consume it.
-        self.next_token_end += 1
+        self.runes.advance()
         # Started with the double newline...
         while True:
             # Start of this loop, last byte was always a newline.
@@ -211,7 +209,7 @@ class _netrcparse:
                         "Macro definition missing null line terminator.")
                 case _ as next_newline:
                     # Text in the macro
-                    self.next_token_end += next_newline
+                    self.runes.advance(next_newline)
                     body = self._materialize_token(1,0)
                     self._consume()
                     return (name, body.splitlines(keepends=True))
@@ -251,7 +249,7 @@ class _netrcparse:
                 case _ as unhandled:
                     raise self._make_error("bad toplevel token %r" % unhandled)
 
-        if not self._at_end():
+        if not self.runes.at_end:
             raise self._make_error("netrc parser error, didn't reach end")
 
 
