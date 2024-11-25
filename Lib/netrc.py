@@ -37,6 +37,38 @@ def _process_escapes(token):
 
 _whitespace = "\n\t\r "
 
+
+class _rune_iter:
+    """Cache current byte, next() to get next byte. """
+    def __init__(self, corpus) -> None:
+        self.corpus = corpus
+        self.position = 0
+        self._corpus_len = len(self.corpus)
+        self.at_end = False
+
+        # Prime rune.
+        next(self)
+
+    def __iter__(self):
+        return self
+
+    def _fill(self):
+        if self.position >= self._corpus_len:
+            self.current = ""
+            self.at_end = True
+            raise StopIteration()
+        self.current = self.corpus[self.position]
+
+    def __next__(self):
+        self.position += 1
+        self._fill()
+        return self.current
+
+    def skip(self, count):
+        self.position += count
+        self._fill()
+
+
 class _netrcparse:
     def __init__(self, file, fp):
         # NOTE: Relies on universal newlines to count lineno post-parse as well
@@ -47,6 +79,7 @@ class _netrcparse:
         self.bytes_consumed = self.next_token_end = 0
         self.next_token = None
         self.total_bytes = len(self.all_text)
+        self.runes = _rune_iter(self.all_text)
 
     def _compute_lineno(self):
         return self.all_text[:self.bytes_consumed].count("\n")
