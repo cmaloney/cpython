@@ -67,6 +67,8 @@ class _token_iter:
     def advance(self, skip_comments=True):
         self.current = None
 
+    def materialize(self, start_offset):
+        pass
 
 
 class _netrcparse:
@@ -91,8 +93,8 @@ class _netrcparse:
         pos = self.all_text.find(substr, self.runes.position)
         return pos - self.bytes_consumed if pos != -1 else pos
 
-    def _materialize_token(self, start_offset, end_offset):
-        return self.all_text[self.bytes_consumed+start_offset:self.runes.position+end_offset]
+    def _materialize_token(self, start_offset=0):
+        return self.all_text[self.bytes_consumed+start_offset:self.runes.position]
 
     def _consume(self):
         self.bytes_consumed = self.runes.position
@@ -139,13 +141,13 @@ class _netrcparse:
                                 self.runes.advance(2)
                                 has_escape = True
                             case '"':
-                                unquoted = self._materialize_token(1, 0)
+                                unquoted = self._materialize_token(1)
                                 self.runes.advance()
                                 return _process_escapes(unquoted) if has_escape else unquoted
                             case '':
                                 # EOF
                                 # FIXME(cmaloney): Needs a test case.
-                                raise self._make_error("Quotation didn't end %r" % self._materialize_token(0, 0))
+                                raise self._make_error("Quotation didn't end %r" % self._materialize_token(0))
                             case _ as c:
                                 self.runes.advance()
                 case _:
@@ -166,7 +168,7 @@ class _netrcparse:
 
                         self.runes.advance()
 
-                    token = self._materialize_token(0, 0)
+                    token = self._materialize_token()
                     return _process_escapes(token) if has_escape else token
 
     # FIXME: I hate skip_comments, it's sooo ugly...
@@ -210,7 +212,7 @@ class _netrcparse:
                 case _ as next_newline:
                     # Text in the macro
                     self.runes.advance(next_newline)
-                    body = self._materialize_token(1,0)
+                    body = self._materialize_token(1)
                     self._consume()
                     return (name, body.splitlines(keepends=True))
 
