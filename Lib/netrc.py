@@ -57,10 +57,6 @@ class _netrcparse:
     def _at_end(self):
         return self.next_token_end >= self.total_byes
 
-    def _next_byte(self):
-        # ow, this apparently hurts a lot...
-        return self.all_text[self.next_token_end]
-
     def _next_find(self, substr, offset=0):
         new_method = self.all_text.find(substr, self.next_token_end)
         if new_method != -1:
@@ -74,7 +70,7 @@ class _netrcparse:
         self.bytes_consumed = self.next_token_end
         self.next_token = None
 
-    def _find_next_token(self, comment_as_token: bool):
+    def _find_next_token(self, skip_comments: bool):
         """Move to the start of the next token, but don't consume."""
 
         while True:
@@ -85,9 +81,9 @@ class _netrcparse:
             if self._at_end():
                 return ""
 
-            match self._next_byte():
+            match self.all_text[self.next_token_end]:
                 # Comments
-                case '#' if comment_as_token is False:
+                case '#' if skip_comments is True:
                     match self._next_find("\n"):
                         case -1:
                             # Comment into EOF, no further tokens.
@@ -101,7 +97,7 @@ class _netrcparse:
                     # Find first non-whitespace.
                     # FIXME/TODO: Can we do a faster find method?
                     while not self._at_end() \
-                        and self._next_byte() in self.whitespace:
+                        and self.all_text[self.next_token_end] in self.whitespace:
                         self.next_token_end += 1
                     self._consume()
 
@@ -110,7 +106,7 @@ class _netrcparse:
                     self.next_token_end += 1
                     has_escape = False
                     while True:
-                        match self._next_byte():
+                        match self.all_text[self.next_token_end]:
                             case '\\':
                                 # Escape and skip next
                                 # FIXME: Validate EOF behavior
@@ -129,9 +125,9 @@ class _netrcparse:
                     # Read until whitespace which doesn't have an escape.
                     has_escape = False
                     while not self._at_end() \
-                        and self._next_byte() not in self.whitespace:
+                        and self.all_text[self.next_token_end] not in self.whitespace:
                         # Skip all escaped characters
-                        if self._next_byte() == '\\':
+                        if self.all_text[self.next_token_end] == '\\':
                             # FIXME/TODO: This will error at EOF currently.
                             self.next_token_end += 1
                             has_escape = True
@@ -141,14 +137,14 @@ class _netrcparse:
                     token = self._materilize_token(0, 0)
                     return _process_escapes(token) if has_escape else token
 
-    # FIXME: I hate comment_as_token, it's sooo ugly...
-    def _peek_token(self, comment_as_token: bool):
+    # FIXME: I hate skip_comments, it's sooo ugly...
+    def _peek_token(self, skip_comments: bool):
         """Move to the start of the next token, but don't consume."""
         # Already have a peeked token
         if self.next_token is not None:
             return self.next_token
 
-        self.next_token = self._find_next_token(comment_as_token=comment_as_token)
+        self.next_token = self._find_next_token(skip_comments=skip_comments)
         assert self.next_token is not None, \
             "Should have gotten a token or exception."
         assert self._at_end() or self.next_token_end != self.bytes_consumed, \
@@ -157,14 +153,15 @@ class _netrcparse:
         return self.next_token
 
 
-    def _consume_token(self, comment_as_token: bool = False):
+    def _consume_token(self, skip_comments: bool = False):
         """Consume and return the next token."""
-        token = self._peek_token(comment_as_token=comment_as_token)
+        token = self._peek_token(skip_comments=skip_comments)
         self._consume()
         return token
 
     def _parse_macro(self):
         """Macros: have a name, end with double newline."""
+        # TODO(fixme): Name here can contain a `#`, needs tests
         name = self._consume_token()
         # TODO, FIXME: Assert that the next byte after name is a newline
         #              and consume it.
@@ -188,16 +185,16 @@ class _netrcparse:
     def _parse_machine(self):
         login = account = password = ''
         while True:
-            match self._peek_token(comment_as_token=False):
+            match self._peek_token(skip_comments=True):
                 case 'login' | 'user':
                     self._consume()
-                    login = self._consume_token(comment_as_token=True)
+                    login = self._consume_token()
                 case 'account':
                     self._consume()
-                    account = self._consume_token(comment_as_token=True)
+                    account = self._consume_token()
                 case 'password':
                     self._consume()
-                    password = self._consume_token(comment_as_token=True)
+                    password = self._consume_token()
                 case '' | 'machine' | 'default' | 'macdef':
                     return (login, account, password)
                 case _ as unhandled:
@@ -221,13 +218,13 @@ class netrc:
     def _parse(self, file, fp, default_netrc):
         parser = _netrcparse(file, fp)
         while True:
-            match parser._consume_token():
+            match parser._consume_token(skip_comments=True):
                 case "default":
                     parser._consume()
                     machine = "default"
                     self.hosts[machine] = parser._parse_machine()
                 case "machine":
-                    machine = parser._consume_token(comment_as_token=True)
+                    machine = parser._consume_token()
                     self.hosts[machine] = parser._parse_machine()
                 case "macdef":
                     name, value = parser._parse_macro()
