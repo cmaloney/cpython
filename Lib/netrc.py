@@ -254,13 +254,12 @@ def _security_check(fp):
 
 
 def _populate_netrc(netrc, filename, fp, default_netrc):
-    parser = _netrcparser(filename, fp.read())
-
-    # NOTE: Relies on universal newlines to count lineno post-parse as well
-    # as normalize line endings across platforms.
+    # NOTE: Relies on universal newlines to count lineno and normalize line
+    # endings across platforms.
     if fp.newlines not in (None, '\n'):
         raise parser.tokens.make_error("doesn't support alternate file newlines.")
 
+    parser = _netrcparser(filename, fp.read())
     parser.populate(netrc)
 
     if os.name == 'posix' and default_netrc:
