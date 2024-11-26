@@ -277,7 +277,7 @@ def _populate_netrc(netrc, file, fp, default_netrc):
             # check. Check only needs to happen once per file.
             if machine[0] != 'anonymous' and machine[2] != '':
                 _security_check(fp)
-                return
+                break  # Just checks file permissions, only need to run once.
 
 
 class netrc:
