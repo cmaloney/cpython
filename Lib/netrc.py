@@ -112,6 +112,7 @@ class _token_iter:
                                 self.runes.advance(2)
                                 has_escape = True
                             case '"':  # End quote
+                                # don't include start quote in token
                                 unquoted = self._materialize(1)
                                 self.runes.advance()
                                 return _process_escapes(unquoted) if has_escape else unquoted
