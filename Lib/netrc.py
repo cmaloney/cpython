@@ -178,12 +178,11 @@ class _token_iter:
     def make_error(self, msg):
         raise NetrcParseError(msg, self.file, self._compute_lineno())
 
-class _netrcparse:
+class _netrcparser:
     # Takes contents for easier testing / no need to round trip to a filesystem
     # file.
     def __init__(self, filename, contents):
         self.tokens = _token_iter(filename, contents)
-
 
     def _parse_macro(self):
         """Macros: have a name, end with double newline.
@@ -255,7 +254,7 @@ def _security_check(fp):
 
 
 def _populate_netrc(netrc, filename, fp, default_netrc):
-    parser = _netrcparse(filename, fp.read())
+    parser = _netrcparser(filename, fp.read())
 
     # NOTE: Relies on universal newlines to count lineno post-parse as well
     # as normalize line endings across platforms.
@@ -271,7 +270,6 @@ def _populate_netrc(netrc, filename, fp, default_netrc):
             if machine[0] != 'anonymous' and machine[2] != '':
                 _security_check(fp)
                 break  # Just checks file permissions, only need to run once.
-
 
 class netrc:
     def __init__(self, file=None):

@@ -1,4 +1,4 @@
-import netrc, os, unittest, sys, textwrap
+import copy, netrc, os, pathlib, sys, textwrap, unittest
 from test.support import os_helper
 
 try:
@@ -8,19 +8,31 @@ except ImportError:
 
 temp_filename = os_helper.TESTFN
 
+
 class NetrcTestCase(unittest.TestCase):
 
-    def make_nrc(self, test_data):
-        test_data = textwrap.dedent(test_data)
-        mode = 'w'
-        if sys.platform != 'cygwin':
-            mode += 't'
-        with open(temp_filename, mode, encoding="utf-8") as fp:
-            fp.write(test_data)
+    def setUp(self):
+        # Proto should not get full
+        assert not self._proto_netrc.hosts, "Proto netrc shouldn't be touched."
+        assert not self._proto_netrc.macros, "Proto netrc shouldn't be touched."
+
+    @classmethod
+    def setUpClass(cls):
+        # Netrc requires working on a file, avoid needing to round trip to a
+        # file for every test by pre-making one then using parser to populate
+        # an empty netrc class.
+        netrc_path = pathlib.Path(os_helper.TESTFN)
         try:
-            nrc = netrc.netrc(temp_filename)
+            netrc_path.write_text("")
+            cls._proto_netrc = netrc.netrc(netrc_path)
         finally:
-            os.unlink(temp_filename)
+            netrc_path.unlink(missing_ok=True)
+
+    def make_nrc(self, test_data):
+        nrc = copy.deepcopy(self._proto_netrc)
+        test_data = textwrap.dedent(test_data)
+        parser = netrc._netrcparser("__memory__", test_data)
+        parser.populate(nrc)
         return nrc
 
     def test_toplevel_non_ordered_tokens(self):
