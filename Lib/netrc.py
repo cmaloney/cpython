@@ -40,19 +40,20 @@ class _rune_iter:
     def __init__(self, corpus) -> None:
         self.corpus = corpus
         self.position = 0
-        self._corpus_len = len(self.corpus)
-        self.at_end = False
+        self._corpus_len = len(self.corpus)  # cached to reduce cost
 
         # Prime first rune.
         self.advance(0)
 
+    def at_end(self):
+        return self.position == self._corpus_len
+
     def _tombstone(self):
         self.current = ""
-        self.at_end = True
         self.position = self._corpus_len
 
 
-    def advance(self, count=1):
+    def advance(self, /, count=1):
         self.position += count
         if self.position >= self._corpus_len:
             self._tombstone()
@@ -231,7 +232,7 @@ class _netrcparse:
                 case _ as unhandled:
                     raise self.tokens.make_error("bad toplevel token %r" % unhandled)
 
-        if not self.tokens.runes.at_end:
+        if not self.tokens.runes.at_end():
             raise self.tokens.make_error("netrc parser error, didn't reach end")
 
 def _security_check(fp):
