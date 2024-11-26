@@ -86,9 +86,9 @@ class _token_iter:
     def _compute_lineno(self):
         return self.runes.corpus[:self.consumed].count("\n")
 
-    def _materialize(self, start_offset=0, *, has_escape=False):
+    def _materialize(self, offset=0, *, has_escape=False):
         self.current = \
-            self.runes.corpus[self.consumed+start_offset:self.runes.position]
+            self.runes.corpus[self.consumed+offset:self.runes.position]
 
         if has_escape:
             self.current = _process_escapes(self.current)
@@ -129,7 +129,6 @@ class _token_iter:
                             self._materialize())
                 case _:
                     # Read until whitespace which doesn't have an escape.
-                    # FIXME: Change to match statement
                     has_escape = False
                     while self.runes.current not in _whitespace:
                         match self.runes.current:
@@ -170,10 +169,9 @@ class _token_iter:
         Value is a required token which can start with any character. Even if
         it looks like a comment, it is not a comment.
         """
-        # Consume the keyword,
+        # Consume the keyword, next token is the value. The value may be an
+        # unquoted literal that starts with '#' so don't allow comments.
         self._find_next_token(allow_comments=False)
-        # Consume the value. The value may be an unquoted literal that starts
-        # with '#' so don't allow comments.
         value = self.current
         self._find_next_token(allow_comments=True)
         return value
