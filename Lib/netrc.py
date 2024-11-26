@@ -103,10 +103,6 @@ class _token_iter:
             match self.runes.current:
                 case '#' if allow_comments:  # Comment, advance and no token.
                     self.runes.advance_through("\n")
-                case c if c in _whitespace:  # Whitespace, advance and no token.
-                    while self.runes.current in _whitespace \
-                            and self.runes.current != '':
-                        self.runes.advance()
                 case '"':  # Quoted token
                     self.runes.advance()  # Skip start quote
                     has_escape = False
@@ -122,11 +118,15 @@ class _token_iter:
                                 return
                             case _:
                                 self.runes.advance()
-                    # EOF before quote.
+                    # EOF before end quote.
                     # FIXME(cmaloney): Needs a test case.
                     raise self.make_error(
                         "Quoted string missing end quote %r" % \
                             self._materialize())
+                case c if c in _whitespace:  # Whitespace, advance and no token.
+                    while self.runes.current in _whitespace \
+                            and self.runes.current:  # EOF "" is in _whitespace
+                        self.runes.advance()
                 case _:  # Unquoted token, read until unescaped whitespace.
                     has_escape = False
                     while self.runes.current not in _whitespace:
