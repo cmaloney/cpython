@@ -149,21 +149,21 @@ class _token_iter:
     def advance_macro(self):
         """Macros aren't standard tokens.
 
-        Macros are everything until the next `\n\n`"""
+        Macros are everything until the next "\n\n"
+        """
         self.consumed = self.runes.position
-        # Manually advance until find `\n\n`
         if not self.runes.advance_through('\n\n'):
             # End of file before next newline.
             raise self.make_error(
                 "Macro definition missing null line terminator.")
-        self.runes.advance()  # First newline is part of macro
+        self.runes.advance()  # First "\n" of end "\n\n" is part of macro
         body = self._materialize(1)
-        self.runes.advance()  # Discard second newline
+        self.runes.advance()  # Discard second "\n"
         self._find_next_token(allow_comments=True)
         return body
 
     def advance_value(self):
-        """Just read a key {login, account, ex.} and now reading its value.
+        """Just read a key (login, password, etc.) and now reading its value.
 
         Value is a required token which can start with any character. Even if
         it looks like a comment, it is not a comment.
@@ -179,8 +179,6 @@ class _token_iter:
         raise NetrcParseError(msg, self.file, self._compute_lineno())
 
 class _netrcparser:
-    # Takes contents for easier testing / no need to round trip to a filesystem
-    # file.
     def __init__(self, filename, contents):
         self.tokens = _token_iter(filename, contents)
 
