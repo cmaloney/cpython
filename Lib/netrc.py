@@ -64,12 +64,12 @@ class _rune_iter:
         """Find the next given string, if hit EOF consume everything.
 
         Returns true if substr was found."""
-        pos = self.corpus.find(substr, self.position)
-        if pos == -1 or pos >= self._corpus_len:
+        found = self.corpus.find(substr, self.position)
+        if found == -1:
             self._tombstone()
             return False
 
-        self.position = pos
+        self.position = found
         self.current = self.corpus[self.position]
         return True
 
