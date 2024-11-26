@@ -52,7 +52,6 @@ class _rune_iter:
         self.current = ""
         self.position = self._corpus_len
 
-
     def advance(self, /, count=1):
         self.position += count
         if self.position >= self._corpus_len:
@@ -108,7 +107,7 @@ class _token_iter:
                     while self.runes.current in _whitespace \
                             and self.runes.current != '':
                         self.runes.advance()
-                case '"':  # Quoted value
+                case '"':  # Quoted token
                     self.runes.advance()  # Skip start quote
                     has_escape = False
                     while self.runes.current:
@@ -128,8 +127,7 @@ class _token_iter:
                     raise self.make_error(
                         "Quoted string missing end quote %r" % \
                             self._materialize())
-                case _:
-                    # Read until whitespace which doesn't have an escape.
+                case _:  # Unquoted token, read until unescaped whitespace.
                     has_escape = False
                     while self.runes.current not in _whitespace:
                         match self.runes.current:
@@ -144,7 +142,8 @@ class _token_iter:
         # EOF
         self.current = ""
 
-    def advance_keyword(self):
+    def advance_default(self):
+        """Handle the special-case 'default' which has no value after."""
         self._find_next_token(allow_comments=True)
 
     def advance_macro(self):
@@ -180,13 +179,10 @@ class _token_iter:
         raise NetrcParseError(msg, self.file, self._compute_lineno())
 
 class _netrcparse:
-    def __init__(self, file, fp):
-        self.tokens = _token_iter(file, fp.read())
-
-        # NOTE: Relies on universal newlines to count lineno post-parse as well
-        # as normalize line endings across platforms.
-        if fp.newlines not in (None, '\n'):
-            raise self.tokens.make_error("doesn't support alternate file newlines.")
+    # Takes contents for easier testing / no need to round trip to a filesystem
+    # file.
+    def __init__(self, filename, contents):
+        self.tokens = _token_iter(filename, contents)
 
 
     def _parse_macro(self):
@@ -219,7 +215,7 @@ class _netrcparse:
         while top_entry := self.tokens.current:
             match top_entry:
                 case "default":
-                    self.tokens.advance_keyword()
+                    self.tokens.advance_default()
                     netrc.hosts["default"] = self._parse_machine()
                 case "machine":
                     machine = self.tokens.advance_value()
@@ -258,8 +254,14 @@ def _security_check(fp):
             " the owner")
 
 
-def _populate_netrc(netrc, file, fp, default_netrc):
-    parser = _netrcparse(file, fp)
+def _populate_netrc(netrc, filename, fp, default_netrc):
+    parser = _netrcparse(filename, fp.read())
+
+    # NOTE: Relies on universal newlines to count lineno post-parse as well
+    # as normalize line endings across platforms.
+    if fp.newlines not in (None, '\n'):
+        raise parser.tokens.make_error("doesn't support alternate file newlines.")
+
     parser.populate(netrc)
 
     if os.name == 'posix' and default_netrc:
