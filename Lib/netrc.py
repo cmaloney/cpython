@@ -31,6 +31,7 @@ def _process_escapes(token):
         unescaped += char
     return unescaped
 
+
 _whitespace = "\n\t\r "
 
 
@@ -98,17 +99,9 @@ class _token_iter:
                     return ""
                 case '#' if allow_comments:  # Comments, advance and no token
                     self.runes.advance_through("\n")
-                    continue
                 case c if c in _whitespace:  # Whitespace, advance and no token
-                    while True:
-                        match self.runes.current:
-                            case '':  # EOF
-                                break
-                            case _ as rune if rune in _whitespace:
-                                self.runes.advance()
-                            case _:
-                                break
-                    continue
+                    while self.runes.current in _whitespace and self.runes.current != '':
+                        self.runes.advance()
                 case '"':  # Tokens, either quoted or literals
                     # Skip start quote
                     self.runes.advance()
