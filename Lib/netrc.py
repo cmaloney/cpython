@@ -3,6 +3,7 @@
 # Module and documentation by Eric S. Raymond, 21 Dec 1998
 
 import os
+import resource
 import stat
 import sys
 
@@ -22,12 +23,7 @@ class NetrcParseError(Exception):
 
 
 def _process_escapes(token):
-    """Single-pass escape removal to avoid copies.
-
-    Most netrc keywords don't contain escapes. (ex. machine, user, login, ...)
-    """
-    assert "\\" in token
-
+    """Single-pass escape removal to avoid copies."""
     unescaped = ""
     for char in token:
         if char == "\\":
@@ -83,7 +79,7 @@ class _token_iter:
         self.runes = _rune_iter(corpus)
 
         self.consumed = 0
-        self.current = None
+        self.current = ""
         self._advance(allow_comments=True)
 
     def _compute_lineno(self):
@@ -119,19 +115,16 @@ class _token_iter:
                     has_escape = False
                     while True:
                         match self.runes.current:
-                            case '\\':
-                                # Escape and skip next
-                                # FIXME: Validate EOF behavior
+                            case '\\':  # Escape and skip next
                                 self.runes.advance(2)
                                 has_escape = True
-                            case '"':
+                            case '"':  # End quote
                                 unquoted = self._materialize(1)
                                 self.runes.advance()
                                 return _process_escapes(unquoted) if has_escape else unquoted
-                            case '':
-                                # EOF
+                            case '':  # EOF
                                 # FIXME(cmaloney): Needs a test case.
-                                raise self.make_error("Quotation didn't end %r" % self._materialize())
+                                raise self.make_error("Quoted string missing end quote %r" % self._materialize())
                             case _:
                                 self.runes.advance()
                 case _:
@@ -139,18 +132,14 @@ class _token_iter:
                     # FIXME: Change to match statement
                     has_escape = False
                     while self.runes.current not in _whitespace:
-                        # EOF
-                        if self.runes.current == '':
-                            break
-
-                        # Skip all escaped characters
-                        if self.runes.current == '\\':
-                            # FIXME/TODO: This will error at EOF currently.
-                            self.runes.advance(2)
-                            has_escape = True
-                            continue
-
-                        self.runes.advance()
+                        match self.runes.current:
+                            case '': # EOF
+                                break
+                            case '\\':
+                                self.runes.advance(2)
+                                has_escape = True
+                            case _:
+                                self.runes.advance()
 
                     token = self._materialize()
                     return _process_escapes(token) if has_escape else token
@@ -231,8 +220,6 @@ class _netrcparse:
                 case 'password':
                     password = self.tokens.advance_value()
                 case '' | 'machine' | 'default' | 'macdef':
-                    # FIXME: Would it be better to make the match consume, then
-                    # this do a "put back"?
                     return (login, account, password)
                 case _ as unhandled:
                     raise self.tokens.make_error("bad follower token %r" % unhandled)
@@ -257,6 +244,40 @@ class _netrcparse:
         if not self.tokens.runes.at_end:
             raise self.tokens.make_error("netrc parser error, didn't reach end")
 
+def _security_check(fp):
+    """Validate netrc file is only readable by current user."""
+    prop = os.fstat(fp.fileno())
+    if prop.st_uid != os.getuid():
+        import pwd
+        try:
+            fowner = pwd.getpwuid(prop.st_uid)[0]
+        except KeyError:
+            fowner = 'uid %s' % prop.st_uid
+        try:
+            user = pwd.getpwuid(os.getuid())[0]
+        except KeyError:
+            user = 'uid %s' % os.getuid()
+        raise NetrcParseError(
+            (f"~/.netrc file owner ({fowner}, {user}) does not match"
+                " current user"))
+    if (prop.st_mode & (stat.S_IRWXG | stat.S_IRWXO)):
+        raise NetrcParseError(
+            "~/.netrc access too permissive: access"
+            " permissions must restrict access to only"
+            " the owner")
+
+
+def _populate_netrc(netrc, file, fp, default_netrc):
+    parser = _netrcparse(file, fp)
+    parser.populate(netrc)
+
+    if os.name == 'posix' and default_netrc:
+        for machine in netrc.hosts.values():
+            # All non-anonymous logins which have a password should trigger
+            # check. Check only needs to happen once per file.
+            if machine[0] != 'anonymous' and machine[2] != '':
+                _security_check(fp)
+                return
 
 
 class netrc:
@@ -268,44 +289,10 @@ class netrc:
         self.macros = {}
         try:
             with open(file, encoding="utf-8") as fp:
-                self._parse(file, fp, default_netrc)
+                _populate_netrc(self, file, fp, default_netrc)
         except UnicodeDecodeError:
             with open(file, encoding="locale") as fp:
-                self._parse(file, fp, default_netrc)
-
-    def _parse(self, file, fp, default_netrc):
-        parser = _netrcparse(file, fp)
-        parser.populate(self)
-
-        if os.name == 'posix' and default_netrc:
-            for machine in self.hosts.values():
-                # All non-anonymous logins which have a password should trigger
-                # check. Check only needs to happen once per file.
-                if machine[0] != 'anonymous' and machine[2] != '':
-                    self._security_check(fp)
-                    break
-
-    def _security_check(self, fp):
-        """Validate netrc file is only readable by current user."""
-        prop = os.fstat(fp.fileno())
-        if prop.st_uid != os.getuid():
-            import pwd
-            try:
-                fowner = pwd.getpwuid(prop.st_uid)[0]
-            except KeyError:
-                fowner = 'uid %s' % prop.st_uid
-            try:
-                user = pwd.getpwuid(os.getuid())[0]
-            except KeyError:
-                user = 'uid %s' % os.getuid()
-            raise NetrcParseError(
-                (f"~/.netrc file owner ({fowner}, {user}) does not match"
-                    " current user"))
-        if (prop.st_mode & (stat.S_IRWXG | stat.S_IRWXO)):
-            raise NetrcParseError(
-                "~/.netrc access too permissive: access"
-                " permissions must restrict access to only"
-                " the owner")
+                _populate_netrc(self, file, fp, default_netrc)
 
     def authenticators(self, host):
         """Return a (user, account, password) tuple for given host."""
@@ -336,5 +323,6 @@ if __name__ == '__main__':
     if len(sys.argv) == 2:
         # FIXME/TODO: Removed print
         netrc(sys.argv[1])
+        # DEBUG: print(f"{resource.getrusage(resource.RUSAGE_SELF).ru_maxrss =}")
     else:
         print(netrc())
