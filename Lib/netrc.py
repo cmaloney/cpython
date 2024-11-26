@@ -95,7 +95,7 @@ class _token_iter:
 
         return self.current
 
-    def _find_next_token(self, allow_comments: bool):
+    def _find_next_token(self, *, allow_comments: bool):
         """Move to the start of the next token, but don't consume."""
         while self.runes.current:
             self.consumed = self.runes.position
