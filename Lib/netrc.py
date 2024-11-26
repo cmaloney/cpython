@@ -311,7 +311,7 @@ class netrc:
 
 if __name__ == '__main__':
     if len(sys.argv) == 2:
-        # FIXME/TODO: Removed print
+        # FIXME/TODO: Removed print (it's half the runtime...)
         netrc(sys.argv[1])
         # DEBUG: print(f"{resource.getrusage(resource.RUSAGE_SELF).ru_maxrss =}")
     else:
