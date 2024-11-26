@@ -152,16 +152,15 @@ class _token_iter:
         Macros are everything until the next `\n\n`"""
         self.consumed = self.runes.position
         # Manually advance until find `\n\n`
-        while True:
-            if not self.runes.advance_through('\n\n'):
-                # End of file before next newline.
-                raise self.make_error(
-                    "Macro definition missing null line terminator.")
-            self.runes.advance()  # First newline is part of macro
-            body = self._materialize(1)
-            self.runes.advance()  # Discard second newline
-            self._find_next_token(allow_comments=True)
-            return body
+        if not self.runes.advance_through('\n\n'):
+            # End of file before next newline.
+            raise self.make_error(
+                "Macro definition missing null line terminator.")
+        self.runes.advance()  # First newline is part of macro
+        body = self._materialize(1)
+        self.runes.advance()  # Discard second newline
+        self._find_next_token(allow_comments=True)
+        return body
 
     def advance_value(self):
         """Just read a key {login, account, ex.} and now reading its value.
