@@ -81,74 +81,71 @@ class _token_iter:
 
         self.consumed = 0
         self.current = ""
-        self._advance(allow_comments=True)
+        self._find_next_token(allow_comments=True)
 
     def _compute_lineno(self):
         return self.runes.corpus[:self.consumed].count("\n")
 
-    def _materialize(self, start_offset=0):
-        return self.runes.corpus[self.consumed+start_offset:self.runes.position]
+    def _materialize(self, start_offset=0, *, has_escape=False):
+        self.current = \
+            self.runes.corpus[self.consumed+start_offset:self.runes.position]
+
+        if has_escape:
+            self.current = _process_escapes(self.current)
+
+        return self.current
 
     def _find_next_token(self, allow_comments: bool):
         """Move to the start of the next token, but don't consume."""
-        while True:
+        while self.runes.current:
             self.consumed = self.runes.position
 
             match self.runes.current:
-                case "":  # EOF
-                    return ""
-                case '#' if allow_comments:  # Comments, advance and no token
+                case '#' if allow_comments:  # Comment, advance and no token.
                     self.runes.advance_through("\n")
-                case c if c in _whitespace:  # Whitespace, advance and no token
-                    while self.runes.current in _whitespace and self.runes.current != '':
+                case c if c in _whitespace:  # Whitespace, advance and no token.
+                    while self.runes.current in _whitespace \
+                            and self.runes.current != '':
                         self.runes.advance()
-                case '"':  # Tokens, either quoted or literals
-                    # Skip start quote
-                    self.runes.advance()
+                case '"':  # Quoted value
+                    self.runes.advance()  # Skip start quote
                     has_escape = False
-                    while True:
+                    while self.runes.current:
                         match self.runes.current:
-                            case '\\':  # Escape and skip next
+                            case '\\':  # Skip escape and escaped rune.
                                 self.runes.advance(2)
                                 has_escape = True
                             case '"':  # End quote
-                                # don't include start quote in token
-                                unquoted = self._materialize(1)
-                                self.runes.advance()
-                                return _process_escapes(unquoted) if has_escape else unquoted
-                            case '':  # EOF
-                                # FIXME(cmaloney): Needs a test case.
-                                raise self.make_error("Quoted string missing end quote %r" % self._materialize())
+                                # Don't include start quote in token.
+                                self._materialize(1, has_escape=has_escape)
+                                self.runes.advance()  # move past end quote
+                                return
                             case _:
                                 self.runes.advance()
+                    # EOF before quote.
+                    # FIXME(cmaloney): Needs a test case.
+                    raise self.make_error(
+                        "Quoted string missing end quote %r" % \
+                            self._materialize())
                 case _:
                     # Read until whitespace which doesn't have an escape.
                     # FIXME: Change to match statement
                     has_escape = False
                     while self.runes.current not in _whitespace:
                         match self.runes.current:
-                            case '': # EOF
-                                break
                             case '\\':
                                 self.runes.advance(2)
                                 has_escape = True
                             case _:
                                 self.runes.advance()
 
-                    token = self._materialize()
-                    return _process_escapes(token) if has_escape else token
-
-    def _advance(self, *, allow_comments):
-        """Consume the last token, find the next"""
-        self.current = self._find_next_token(allow_comments)
-        # DEBUG: print(f"{self.current=!r}")
-        assert self.current is not None, \
-            "Should have gotten a token or exception."
-        assert self.runes.at_end or self.runes.position != self.consumed, \
-            "Should either have no data remaining, or be in a token"
+                    self._materialize(has_escape=has_escape)
+                    return
+        # EOF
+        self.current = ""
 
     def advance_keyword(self):
-        self._advance(allow_comments=True)
+        self._find_next_token(allow_comments=True)
 
     def advance_macro(self):
         """Macros aren't standard tokens.
@@ -164,8 +161,7 @@ class _token_iter:
             self.runes.advance()  # First newline is part of macro
             body = self._materialize(1)
             self.runes.advance()  # Discard second newline
-            self._advance(allow_comments=True)
-            print(f"{body!r}")
+            self._find_next_token(allow_comments=True)
             return body
 
     def advance_value(self):
@@ -175,11 +171,11 @@ class _token_iter:
         it looks like a comment, it is not a comment.
         """
         # Consume the keyword,
-        self._advance(allow_comments=False)
+        self._find_next_token(allow_comments=False)
         # Consume the value. The value may be an unquoted literal that starts
         # with '#' so don't allow comments.
         value = self.current
-        self._advance(allow_comments=True)
+        self._find_next_token(allow_comments=True)
         return value
 
     def make_error(self, msg):
@@ -187,10 +183,13 @@ class _token_iter:
 
 class _netrcparse:
     def __init__(self, file, fp):
+        self.tokens = _token_iter(file, fp.read())
+
         # NOTE: Relies on universal newlines to count lineno post-parse as well
         # as normalize line endings across platforms.
-        assert fp.newlines is None, "Doesn't allow arbitrary readline."
-        self.tokens = _token_iter(file, fp.read())
+        if fp.newlines not in (None, '\n'):
+            raise self.tokens.make_error("doesn't support alternate file newlines.")
+
 
     def _parse_macro(self):
         """Macros: have a name, end with double newline.
@@ -198,7 +197,7 @@ class _netrcparse:
         They are "lexed" as one block until the newline which is different than
         how the tokenizer normally works."""
         # TODO(fixme): Name here can contain a `#`, needs tests
-        self.tokens._advance(allow_comments=False)
+        self.tokens._find_next_token(allow_comments=False)
         name = self.tokens.current
         body = self.tokens.advance_macro()
         return (name, body.splitlines(keepends=True))
