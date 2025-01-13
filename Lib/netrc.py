@@ -77,7 +77,7 @@ class netrc:
             with open(file, encoding="locale") as fp:
                 self._parse(file, fp, default_netrc)
 
-    def _parse(self, file, fp, default_netrc):
+    def _parse_unchecked(self, file, fp):
         lexer = _netrclex(fp)
         while 1:
             # Look for a machine, default, or macdef top-level keyword
@@ -139,29 +139,44 @@ class netrc:
                 else:
                     raise NetrcParseError("bad follower token %r" % tt,
                                           file, lexer.lineno)
-            self._security_check(fp, default_netrc, self.hosts[entryname][0])
 
-    def _security_check(self, fp, default_netrc, login):
-        if os.name == 'posix' and default_netrc and login != "anonymous":
-            prop = os.fstat(fp.fileno())
-            if prop.st_uid != os.getuid():
-                import pwd
-                try:
-                    fowner = pwd.getpwuid(prop.st_uid)[0]
-                except KeyError:
-                    fowner = 'uid %s' % prop.st_uid
-                try:
-                    user = pwd.getpwuid(os.getuid())[0]
-                except KeyError:
-                    user = 'uid %s' % os.getuid()
-                raise NetrcParseError(
-                    (f"~/.netrc file owner ({fowner}, {user}) does not match"
-                     " current user"))
-            if (prop.st_mode & (stat.S_IRWXG | stat.S_IRWXO)):
-                raise NetrcParseError(
-                    "~/.netrc access too permissive: access"
-                    " permissions must restrict access to only"
-                    " the owner")
+    def _parse(self, file, fp, default_netrc):
+        """Parse the file and if it has passwords validate restricted access."""
+        self._parse_unchecked(file, fp)
+
+        # Run posix security check if there are any users other than
+        # anonymous with a password.
+        if os.name != 'posix' or not default_netrc:
+            return
+
+        for host in self.hosts.values():
+            if host[0] != 'anonymous' and host[2] != '':
+                # Only need to check once per file/parse as it checks
+                # file permissions vs. current user, not entry usernames.
+                self._security_check(fp)
+                break
+
+    def _security_check(self, fp):
+        """Check file is restricted to current user."""
+        prop = os.fstat(fp.fileno())
+        if prop.st_uid != os.getuid():
+            import pwd
+            try:
+                fowner = pwd.getpwuid(prop.st_uid)[0]
+            except KeyError:
+                fowner = 'uid %s' % prop.st_uid
+            try:
+                user = pwd.getpwuid(os.getuid())[0]
+            except KeyError:
+                user = 'uid %s' % os.getuid()
+            raise NetrcParseError(
+                (f"~/.netrc file owner ({fowner}, {user}) does not match"
+                    " current user"))
+        if (prop.st_mode & (stat.S_IRWXG | stat.S_IRWXO)):
+            raise NetrcParseError(
+                "~/.netrc access too permissive: access"
+                " permissions must restrict access to only"
+                " the owner")
 
     def authenticators(self, host):
         """Return a (user, account, password) tuple for given host."""
