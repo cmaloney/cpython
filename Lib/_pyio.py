@@ -1708,11 +1708,10 @@ class FileIO(RawIOBase):
 
     def readinto(self, b):
         """Same as RawIOBase.readinto()."""
+        self._checkClosed()
+        self._checkReadable()
         m = memoryview(b).cast('B')
-        data = self.read(len(m))
-        n = len(data)
-        m[:n] = data
-        return n
+        return os.readv(self._fd, (m, ))
 
     def write(self, b):
         """Write bytes b to file, return number written.
