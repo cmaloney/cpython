@@ -152,7 +152,7 @@ class TestFileMethods(LargeFileTest):
                 f.seek(pos)
                 self.assertTrue(f.seekable())
 
-    @bigmemtest(size=size, memuse=2, dry_run=False)
+    @bigmemtest(size=size, memuse=1, dry_run=False)
     def test_seek_readall(self, _size):
         # Seek which doesn't change position should readall successfully.
         with self.open(TESTFN, 'rb') as f:

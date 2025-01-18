@@ -1062,8 +1062,10 @@ class BufferedReader(_BufferedIOMixin):
                 chunk = self.raw.readall()
                 if chunk is None:
                     return buf[pos:] or None
-                else:
-                    return buf[pos:] + chunk
+                # If buffer is empty, avoid copy by directly returning.
+                if pos == 0:
+                    return chunk
+                return buf[pos:] + chunk
             chunks = [buf[pos:]]  # Strip the consumed bytes.
             current_size = 0
             while True:
@@ -1703,8 +1705,8 @@ class FileIO(RawIOBase):
             bytes_read += n
 
         # Trim excess storage.
-        result[bytes_read:] = b''
-        return bytes(result)
+        del result[bytes_read:]
+        return result
 
     def readinto(self, b):
         """Same as RawIOBase.readinto()."""
