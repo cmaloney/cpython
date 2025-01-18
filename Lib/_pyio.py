@@ -25,6 +25,7 @@ if hasattr(os, 'SEEK_HOLE') :
 
 # open() uses st_blksize whenever we can
 DEFAULT_BUFFER_SIZE = 8 * 1024  # bytes
+LARGE_BUFFER_SIZE = 65536
 
 # NOTE: Base classes defined here are registered with the "official" ABCs
 # defined in io.py. We don't use real inheritance though, because we don't want
@@ -1666,7 +1667,7 @@ class FileIO(RawIOBase):
             # for EOF) without needing to resize the buffer.
             bufsize = self._stat_atopen.st_size + 1
 
-            if self._stat_atopen.st_size > 65536:
+            if self._stat_atopen.st_size > LARGE_BUFFER_SIZE:
                 try:
                     pos = os.lseek(self._fd, 0, SEEK_CUR)
                     if self._stat_atopen.st_size >= pos:
@@ -1674,23 +1675,35 @@ class FileIO(RawIOBase):
                 except OSError:
                     pass
 
-        result = bytearray()
+        result = bytearray(bufsize)
+        bytes_read = 0
+        n = 0
         while True:
-            if len(result) >= bufsize:
-                bufsize = len(result)
-                bufsize += max(bufsize, DEFAULT_BUFFER_SIZE)
-            n = bufsize - len(result)
+            if bytes_read >= bufsize:
+                # Parallels new_buffersize in _io implementation.
+                if bufsize > LARGE_BUFFER_SIZE:
+                    addend = bytes_read >> 3
+                else:
+                    addend = 256 + bytes_read
+                if addend < DEFAULT_BUFFER_SIZE:
+                    addend = DEFAULT_BUFFER_SIZE
+                bufsize = bufsize + addend
+                result[bytes_read:bufsize] = b'\0'
+
+            to_read = bufsize - bytes_read
+            assert to_read > 0, "Should always try to read at least one byte."
             try:
-                chunk = os.read(self._fd, n)
+                dest = memoryview(result)[bytes_read:]
+                n = os.readv(self._fd, (dest,))
             except BlockingIOError:
-                if result:
+                if bytes_read:
                     break
                 return None
-            if not chunk: # reached the end of the file
+            if n == 0: # reached the end of the file
                 break
-            result += chunk
+            bytes_read += n
 
-        return bytes(result)
+        return bytes(result[:bytes_read])
 
     def readinto(self, b):
         """Same as RawIOBase.readinto()."""
