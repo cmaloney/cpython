@@ -1693,8 +1693,7 @@ class FileIO(RawIOBase):
             to_read = bufsize - bytes_read
             assert to_read > 0, "Should always try to read at least one byte."
             try:
-                dest = memoryview(result)[bytes_read:]
-                n = os.readv(self._fd, (dest,))
+                n = os.readv(self._fd, (memoryview(result)[bytes_read:],))
             except BlockingIOError:
                 if bytes_read:
                     break
@@ -1703,7 +1702,9 @@ class FileIO(RawIOBase):
                 break
             bytes_read += n
 
-        return bytes(result[:bytes_read])
+        # Trim excess storage.
+        result[bytes_read:] = b''
+        return bytes(result)
 
     def readinto(self, b):
         """Same as RawIOBase.readinto()."""
