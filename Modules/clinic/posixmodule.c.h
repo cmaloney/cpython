@@ -7577,6 +7577,57 @@ exit:
     return return_value;
 }
 
+PyDoc_STRVAR(os_readinto__doc__,
+"readinto($module, fd, buffer, /)\n"
+"--\n"
+"\n"
+"Read from a file descriptor into a provided buffer.\n"
+"\n"
+"The buffer shold be a mutable buffer accepting bytes. On success, returns the\n"
+"number of read bytes. It may be lower than the size of the buffer. When\n"
+"interrupted by a signal (read() fails with EINTR), retries the read. For other\n"
+"errors, read will not be retried and -1 will be returned.");
+
+#define OS_READINTO_METHODDEF    \
+    {"readinto", _PyCFunction_CAST(os_readinto), METH_FASTCALL, os_readinto__doc__},
+
+static Py_ssize_t
+os_readinto_impl(PyObject *module, int fd, Py_buffer *buffer);
+
+static PyObject *
+os_readinto(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
+{
+    PyObject *return_value = NULL;
+    int fd;
+    Py_buffer buffer = {NULL, NULL};
+    Py_ssize_t _return_value;
+
+    if (!_PyArg_CheckPositional("readinto", nargs, 2, 2)) {
+        goto exit;
+    }
+    fd = PyLong_AsInt(args[0]);
+    if (fd == -1 && PyErr_Occurred()) {
+        goto exit;
+    }
+    if (PyObject_GetBuffer(args[1], &buffer, PyBUF_WRITABLE) < 0) {
+        _PyArg_BadArgument("readinto", "argument 2", "read-write bytes-like object", args[1]);
+        goto exit;
+    }
+    _return_value = os_readinto_impl(module, fd, &buffer);
+    if ((_return_value == -1) && PyErr_Occurred()) {
+        goto exit;
+    }
+    return_value = PyLong_FromSsize_t(_return_value);
+
+exit:
+    /* Cleanup for buffer */
+    if (buffer.obj) {
+       PyBuffer_Release(&buffer);
+    }
+
+    return return_value;
+}
+
 #if defined(HAVE_READV)
 
 PyDoc_STRVAR(os_readv__doc__,
@@ -13140,4 +13191,4 @@ os__emscripten_debugger(PyObject *module, PyObject *Py_UNUSED(ignored))
 #ifndef OS__EMSCRIPTEN_DEBUGGER_METHODDEF
     #define OS__EMSCRIPTEN_DEBUGGER_METHODDEF
 #endif /* !defined(OS__EMSCRIPTEN_DEBUGGER_METHODDEF) */
-/*[clinic end generated code: output=34cb96bd07bcef90 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=97a096210f89ad14 input=a9049054013a1b77]*/

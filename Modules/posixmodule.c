@@ -11433,6 +11433,34 @@ os_read_impl(PyObject *module, int fd, Py_ssize_t length)
     return buffer;
 }
 
+/*[clinic input]
+os.readinto -> Py_ssize_t
+    fd: int
+    buffer: Py_buffer(accept={rwbuffer})
+    /
+
+Read from a file descriptor into a provided buffer.
+
+The buffer shold be a mutable buffer accepting bytes. On success, returns the
+number of read bytes. It may be lower than the size of the buffer. When
+interrupted by a signal (read() fails with EINTR), retries the read. For other
+errors, read will not be retried and -1 will be returned.
+[clinic start generated code]*/
+
+static Py_ssize_t
+os_readinto_impl(PyObject *module, int fd, Py_buffer *buffer)
+/*[clinic end generated code: output=8091a3513c683a80 input=272ce8579f551995]*/
+{
+    // Need a buffer to read into, return `-1` if there isn't one so that there
+    // is a uniform return type.
+    if (buffer->len <= 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    return _Py_read(fd, buffer->buf, buffer->len);
+}
+
 #if (defined(HAVE_SENDFILE) && (defined(__FreeBSD__) || defined(__DragonFly__) \
                                 || defined(__APPLE__))) \
     || defined(HAVE_READV) || defined(HAVE_PREADV) || defined (HAVE_PREADV2) \
@@ -16973,6 +17001,7 @@ static PyMethodDef posix_methods[] = {
     OS_LOCKF_METHODDEF
     OS_LSEEK_METHODDEF
     OS_READ_METHODDEF
+    OS_READINTO_METHODDEF
     OS_READV_METHODDEF
     OS_PREAD_METHODDEF
     OS_PREADV_METHODDEF
