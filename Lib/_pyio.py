@@ -1674,22 +1674,30 @@ class FileIO(RawIOBase):
                 except OSError:
                     pass
 
-        result = bytearray()
+        result = bytearray(bufsize)
+        bytes_read = 0
         while True:
-            if len(result) >= bufsize:
-                bufsize = len(result)
-                bufsize += max(bufsize, DEFAULT_BUFFER_SIZE)
-            n = bufsize - len(result)
+            if bytes_read >= bufsize:
+                # Paralllels _io/fileio.c new_buffersize
+                if bufsize > 65536:
+                    addend = bufsize >> 3
+                else:
+                    addend = bufsize + 256
+                if addend < DEFAULT_BUFFER_SIZE:
+                    addend = DEFAULT_BUFFER_SIZE
+                bufsize += addend
+                result[bytes_read:bufsize] = b'\0'
+            assert bufsize - bytes_read > 0, "Should always try to read at least one byte."
             try:
-                chunk = os.read(self._fd, n)
+                n = os.readinto(self._fd, memoryview(result)[bytes_read:])
             except BlockingIOError:
                 if result:
                     break
                 return None
-            if not chunk: # reached the end of the file
+            if n  == 0:
                 break
-            result += chunk
-
+            bytes_read += n
+        del result[bytes_read:]
         return bytes(result)
 
     def readinto(self, b):
