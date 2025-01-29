@@ -1,0 +1,2 @@
+Return a bytearray from ``_pyio.FileIO.readall()`` which makes it require
+the same amount of memory as ``_io.FileIO.readall()``
