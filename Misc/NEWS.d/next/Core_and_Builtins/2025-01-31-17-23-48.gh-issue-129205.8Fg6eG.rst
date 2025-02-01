@@ -1,0 +1,2 @@
+Add resize method to :class:`bytearray` wrapping
+:c:func:`PyByteArray_Resize`.

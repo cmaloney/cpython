@@ -1149,6 +1149,50 @@ exit:
     return return_value;
 }
 
+PyDoc_STRVAR(bytearray_resize__doc__,
+"resize($self, size, /)\n"
+"--\n"
+"\n"
+"Resize the bytearray to the given size.\n"
+"\n"
+"  size\n"
+"    New size to resize to..");
+
+#define BYTEARRAY_RESIZE_METHODDEF    \
+    {"resize", (PyCFunction)bytearray_resize, METH_O, bytearray_resize__doc__},
+
+static int
+bytearray_resize_impl(PyByteArrayObject *self, Py_ssize_t size);
+
+static PyObject *
+bytearray_resize(PyObject *self, PyObject *arg)
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t size;
+    int _return_value;
+
+    {
+        Py_ssize_t ival = -1;
+        PyObject *iobj = _PyNumber_Index(arg);
+        if (iobj != NULL) {
+            ival = PyLong_AsSsize_t(iobj);
+            Py_DECREF(iobj);
+        }
+        if (ival == -1 && PyErr_Occurred()) {
+            goto exit;
+        }
+        size = ival;
+    }
+    _return_value = bytearray_resize_impl((PyByteArrayObject *)self, size);
+    if ((_return_value == -1) && PyErr_Occurred()) {
+        goto exit;
+    }
+    return_value = PyLong_FromLong((long)_return_value);
+
+exit:
+    return return_value;
+}
+
 PyDoc_STRVAR(bytearray_strip__doc__,
 "strip($self, bytes=None, /)\n"
 "--\n"
@@ -1623,4 +1667,4 @@ bytearray_sizeof(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
     return bytearray_sizeof_impl((PyByteArrayObject *)self);
 }
-/*[clinic end generated code: output=bc8bec8514102bf3 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=95fad27c034c348a input=a9049054013a1b77]*/

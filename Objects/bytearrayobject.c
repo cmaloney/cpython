@@ -184,7 +184,12 @@ PyByteArray_Resize(PyObject *self, Py_ssize_t requested_size)
     assert(self != NULL);
     assert(PyByteArray_Check(self));
     assert(logical_offset <= alloc);
-    assert(requested_size >= 0);
+
+    if (requested_size < 0) {
+        PyErr_Format(PyExc_BufferError,
+            "Can only resize to positive sizes, got %zd.", requested_size);
+        return -1;
+    }
 
     if (requested_size == Py_SIZE(self)) {
         return 0;
@@ -1986,6 +1991,23 @@ bytearray_remove_impl(PyByteArrayObject *self, int value)
     Py_RETURN_NONE;
 }
 
+/*[clinic input]
+bytearray.resize -> int
+
+    len: Py_ssize_t
+        New size to resize to..
+    /
+
+Resize the internal buffer of bytearray to len.
+[clinic start generated code]*/
+
+static int
+bytearray_resize_impl(PyByteArrayObject *self, Py_ssize_t size)
+/*[clinic end generated code: output=8668e6320dca6f66 input=d7edd24195e3d272]*/
+{
+    return PyByteArray_Resize((PyObject *)self, size);
+}
+
 #define LEFTSTRIP 0
 #define RIGHTSTRIP 1
 #define BOTHSTRIP 2
@@ -2361,6 +2383,7 @@ static PyMethodDef bytearray_methods[] = {
     BYTEARRAY_REPLACE_METHODDEF
     BYTEARRAY_REMOVEPREFIX_METHODDEF
     BYTEARRAY_REMOVESUFFIX_METHODDEF
+    BYTEARRAY_RESIZE_METHODDEF
     BYTEARRAY_REVERSE_METHODDEF
     BYTEARRAY_RFIND_METHODDEF
     BYTEARRAY_RINDEX_METHODDEF
