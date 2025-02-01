@@ -1686,7 +1686,8 @@ class FileIO(RawIOBase):
                 if addend < DEFAULT_BUFFER_SIZE:
                     addend = DEFAULT_BUFFER_SIZE
                 bufsize += addend
-                result[bytes_read:bufsize] = b'\0'
+                result.resize(bufsize)
+                assert len(result) == bufsize, f"Should have expanded in size. {len(result)=}, {bufsize=}"
             assert bufsize - bytes_read > 0, "Should always try and read at least one byte"
             try:
                 n = os.readinto(self._fd, memoryview(result)[bytes_read:])

@@ -4458,6 +4458,7 @@ class MiscIOTest(unittest.TestCase):
                     self.assertEqual(e.args[2], e.characters_written)
                     sent[-1] = sent[-1][:e.characters_written]
                     received.append(rf.read())
+                    assert received[-1] != None, f"Should have data: {received[-1]}"
                     msg = b'BLOCKED'
                     wf.write(msg)
                     sent.append(msg)
