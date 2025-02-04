@@ -1921,12 +1921,9 @@ class Popen:
 
                 # Wait for exec to fail or succeed; possibly raising an
                 # exception (limited in size)
-                errpipe_data = bytearray()
-                while True:
-                    part = os.read(errpipe_read, 50000)
-                    errpipe_data += part
-                    if not part or len(errpipe_data) > 50000:
-                        break
+                bytesio = io.BytesIO()
+                bytesio.readfrom(errpipe_read, cap_size=50_000)
+                errpipe_data = bytesio.getvalue()
             finally:
                 # be sure the FD is closed no matter what
                 os.close(errpipe_read)
@@ -1952,7 +1949,7 @@ class Popen:
                     exception_name = b'SubprocessError'
                     hex_errno = b'0'
                     err_msg = 'Bad exception data from child: {!r}'.format(
-                                  bytes(errpipe_data))
+                                  errpipe_data)
                 child_exception_type = getattr(
                         builtins, exception_name.decode('ascii'),
                         SubprocessError)
