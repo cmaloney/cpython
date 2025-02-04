@@ -829,6 +829,7 @@ extern "C" {
     INIT_ID(call_soon), \
     INIT_ID(callback), \
     INIT_ID(cancel), \
+    INIT_ID(cap_size), \
     INIT_ID(capath), \
     INIT_ID(category), \
     INIT_ID(cb_type), \
@@ -914,6 +915,7 @@ extern "C" {
     INIT_ID(entrypoint), \
     INIT_ID(env), \
     INIT_ID(errors), \
+    INIT_ID(estimated_size), \
     INIT_ID(event), \
     INIT_ID(eventmask), \
     INIT_ID(exc_type), \

@@ -196,6 +196,106 @@ exit:
     return return_value;
 }
 
+PyDoc_STRVAR(_io_BytesIO_readfrom__doc__,
+"readfrom($self, file, /, *, estimated_size=-1, cap_size=-1)\n"
+"--\n"
+"\n"
+"Efficiently read from the provided file and return True if hit end of file.\n"
+"\n"
+"Returns True if and only if a read into a non-zero length buffer returns 0\n"
+"bytes. On most systems this indicates end of file / stream.\n"
+"\n"
+"FIXME?: Allow fileobj that provides readinto.?\n"
+"FIXME?: Support fileobj that only has read?\n"
+"\n"
+"If a readinto call raises NonBlockingError or returns None, data returned to\n"
+"that point will be stored in buffer, and will return False\n"
+"    FIXME: BlockingIOError contains data from partial reads. Append it.\n"
+"\n"
+"For other exceptions while reading, as much data as possible will be in the\n"
+"buffer.\n"
+"\n"
+"FIXME: Does this need to document that all reads are Limited to PY_SSIZE_T_MAX.\n"
+"FIXME? It would be nice if this could support a timeout, but probably a feature\n"
+"       for later.");
+
+#define _IO_BYTESIO_READFROM_METHODDEF    \
+    {"readfrom", _PyCFunction_CAST(_io_BytesIO_readfrom), METH_FASTCALL|METH_KEYWORDS, _io_BytesIO_readfrom__doc__},
+
+static int
+_io_BytesIO_readfrom_impl(bytesio *self, int file, Py_ssize_t estimated_size,
+                          Py_ssize_t cap_size);
+
+static PyObject *
+_io_BytesIO_readfrom(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
+
+    #define NUM_KEYWORDS 2
+    static struct {
+        PyGC_Head _this_is_not_used;
+        PyObject_VAR_HEAD
+        PyObject *ob_item[NUM_KEYWORDS];
+    } _kwtuple = {
+        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
+        .ob_item = { &_Py_ID(estimated_size), &_Py_ID(cap_size), },
+    };
+    #undef NUM_KEYWORDS
+    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
+
+    #else  // !Py_BUILD_CORE
+    #  define KWTUPLE NULL
+    #endif  // !Py_BUILD_CORE
+
+    static const char * const _keywords[] = {"", "estimated_size", "cap_size", NULL};
+    static _PyArg_Parser _parser = {
+        .keywords = _keywords,
+        .fname = "readfrom",
+        .kwtuple = KWTUPLE,
+    };
+    #undef KWTUPLE
+    PyObject *argsbuf[3];
+    Py_ssize_t noptargs = nargs + (kwnames ? PyTuple_GET_SIZE(kwnames) : 0) - 1;
+    int file;
+    Py_ssize_t estimated_size = -1;
+    Py_ssize_t cap_size = -1;
+    int _return_value;
+
+    args = _PyArg_UnpackKeywords(args, nargs, NULL, kwnames, &_parser,
+            /*minpos*/ 1, /*maxpos*/ 1, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
+    if (!args) {
+        goto exit;
+    }
+    file = PyLong_AsInt(args[0]);
+    if (file == -1 && PyErr_Occurred()) {
+        goto exit;
+    }
+    if (!noptargs) {
+        goto skip_optional_kwonly;
+    }
+    if (args[1]) {
+        if (!_Py_convert_optional_to_ssize_t(args[1], &estimated_size)) {
+            goto exit;
+        }
+        if (!--noptargs) {
+            goto skip_optional_kwonly;
+        }
+    }
+    if (!_Py_convert_optional_to_ssize_t(args[2], &cap_size)) {
+        goto exit;
+    }
+skip_optional_kwonly:
+    _return_value = _io_BytesIO_readfrom_impl((bytesio *)self, file, estimated_size, cap_size);
+    if ((_return_value == -1) && PyErr_Occurred()) {
+        goto exit;
+    }
+    return_value = PyBool_FromLong((long)_return_value);
+
+exit:
+    return return_value;
+}
+
 PyDoc_STRVAR(_io_BytesIO_read1__doc__,
 "read1($self, size=-1, /)\n"
 "--\n"
@@ -535,4 +635,4 @@ skip_optional_pos:
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=8a5e153bc7584b55 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=74dde6579c8863ae input=a9049054013a1b77]*/

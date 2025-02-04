@@ -441,6 +441,208 @@ _io_BytesIO_read_impl(bytesio *self, Py_ssize_t size)
     return read_bytes(self, size);
 }
 
+static size_t
+_bytesio_next_buffersize(size_t currentsize)
+{
+    size_t addend;
+
+    /* Expand the buffer by an amount proportional to the current size,
+       giving us amortized linear-time behavior.  For bigger sizes, use a
+       less-than-double growth factor to avoid excessive allocation. */
+    assert(currentsize <= PY_SSIZE_T_MAX);
+    if (currentsize > 65536)
+        addend = currentsize >> 3;
+    else
+        addend = 256 + currentsize;
+    if (addend < 8192)
+        /* Avoid tiny read() calls. */
+        addend = 8192;
+    return currentsize + addend;
+}
+
+/* Read from a fd where there is no data expected to be read.
+
+This is faster (less allocations, less copies) when there is no data, at the
+expense of slightly slower if there is actual data to read. Falls back to normal
+read loop if more than one buffer of data.
+
+-1 == error, 0 == hit cap or blocked, exit, 1 == hit eof / True return, 2 == read more
+*/
+static int _bytesio_readfrom_small_fast(bytesio *self, int fd, Py_ssize_t *cap_size) {
+    char local_buffer[1024];
+    Py_ssize_t result = _Py_read(fd, local_buffer, Py_MIN(1024, *cap_size));
+
+    // Hit EOF in a single read, return True
+    if (result == 0) {
+        return 1;
+    }
+    if (result == -1) {
+        // BlockingIOError -> return False (didn't find EOF)
+        if (errno == EAGAIN) {
+            PyErr_Clear();
+            return 0;
+        }
+        return -1;
+    }
+
+    // Got data, copy across to the buf, then proceed with normal read loop.
+    // FIXME? The temporary bytes object is an unnecessary copy + allocation.
+    // yea: faster / less copies, remove some redundant checks
+    // nay: resizing, appending, copying, updating pointers is a lot.
+    PyObject *bytes = PyBytes_FromStringAndSize(local_buffer, result);
+    if (!bytes) {
+        return -1;
+    }
+    result = write_bytes(self, bytes);
+    Py_DECREF(bytes);
+    if (result < 0) {
+        return -1;
+    }
+
+    // Hit cap, nothing left to do.
+    if (result == *cap_size) {
+        return 0;
+    }
+
+    *cap_size -= result;
+    return 2;
+}
+
+/*[clinic input]
+_io.BytesIO.readfrom -> bool
+    file: int
+    /
+    *
+    estimated_size: Py_ssize_t(accept={int, NoneType}) = -1
+    cap_size: Py_ssize_t(accept={int, NoneType}) = -1
+
+Efficiently read from the provided file and return True if hit end of file.
+
+Returns True if and only if a read into a non-zero length buffer returns 0
+bytes. On most systems this indicates end of file / stream.
+
+FIXME?: Allow fileobj that provides readinto.?
+FIXME?: Support fileobj that only has read?
+
+If a readinto call raises NonBlockingError or returns None, data returned to
+that point will be stored in buffer, and will return False
+    FIXME: BlockingIOError contains data from partial reads. Append it.
+
+For other exceptions while reading, as much data as possible will be in the
+buffer.
+
+FIXME: Does this need to document that all reads are Limited to PY_SSIZE_T_MAX.
+FIXME? It would be nice if this could support a timeout, but probably a feature
+       for later.
+[clinic start generated code]*/
+
+static int
+_io_BytesIO_readfrom_impl(bytesio *self, int file, Py_ssize_t estimated_size,
+                          Py_ssize_t cap_size)
+/*[clinic end generated code: output=15c7900246fa10d9 input=0d962d3e9dd739bd]*/
+{
+    if (check_closed(self)) {
+        return -1;
+    }
+
+    if (check_exports(self)) {
+        return -1;
+    }
+
+    /* Cap all reads to PY_SSIZE_T_MAX */
+    if (cap_size <= 0) {
+        cap_size = PY_SSIZE_T_MAX;
+    } else {
+        cap_size = Py_MIN(cap_size, PY_SSIZE_T_MAX);
+    }
+    assert(cap_size > 0);
+
+    /* Try and get estimated_size in a single read. */
+    Py_ssize_t read_size = DEFAULT_BUFFER_SIZE;
+    if (estimated_size > 0) {
+        /* If cap_size is smaller than estimated, limit to it. */
+        estimated_size = Py_MIN(estimated_size, cap_size);
+        read_size = estimated_size;
+    } else if (estimated_size == 0 || cap_size < 1024) {
+        printf("CAPPED small fast est=%zd | %zd\n", estimated_size, cap_size);
+        /* A number of things in the normal path expect no data, use a small
+           temp buffer for those, only expanding buffer if absolutely needed. */
+        Py_ssize_t result = _bytesio_readfrom_small_fast(self, file, &cap_size);
+        if (result != 2) {
+            return result;
+        }
+    }
+
+    Py_ssize_t current_size = PyBytes_GET_SIZE(self->buf);
+    read_size = Py_MIN(read_size, cap_size);
+    assert(read_size > 0);
+
+    current_size += read_size;
+    if (_PyBytes_Resize(&self->buf, current_size)) {
+        return -1;
+    }
+
+    Py_ssize_t bytes_read = 0;
+    Py_ssize_t found_eof = 0;
+    while (true) {
+        /* Expand buffer if needed. */
+        if (self->string_size >= current_size) {
+            Py_ssize_t target_size = _bytesio_next_buffersize(current_size);
+            if (target_size > PY_SSIZE_T_MAX || target_size <= 0) {
+                PyErr_SetString(PyExc_OverflowError,
+                                "unbounded read returned more bytes "
+                                "than a Python bytes object can hold");
+                return -1;
+            }
+            if (_PyBytes_Resize(&self->buf, target_size)) {
+                return -1;
+            }
+            current_size = target_size;
+            read_size = target_size - current_size;
+        }
+
+        // DEBUG: printf("cs: %zd, ss: %zd, cap: %zd, read: %zd\n", current_size, self->string_size, cap_size, bytes_read);
+        read_size = Py_MIN(current_size - self->string_size, cap_size - bytes_read);
+
+        assert(read_size > 0); // Should always be reading some bytes.
+        assert(self->string_size + read_size <= current_size);
+        Py_ssize_t result = _Py_read(file,
+                                     PyBytes_AS_STRING(self->buf) + self->string_size,
+                                     read_size);
+        if (result == -1) {
+            // Blocking -> early exit without error.
+            if (errno == EAGAIN) {
+                PyErr_Clear();
+                break;
+            }
+            return  -1;
+        }
+        // Found EOF.
+        if (result == 0) {
+            found_eof = 1;
+            break;
+        }
+
+        assert(result >= 0); // Should have got bytes
+        self->string_size += result;
+        bytes_read += result;
+
+        assert(bytes_read <= cap_size); // Shold
+        if (bytes_read >= cap_size) {
+            found_eof = 0;
+            break;
+        }
+    }
+
+    // FIXME? There could be quite a bit of space between current_size and
+    // self->string_size, should this downsize then?
+    //
+    // yea: Save excess memory
+    // nay: Efficient pre-allocated buffer reuse if long lived, getting out the
+    //      bytes() will do anyways
+    return found_eof;
+}
+
 
 /*[clinic input]
 _io.BytesIO.read1
@@ -1015,6 +1217,7 @@ static struct PyMethodDef bytesio_methods[] = {
     _IO_BYTESIO_WRITE_METHODDEF
     _IO_BYTESIO_WRITELINES_METHODDEF
     _IO_BYTESIO_READ1_METHODDEF
+    _IO_BYTESIO_READFROM_METHODDEF
     _IO_BYTESIO_READINTO_METHODDEF
     _IO_BYTESIO_READLINE_METHODDEF
     _IO_BYTESIO_READLINES_METHODDEF
