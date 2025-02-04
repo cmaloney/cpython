@@ -564,7 +564,6 @@ _io_BytesIO_readfrom_impl(bytesio *self, int file, Py_ssize_t estimated_size,
         estimated_size = Py_MIN(estimated_size, cap_size);
         read_size = estimated_size;
     } else if (estimated_size == 0 || cap_size < 1024) {
-        printf("CAPPED small fast est=%zd | %zd\n", estimated_size, cap_size);
         /* A number of things in the normal path expect no data, use a small
            temp buffer for those, only expanding buffer if absolutely needed. */
         Py_ssize_t result = _bytesio_readfrom_small_fast(self, file, &cap_size);
