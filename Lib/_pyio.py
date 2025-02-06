@@ -1687,6 +1687,25 @@ class FileIO(RawIOBase):
 
         result = bytearray(bufsize)
         bytes_read = 0
+        try:
+            # Read until EOF (n == 0)
+            while n := os.readinto(self._fd, memoryview(result)[bytes_read:]):
+                bytes_read += n
+                if bytes_read >= len(result):
+                    result.resize(_new_buffersize(bytes_read))
+
+        except BlockingIOError:
+            if not bytes_read:
+                return None
+
+        assert len(result) - bytes_read >= 1, \
+            "os.readinto buffer size 0 will result in erroneous EOF / returns 0"
+
+        result.resize(bytes_read)
+        return bytes(result)
+
+        # n == 0 case
+
         while True:
             if bytes_read >= len(result):
                 result.resize(_new_buffersize(bytes_read))
