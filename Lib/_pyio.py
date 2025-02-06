@@ -1704,24 +1704,6 @@ class FileIO(RawIOBase):
         result.resize(bytes_read)
         return bytes(result)
 
-        # n == 0 case
-
-        while True:
-            if bytes_read >= len(result):
-                result.resize(_new_buffersize(bytes_read))
-
-            assert len(result) - bytes_read >= 1, "Must read at least one byte"
-            try:
-                n = os.readinto(self._fd, memoryview(result)[bytes_read:])
-            except BlockingIOError:
-                if bytes_read:
-                    break
-                return None
-            if n == 0:  # Reached the end of the file
-                break
-            bytes_read += n
-        result.resize(bytes_read)
-        return bytes(result)
 
     def readinto(self, buffer):
         """Same as RawIOBase.readinto()."""
