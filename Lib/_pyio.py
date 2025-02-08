@@ -926,6 +926,30 @@ class BytesIO(BufferedIOBase):
         """
         return self.read(size)
 
+    def _readfrom(self, file, /, *, estimate=None, limit=None):
+        """Read from the given fd into the byte byuffer.
+
+        Modeled after recvfrom for name, reads until end of file or limit is
+        reached."""
+        if self.closed:
+            raise ValueError("read from closed file")
+        result = bytearray()
+
+        while True:
+            if len(result) >= bufsize:
+                bufsize = len(result)
+                bufsize += max(bufsize, DEFAULT_BUFFER_SIZE)
+            n = bufsize - len(result)
+            try:
+                chunk = os.read(self._fd, n)
+            except BlockingIOError:
+                if result:
+                    break
+                return None
+            if not chunk: # reached the end of the file
+                break
+            result += chunk
+
     def write(self, b):
         if self.closed:
             raise ValueError("write to closed file")
@@ -1655,40 +1679,20 @@ class FileIO(RawIOBase):
         """
         self._checkClosed()
         self._checkReadable()
-        if self._stat_atopen is None or self._stat_atopen.st_size <= 0:
-            bufsize = DEFAULT_BUFFER_SIZE
-        else:
-            # In order to detect end of file, need a read() of at least 1
-            # byte which returns size 0. Oversize the buffer by 1 byte so the
-            # I/O can be completed with two read() calls (one for all data, one
-            # for EOF) without needing to resize the buffer.
-            bufsize = self._stat_atopen.st_size + 1
-
+        estimate = None
+        if self._stat_atopen and self._stat_atopen.st_size > 0:
+            estimate = self._stat_atopen.st_size
             if self._stat_atopen.st_size > 65536:
                 try:
                     pos = os.lseek(self._fd, 0, SEEK_CUR)
                     if self._stat_atopen.st_size >= pos:
-                        bufsize = self._stat_atopen.st_size - pos + 1
+                        estimate = estimate - pos
                 except OSError:
                     pass
 
-        result = bytearray()
-        while True:
-            if len(result) >= bufsize:
-                bufsize = len(result)
-                bufsize += max(bufsize, DEFAULT_BUFFER_SIZE)
-            n = bufsize - len(result)
-            try:
-                chunk = os.read(self._fd, n)
-            except BlockingIOError:
-                if result:
-                    break
-                return None
-            if not chunk: # reached the end of the file
-                break
-            result += chunk
-
-        return bytes(result)
+        bytesio = BytesIO()
+        bytesio._readfrom(self._fd, estimate=estimate)
+        return bytesio.getvalue()
 
     def readinto(self, buffer):
         """Same as RawIOBase.readinto()."""

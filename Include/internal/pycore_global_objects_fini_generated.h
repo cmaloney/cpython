@@ -831,7 +831,6 @@ _PyStaticObjects_CheckRefcnt(PyInterpreterState *interp) {
     _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(call_soon));
     _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(callback));
     _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(cancel));
-    _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(cap_size));
     _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(capath));
     _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(category));
     _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(cb_type));
@@ -917,7 +916,7 @@ _PyStaticObjects_CheckRefcnt(PyInterpreterState *interp) {
     _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(entrypoint));
     _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(env));
     _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(errors));
-    _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(estimated_size));
+    _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(estimate));
     _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(event));
     _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(eventmask));
     _PyStaticObject_CheckRefcnt((PyObject *)&_Py_ID(exc_type));

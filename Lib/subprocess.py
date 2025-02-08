@@ -1922,7 +1922,7 @@ class Popen:
                 # Wait for exec to fail or succeed; possibly raising an
                 # exception (limited in size)
                 bytesio = io.BytesIO()
-                bytesio.readfrom(errpipe_read, cap_size=50_000, estimated_size=0)
+                bytesio._readfrom(errpipe_read, limit=50_000, estimate=0)
                 errpipe_data = bytesio.getvalue()
             finally:
                 # be sure the FD is closed no matter what

@@ -509,37 +509,35 @@ static int _bytesio_readfrom_small_fast(bytesio *self, int fd, Py_ssize_t *cap_s
 }
 
 /*[clinic input]
-_io.BytesIO.readfrom -> bool
+_io.BytesIO._readfrom -> bool
     file: int
     /
     *
-    estimated_size: Py_ssize_t(accept={int, NoneType}) = -1
-    cap_size: Py_ssize_t(accept={int, NoneType}) = -1
+    estimate: Py_ssize_t(accept={int, NoneType}) = -1
+    limit: Py_ssize_t(accept={int, NoneType}) = -1
 
 Efficiently read from the provided file and return True if hit end of file.
 
 Returns True if and only if a read into a non-zero length buffer returns 0
 bytes. On most systems this indicates end of file / stream.
 
-FIXME?: Allow fileobj that provides readinto.?
+FIXME?: Allow fileobj that provides readinto.
 FIXME?: Support fileobj that only has read?
 
 If a readinto call raises NonBlockingError or returns None, data returned to
 that point will be stored in buffer, and will return False
-    FIXME: BlockingIOError contains data from partial reads. Append it.
 
 For other exceptions while reading, as much data as possible will be in the
 buffer.
 
-FIXME: Does this need to document that all reads are Limited to PY_SSIZE_T_MAX.
-FIXME? It would be nice if this could support a timeout, but probably a feature
-       for later.
+
+FIXME: BlockingIOError contains data from partial reads. Append it.
 [clinic start generated code]*/
 
 static int
-_io_BytesIO_readfrom_impl(bytesio *self, int file, Py_ssize_t estimated_size,
-                          Py_ssize_t cap_size)
-/*[clinic end generated code: output=15c7900246fa10d9 input=0d962d3e9dd739bd]*/
+_io_BytesIO__readfrom_impl(bytesio *self, int file, Py_ssize_t estimate,
+                           Py_ssize_t limit)
+/*[clinic end generated code: output=073be8984d890b86 input=2f0621ad283cf15f]*/
 {
     if (check_closed(self)) {
         return -1;
@@ -550,20 +548,19 @@ _io_BytesIO_readfrom_impl(bytesio *self, int file, Py_ssize_t estimated_size,
     }
 
     /* Cap all reads to PY_SSIZE_T_MAX */
-    if (cap_size <= 0) {
-        cap_size = PY_SSIZE_T_MAX;
-    } else {
-        cap_size = Py_MIN(cap_size, PY_SSIZE_T_MAX);
-    }
+    Py_ssize_t cap_size = Py_MIN(Py_MAX(limit, 0), PY_SSIZE_T_MAX);
     assert(cap_size > 0);
 
     /* Try and get estimated_size in a single read. */
     Py_ssize_t read_size = DEFAULT_BUFFER_SIZE;
-    if (estimated_size > 0) {
-        /* If cap_size is smaller than estimated, limit to it. */
-        estimated_size = Py_MIN(estimated_size, cap_size);
-        read_size = estimated_size;
-    } else if (estimated_size == 0 || cap_size < 1024) {
+    if (estimate > 0) {
+        /* In order to detect end of file, need a read() of at
+            least 1 byte which returns size 0. Oversize the buffer
+            by 1 byte so the I/O can be completed with two read()
+            calls (one for all data, one for EOF) without needing
+            to resize the buffer. */
+        read_size = estimate + 1;
+    } else if (estimate == 0 || cap_size < 1024) {
         /* A number of things in the normal path expect no data, use a small
            temp buffer for those, only expanding buffer if absolutely needed. */
         Py_ssize_t result = _bytesio_readfrom_small_fast(self, file, &cap_size);
@@ -572,10 +569,11 @@ _io_BytesIO_readfrom_impl(bytesio *self, int file, Py_ssize_t estimated_size,
         }
     }
 
-    Py_ssize_t current_size = PyBytes_GET_SIZE(self->buf);
+    /* Never read more than cap_size */
     read_size = Py_MIN(read_size, cap_size);
     assert(read_size > 0);
 
+    Py_ssize_t current_size = PyBytes_GET_SIZE(self->buf);
     current_size += read_size;
     if (_PyBytes_Resize(&self->buf, current_size)) {
         return -1;
@@ -1216,7 +1214,7 @@ static struct PyMethodDef bytesio_methods[] = {
     _IO_BYTESIO_WRITE_METHODDEF
     _IO_BYTESIO_WRITELINES_METHODDEF
     _IO_BYTESIO_READ1_METHODDEF
-    _IO_BYTESIO_READFROM_METHODDEF
+    _IO_BYTESIO__READFROM_METHODDEF
     _IO_BYTESIO_READINTO_METHODDEF
     _IO_BYTESIO_READLINE_METHODDEF
     _IO_BYTESIO_READLINES_METHODDEF
