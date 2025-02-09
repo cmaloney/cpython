@@ -351,7 +351,7 @@ class GzipFile(_compression.BaseStream):
 
     def close(self):
         fileobj = self.fileobj
-        if fileobj is None or self._buffer.closed:
+        if fileobj is None or self._buffer.closed or self.fileobj.closed:
             return
         try:
             if self.mode == WRITE:
