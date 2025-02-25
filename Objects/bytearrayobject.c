@@ -22,6 +22,17 @@ char _PyByteArray_empty_string[] = "";
 
 /* Helpers */
 
+void
+bytearray_set_bytes(PyByteArrayObject *self, PyObject *bytes, Py_ssize_t size)
+{
+    /* Always point to a valid byes object, often empty singleton. */
+    assert(bytes);
+    self->ob_bytes_head = bytes;
+    self->ob_bytes = self->ob_start = PyBytes_AS_STRING(bytes);
+    FT_ATOMIC_STORE_SSIZE_RELAXED(self->ob_alloc, PyBytes_GET_SIZE(bytes));
+    Py_SET_SIZE(self, size);
+}
+
 static int
 _getbytevalue(PyObject* arg, int *value)
 {
@@ -143,16 +154,14 @@ PyByteArray_FromStringAndSize(const char *bytes, Py_ssize_t size)
         return NULL;
     }
 
-    new->ob_bytes_head = PyBytes_FromStringAndSize(bytes, size);
-    if (new->ob_bytes_head == NULL) {
+    PyObject *buffer = PyBytes_FromStringAndSize(bytes, size);
+    if (buffer == NULL) {
         Py_DECREF(new);
         return NULL;
     }
-    new->ob_alloc = size == 0 ? 0 : size + 1;
-    new->ob_start = new->ob_bytes = PyBytes_AS_STRING(new->ob_bytes_head);
-    // PyByteArray guarantees null termination of buffer.
+
+    bytearray_set_bytes(new, buffer, size);
     new->ob_exports = 0;
-    Py_SET_SIZE(new, size);
 
     return (PyObject *)new;
 }
@@ -242,23 +251,19 @@ bytearray_resize_lock_held(PyObject *self, Py_ssize_t requested_size)
         size_t new_size = Py_MIN((size_t)requested_size, (size_t)Py_SIZE(self));
         memcpy(PyBytes_AS_STRING(new), PyByteArray_AS_STRING(obj), new_size);
         Py_DECREF(obj->ob_bytes_head);
-        obj->ob_bytes_head = new;
-    }
-    else {
-        /* Too small, grow allocation */
-        if (_PyBytes_Resize(&obj->ob_bytes_head, alloc - 1) < 0) {
-            obj->ob_bytes_head = PyBytes_FromStringAndSize(NULL, 0);
-            obj->ob_bytes = obj->ob_start = PyBytes_AS_STRING(obj->ob_bytes_head);
-            obj->ob_alloc = 0;
-            return -1;
-        }
+        bytearray_set_bytes(obj, new, size);
+        obj->ob_bytes[size] = '\0';
+        return 0;
     }
 
-    obj->ob_bytes = obj->ob_start = PyBytes_AS_STRING(obj->ob_bytes_head);
+    /* Too small, grow allocation */
+    if (_PyBytes_Resize(&obj->ob_bytes_head, alloc - 1) < 0) {
+        bytearray_set_bytes(obj, PyBytes_FromStringAndSize(NULL, 0), 0);
+        return -1;
+    }
+
+    bytearray_set_bytes(obj, obj->ob_bytes_head, size);
     obj->ob_bytes[size] = '\0';
-    Py_SET_SIZE(self, size);
-    FT_ATOMIC_STORE_SSIZE_RELAXED(obj->ob_alloc, alloc);
-
     return 0;
 }
 
@@ -1225,11 +1230,7 @@ bytearray_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds)
     }
 
     PyByteArrayObject *self = _PyByteArray_CAST(obj);
-    /* Ensure always have a buffer, the empty bytes singleton. */
-    self->ob_bytes_head = PyBytes_FromStringAndSize(NULL, 0);
-    assert(self->ob_bytes_head);
-    self->ob_bytes = self->ob_start = PyBytes_AS_STRING(self->ob_bytes_head);
-    self->ob_alloc = 0;
+    bytearray_set_bytes(self, PyBytes_FromStringAndSize(NULL, 0), 0);
 
     return obj;
 }
