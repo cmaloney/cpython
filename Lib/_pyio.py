@@ -1697,7 +1697,7 @@ class FileIO(RawIOBase):
         assert len(result) - bytes_read >= 1, \
             "os.readinto buffer size 0 will result in erroneous EOF / returns 0"
         result.resize(bytes_read)
-        return bytes(result)
+        return result._detach()
 
     def readinto(self, buffer):
         """Same as RawIOBase.readinto()."""
