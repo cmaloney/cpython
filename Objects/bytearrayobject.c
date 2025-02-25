@@ -245,16 +245,12 @@ bytearray_resize_lock_held(PyObject *self, Py_ssize_t requested_size)
         obj->ob_bytes_head = new;
     }
     else {
-        if (obj->ob_bytes_head == NULL) {
-            obj->ob_bytes_head = PyBytes_FromStringAndSize(NULL, alloc - 1);
-        }
-        else {
-            /* Too small, grow allocation */
-            if (_PyBytes_Resize(&obj->ob_bytes_head, alloc - 1) < 0) {
-                obj->ob_bytes_head = NULL;
-                obj->ob_bytes = obj->ob_start = NULL;
-                return -1;
-            }
+        /* Too small, grow allocation */
+        if (_PyBytes_Resize(&obj->ob_bytes_head, alloc - 1) < 0) {
+            obj->ob_bytes_head = PyBytes_FromStringAndSize(NULL, 0);
+            obj->ob_bytes = obj->ob_start = PyBytes_AS_STRING(obj->ob_bytes_head);
+            obj->ob_alloc = 0;
+            return -1;
         }
     }
 
@@ -1220,6 +1216,24 @@ bytearray_richcompare(PyObject *self, PyObject *other, int op)
 
 }
 
+PyObject *
+bytearray_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds)
+{
+    PyObject *obj = subtype->tp_alloc(subtype, 0);
+    if (obj == NULL) {
+        return NULL;
+    }
+
+    PyByteArrayObject *self = _PyByteArray_CAST(obj);
+    /* Ensure always have a buffer, the empty bytes singleton. */
+    self->ob_bytes_head = PyBytes_FromStringAndSize(NULL, 0);
+    assert(self->ob_bytes_head);
+    self->ob_bytes = self->ob_start = PyBytes_AS_STRING(self->ob_bytes_head);
+    self->ob_alloc = 0;
+
+    return obj;
+}
+
 static void
 bytearray_dealloc(PyObject *op)
 {
@@ -1229,9 +1243,7 @@ bytearray_dealloc(PyObject *op)
                         "deallocated bytearray object has exported buffers");
         PyErr_Print();
     }
-    if (self->ob_bytes_head != 0) {
-        Py_DECREF(self->ob_bytes_head);
-    }
+    Py_XDECREF(self->ob_bytes_head);
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
@@ -2493,6 +2505,12 @@ static PyObject *
 bytearray_alloc(PyObject *op, PyObject *Py_UNUSED(ignored))
 {
     PyByteArrayObject *self = _PyByteArray_CAST(op);
+    /* Validate redundant information is redundant */
+    if (self->ob_alloc == 0) {
+        assert(PyBytes_GET_SIZE(self->ob_bytes_head) == 0);
+    } else {
+        assert(PyBytes_GET_SIZE(self->ob_bytes_head) + 1 == self->ob_alloc);
+    }
     return PyLong_FromSsize_t(FT_ATOMIC_LOAD_SSIZE_RELAXED(self->ob_alloc));
 }
 
@@ -2862,7 +2880,7 @@ PyTypeObject PyByteArray_Type = {
     0,                                  /* tp_dictoffset */
     (initproc)bytearray___init__,       /* tp_init */
     PyType_GenericAlloc,                /* tp_alloc */
-    PyType_GenericNew,                  /* tp_new */
+    bytearray_new,                      /* tp_new */
     PyObject_Free,                      /* tp_free */
     .tp_version_tag = _Py_TYPE_VERSION_BYTEARRAY,
 };
