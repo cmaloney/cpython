@@ -29,7 +29,7 @@ bytearray_set_bytes(PyByteArrayObject *self, PyObject *bytes, Py_ssize_t size)
     assert(bytes);
     self->ob_bytes_head = bytes;
     self->ob_bytes = self->ob_start = PyBytes_AS_STRING(bytes);
-    FT_ATOMIC_STORE_SSIZE_RELAXED(self->ob_alloc, PyBytes_GET_SIZE(bytes));
+    FT_ATOMIC_STORE_SSIZE_RELAXED(self->ob_alloc, PyBytes_GET_SIZE(bytes) + 1);
     Py_SET_SIZE(self, size);
 }
 
@@ -2489,11 +2489,7 @@ bytearray__detach_impl(PyByteArrayObject *self)
         return NULL;
     }
     PyObject *old_buffer = self->ob_bytes_head;
-    self->ob_bytes_head = new_buffer;
-    self->ob_start = self->ob_bytes = PyBytes_AS_STRING(self->ob_bytes_head);
-    self->ob_alloc = 1;
-    Py_SET_SIZE(self, 0);
-
+    bytearray_set_bytes(self, new_buffer, 0);
     return old_buffer;
 }
 
