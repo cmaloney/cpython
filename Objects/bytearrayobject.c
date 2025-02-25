@@ -127,8 +127,6 @@ PyObject *
 PyByteArray_FromStringAndSize(const char *bytes, Py_ssize_t size)
 {
     PyByteArrayObject *new;
-    Py_ssize_t alloc;
-
     if (size < 0) {
         PyErr_SetString(PyExc_SystemError,
             "Negative size passed to PyByteArray_FromStringAndSize");
@@ -141,28 +139,20 @@ PyByteArray_FromStringAndSize(const char *bytes, Py_ssize_t size)
     }
 
     new = PyObject_New(PyByteArrayObject, &PyByteArray_Type);
-    if (new == NULL)
+    if (new == NULL) {
         return NULL;
+    }
 
-    if (size == 0) {
-        new->ob_bytes = NULL;
-        alloc = 0;
+    new->ob_bytes_head = PyBytes_FromStringAndSize(bytes, size);
+    if (new->ob_bytes_head == NULL) {
+        Py_DECREF(new);
+        return NULL;
     }
-    else {
-        alloc = size + 1;
-        new->ob_bytes = PyMem_Malloc(alloc);
-        if (new->ob_bytes == NULL) {
-            Py_DECREF(new);
-            return PyErr_NoMemory();
-        }
-        if (bytes != NULL && size > 0)
-            memcpy(new->ob_bytes, bytes, size);
-        new->ob_bytes[size] = '\0';  /* Trailing null byte */
-    }
-    Py_SET_SIZE(new, size);
-    new->ob_alloc = alloc;
-    new->ob_start = new->ob_bytes;
+    new->ob_alloc = size == 0 ? 0 : size + 1;
+    new->ob_start = new->ob_bytes = PyBytes_AS_STRING(new->ob_bytes_head);
+    // PyByteArray guarantees null termination of buffer.
     new->ob_exports = 0;
+    Py_SET_SIZE(new, size);
 
     return (PyObject *)new;
 }
@@ -189,7 +179,6 @@ static int
 bytearray_resize_lock_held(PyObject *self, Py_ssize_t requested_size)
 {
     _Py_CRITICAL_SECTION_ASSERT_OBJECT_LOCKED(self);
-    void *sval;
     PyByteArrayObject *obj = ((PyByteArrayObject *)self);
     /* All computations are done unsigned to avoid integer overflows
        (see issue #22335). */
@@ -245,27 +234,34 @@ bytearray_resize_lock_held(PyObject *self, Py_ssize_t requested_size)
     }
 
     if (logical_offset > 0) {
-        sval = PyMem_Malloc(alloc);
-        if (sval == NULL) {
-            PyErr_NoMemory();
+        /* Make a new non-offset buffer */
+        PyObject *new = PyBytes_FromStringAndSize(NULL, alloc - 1);
+        if (new == NULL) {
             return -1;
         }
-        memcpy(sval, PyByteArray_AS_STRING(self),
-               Py_MIN((size_t)requested_size, (size_t)Py_SIZE(self)));
-        PyMem_Free(obj->ob_bytes);
+        size_t new_size = Py_MIN((size_t)requested_size, (size_t)Py_SIZE(self));
+        memcpy(PyBytes_AS_STRING(new), PyByteArray_AS_STRING(obj), new_size);
+        Py_DECREF(obj->ob_bytes_head);
+        obj->ob_bytes_head = new;
     }
     else {
-        sval = PyMem_Realloc(obj->ob_bytes, alloc);
-        if (sval == NULL) {
-            PyErr_NoMemory();
-            return -1;
+        if (obj->ob_bytes_head == NULL) {
+            obj->ob_bytes_head = PyBytes_FromStringAndSize(NULL, alloc - 1);
+        }
+        else {
+            /* Too small, grow allocation */
+            if (_PyBytes_Resize(&obj->ob_bytes_head, alloc - 1) < 0) {
+                obj->ob_bytes_head = NULL;
+                obj->ob_bytes = obj->ob_start = NULL;
+                return -1;
+            }
         }
     }
 
-    obj->ob_bytes = obj->ob_start = sval;
+    obj->ob_bytes = obj->ob_start = PyBytes_AS_STRING(obj->ob_bytes_head);
+    obj->ob_bytes[size] = '\0';
     Py_SET_SIZE(self, size);
     FT_ATOMIC_STORE_SSIZE_RELAXED(obj->ob_alloc, alloc);
-    obj->ob_bytes[size] = '\0'; /* Trailing null byte */
 
     return 0;
 }
@@ -1233,8 +1229,8 @@ bytearray_dealloc(PyObject *op)
                         "deallocated bytearray object has exported buffers");
         PyErr_Print();
     }
-    if (self->ob_bytes != 0) {
-        PyMem_Free(self->ob_bytes);
+    if (self->ob_bytes_head != 0) {
+        Py_DECREF(self->ob_bytes_head);
     }
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
@@ -2443,6 +2439,51 @@ bytearray_decode_impl(PyByteArrayObject *self, const char *encoding,
     return PyUnicode_FromEncodedObject((PyObject*)self, encoding, errors);
 }
 
+/*[clinic input]
+@critical_section
+bytearray._detach
+
+Return existing storage without copying as a bytes and clear bytearray storage.
+
+On error, bytearray will be left in a valid state, but buffer may be cleared. If
+there are exports or the bytearray data is offset will throw rather than copy.
+[clinic start generated code]*/
+
+static PyObject *
+bytearray__detach_impl(PyByteArrayObject *self)
+/*[clinic end generated code: output=eac03c9d6f8d6230 input=5bb91fd1ce9b77dc]*/
+{
+    _Py_CRITICAL_SECTION_ASSERT_OBJECT_LOCKED(self);
+    if (self->ob_exports > 0) {
+        PyErr_SetString(PyExc_BufferError,
+                "Existing exports of data: buffer cannot be detached");
+        return NULL;
+    }
+    if (self->ob_start != self->ob_bytes) {
+        PyErr_SetString(PyExc_BufferError,
+                "Buffer start offset from bytes: buffer cannot be detached; was the object sliced?");
+        return NULL;
+    }
+
+    /* buffer may be overallocated, ensure exact size */
+    if (_PyBytes_Resize(&self->ob_bytes_head, PyByteArray_GET_SIZE(self))) {
+        return NULL;
+    }
+
+    /* FIXME: Take buffer size? Bytes to copy from? */
+    PyObject *new_buffer = PyBytes_FromStringAndSize(NULL, 0);
+    if (!new_buffer) {
+        return NULL;
+    }
+    PyObject *old_buffer = self->ob_bytes_head;
+    self->ob_bytes_head = new_buffer;
+    self->ob_start = self->ob_bytes = PyBytes_AS_STRING(self->ob_bytes_head);
+    self->ob_alloc = 1;
+    Py_SET_SIZE(self, 0);
+
+    return old_buffer;
+}
+
 PyDoc_STRVAR(alloc_doc,
 "B.__alloc__() -> int\n\
 \n\
@@ -2688,6 +2729,7 @@ static PyMethodDef bytearray_methods[] = {
     BYTEARRAY_COPY_METHODDEF
     BYTEARRAY_COUNT_METHODDEF
     BYTEARRAY_DECODE_METHODDEF
+    BYTEARRAY__DETACH_METHODDEF
     BYTEARRAY_ENDSWITH_METHODDEF
     {"expandtabs", _PyCFunction_CAST(bytearray_expandtabs),
     METH_FASTCALL|METH_KEYWORDS, stringlib_expandtabs__doc__},

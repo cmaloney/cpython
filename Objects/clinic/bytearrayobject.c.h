@@ -1492,6 +1492,33 @@ exit:
     return return_value;
 }
 
+PyDoc_STRVAR(bytearray__detach__doc__,
+"_detach($self, /)\n"
+"--\n"
+"\n"
+"Return existing storage without copying as a bytes and clear bytearray storage.\n"
+"\n"
+"On error, bytearray will be left in a valid state, but buffer may be cleared. If\n"
+"there are exports or the bytearray data is offset will throw rather than copy.");
+
+#define BYTEARRAY__DETACH_METHODDEF    \
+    {"_detach", (PyCFunction)bytearray__detach, METH_NOARGS, bytearray__detach__doc__},
+
+static PyObject *
+bytearray__detach_impl(PyByteArrayObject *self);
+
+static PyObject *
+bytearray__detach(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    PyObject *return_value = NULL;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    return_value = bytearray__detach_impl((PyByteArrayObject *)self);
+    Py_END_CRITICAL_SECTION();
+
+    return return_value;
+}
+
 PyDoc_STRVAR(bytearray_join__doc__,
 "join($self, iterable_of_bytes, /)\n"
 "--\n"
@@ -1789,4 +1816,4 @@ bytearray_sizeof(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
     return bytearray_sizeof_impl((PyByteArrayObject *)self);
 }
-/*[clinic end generated code: output=5e33422343b47af9 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=5a269c6e328c966f input=a9049054013a1b77]*/
