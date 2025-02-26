@@ -934,6 +934,11 @@ bytearray___init___impl(PyByteArrayObject *self, PyObject *arg,
         if (encoded == NULL)
             return -1;
         assert(PyBytes_Check(encoded));
+        if (Py_REFCNT(encoded) == 1 && PyBytes_CheckExact(encoded)) {
+            /* Take as own mutable buffer */
+            bytearray_set_bytes(self, encoded, PyBytes_GET_SIZE(encoded));
+            return 0;
+        }
         new = bytearray_iconcat((PyObject*)self, encoded);
         Py_DECREF(encoded);
         if (new == NULL)
