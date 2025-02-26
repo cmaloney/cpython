@@ -2455,6 +2455,47 @@ bytearray_decode_impl(PyByteArrayObject *self, const char *encoding,
     return PyUnicode_FromEncodedObject((PyObject*)self, encoding, errors);
 }
 
+/*[clinic input]
+@critical_section
+bytearray._detach
+
+Return existing storage without copying as a bytes and clear bytearray storage.
+
+On error, bytearray will be left in a valid state, but buffer may be cleared. If
+there are exports or the bytearray data is offset will throw rather than copy.
+[clinic start generated code]*/
+
+static PyObject *
+bytearray__detach_impl(PyByteArrayObject *self)
+/*[clinic end generated code: output=eac03c9d6f8d6230 input=5bb91fd1ce9b77dc]*/
+{
+    _Py_CRITICAL_SECTION_ASSERT_OBJECT_LOCKED(self);
+    if (self->ob_exports > 0) {
+        PyErr_SetString(PyExc_BufferError,
+                "Existing exports of data: buffer cannot be detached");
+        return NULL;
+    }
+    if (self->ob_start != self->ob_bytes) {
+        PyErr_SetString(PyExc_BufferError,
+                "Buffer start offset from bytes: buffer cannot be detached; was the object sliced?");
+        return NULL;
+    }
+
+    /* buffer may be overallocated, ensure exact size */
+    if (_PyBytes_Resize(&self->ob_bytes_head, PyByteArray_GET_SIZE(self))) {
+        return NULL;
+    }
+
+    /* FIXME: Take buffer size? Bytes to copy from? */
+    PyObject *new_buffer = PyBytes_FromStringAndSize(NULL, 0);
+    if (!new_buffer) {
+        return NULL;
+    }
+    PyObject *old_buffer = self->ob_bytes_head;
+    bytearray_set_bytes(self, new_buffer, 0);
+    return old_buffer;
+}
+
 PyDoc_STRVAR(alloc_doc,
 "B.__alloc__() -> int\n\
 \n\
@@ -2709,6 +2750,7 @@ static PyMethodDef bytearray_methods[] = {
     BYTEARRAY_COPY_METHODDEF
     BYTEARRAY_COUNT_METHODDEF
     BYTEARRAY_DECODE_METHODDEF
+    BYTEARRAY__DETACH_METHODDEF
     BYTEARRAY_ENDSWITH_METHODDEF
     {"expandtabs", _PyCFunction_CAST(bytearray_expandtabs),
     METH_FASTCALL|METH_KEYWORDS, stringlib_expandtabs__doc__},
