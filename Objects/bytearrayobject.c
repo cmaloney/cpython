@@ -947,6 +947,16 @@ bytearray___init___impl(PyByteArrayObject *self, PyObject *arg,
         return 0;
     }
 
+     if (PyBytes_CheckExact(arg)) {
+        if (!_Py_IsImmortal(arg) && _Py_REFCNT(arg) == 2) {
+            // DEBUG: printf("shortcut refcount: %zd\n", Py_REFCNT(arg));
+            bytearray_set_bytes(self, arg, PyBytes_GET_SIZE(arg));
+            Py_INCREF(arg);
+        } else {
+            // DEBUG: printf("refcount: %zd\n", Py_REFCNT(arg));
+        }
+     }
+
     /* If it's not unicode, there can't be encoding or errors */
     if (encoding != NULL || errors != NULL) {
         PyErr_SetString(PyExc_TypeError,
