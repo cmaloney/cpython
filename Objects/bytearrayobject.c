@@ -22,7 +22,7 @@ char _PyByteArray_empty_string[] = "";
 
 /* Helpers */
 
-void
+static void
 bytearray_set_bytes(PyByteArrayObject *self, PyObject *bytes, Py_ssize_t size)
 {
     /* Always point to a valid byes object, often empty singleton. */
