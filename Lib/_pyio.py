@@ -1212,6 +1212,7 @@ class BufferedWriter(_BufferedIOMixin):
     """
 
     def __init__(self, raw, buffer_size=DEFAULT_BUFFER_SIZE):
+        self._write_buf = bytearray()
         if not raw.writable():
             raise OSError('"raw" argument must be writable.')
 
@@ -1219,7 +1220,6 @@ class BufferedWriter(_BufferedIOMixin):
         if buffer_size <= 0:
             raise ValueError("invalid buffer size")
         self.buffer_size = buffer_size
-        self._write_buf = bytearray()
         self._write_lock = Lock()
 
     def writable(self):
@@ -1305,6 +1305,14 @@ class BufferedWriter(_BufferedIOMixin):
         finally:
             with self._write_lock:
                 self.raw.close()
+
+    def __del__(self):
+        # Using getattr to handle partially-constructed instances.
+        if getattr(self, "_write_buf", False) and not self.closed:
+            import warnings
+            warnings.warn("unclosed BufferedWriter with data", ResourceWarning,
+                          source=self, stacklevel=2)
+        return super().__del__()
 
 
 class BufferedRWPair(BufferedIOBase):

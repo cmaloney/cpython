@@ -1943,7 +1943,8 @@ class BufferedWriterTest(unittest.TestCase, CommonBufferedTests):
         writer = self.MockRawIO()
         bufio = self.tp(writer, 8)
         bufio.write(b"abc")
-        del bufio
+        with self.assertWarns(ResourceWarning):
+            del bufio
         support.gc_collect()
         self.assertEqual(b"abc", writer._write_stack[0])
 
@@ -2502,7 +2503,8 @@ class BufferedRandomTest(BufferedReaderTest, BufferedWriterTest):
 
     def test_misbehaved_io(self):
         BufferedReaderTest.test_misbehaved_io(self)
-        BufferedWriterTest.test_misbehaved_io(self)
+        with self.assertWarns(ResourceWarning):
+            BufferedWriterTest.test_misbehaved_io(self)
 
     def test_interleaved_read_write(self):
         # Test for issue #12213
