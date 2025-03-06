@@ -1212,7 +1212,6 @@ class BufferedWriter(_BufferedIOMixin):
     """
 
     def __init__(self, raw, buffer_size=DEFAULT_BUFFER_SIZE):
-        self._write_buf = bytearray()
         if not raw.writable():
             raise OSError('"raw" argument must be writable.')
 
@@ -1220,6 +1219,7 @@ class BufferedWriter(_BufferedIOMixin):
         if buffer_size <= 0:
             raise ValueError("invalid buffer size")
         self.buffer_size = buffer_size
+        self._write_buf = bytearray()
         self._write_lock = Lock()
 
     def writable(self):
