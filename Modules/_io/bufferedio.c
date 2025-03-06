@@ -919,15 +919,20 @@ buffered_flush_and_rewind_unlocked(buffered *self)
 static void
 bufferedwriter_finalize(PyObject *op)
 {
+    PyObject *exception = PyErr_GetRaisedException();
+
     buffered *self = buffered_CAST(op);
     if (self->ok <= 0 || IS_CLOSED(self) || !VALID_WRITE_BUFFER(self)) {
+        PyErr_SetRaisedException(exception);
         return;
     }
+
 
     if (self->pos < self->write_pos) {
         PyErr_ResourceWarning(op, 1,
             "unclosed writeable Buffered I/O with data %R", self);
     }
+    PyErr_SetRaisedException(exception);
 }
 
 /*[clinic input]

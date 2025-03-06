@@ -2288,9 +2288,10 @@ class BufferedRWPairTest(unittest.TestCase):
         writer.close = lambda: None
 
     def test_isatty(self):
-        class SelectableIsAtty(MockRawIO):
+        rawio_class = self.MockRawIO
+        class SelectableIsAtty(rawio_class):
             def __init__(self, isatty):
-                MockRawIO.__init__(self)
+                rawio_class.__init__(self)
                 self._isatty = isatty
 
             def isatty(self):
