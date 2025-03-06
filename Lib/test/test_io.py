@@ -1825,6 +1825,7 @@ class BufferedWriterTest(unittest.TestCase, CommonBufferedTests):
         # At least (total - 8) bytes were implicitly flushed, perhaps more
         # depending on the implementation.
         self.assertTrue(flushed.startswith(contents[:-8]), flushed)
+        bufio.close()
 
     def check_writes(self, intermediate_func):
         # Lots of writes, test the flushed output is as expected.
@@ -2034,6 +2035,9 @@ class BufferedWriterTest(unittest.TestCase, CommonBufferedTests):
 
         # Silence destructor error
         bufio.close = lambda: None
+
+        with self.assertWarns(ResourceWarning):
+            del bufio
 
     def test_max_buffer_size_removal(self):
         with self.assertRaises(TypeError):
@@ -2503,8 +2507,7 @@ class BufferedRandomTest(BufferedReaderTest, BufferedWriterTest):
 
     def test_misbehaved_io(self):
         BufferedReaderTest.test_misbehaved_io(self)
-        with self.assertWarns(ResourceWarning):
-            BufferedWriterTest.test_misbehaved_io(self)
+        BufferedWriterTest.test_misbehaved_io(self)
 
     def test_interleaved_read_write(self):
         # Test for issue #12213
