@@ -435,6 +435,7 @@ buffered_dealloc(PyObject *op)
     Py_DECREF(tp);
 }
 
+
 /*[clinic input]
 @critical_section
 _io._Buffered.__sizeof__
@@ -913,6 +914,24 @@ buffered_flush_and_rewind_unlocked(buffered *self)
             return NULL;
     }
     Py_RETURN_NONE;
+}
+
+static void
+bufferedwriter_finalize(PyObject *op)
+{
+    buffered *self = buffered_CAST(op);
+    if (self->ok != 1 || !VALID_WRITE_BUFFER(self)|| self->pos >= self->write_pos) {
+        return;
+    }
+
+    if (PyErr_ResourceWarning(op, 1,
+        "unclosed writeable Buffered I/O with data %R", self)) {
+        /* Spurious errors can appear at shutdown */
+        if (PyErr_ExceptionMatches(PyExc_Warning)) {
+            PyErr_FormatUnraisable(
+                "Exception ignored while finalizing BufferedWriter %R", self);
+        }
+    }
 }
 
 /*[clinic input]
@@ -2634,6 +2653,7 @@ static PyGetSetDef bufferedwriter_getset[] = {
 
 static PyType_Slot bufferedwriter_slots[] = {
     {Py_tp_dealloc, buffered_dealloc},
+    {Py_tp_finalize, bufferedwriter_finalize},
     {Py_tp_repr, buffered_repr},
     {Py_tp_doc, (void *)_io_BufferedWriter___init____doc__},
     {Py_tp_traverse, buffered_traverse},
@@ -2752,6 +2772,7 @@ static PyGetSetDef bufferedrandom_getset[] = {
 
 static PyType_Slot bufferedrandom_slots[] = {
     {Py_tp_dealloc, buffered_dealloc},
+    {Py_tp_finalize, bufferedwriter_finalize},
     {Py_tp_repr, buffered_repr},
     {Py_tp_doc, (void *)_io_BufferedRandom___init____doc__},
     {Py_tp_traverse, buffered_traverse},

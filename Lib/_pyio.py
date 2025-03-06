@@ -1307,6 +1307,14 @@ class BufferedWriter(_BufferedIOMixin):
             with self._write_lock:
                 self.raw.close()
 
+    def __del__(self):
+        # Using getattr to handle partially-constructed instances.
+        if getattr(self, "_write_buf", False) and not self.closed:
+            import warnings
+            warnings.warn("unclosed BufferedWriter with data", ResourceWarning,
+                          source=self, stacklevel=2)
+        return super().__del__()
+
 
 class BufferedRWPair(BufferedIOBase):
 

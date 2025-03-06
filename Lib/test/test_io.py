@@ -1825,6 +1825,7 @@ class BufferedWriterTest(unittest.TestCase, CommonBufferedTests):
         # At least (total - 8) bytes were implicitly flushed, perhaps more
         # depending on the implementation.
         self.assertTrue(flushed.startswith(contents[:-8]), flushed)
+        bufio.close()
 
     def check_writes(self, intermediate_func):
         # Lots of writes, test the flushed output is as expected.
@@ -1943,7 +1944,8 @@ class BufferedWriterTest(unittest.TestCase, CommonBufferedTests):
         writer = self.MockRawIO()
         bufio = self.tp(writer, 8)
         bufio.write(b"abc")
-        del bufio
+        with self.assertWarns(ResourceWarning):
+            del bufio
         support.gc_collect()
         self.assertEqual(b"abc", writer._write_stack[0])
 
@@ -2033,6 +2035,9 @@ class BufferedWriterTest(unittest.TestCase, CommonBufferedTests):
 
         # Silence destructor error
         bufio.close = lambda: None
+
+        with self.assertWarns(ResourceWarning):
+            del bufio
 
     def test_max_buffer_size_removal(self):
         with self.assertRaises(TypeError):
@@ -2283,9 +2288,10 @@ class BufferedRWPairTest(unittest.TestCase):
         writer.close = lambda: None
 
     def test_isatty(self):
-        class SelectableIsAtty(MockRawIO):
+        rawio_class = self.MockRawIO
+        class SelectableIsAtty(rawio_class):
             def __init__(self, isatty):
-                MockRawIO.__init__(self)
+                rawio_class.__init__(self)
                 self._isatty = isatty
 
             def isatty(self):
@@ -4354,7 +4360,7 @@ class MiscIOTest(unittest.TestCase):
         self._check_abc_inheritance(io)
 
     def _check_warn_on_dealloc(self, *args, **kwargs):
-        f = open(*args, **kwargs)
+        f = self.open(*args, **kwargs)
         r = repr(f)
         with self.assertWarns(ResourceWarning) as cm:
             f = None
@@ -4383,7 +4389,7 @@ class MiscIOTest(unittest.TestCase):
         r, w = os.pipe()
         fds += r, w
         with warnings_helper.check_no_resource_warning(self):
-            open(r, *args, closefd=False, **kwargs)
+            self.open(r, *args, closefd=False, **kwargs)
 
     @unittest.skipUnless(hasattr(os, "pipe"), "requires os.pipe()")
     def test_warn_on_dealloc_fd(self):
