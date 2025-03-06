@@ -921,14 +921,20 @@ bufferedwriter_finalize(PyObject *op)
 {
     PyObject *exception = PyErr_GetRaisedException();
 
+    // If there's already a ResourceWarning (ex. underlying File not closed),
+    // don't layer on a redundant warning.
+    if (PyErr_GivenExceptionMatches(exception, PyExc_ResourceWarning)) {
+        PyErr_SetRaisedException(exception);
+        return;
+    }
+
     buffered *self = buffered_CAST(op);
     if (self->ok <= 0 || IS_CLOSED(self) || !VALID_WRITE_BUFFER(self)) {
         PyErr_SetRaisedException(exception);
         return;
     }
 
-
-    if (self->pos < self->write_pos) {
+    if (exception && self->pos < self->write_pos) {
         PyErr_ResourceWarning(op, 1,
             "unclosed writeable Buffered I/O with data %R", self);
     }
