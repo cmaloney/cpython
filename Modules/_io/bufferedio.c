@@ -919,26 +919,36 @@ buffered_flush_and_rewind_unlocked(buffered *self)
 static void
 bufferedwriter_finalize(PyObject *op)
 {
-    PyObject *exception = PyErr_GetRaisedException();
 
-    // If there's already a ResourceWarning (ex. underlying File not closed),
-    // don't layer on a redundant warning.
-    if (PyErr_GivenExceptionMatches(exception, PyExc_ResourceWarning)) {
-        PyErr_SetRaisedException(exception);
+#if 0
+    // If there's already an exception, no-op.
+    if (PyErr_)
+
+    // If there's already a warning (ex. underlying FileIO not closed),
+    // don't add another warning.
+    if (PyErr_GivenExceptionMatches(exc, PyExc_Warning)) {
+        PyErr_SetRaisedException(exc);
         return;
     }
+#endif
 
+    /* Warn if the buffered has a non-empty buffer. */
     buffered *self = buffered_CAST(op);
-    if (self->ok <= 0 || IS_CLOSED(self) || !VALID_WRITE_BUFFER(self)) {
-        PyErr_SetRaisedException(exception);
-        return;
-    }
+    if (self->ok == 1 && VALID_READ_BUFFER(self) && self->pos < self->write_pos) {
+        PyObject *exc = PyErr_GetRaisedException();
 
-    if (exception && self->pos < self->write_pos) {
-        PyErr_ResourceWarning(op, 1,
-            "unclosed writeable Buffered I/O with data %R", self);
+        /* May call arbitrary Python code, save/store exception around */
+        if (IS_CLOSED(self)) {
+            if (PyErr_ResourceWarning(op, 1, "unclosed BufferedWriter %R", self)) {
+                /* Spurious errors can appear at shutdown */
+                if (PyErr_ExceptionMatches(PyExc_Warning)) {
+                    PyErr_FormatUnraisable("Exception ignored "
+                        "while finalizing BufferedWriter %R", self);
+                }
+            }
+        }
+        PyErr_SetRaisedException(exc);
     }
-    PyErr_SetRaisedException(exception);
 }
 
 /*[clinic input]
