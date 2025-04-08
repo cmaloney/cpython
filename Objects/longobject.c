@@ -6438,7 +6438,7 @@ int_from_bytes_impl(PyTypeObject *type, PyObject *bytes_obj,
 /*[clinic end generated code: output=efc5d68e31f9314f input=2ff527997fe7b0c5]*/
 {
     int little_endian;
-    PyObject *long_obj, *bytes;
+    PyObject *long_obj = NULL, *bytes = NULL;
     Py_buffer view;
 
     if (byteorder == NULL)
@@ -6452,9 +6452,32 @@ int_from_bytes_impl(PyTypeObject *type, PyObject *bytes_obj,
             "byteorder must be either 'little' or 'big'");
         return NULL;
     }
+    /* Get out the bytes matching PyObject_Bytes resolution order for special
+       methods. Just needs a buffer, not a bytes object, so can save a copy
+       coming from bytes-like types (ex. bytearray).
 
+       Exact bytes, just look at ob_sval. */
+    if (PyBytes_CheckExact(bytes_obj)) {
+        long_obj = _PyLong_FromByteArray(
+            (unsigned char *)PyBytes_AS_STRING(bytes_obj), Py_SIZE(bytes_obj),
+            little_endian, is_signed);
+    }
+    /* __bytes__ takes precedence over buffer. */
+    else if (bytes = _PyObject_MaybeCallSpecialNoArgs(bytes_obj,
+                                                      &_Py_ID(__bytes__))) {
+        if (!PyBytes_Check(bytes)) {
+            PyErr_Format(PyExc_TypeError,
+                            "__bytes__ returned non-bytes (type %.200s)",
+                            Py_TYPE(bytes)->tp_name);
+            Py_DECREF(bytes);
+            return NULL;
+        }
+    }
+    else if (PyErr_Occurred()) {
+        return NULL;
+    }
     /* Use buffer protocol to avoid copies. */
-    if (PyObject_CheckBuffer(bytes_obj)) {
+    else if (PyObject_CheckBuffer(bytes_obj)) {
         if (PyObject_GetBuffer(bytes_obj, &view, PyBUF_SIMPLE) != 0) {
             return NULL;
         }
@@ -6462,11 +6485,14 @@ int_from_bytes_impl(PyTypeObject *type, PyObject *bytes_obj,
             is_signed);
         PyBuffer_Release(&view);
     }
-    else {
+    /* Either: bytes_obj had __bytes__ or no method has succeded yet. */
+    if (long_obj == NULL) {
         /* fallback: Construct a bytes then convert. */
-        bytes = PyObject_Bytes(bytes_obj);
         if (bytes == NULL) {
-            return NULL;
+            bytes = PyBytes_FromObject(bytes_obj);
+            if (bytes == NULL) {
+                return NULL;
+            }
         }
         long_obj = _PyLong_FromByteArray(
             (unsigned char *)PyBytes_AS_STRING(bytes), Py_SIZE(bytes),
@@ -6474,6 +6500,7 @@ int_from_bytes_impl(PyTypeObject *type, PyObject *bytes_obj,
         Py_DECREF(bytes);
     }
 
+    /* Convert to requested type if needed. */
     if (long_obj != NULL && type != &PyLong_Type) {
         Py_SETREF(long_obj, PyObject_CallOneArg((PyObject *)type, long_obj));
     }
