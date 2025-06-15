@@ -209,26 +209,62 @@ class CommonBufferedTests:
 
 
 class SizeofTest:
-
     @support.cpython_only
     def test_sizeof(self):
-        bufsize1 = 4096
-        bufsize2 = 8192
-        rawio = self.MockRawIO()
-        bufio = self.tp(rawio, buffer_size=bufsize1)
-        size = sys.getsizeof(bufio) - bufsize1
-        rawio = self.MockRawIO()
-        bufio = self.tp(rawio, buffer_size=bufsize2)
-        self.assertEqual(sys.getsizeof(bufio), size + bufsize2)
+        # Unusual size to make sure we get this size piped through.
+        small_buffer_size = 1234
+        big_buffer_size = 6789
+        # Bigger than buffer_size data vailable to ensure buffer_size caps the
+        # amount read.
+        rawio = self.MockRawIO([b'x' * 4096])
+        small = self.tp(rawio, buffer_size=small_buffer_size)
+        small_size = sys.getsizeof(small)
+        rawio = self.MockRawIO([b'x' * 8192])
+        big = self.tp(rawio, buffer_size=big_buffer_size)
+        big_size = sys.getsizeof(big)
+        # No buffers allocated until at least one I/O; buffer_size doesn't
+        # effect object size.
+        self.assertEqual(small_size, big_size)
+
+        # Fill the buffer.
+        # FIXME(cmaloney): Need a better way to pass in how to ensure the buffer is filled
+        try:
+            small.peek()
+            big.peek()
+        # Writable instances
+        except AttributeError:
+            # TODO(cmaloney): Write too much and ensure buffer size caps?
+            small_buffer_size -= 1
+            big_buffer_size -= 1
+            small.write(b'x' * small_buffer_size)
+            big.write(b'x' * big_buffer_size)
+
+        self.assertEqual(sys.getsizeof(small), small_size + small_buffer_size)
+        self.assertEqual(sys.getsizeof(big), big_size + big_buffer_size)
+
 
     @support.cpython_only
-    def test_buffer_freeing(self) :
-        bufsize = 4096
-        rawio = self.MockRawIO()
-        bufio = self.tp(rawio, buffer_size=bufsize)
-        size = sys.getsizeof(bufio) - bufsize
+    def test_buffer_freeing(self):
+        # Unusual size to make sure we get this size piped through.
+        small_buffer_size = 1234
+        rawio = self.MockRawIO([b'x' * 4096])
+        bufio = self.tp(rawio, buffer_size=small_buffer_size)
+        # Read some so the buffer gets filled; ensure size up.
+        start_size = sys.getsizeof(bufio)
+        # Fill the buffer.
+        # FIXME(cmaloney): Need a better way to pass in how to ensure the buffer is filled
+        try:
+            bufio.peek()
+        except AttributeError:
+            # One less than max size, since max size gets special cased to pass
+            # through
+            small_buffer_size -= 1
+            bufio.write(b'x' * small_buffer_size)
+        self.assertEqual(sys.getsizeof(bufio), start_size + small_buffer_size)
+        # Close, size should reset to initial.
         bufio.close()
-        self.assertEqual(sys.getsizeof(bufio), size)
+        self.assertEqual(sys.getsizeof(bufio), start_size)
+
 
 class BufferedReaderTest(CommonBufferedTests):
     read_mode = "rb"
@@ -240,7 +276,10 @@ class BufferedReaderTest(CommonBufferedTests):
         bufio.__init__(rawio, buffer_size=1024)
         bufio.__init__(rawio, buffer_size=16)
         self.assertEqual(b"abc", bufio.read())
-        self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
+        bufio.__init__(rawio, buffer_size=0)
+        # no buffer, no peek
+        self.assertRaises(ValueError, bufio.peek)
+
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-16)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-1)
         rawio = self.MockRawIO([b"abc"])
@@ -571,8 +610,6 @@ class CBufferedReaderTest(BufferedReaderTest, SizeofTest, CTestCase):
     def test_initialization(self):
         rawio = self.MockRawIO([b"abc"])
         bufio = self.tp(rawio)
-        self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
-        self.assertRaises(ValueError, bufio.read)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-16)
         self.assertRaises(ValueError, bufio.read)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-1)
@@ -639,7 +676,7 @@ class BufferedWriterTest(CommonBufferedTests):
         bufio.__init__(rawio, buffer_size=16)
         self.assertEqual(3, bufio.write(b"abc"))
         bufio.flush()
-        self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
+        bufio.__init__(rawio, buffer_size=0)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-16)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-1)
         bufio.__init__(rawio)
@@ -744,6 +781,7 @@ class BufferedWriterTest(CommonBufferedTests):
         # 8 bytes will be written, 8 will be buffered and the rest will be lost
         raw.block_on(b"0")
         try:
+            # FIXME(cmaloney): The bytestring is already in memory, would it be better to keep the remainder?
             bufio.write(b"opqrwxyz0123456789")
         except self.BlockingIOError as e:
             written = e.characters_written
@@ -929,8 +967,6 @@ class CBufferedWriterTest(BufferedWriterTest, SizeofTest, CTestCase):
     def test_initialization(self):
         rawio = self.MockRawIO()
         bufio = self.tp(rawio)
-        self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
-        self.assertRaises(ValueError, bufio.write, b"def")
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-16)
         self.assertRaises(ValueError, bufio.write, b"def")
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-1)

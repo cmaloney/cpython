@@ -583,6 +583,13 @@ _io__IOBase_readline_impl(PyObject *self, Py_ssize_t limit)
         return NULL;
     }
 
+    // FIXME(cmaloney): This is fairly inefficient most the time...
+    // It effectively reads in tiny chunks always and lots and lots of them. Be much better
+    // to
+    // a. expanding buffer size
+    // b. Gather a list of chunks than "join" them back together as needed (or readall style fast! and split)
+    //
+    // In general, the peek + read is _nice_ but if have seeking capabilities better to run backwards.
     while (limit < 0 || PyByteArray_GET_SIZE(buffer) < limit) {
         Py_ssize_t nreadahead = 1;
         PyObject *b;
