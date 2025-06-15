@@ -1297,7 +1297,7 @@ _buffered_readline(buffered *self, Py_ssize_t limit)
                 Py_DECREF(chunks);
                 return NULL;
             }
-            res = NULL;
+            Py_CLEAR(res);
             break;
         }
     }
