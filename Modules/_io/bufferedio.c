@@ -49,6 +49,8 @@ PyDoc_STRVAR(bufferediobase_doc,
 static PyObject *
 _bufferediobase_readinto_generic(PyObject *self, Py_buffer *buffer, char readinto1)
 {
+    // FIXME: is this useful to still have? would it be nicer to have read() do
+    // the wrapping.
     Py_ssize_t len;
     PyObject *data;
 
@@ -56,9 +58,11 @@ _bufferediobase_readinto_generic(PyObject *self, Py_buffer *buffer, char readint
         ? &_Py_ID(read1)
         : &_Py_ID(read);
     data = _PyObject_CallMethod(self, attr, "n", buffer->len);
-    if (data == NULL)
-        return NULL;
+    if (data == NULL) {
+        return  NULL;
+    }
 
+    // FIXME: Should this actually do bytes-like?
     if (!PyBytes_Check(data)) {
         Py_DECREF(data);
         PyErr_SetString(PyExc_TypeError, "read() should return bytes");
@@ -373,8 +377,7 @@ buffered_dealloc(PyObject *op)
     self->ok = 0;
     if (self->weakreflist != NULL)
         PyObject_ClearWeakRefs(op);
-    Py_XDECREF(self->read_buffer);
-    self->read_buffer = NULL;
+    Py_CLEAR(self->read_buffer);
     if (self->lock) {
         PyThread_free_lock(self->lock);
         self->lock = NULL;
@@ -658,7 +661,7 @@ _io__Buffered_isatty_impl(buffered *self)
 }
 
 /* Forward decls */
-static PyObject *
+static Py_ssize_t
 _bufferedwriter_flush_unlocked(buffered *);
 static Py_ssize_t
 _bufferedreader_fill_buffer(buffered *self);
@@ -818,28 +821,25 @@ _PyIO_trap_eintr(void)
  * Shared methods and wrappers
  */
 
-static PyObject *
+static int
 buffered_flush_and_rewind_unlocked(buffered *self)
 {
     Py_ssize_t n;
-    PyObject *res;
 
-    res = _bufferedwriter_flush_unlocked(self);
-    if (res == NULL) {
-        return NULL;
+    if (_bufferedwriter_flush_unlocked(self) == -1) {
+        return -1;
     }
-    Py_DECREF(res);
 
     if (self->read_buffer) {
         /* Rewind the raw stream so that its position corresponds to
            the current logical position. */
         n = _buffered_raw_seek(self, -PyBytes_GET_SIZE(self->read_buffer), SEEK_CUR);
         if (n == -1) {
-            return NULL;
+            return -1;
         }
         _buffered_reset_buf(self);
     }
-    Py_RETURN_NONE;
+    return 0;
 }
 
 /* FIXME: This should never need to allocate. Allocation == new failure state.
@@ -858,8 +858,7 @@ buffered_shrink_read_buffer(buffered *self, Py_ssize_t consumed)
     assert(available >= consumed && consumed >= 0);
 
     if (available == consumed) {
-        Py_DECREF(self->read_buffer);
-        self->read_buffer = NULL;
+        Py_CLEAR(self->read_buffer);
         return 0;
     }
 
@@ -869,8 +868,7 @@ buffered_shrink_read_buffer(buffered *self, Py_ssize_t consumed)
     if (new_buffer == NULL) {
         return -1;
     }
-    Py_DECREF(self->read_buffer);
-    self->read_buffer = new_buffer;
+    Py_SETREF(self->read_buffer, new_buffer);
     return 0;
 }
 
@@ -883,17 +881,18 @@ static PyObject *
 _io__Buffered_flush_impl(buffered *self)
 /*[clinic end generated code: output=da2674ef1ce71f3a input=6b30de9f083419c2]*/
 {
-    PyObject *res;
-
     CHECK_INITIALIZED(self)
     CHECK_CLOSED(self, "flush of closed file")
 
     if (!ENTER_BUFFERED(self))
         return NULL;
-    res = buffered_flush_and_rewind_unlocked(self);
+    Py_ssize_t res = buffered_flush_and_rewind_unlocked(self);
     LEAVE_BUFFERED(self)
 
-    return res;
+    if (res == -1) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
 }
 
 /*[clinic input]
@@ -923,15 +922,11 @@ _io__Buffered_peek_impl(buffered *self, Py_ssize_t size)
     if (!ENTER_BUFFERED(self))
         return NULL;
 
-    if (self->writable) {
-        res = buffered_flush_and_rewind_unlocked(self);
-        if (res == NULL)
-            goto end;
-        Py_CLEAR(res);
+    if (buffered_flush_and_rewind_unlocked(self) == -1) {
+        LEAVE_BUFFERED(self);
+        return NULL;
     }
     res = _bufferedreader_peek_unlocked(self);
-
-end:
     LEAVE_BUFFERED(self)
     return res;
 }
@@ -970,12 +965,6 @@ _io__Buffered_read_impl(buffered *self, Py_ssize_t n)
     // FIXME(cmaloney): lock-free fast reading was in last version.
     if (!ENTER_BUFFERED(self))
         return NULL;
-    res = _bufferedreader_read_fast(self, n);
-    if (res != Py_None) {
-        LEAVE_BUFFERED(self);
-        return res;
-    }
-    Py_DECREF(res);
     res = _bufferedreader_read_generic(self, n);
     LEAVE_BUFFERED(self);
     return res;
@@ -1006,6 +995,7 @@ _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
         Py_DECREF(res);
         return NULL;
     }
+    // FIXME: Just call _buffered_readinto_generic with readinto1=1
 
     /* Return up to n bytes.  If at least one byte is buffered, we
        only return buffered bytes.  Otherwise, we do one raw read. */
@@ -1014,22 +1004,20 @@ _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
         return _bufferedreader_read_fast(self, n);
     }
 
+    /* Flush the write buffer if necessary */
+    if (buffered_flush_and_rewind_unlocked(self) == -1) {
+        LEAVE_BUFFERED(self)
+        Py_DECREF(res);
+        return NULL;
+    }
     // FIXME: Can this be replaced with jsut a _buffered_readinto_generic?
     // Really just need the byes on top / wrapping...
     // Need to do a read
     res = PyBytes_FromStringAndSize(NULL, n);
-    if (res == NULL)
+    if (res == NULL) {
         return NULL;
-    /* Flush the write buffer if necessary */
-    if (self->writable) {
-        PyObject *r = buffered_flush_and_rewind_unlocked(self);
-        if (r == NULL) {
-            LEAVE_BUFFERED(self)
-            Py_DECREF(res);
-            return NULL;
-        }
-        Py_DECREF(r);
     }
+
     r = _bufferedreader_raw_read(self, PyBytes_AS_STRING(res), n);
     LEAVE_BUFFERED(self)
     if (r == -1) {
@@ -1085,13 +1073,9 @@ _buffered_readinto_generic(buffered *self, Py_buffer *buffer, char readinto1)
     }
 
     // FIXME: with bufer_size = 0, I think write buffer should _always_ be empty.
-    if (self->writable) {
-        res = buffered_flush_and_rewind_unlocked(self);
-        if (res == NULL) {
-            LEAVE_BUFFERED(self);
-            return res;
-        }
-        Py_CLEAR(res);
+    if (buffered_flush_and_rewind_unlocked(self) == -1) {
+        LEAVE_BUFFERED(self);
+        return NULL;
     }
 
     // read buffer should have been emptied.
@@ -1225,12 +1209,10 @@ _buffered_readline(buffered *self, Py_ssize_t limit)
 
     // FIXME: Flush the write buffer if there is one. This code handles having
     //        data in read_buffer fine.
-    res = _bufferedwriter_flush_unlocked(self);
-    if (res == NULL) {
+    if (_bufferedwriter_flush_unlocked(self) == -1) {
         LEAVE_BUFFERED(self);
         return NULL;
     }
-    Py_CLEAR(res);
 
     // FIXME(cmaloney): Benchmark what length is best?
     // ideally this just becomes the internal list of "data sitting around"...
@@ -1429,14 +1411,9 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
         return NULL;
 
     /* slow path: empty all buffers and raw seek() */
-    buffered_flush_and_rewind_unlocked(self);
-    if (self->writable) {
-        res = _bufferedwriter_flush_unlocked(self);
-        if (res == NULL) {
-            LEAVE_BUFFERED(self);
-            return NULL;
-        }
-        Py_CLEAR(res);
+    if (buffered_flush_and_rewind_unlocked(self) == -1) {
+        LEAVE_BUFFERED(self);
+        return NULL;
     }
 
     assert(!self->read_buffer);
@@ -1473,10 +1450,9 @@ _io__Buffered_truncate_impl(buffered *self, PyTypeObject *cls, PyObject *pos)
         return NULL;
     }
 
-    res = buffered_flush_and_rewind_unlocked(self);
-    if (res == NULL) {
+    if (buffered_flush_and_rewind_unlocked(self) == -1) {
         LEAVE_BUFFERED(self)
-        return res;
+        return NULL;
     }
     Py_CLEAR(res);
 
@@ -1568,8 +1544,7 @@ buffered_repr(PyObject *op)
 
 static void _buffered_reset_buf(buffered *self)
 {
-    Py_XDECREF(self->read_buffer);
-    self->read_buffer = NULL;
+    Py_CLEAR(self->read_buffer);
 }
 
 /*[clinic input]
@@ -1620,6 +1595,8 @@ _bufferedreader_raw_read(buffered *self, char *start, Py_ssize_t len)
     if (PyBuffer_FillInfo(&buf, NULL, start, len, 0, PyBUF_CONTIG) == -1) {
         return -1;
     }
+    // FIXME: If the memoryview lives on, should this return NULL / don't let
+    // modifiable bytes live into the wild?
     memobj = PyMemoryView_FromBuffer(&buf);
     if (memobj == NULL) {
         return -1;
@@ -1692,71 +1669,73 @@ _bufferedreader_read_all(buffered *self)
     // FIXME
     // CURPOS
     // TODO
-    Py_ssize_t current_size;
     PyObject *res = NULL, *data = NULL, *tmp = NULL, *chunks = NULL, *readall;
 
-    /* First copy what we have in the current buffer. */
-    current_size = Py_SAFE_DOWNCAST(READAHEAD(self), Py_off_t, Py_ssize_t);
-    if (current_size) {
-        data = PyBytes_FromStringAndSize(
-            self->buffer + self->pos, current_size);
-        if (data == NULL)
-            return NULL;
-        self->pos += current_size;
+    /* Ensure no unwritten data. */
+    if (_bufferedwriter_flush_unlocked(self) == -1) {
+        goto cleanup;
     }
-    /* We're going past the buffer's bounds, flush it */
-    if (self->writable) {
-        tmp = buffered_flush_and_rewind_unlocked(self);
-        if (tmp == NULL)
-            goto cleanup;
-        Py_CLEAR(tmp);
-    }
-    _bufferedreader_reset_buf(self);
 
+    /* Use underlying readall if available. */
     if (PyObject_GetOptionalAttr(self->raw, &_Py_ID(readall), &readall) < 0) {
         goto cleanup;
     }
     if (readall) {
         tmp = _PyObject_CallNoArgs(readall);
         Py_DECREF(readall);
-        if (tmp == NULL)
+        if (tmp == NULL) {
             goto cleanup;
-        if (tmp != Py_None && !PyBytes_Check(tmp)) {
+        } else if (Py_IsNone(tmp)) {
+            // Blocked but already have data, return already read data.
+            if (self->read_buffer == NULL) {
+                res = tmp;
+                goto cleanup;
+            }
+            Py_XSETREF(res, self->read_buffer);
+            goto cleanup;
+        } else if (!PyBytes_Check(tmp)) {
             PyErr_SetString(PyExc_TypeError, "readall() should return bytes");
             goto cleanup;
         }
-        if (current_size == 0) {
-            res = tmp;
-        } else {
-            if (tmp != Py_None) {
-                PyBytes_Concat(&data, tmp);
-            }
-            res = data;
-        }
+
+        // combine read buffer with the readall result.
+        PyBytes_Concat(&self->read_buffer, tmp);
+        Py_XSETREF(res, self->read_buffer);
         goto cleanup;
     }
 
     chunks = PyList_New(0);
-    if (chunks == NULL)
+    if (chunks == NULL) {
         goto cleanup;
+    }
+
+    data = self->read_buffer;
+    self->read_buffer = NULL;
 
     while (1) {
         if (data) {
-            if (PyList_Append(chunks, data) < 0)
+            /* all chunks must have at least one byte. */
+            assert(PyBytes_GET_SIZE(data) > 0);
+            if (PyList_Append(chunks, data) < 0) {
                 goto cleanup;
+            }
             Py_CLEAR(data);
         }
 
+        // FIXME(cmaloney): This should non-linearly resize the buffer, see
+        // FileIO.readall for more details.
         /* Read until EOF or until read() would block. */
         data = PyObject_CallMethodNoArgs(self->raw, &_Py_ID(read));
-        if (data == NULL)
+        if (data == NULL) {
             goto cleanup;
+        }
         if (data != Py_None && !PyBytes_Check(data)) {
             PyErr_SetString(PyExc_TypeError, "read() should return bytes");
             goto cleanup;
         }
+        /* EOF or would block */
         if (data == Py_None || PyBytes_GET_SIZE(data) == 0) {
-            if (current_size == 0) {
+            if (PyList_Size(chunks) == 0) {
                 res = data;
                 goto cleanup;
             }
@@ -1766,9 +1745,6 @@ _bufferedreader_read_all(buffered *self)
                 goto cleanup;
             }
         }
-        current_size += PyBytes_GET_SIZE(data);
-        if (self->abs_pos != -1)
-            self->abs_pos += PyBytes_GET_SIZE(data);
     }
 cleanup:
     /* res is either NULL or a borrowed ref */
@@ -1782,6 +1758,7 @@ cleanup:
 
 
 /* Read n bytes from the buffer if it can, otherwise return None.
+   FIXME:
    This function is simple enough that it can run unlocked. */
 static PyObject *
 _bufferedreader_read_fast(buffered *self, Py_ssize_t requested)
@@ -1792,7 +1769,7 @@ _bufferedreader_read_fast(buffered *self, Py_ssize_t requested)
     }
     // FIXME: This should probably be an atomic pointer swap.
     if (requested == current_size) {
-        res = self->read_buffer;
+        PyObject *res = self->read_buffer;
         self->read_buffer = NULL;
         return res;
     }
@@ -1801,12 +1778,12 @@ _bufferedreader_read_fast(buffered *self, Py_ssize_t requested)
 
        res, read_buffer = self->read_buffer[:n], self->read_buffer[n:] */
     Py_INCREF(self->read_buffer);
-    res = self->read_buffer;
-    if (buffered_shrink_read_buffer(self, n) == -1) {
+    PyObject *res = self->read_buffer;
+    if (buffered_shrink_read_buffer(self, requested) == -1) {
         Py_CLEAR(res);
         return NULL;
     }
-    if (_PyBytes_Resize(&res, n) == -1) {
+    if (_PyBytes_Resize(&res, requested) == -1) {
         return NULL;
     }
     return res;
@@ -1816,102 +1793,59 @@ _bufferedreader_read_fast(buffered *self, Py_ssize_t requested)
  * or until an EOF occurs or until read() would block.
  */
 static PyObject *
-_bufferedreader_read_generic(buffered *self, Py_ssize_t n)
+_bufferedreader_read_generic(buffered *self, Py_ssize_t size)
 {
+    Py_buffer buf;
     PyObject *res = NULL;
-    Py_ssize_t current_size, remaining, written;
-    char *out;
+    PyObject *readinto_res;
 
-    current_size = Py_SAFE_DOWNCAST(READAHEAD(self), Py_off_t, Py_ssize_t);
-    if (n <= current_size) {
-        return _bufferedreader_read_fast(self, n);
+    // Have all the bytes, fast copy out. Note, handling this outside of
+    // _readinto_generic, since if read_buffer already has the right data, don't
+    // want to memcpy.
+    res = _bufferedreader_read_fast(self, size);
+    if (!Py_IsNone(res)) {
+        return res;
     }
+    Py_CLEAR(res);
 
-    res = PyBytes_FromStringAndSize(NULL, n);
+    // FIXME: This is very, very similar to fill_buffer, just allocating
+    // for itself...
+    /* Create a contiguous buffer and readinto it. */
+    res = PyBytes_FromStringAndSize(NULL, size);
     if (res == NULL) {
-        goto error;
+        return NULL;
     }
-    out = PyBytes_AS_STRING(res);
-    remaining = n;
-    written = 0;
-    if (current_size > 0) {
-        memcpy(out, self->buffer + self->pos, current_size);
-        remaining -= current_size;
-        written += current_size;
-        self->pos += current_size;
+
+    /* NOTE: the buffer needn't be released as its object is NULL. */
+    if (PyBuffer_FillInfo(&buf, NULL, PyBytes_AS_STRING(res), size, 0, PyBUF_CONTIG) == -1) {
+        Py_DECREF(res);
+        return NULL;
     }
-    /* Flush the write buffer if necessary */
-    if (self->writable) {
-        PyObject *r = buffered_flush_and_rewind_unlocked(self);
-        if (r == NULL)
-            goto error;
-        Py_DECREF(r);
+
+    readinto_res = _buffered_readinto_generic(self, &buf, 0);
+    if (readinto_res == NULL) {
+        Py_DECREF(res);
+        return NULL;
     }
-    _bufferedreader_reset_buf(self);
-    while (remaining > 0) {
-        /* We want to read a whole block at the end into buffer.
-           If we had readv() we could do this in one pass. */
-        Py_ssize_t r = MINUS_LAST_BLOCK(self, remaining);
-        if (r == 0)
-            break;
-        r = _bufferedreader_raw_read(self, out + written, r);
-        if (r == -1)
-            goto error;
-        if (r == 0 || r == -2) {
-            /* EOF occurred or read() would block. */
-            if (r == 0 || written > 0) {
-                if (_PyBytes_Resize(&res, written))
-                    goto error;
-                return res;
-            }
-            Py_DECREF(res);
-            Py_RETURN_NONE;
-        }
-        remaining -= r;
-        written += r;
+    /* Blocked with no data. */
+    else if (Py_IsNone(readinto_res)) {
+        Py_DECREF(res);
+        return readinto_res;
     }
-    assert(remaining <= self->buffer_size);
-    self->pos = 0;
-    self->raw_pos = 0;
-    self->read_end = 0;
-    /* NOTE: when the read is satisfied, we avoid issuing any additional
-       reads, which could block indefinitely (e.g. on a socket).
-       See issue #9550. */
-    while (remaining > 0 && self->read_end < self->buffer_size) {
-        Py_ssize_t r = _bufferedreader_fill_buffer(self);
-        if (r == -1)
-            goto error;
-        if (r == 0 || r == -2) {
-            /* EOF occurred or read() would block. */
-            if (r == 0 || written > 0) {
-                if (_PyBytes_Resize(&res, written))
-                    goto error;
-                return res;
-            }
-            Py_DECREF(res);
-            Py_RETURN_NONE;
-        }
-        if (remaining > r) {
-            memcpy(out + written, self->buffer + self->pos, r);
-            written += r;
-            self->pos += r;
-            remaining -= r;
-        }
-        else if (remaining > 0) {
-            memcpy(out + written, self->buffer + self->pos, remaining);
-            written += remaining;
-            self->pos += remaining;
-            remaining = 0;
-        }
-        if (remaining == 0)
-            break;
+
+    Py_ssize_t actual = PyLong_AsSsize_t(readinto_res);
+    if (actual == -1 && PyErr_Occurred()) {
+        Py_DECREF(res);
+        return NULL;
+    }
+
+    // FIXME: If the Py_buffer lives on, should this return NULL / don't let
+    // modifiable bytes live into the wild?
+    if (actual > size) {
+        _PyBytes_Resize(&res, actual);
     }
 
     return res;
-
-error:
-    Py_XDECREF(res);
-    return NULL;
 }
 
 static PyObject *
@@ -2033,7 +1967,15 @@ _bufferedwriter_raw_write(buffered *self, char *start, Py_ssize_t len)
     return n;
 }
 
-static PyObject *
+/* Ensure all write buffering is empty.
+
+   FIXME: Use this again when start buffering writes. For now leaving in
+   callsites because they've often been added via bugs.
+
+   0 == success,
+   -1 == error
+*/
+static int
 _bufferedwriter_flush_unlocked(buffered *self)
 {
     Py_off_t n, rewind;
@@ -2083,10 +2025,10 @@ end:
 
        Issue: https://bugs.python.org/issue32228 */
     _buffered_reset_buf(self);
-    Py_RETURN_NONE;
+    return 0;
 
 error:
-    return NULL;
+    return -1;
 }
 
 /*[clinic input]
@@ -2135,8 +2077,8 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
     }
 
     /* First write the current buffer */
-    res = _bufferedwriter_flush_unlocked(self);
-    if (res == NULL) {
+    if (_bufferedwriter_flush_unlocked(self) == -1) {
+        /* Error doing write flush, keep ownership of the data. */
         Py_ssize_t *w = _buffered_check_blocking_error();
         if (w == NULL)
             goto error;
@@ -2173,7 +2115,6 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
                              avail);
         goto error;
     }
-    Py_CLEAR(res);
 
     /* Adjust the raw stream position if it is away from the logical stream
        position. This happens if the read buffer has been filled but not
@@ -2221,8 +2162,9 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
         if (PyErr_CheckSignals() < 0)
             goto error;
     }
-    if (self->readable)
+    if (self->readable) {
         _buffered_reset_buf(self);
+    }
     if (remaining > 0) {
         memcpy(self->buffer, (char *) buffer->buf + written, remaining);
         written += remaining;
