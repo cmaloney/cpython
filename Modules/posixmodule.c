@@ -11450,7 +11450,7 @@ os.lseek -> Py_off_t
     fd: int
         An open file descriptor, as returned by os.open().
     position: Py_off_t
-        Position, interpreted relative to 'whence'.
+        Position, interpreted rel`ative to 'whence'.
     whence as how: int
         The relative position to seek from. Valid values are:
         - SEEK_SET: seek from the start of the file.
