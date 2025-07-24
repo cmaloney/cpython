@@ -326,7 +326,8 @@ _enter_buffered_busy(buffered *self)
         if (self->detached) { \
             PyErr_SetString(PyExc_ValueError, \
                  "raw stream has been detached"); \
-        } else { \
+        } \
+        else { \
             PyErr_SetString(PyExc_ValueError, \
                 "I/O operation on uninitialized object"); \
         } \
@@ -338,7 +339,8 @@ _enter_buffered_busy(buffered *self)
         if (self->detached) { \
             PyErr_SetString(PyExc_ValueError, \
                  "raw stream has been detached"); \
-        } else { \
+        } \
+        else { \
             PyErr_SetString(PyExc_ValueError, \
                 "I/O operation on uninitialized object"); \
         } \
@@ -374,8 +376,9 @@ buffered_dealloc(PyObject *op)
     buffered *self = buffered_CAST(op);
     PyTypeObject *tp = Py_TYPE(self);
     self->finalizing = 1;
-    if (_PyIOBase_finalize(op) < 0)
+    if (_PyIOBase_finalize(op) < 0) {
         return;
+    }
     _PyObject_GC_UNTRACK(self);
     self->ok = 0;
     FT_CLEAR_WEAKREFS(op, self->weakreflist);
@@ -465,8 +468,9 @@ buffered_closed(buffered *self)
     PyObject *res;
     CHECK_INITIALIZED_INT(self)
     res = PyObject_GetAttr(self->raw, &_Py_ID(closed));
-    if (res == NULL)
+    if (res == NULL) {
         return -1;
+    }
     closed = PyObject_IsTrue(res);
     Py_DECREF(res);
     return closed;
@@ -693,8 +697,9 @@ _set_BlockingIOError(const char *msg, Py_ssize_t written)
     PyErr_Clear();
     err = PyObject_CallFunction(PyExc_BlockingIOError, "isn",
                                 errno, msg, written);
-    if (err)
+    if (err) {
         PyErr_SetObject(PyExc_BlockingIOError, err);
+    }
     Py_XDECREF(err);
 }
 
@@ -723,15 +728,17 @@ _buffered_raw_tell(buffered *self)
     Py_off_t n;
     PyObject *res;
     res = PyObject_CallMethodNoArgs(self->raw, &_Py_ID(tell));
-    if (res == NULL)
+    if (res == NULL) {
         return -1;
+    }
     n = PyNumber_AsOff_t(res, PyExc_ValueError);
     Py_DECREF(res);
     if (n < 0) {
-        if (!PyErr_Occurred())
+        if (!PyErr_Occurred()) {
             PyErr_Format(PyExc_OSError,
                          "Raw stream returned invalid position %" PY_PRIdOFF,
                          (PY_OFF_T_COMPAT)n);
+        }
         return -1;
     }
 
@@ -782,8 +789,9 @@ _buffered_raw_seek(buffered *self, Py_off_t target, int whence)
 static int
 _buffered_init(buffered *self)
 {
-    if (self->lock)
+    if (self->lock) {
         PyThread_free_lock(self->lock);
+    }
     self->lock = PyThread_allocate_lock();
     if (self->lock == NULL) {
         PyErr_SetString(PyExc_RuntimeError, "can't allocate read lock");
@@ -872,6 +880,7 @@ buffered_shrink_read_buffer(buffered *self, Py_ssize_t consumed)
             PyBytes_AS_STRING(self->read_buffer) + consumed,
             available - consumed);
     if (new_buffer == NULL) {
+        assert(PyErr_Occurred());
         return -1;
     }
     Py_SETREF(self->read_buffer, new_buffer);
@@ -897,6 +906,7 @@ _io__Buffered_flush_impl(buffered *self)
     LEAVE_BUFFERED(self)
 
     if (res == -1) {
+        assert(PyErr_Occurred());
         return NULL;
     }
     Py_RETURN_NONE;
@@ -972,11 +982,7 @@ _io__Buffered_read_impl(buffered *self, Py_ssize_t n)
     }
 
     // FIXME(cmaloney): lock-free fast reading was in last version.
-    if (!ENTER_BUFFERED(self)) {
-        return NULL;
-    }
     res = _bufferedreader_read_generic(self, n);
-    LEAVE_BUFFERED(self);
     return res;
 }
 
@@ -1091,6 +1097,9 @@ _buffered_readinto_generic(buffered *self, Py_buffer *buffer, char readinto1)
 
     // read buffer should have been emptied.
     assert(self->read_buffer == NULL);
+    // FIXME
+    // TODO
+    // CURPOS
     assert(false);
     while (1) {
         assert(buffer->len >= written);
@@ -1700,7 +1709,8 @@ _bufferedreader_read_all(buffered *self)
         Py_DECREF(readall);
         if (tmp == NULL) {
             goto cleanup;
-        } else if (Py_IsNone(tmp)) {
+        }
+        else if (Py_IsNone(tmp)) {
             // Blocked but already have data, return already read data.
             if (self->read_buffer == NULL) {
                 res = tmp;
@@ -1708,14 +1718,20 @@ _bufferedreader_read_all(buffered *self)
             }
             Py_XSETREF(res, self->read_buffer);
             goto cleanup;
-        } else if (!PyBytes_Check(tmp)) {
+        }
+        else if (!PyBytes_Check(tmp)) {
             PyErr_SetString(PyExc_TypeError, "readall() should return bytes");
             goto cleanup;
         }
 
         // combine read buffer with the readall result.
-        PyBytes_Concat(&self->read_buffer, tmp);
-        Py_XSETREF(res, self->read_buffer);
+        if (self->read_buffer) {
+            PyBytes_Concat(&self->read_buffer, tmp);
+            Py_XSETREF(res, self->read_buffer);
+        }
+        else {
+            Py_XSETREF(res, tmp);
+        }
         goto cleanup;
     }
 
@@ -1778,7 +1794,14 @@ cleanup:
 static PyObject *
 _bufferedreader_read_fast(buffered *self, Py_ssize_t requested)
 {
-    Py_ssize_t current_size = PyBytes_GET_SIZE(self->read_buffer);
+    Py_ssize_t current_size;
+    if (self->read_buffer != NULL) {
+        current_size = PyBytes_GET_SIZE(self->read_buffer);
+    }
+    else {
+        current_size = 0;
+    }
+
     if (requested > current_size) {
         return Py_None;
     }
@@ -2042,6 +2065,7 @@ _bufferedwriter_flush_unlocked(buffered *self)
     Py_ssize_t n = _bufferedwriter_write_retrying(self, buffer_bytes, size);
 
     if (n == -1) {
+        assert(PyErr_Occurred());
         return -1;
     }
     /* Wrote all bytes */
@@ -2067,7 +2091,7 @@ _bufferedwriter_flush_unlocked(buffered *self)
         return -1;
     }
     Py_SETREF(self->write_buffer, remaining);
-    return -1;
+    return 0;
 }
 
 /*[clinic input]
@@ -2087,8 +2111,9 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
 
     CHECK_INITIALIZED(self)
 
-    if (!ENTER_BUFFERED(self))
+    if (!ENTER_BUFFERED(self)) {
         return NULL;
+    }
 
     /* Issue #31976: Check for closed file after acquiring the lock. Another
        thread could be holding the lock while closing the file. */
@@ -2408,8 +2433,9 @@ _io_BufferedRandom___init___impl(buffered *self, PyObject *raw,
     self->readable = 1;
     self->writable = 1;
 
-    if (_buffered_init(self) < 0)
+    if (_buffered_init(self) < 0) {
         return -1;
+    }
 
     self->fast_closed_checks = (Py_IS_TYPE(self, state->PyBufferedRandom_Type) &&
                                 Py_IS_TYPE(raw, state->PyFileIO_Type));
