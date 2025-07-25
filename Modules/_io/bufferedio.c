@@ -1097,10 +1097,6 @@ _buffered_readinto_generic(buffered *self, Py_buffer *buffer, char readinto1)
 
     // read buffer should have been emptied.
     assert(self->read_buffer == NULL);
-    // FIXME
-    // TODO
-    // CURPOS
-    assert(false);
     while (1) {
         assert(buffer->len >= written);
         remaining = buffer->len - written;
@@ -1116,13 +1112,12 @@ _buffered_readinto_generic(buffered *self, Py_buffer *buffer, char readinto1)
         }
         /* non-blocking would have blocked */
         else if (n == -2) {
-            if (written > 0) {
-                break;
-            }
-            else {
+            if (written == 0) {
                 LEAVE_BUFFERED(self);
                 Py_RETURN_NONE;
             }
+            /* Return as much as read so far. */
+            break;
         }
         /* Other errors */
         else if (n < 0) {
