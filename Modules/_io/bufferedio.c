@@ -1263,6 +1263,7 @@ _buffered_readline(buffered *self, Py_ssize_t limit)
                 break;
             }
         }
+        assert(self->read_buffer != NULL);
 
         res = _buffered_try_split_line(self, limit);
         if (res == NULL) {
@@ -1284,6 +1285,7 @@ _buffered_readline(buffered *self, Py_ssize_t limit)
             if (limit >= 0) {
                 limit = Py_MAX(limit - PyBytes_GET_SIZE(self->read_buffer), 0);
             }
+            Py_CLEAR(res);
         }
         /* Found! Return data so far. */
         else {
@@ -1304,6 +1306,7 @@ _buffered_readline(buffered *self, Py_ssize_t limit)
 
     // Need to return all the data in chunks joined together.
     assert(res == NULL);
+    assert(chunks != NULL);
     Py_XSETREF(res, PyBytes_Join((PyObject *)&_Py_SINGLETON(bytes_empty), chunks));
     return res;
 }
