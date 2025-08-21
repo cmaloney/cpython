@@ -1008,39 +1008,60 @@ _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
 /*[clinic end generated code: output=bcc4fb4e54d103a3 input=3d0ad241aa52b36c]*/
 {
     Py_ssize_t r;
-    PyObject *res = NULL;
 
     CHECK_INITIALIZED(self)
 
     CHECK_CLOSED(self, "read of closed file")
 
-    if (n == 0)
+    if (n == 0) {
         return PyBytes_FromStringAndSize(NULL, 0);
+    }
 
     if (!ENTER_BUFFERED(self)) {
-        Py_DECREF(res);
         return NULL;
     }
+
+    // FIXME(cmaloney): the previous logic this wasn't special cased. Can this
+    //                  get simplified back to that?
+    // Called without an explicit size. Return available data or fill a buffer
+    // a single time.
+    if (n < 0) {
+        if (self->read_buffer == NULL) {
+            n = _bufferedreader_fill_buffer(self);
+            if (n <= 0) {
+                LEAVE_BUFFERED(self);
+                return NULL;
+            }
+        }
+        else {
+            n = PyBytes_GET_SIZE(self->read_buffer);
+        }
+        LEAVE_BUFFERED(self);
+        return _bufferedreader_read_fast(self, n);
+    }
+
     // FIXME: Just call _buffered_readinto_generic with readinto1=1
 
     /* Return up to n bytes.  If at least one byte is buffered, we
        only return buffered bytes.  Otherwise, we do one raw read. */
     if (self->read_buffer) {
         n = Py_MIN(PyBytes_GET_SIZE(self->read_buffer), n);
-        return _bufferedreader_read_fast(self, n);
+        PyObject *res = _bufferedreader_read_fast(self, n);
+        LEAVE_BUFFERED(self);
+        return res;
     }
 
     /* Flush the write buffer if necessary */
     if (buffered_flush_and_rewind_unlocked(self) == -1) {
         LEAVE_BUFFERED(self)
-        Py_DECREF(res);
         return NULL;
     }
     // FIXME: Can this be replaced with jsut a _buffered_readinto_generic?
     // Really just need the byes on top / wrapping...
     // Need to do a read
-    res = PyBytes_FromStringAndSize(NULL, n);
+    PyObject *res = PyBytes_FromStringAndSize(NULL, n);
     if (res == NULL) {
+        LEAVE_BUFFERED(self);
         return NULL;
     }
 
@@ -1063,7 +1084,6 @@ static PyObject *
 _buffered_readinto_generic(buffered *self, Py_buffer *buffer, char readinto1)
 {
     Py_ssize_t n, written = 0, remaining;
-    PyObject *res = NULL;
 
     CHECK_INITIALIZED(self)
     CHECK_CLOSED(self, "readinto of closed file")
@@ -1114,7 +1134,32 @@ _buffered_readinto_generic(buffered *self, Py_buffer *buffer, char readinto1)
             break;
         }
 
-        n = _bufferedreader_raw_read(self, buffer->buf + written, remaining);
+        // FIXME(cmaloney): Are the thresholds for when to do this right for
+        // current version?
+        // Do big reads directly. For small reads, bump up to a full buffer_size
+        // to avoid small reads. This exchanges read() for memcpy().
+        if (self->buffer_size <= remaining) {
+            n = _bufferedreader_raw_read(self, buffer->buf + written, remaining);
+        }
+        else {
+            // FIXME: Ideally need bytearray which is convertable to bytes without copy...
+            //        (and handles the prefix cut memcpy when needed / is slicable...)
+            Py_ssize_t filled_bytes = _bufferedreader_fill_buffer(self);
+            // Adapt to match _bufferedreader_raw_read return + data filling.
+            if (filled_bytes > 0) {
+                assert(self->read_buffer);
+                Py_ssize_t copied_out = Py_MIN(remaining, filled_bytes);
+                memcpy(buffer->buf + written,
+                       PyBytes_AS_STRING(self->read_buffer), copied_out);
+                if (buffered_shrink_read_buffer(self, copied_out) == -1) {
+                    LEAVE_BUFFERED(self);
+                    return NULL;
+                }
+                n = copied_out;
+            } else {
+                n = filled_bytes;
+            }
+        }
 
         /* end of stream */
         if (n == 0) {
@@ -1132,7 +1177,7 @@ _buffered_readinto_generic(buffered *self, Py_buffer *buffer, char readinto1)
         /* Other errors */
         else if (n < 0) {
             LEAVE_BUFFERED(self);
-            return res;
+            return NULL;
         }
 
         written += n;
@@ -1142,9 +1187,9 @@ _buffered_readinto_generic(buffered *self, Py_buffer *buffer, char readinto1)
             break;
         }
     }
-    res = PyLong_FromSsize_t(written);
+
     LEAVE_BUFFERED(self);
-    return res;
+    return PyLong_FromSsize_t(written);
 }
 
 /*[clinic input]
@@ -1674,6 +1719,8 @@ _bufferedreader_fill_buffer(buffered *self)
     // Read buffer should be empty.
     assert (self->read_buffer == NULL);
     Py_ssize_t buffer_size = self->buffer_size;
+    // FIXME(cmaloney): This should probably go away, or be the place that
+    // always tests for it?
     if (buffer_size == 0) {
         buffer_size = DEFAULT_BUFFER_SIZE;
     }
@@ -1690,7 +1737,6 @@ _bufferedreader_fill_buffer(buffered *self)
     if (_PyBytes_Resize(&self->read_buffer, n) == -1) {
         return -1;
     }
-    assert(self->read_buffer != NULL);
     return n;
 }
 
