@@ -1028,7 +1028,7 @@ _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
     if (n < 0) {
         if (self->read_buffer == NULL) {
             n = _bufferedreader_fill_buffer(self);
-            if (n <= 0) {
+            if (n < 0) {
                 LEAVE_BUFFERED(self);
                 return NULL;
             }
