@@ -1690,6 +1690,7 @@ _bufferedreader_fill_buffer(buffered *self)
     if (_PyBytes_Resize(&self->read_buffer, n) == -1) {
         return -1;
     }
+    assert(self->read_buffer != NULL);
     return n;
 }
 
@@ -1916,10 +1917,11 @@ _bufferedreader_peek_unlocked(buffered *self)
     if (r == -1) {
         return NULL;
     }
-    if (r == -2) {
+    if (r == -2 || r == 0) {
         return _BYTES_EMPTY;
     }
     // FIXME: does this need a Py_INCREF?
+    assert(self->read_buffer != NULL);
     Py_INCREF(self->read_buffer);
     return self->read_buffer;
 }
