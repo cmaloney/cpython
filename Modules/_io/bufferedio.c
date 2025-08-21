@@ -1083,28 +1083,26 @@ _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
 static PyObject *
 _buffered_readinto_generic(buffered *self, Py_buffer *buffer, char readinto1)
 {
-    Py_ssize_t n, written = 0, remaining;
-
     CHECK_INITIALIZED(self)
     CHECK_CLOSED(self, "readinto of closed file")
 
     if (!ENTER_BUFFERED(self)) {
         return NULL;
     }
-
+    Py_ssize_t written = 0;
     // FIXME(cmaloney): Optimize read case a lot more (bpo-9971)
     // see: https://github.com/python/cpython/commit/3486a98dcd7f11215b61be3428edbbc9b6aa3164
     if (self->read_buffer) {
-        // FIXME(cmaloney): n is a confusing var name here. (it indicates size of read buffer)
-        n = PyBytes_GET_SIZE(self->read_buffer);
-        written = Py_MIN(buffer->len, n);
+        Py_ssize_t available = PyBytes_GET_SIZE(self->read_buffer);
+        written = Py_MIN(buffer->len, available);
         memcpy(buffer->buf, PyBytes_AS_STRING(self->read_buffer), written);
         if (buffered_shrink_read_buffer(self, written) == -1) {
             LEAVE_BUFFERED(self);
             return NULL;
         }
 
-        if (written <= n) {
+        // Buffer filled from read_buffer; early exit.
+        if (available >= buffer->len) {
             LEAVE_BUFFERED(self);
             return PyLong_FromSsize_t(written);
         }
@@ -1118,9 +1116,10 @@ _buffered_readinto_generic(buffered *self, Py_buffer *buffer, char readinto1)
 
     // read buffer should have been emptied.
     assert(self->read_buffer == NULL);
+    Py_ssize_t n;
     while (1) {
         assert(buffer->len >= written);
-        remaining = buffer->len - written;
+        Py_ssize_t remaining = buffer->len - written;
         if (remaining == 0) {
             break;
         }
@@ -1129,10 +1128,14 @@ _buffered_readinto_generic(buffered *self, Py_buffer *buffer, char readinto1)
         // current version?
         // Do big reads directly. For small reads, bump up to a full buffer_size
         // to avoid small reads. This exchanges read() for memcpy().
-        if (self->buffer_size <= remaining) {
+        if (remaining > self->buffer_size) {
             n = _bufferedreader_raw_read(self, buffer->buf + written, remaining);
         }
-        else {
+        // FIXME(cmaloney): I don't understand why this behavior is optimal but
+        // it is needed for readinto1 tests.
+        /* In readinto1 mode, we do not want to fill the internal
+           buffer if we already have some data to return */
+        else if (!(readinto1 && written)) {
             // FIXME: Ideally need bytearray which is convertable to bytes without copy...
             //        (and handles the prefix cut memcpy when needed / is slicable...)
             Py_ssize_t filled_bytes = _bufferedreader_fill_buffer(self);
@@ -1150,6 +1153,9 @@ _buffered_readinto_generic(buffered *self, Py_buffer *buffer, char readinto1)
             } else {
                 n = filled_bytes;
             }
+        }
+        else {
+            n = 0;
         }
 
         /* end of stream */
