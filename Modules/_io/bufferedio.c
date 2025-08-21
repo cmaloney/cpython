@@ -1894,7 +1894,7 @@ _bufferedreader_read_generic(buffered *self, Py_ssize_t size)
 
     // FIXME: If the Py_buffer lives on, should this return NULL / don't let
     // modifiable bytes live into the wild?
-    if (actual > size) {
+    if (actual < size) {
         _PyBytes_Resize(&res, actual);
     }
 
