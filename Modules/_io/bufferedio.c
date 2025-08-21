@@ -1095,6 +1095,7 @@ _buffered_readinto_generic(buffered *self, Py_buffer *buffer, char readinto1)
     // FIXME(cmaloney): Optimize read case a lot more (bpo-9971)
     // see: https://github.com/python/cpython/commit/3486a98dcd7f11215b61be3428edbbc9b6aa3164
     if (self->read_buffer) {
+        // FIXME(cmaloney): n is a confusing var name here. (it indicates size of read buffer)
         n = PyBytes_GET_SIZE(self->read_buffer);
         written = Py_MIN(buffer->len, n);
         memcpy(buffer->buf, PyBytes_AS_STRING(self->read_buffer), written);
@@ -1103,7 +1104,7 @@ _buffered_readinto_generic(buffered *self, Py_buffer *buffer, char readinto1)
             return NULL;
         }
 
-        if (written == n || readinto1) {
+        if (written <= n) {
             LEAVE_BUFFERED(self);
             return PyLong_FromSsize_t(written);
         }
