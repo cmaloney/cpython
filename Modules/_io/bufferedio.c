@@ -1096,26 +1096,16 @@ _buffered_readinto_generic(buffered *self, Py_buffer *buffer, char readinto1)
     // see: https://github.com/python/cpython/commit/3486a98dcd7f11215b61be3428edbbc9b6aa3164
     if (self->read_buffer) {
         n = PyBytes_GET_SIZE(self->read_buffer);
-        if (n >= buffer->len) {
-            memcpy(buffer->buf, PyBytes_AS_STRING(self->read_buffer), buffer->len);
-            if (buffered_shrink_read_buffer(self, buffer->len) == -1) {
-                LEAVE_BUFFERED(self);
-                return NULL;
-            }
-            LEAVE_BUFFERED(self);
-            return PyLong_FromSsize_t(buffer->len);
-        }
-        memcpy(buffer->buf, PyBytes_AS_STRING(self->read_buffer), n);
-        if (buffered_shrink_read_buffer(self, n) == -1) {
+        written = Py_MIN(buffer->len, n);
+        memcpy(buffer->buf, PyBytes_AS_STRING(self->read_buffer), written);
+        if (buffered_shrink_read_buffer(self, written) == -1) {
             LEAVE_BUFFERED(self);
             return NULL;
         }
-        written = n;
 
-        // FIXME: Maybe make an extra call... Maybe.
-        // readinto1 is at most one call, already have data.
-        if (readinto1) {
-            return PyLong_FromSsize_t(buffer->len);
+        if (written == n || readinto1) {
+            LEAVE_BUFFERED(self);
+            return PyLong_FromSsize_t(written);
         }
     }
 
