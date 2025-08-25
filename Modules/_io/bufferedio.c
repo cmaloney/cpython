@@ -1217,8 +1217,6 @@ _io__Buffered_readinto1_impl(buffered *self, Py_buffer *buffer)
     return _buffered_readinto_generic(self, buffer, 1);
 }
 
-
-// FIXME(cmaloney): This shold probably be inline
 // Return values:
 // -1 -- Not Found
 // 0-N -- Found or hit limit, length of string to take
@@ -1238,9 +1236,8 @@ _buffered_try_split_line(PyObject *bytes, Py_ssize_t limit) {
     if (limit >= 0 && size > limit) {
         size = limit;
     }
-    found = memchr(start, '\n', size);
 
-    /* No newline, return None */
+    found = memchr(start, '\n', size);
     if (found == NULL) {
         /* Hit limit, return everything passed. */
         if (limit >= 0) {
@@ -1252,11 +1249,6 @@ _buffered_try_split_line(PyObject *bytes, Py_ssize_t limit) {
     return found - start + 1;
 }
 
-// FIXME
-// TODO
-// CURPOS
-//
-// Change this to work around read_buffer.
 static PyObject *
 _buffered_readline(buffered *self, Py_ssize_t limit)
 {
