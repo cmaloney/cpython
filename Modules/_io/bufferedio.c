@@ -1218,10 +1218,10 @@ _io__Buffered_readinto1_impl(buffered *self, Py_buffer *buffer)
 }
 
 
-// three return states
 // 1. Found newline, return buffer (res)
-// 2. No newline found, but successfully searched (None)
-// 3. Error (NULL)
+// 2. Hit limit, return buffer to limit
+// 3. Not found, return None (keep going)
+// 4. Error (NULL)
 static PyObject *
 _buffered_try_split_line(buffered *self, Py_ssize_t limit) {
     const char *found, *start;
@@ -1242,12 +1242,16 @@ _buffered_try_split_line(buffered *self, Py_ssize_t limit) {
 
     /* No newline, return None */
     if (found == NULL) {
+        /* Hit limit, return everything passed. */
+        if (limit >= 0) {
+            return _bufferedreader_read_fast(self, limit);
+        }
         /* no newline before limit, return all read data */
         Py_RETURN_NONE;
     }
 
     // Take chunk out of read_buffer.
-    return _bufferedreader_read_fast(self, found - start);
+    return _bufferedreader_read_fast(self, found - start + 1);
 }
 
 // FIXME
@@ -1286,6 +1290,9 @@ _buffered_readline(buffered *self, Py_ssize_t limit)
         LEAVE_BUFFERED(self);
         return  NULL;
     }
+    // FIXME(cmaloney): Make this thread safe by not using self->read_buffer
+    // that is, keep the data actually being worked on local to this thread
+    // (that you interleave operations isn't the fault of this)
 
     // Gather chunks into read_buffer appending to list.
     while (limit != 0) {
@@ -1331,6 +1338,7 @@ _buffered_readline(buffered *self, Py_ssize_t limit)
                 Py_DECREF(chunks);
                 return NULL;
             }
+            Py_CLEAR(self->read_buffer);
 
             if (limit >= 0) {
                 limit = Py_MAX(limit - PyBytes_GET_SIZE(self->read_buffer), 0);
@@ -1339,6 +1347,8 @@ _buffered_readline(buffered *self, Py_ssize_t limit)
         }
         /* Found! Return data so far. */
         else {
+            // FIXME: Add a special fast-case for "first buffer contains" which
+            // makes no list construction, appending, and/or joining necessary.
             if (PyList_Append(chunks, res) < 0) {
                 // Note: Not clearing read buffer here, as it has the data after
                 //       the newline which might still be useful.
