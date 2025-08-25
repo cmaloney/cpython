@@ -1218,20 +1218,20 @@ _io__Buffered_readinto1_impl(buffered *self, Py_buffer *buffer)
 }
 
 
-// 1. Found newline, return buffer (res)
-// 2. Hit limit, return buffer to limit
-// 3. Not found, return None (keep going)
-// 4. Error (NULL)
-static PyObject *
-_buffered_try_split_line(buffered *self, Py_ssize_t limit) {
+// FIXME(cmaloney): This shold probably be inline
+// Return values:
+// -1 -- Not Found
+// 0-N -- Found or hit limit, length of string to take
+static Py_ssize_t
+_buffered_try_split_line(PyObject *bytes, Py_ssize_t limit) {
     const char *found, *start;
     Py_ssize_t size;
 
     // Must have a cached read to search inside of.
-    assert(self->read_buffer);
+    assert(bytes);
 
-    start = PyBytes_AsString(self->read_buffer);
-    size = PyBytes_GET_SIZE(self->read_buffer);
+    start = PyBytes_AsString(bytes);
+    size = PyBytes_GET_SIZE(bytes);
 
     // FIXME: ASM check limit >= 0 && Py_MIN here
     // FIXME: Would a Py_MIN be better here?
@@ -1244,14 +1244,12 @@ _buffered_try_split_line(buffered *self, Py_ssize_t limit) {
     if (found == NULL) {
         /* Hit limit, return everything passed. */
         if (limit >= 0) {
-            return _bufferedreader_read_fast(self, limit);
+            return limit;
         }
         /* no newline before limit, return all read data */
-        Py_RETURN_NONE;
+        return -1;
     }
-
-    // Take chunk out of read_buffer.
-    return _bufferedreader_read_fast(self, found - start + 1);
+    return found - start + 1;
 }
 
 // FIXME
@@ -1262,7 +1260,6 @@ _buffered_try_split_line(buffered *self, Py_ssize_t limit) {
 static PyObject *
 _buffered_readline(buffered *self, Py_ssize_t limit)
 {
-    PyObject *res = NULL;
     PyObject *chunks = NULL;
 
     CHECK_CLOSED(self, "readline of closed file")
@@ -1285,17 +1282,17 @@ _buffered_readline(buffered *self, Py_ssize_t limit)
         return NULL;
     }
 
-    chunks = PyList_New(0);
-    if (chunks == NULL) {
-        LEAVE_BUFFERED(self);
-        return  NULL;
-    }
     // FIXME(cmaloney): Make this thread safe by not using self->read_buffer
     // that is, keep the data actually being worked on local to this thread
     // (that you interleave operations isn't the fault of this)
 
     // Gather chunks into read_buffer appending to list.
-    while (limit != 0) {
+    while (1) {
+        if (limit == 0) {
+            LEAVE_BUFFERED(self);
+            break;
+        }
+
         /* Fill buffer if needed
 
            NOTE: It's critical not to issue a read() unless more data is
@@ -1311,64 +1308,70 @@ _buffered_readline(buffered *self, Py_ssize_t limit)
                 // FIXME: would it be better to put chunks back into
                 // self->read_buffer?
                 LEAVE_BUFFERED(self);
-                Py_DECREF(chunks);
+                Py_XDECREF(chunks);
                 return NULL;
             }
 
             /* End of stream or would block, return all bytes so far. */
             if (n <= 0) {
+                LEAVE_BUFFERED(self);
                 break;
             }
         }
         assert(self->read_buffer != NULL);
 
-        res = _buffered_try_split_line(self, limit);
-        if (res == NULL) {
-            // FIXME: would it be better to put chunks back into
-            // self->read_buffer?
+        Py_ssize_t length = _buffered_try_split_line(self->read_buffer, limit);
+
+        /* Found! Return data so far. */
+        if (length >= 0) {
+            PyObject *final_chunk = _bufferedreader_read_fast(self, length);
+
+            // Unlock before string join + dealloc which may be expensive.
+            // note nothing past this touches self->read_buffer.
+            LEAVE_BUFFERED(self);
+
+            if (chunks == NULL) {
+                // Is first chunk, no need to join.
+                return final_chunk;
+            }
+
+            if (PyList_Append(chunks, final_chunk) < 0) {
+                // Note: Not clearing read buffer here, as it has the data after
+                //       the newline which might still be useful.
+                Py_DECREF(chunks);
+                return NULL;
+            }
+            break;
+        }
+
+        /* Not found, will need another chunk. */
+        if (chunks == NULL) {
+            chunks = PyList_New(0);
+            if (chunks == NULL) {
+                LEAVE_BUFFERED(self);
+                return  NULL;
+            }
+        }
+
+        if (PyList_Append(chunks, self->read_buffer) < 0) {
+            Py_CLEAR(self->read_buffer);
             LEAVE_BUFFERED(self);
             Py_DECREF(chunks);
             return NULL;
         }
-        /* Not found, will need another chunk. */
-        else if (Py_IsNone(res)) {
-            if (PyList_Append(chunks, self->read_buffer) < 0) {
-                Py_CLEAR(self->read_buffer);
-                LEAVE_BUFFERED(self);
-                Py_DECREF(chunks);
-                return NULL;
-            }
-            Py_CLEAR(self->read_buffer);
+        Py_CLEAR(self->read_buffer);
 
-            if (limit >= 0) {
-                limit = Py_MAX(limit - PyBytes_GET_SIZE(self->read_buffer), 0);
-            }
-            Py_CLEAR(res);
-        }
-        /* Found! Return data so far. */
-        else {
-            // FIXME: Add a special fast-case for "first buffer contains" which
-            // makes no list construction, appending, and/or joining necessary.
-            if (PyList_Append(chunks, res) < 0) {
-                // Note: Not clearing read buffer here, as it has the data after
-                //       the newline which might still be useful.
-                LEAVE_BUFFERED(self);
-                Py_DECREF(chunks);
-                return NULL;
-            }
-            Py_CLEAR(res);
-            break;
+        if (limit >= 0) {
+            limit = Py_MAX(limit - PyBytes_GET_SIZE(self->read_buffer), 0);
         }
     }
-    // Unlock before string join + dealloc which may be expensive.
-    // note nothing past this touches self->read_buffer.
-    LEAVE_BUFFERED(self);
 
     // Need to return all the data in chunks joined together.
-    assert(res == NULL);
-    assert(chunks != NULL);
-    Py_XSETREF(res, PyBytes_Join(_BYTES_EMPTY, chunks));
-    return res;
+    // Happens for both hit limit and found in not first chunk.
+    if (chunks == NULL) {
+        return _BYTES_EMPTY;
+    }
+    return PyBytes_Join(_BYTES_EMPTY, chunks);
 }
 
 /*[clinic input]
