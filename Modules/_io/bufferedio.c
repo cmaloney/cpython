@@ -1743,59 +1743,74 @@ _bufferedreader_fill_buffer(buffered *self)
 }
 
 static PyObject *
+_bufferedreader_raw_readall(buffered *self) {
+    PyObject *raw_readall = NULL;
+    if (PyObject_GetOptionalAttr(self->raw, &_Py_ID(readall), &raw_readall) <= 0) {
+        return NULL;
+    }
+
+    assert(raw_readall);
+    PyObject *res = _PyObject_CallNoArgs(raw_readall);
+    Py_DECREF(raw_readall);
+    if (res == NULL) {
+        return NULL;
+    }
+
+    // FIXME: The "prepend self->readbuffer" should move to a wrapper function.
+    //       for both the None and "got bytes" cases.
+
+    /* Blocked but may already have data, return already read data. */
+    if (res == Py_None) {
+        if (self->read_buffer) {
+            Py_SETREF(res, self->read_buffer);
+            Py_CLEAR(self->read_buffer);
+        }
+        return res;
+    }
+
+    /* Readall is expected to return bytes. */
+    if (!PyBytes_Check(res)) {
+        PyErr_SetString(PyExc_TypeError, "readall() should return bytes");
+        Py_DECREF(res);
+        return NULL;
+    }
+
+    /* Combine read buffer with readall result. */
+    if (self->read_buffer) {
+        // FIXME(cmaloney): This whole function should probably take read_buffer
+        // at the start / make it thread local.
+        PyBytes_Concat(&self->read_buffer, res);
+        Py_SETREF(res, self->read_buffer);
+        Py_CLEAR(self->read_buffer);
+    }
+    return res;
+}
+
+
+static PyObject *
 _bufferedreader_read_all(buffered *self)
 {
-    // FIXME
-    // CURPOS
-    // TODO
-    PyObject *res = NULL, *data = NULL, *tmp = NULL, *chunks = NULL, *readall;
 
     /* Ensure no unwritten data. */
     if (_bufferedwriter_flush_unlocked(self) == -1) {
-        goto cleanup;
+        return NULL;
     }
 
     /* Use underlying readall if available. */
-    if (PyObject_GetOptionalAttr(self->raw, &_Py_ID(readall), &readall) < 0) {
-        goto cleanup;
+    PyObject *readall_result = _bufferedreader_raw_readall(self);
+    if (readall_result) {
+        return readall_result;
     }
-    if (readall) {
-        tmp = _PyObject_CallNoArgs(readall);
-        Py_DECREF(readall);
-        if (tmp == NULL) {
-            goto cleanup;
-        }
-        else if (Py_IsNone(tmp)) {
-            // Blocked but already have data, return already read data.
-            if (self->read_buffer == NULL) {
-                res = tmp;
-                goto cleanup;
-            }
-            Py_XSETREF(res, self->read_buffer);
-            goto cleanup;
-        }
-        else if (!PyBytes_Check(tmp)) {
-            PyErr_SetString(PyExc_TypeError, "readall() should return bytes");
-            goto cleanup;
-        }
-
-        // combine read buffer with the readall result.
-        if (self->read_buffer) {
-            PyBytes_Concat(&self->read_buffer, tmp);
-            Py_XSETREF(res, self->read_buffer);
-        }
-        else {
-            Py_XSETREF(res, tmp);
-        }
-        goto cleanup;
+    else if (PyErr_Occurred()) {
+        return NULL;
     }
 
-    chunks = PyList_New(0);
+    PyObject *chunks = PyList_New(0);
     if (chunks == NULL) {
-        goto cleanup;
+        return NULL;
     }
 
-    data = self->read_buffer;
+    PyObject *data = self->read_buffer;
     self->read_buffer = NULL;
 
     while (1) {
@@ -1803,7 +1818,8 @@ _bufferedreader_read_all(buffered *self)
             /* all chunks must have at least one byte. */
             assert(PyBytes_GET_SIZE(data) > 0);
             if (PyList_Append(chunks, data) < 0) {
-                goto cleanup;
+                Py_CLEAR(data);
+                break;
             }
             Py_CLEAR(data);
         }
@@ -1813,32 +1829,30 @@ _bufferedreader_read_all(buffered *self)
         /* Read until EOF or until read() would block. */
         data = PyObject_CallMethodNoArgs(self->raw, &_Py_ID(read));
         if (data == NULL) {
-            goto cleanup;
+            assert(PyErr_Occurred());
+            Py_DECREF(chunks);
+            break;
         }
         if (data != Py_None && !PyBytes_Check(data)) {
             PyErr_SetString(PyExc_TypeError, "read() should return bytes");
-            goto cleanup;
+            Py_CLEAR(data);
+            break;
         }
+
         /* EOF or would block */
         if (data == Py_None || PyBytes_GET_SIZE(data) == 0) {
             if (PyList_Size(chunks) == 0) {
-                res = data;
-                goto cleanup;
+                break;
             }
-            else {
-                tmp = PyBytes_Join(_BYTES_EMPTY, chunks);
-                res = tmp;
-                goto cleanup;
-            }
+
+            Py_SETREF(data, PyBytes_Join(_BYTES_EMPTY, chunks));
+            break;
         }
     }
-cleanup:
-    /* res is either NULL or a borrowed ref */
-    Py_XINCREF(res);
-    Py_XDECREF(data);
-    Py_XDECREF(tmp);
-    Py_XDECREF(chunks);
-    return res;
+
+    Py_DECREF(chunks);
+    assert(PyBytes_Check(data));
+    return data;
 }
 
 
