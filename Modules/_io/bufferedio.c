@@ -1830,7 +1830,6 @@ _bufferedreader_read_all(buffered *self)
         data = PyObject_CallMethodNoArgs(self->raw, &_Py_ID(read));
         if (data == NULL) {
             assert(PyErr_Occurred());
-            Py_DECREF(chunks);
             break;
         }
         if (data != Py_None && !PyBytes_Check(data)) {
@@ -1851,7 +1850,6 @@ _bufferedreader_read_all(buffered *self)
     }
 
     Py_DECREF(chunks);
-    assert(PyBytes_Check(data));
     return data;
 }
 
