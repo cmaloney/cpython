@@ -1767,7 +1767,7 @@ _bufferedreader_raw_readall(buffered *self) {
     /* Blocked but may already have data, return already read data. */
     if (res == Py_None) {
         if (self->read_buffer) {
-            Py_SETREF(res, self->read_buffer);
+            res = Py_NewRef(self->read_buffer);
             Py_CLEAR(self->read_buffer);
         }
         return res;
