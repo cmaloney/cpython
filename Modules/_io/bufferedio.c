@@ -2162,7 +2162,7 @@ _bufferedwriter_flush_unlocked(buffered *self)
         RAW_OFFSET(self) == 0.
 
         Issue: https://bugs.python.org/issue32228 */
-        _buffered_reset_buf(self);
+        // TODO(cmaloney): Was _bufferedwriter_reset_buf()
         return 0;
     }
     /* Only wrote some, keep the rest. Not cleared even with retries (error) */
