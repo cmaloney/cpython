@@ -18,7 +18,12 @@
 #include "_iomodule.h"
 
 
-#define _BYTES_EMPTY ((PyObject *)&_Py_SINGLETON(bytes_empty))
+static inline PyObject* bytes_get_empty(void)
+{
+    PyObject *empty = &(&_Py_SINGLETON(bytes_empty))->ob_base.ob_base;
+    assert(_Py_IsImmortal(empty));
+    return empty;
+}
 
 /*[clinic input]
 module _io
@@ -1361,9 +1366,9 @@ _buffered_readline(buffered *self, Py_ssize_t limit)
     // Need to return all the data in chunks joined together.
     // Happens for both hit limit and found in not first chunk.
     if (chunks == NULL) {
-        return _BYTES_EMPTY;
+        return bytes_get_empty();
     }
-    return PyBytes_Join(_BYTES_EMPTY, chunks);
+    return PyBytes_Join(bytes_get_empty(), chunks);
 }
 
 /*[clinic input]
@@ -1779,6 +1784,7 @@ _bufferedreader_raw_readall(buffered *self) {
     if (self->read_buffer) {
         // FIXME(cmaloney): This whole function should probably take read_buffer
         // at the start / make it thread local.
+        // FIXME(cmaloney): Maybe use PyBytes_ConcatAndDel
         PyBytes_Concat(&self->read_buffer, res);
         Py_SETREF(res, self->read_buffer);
         Py_CLEAR(self->read_buffer);
@@ -1844,7 +1850,7 @@ _bufferedreader_read_all(buffered *self)
                 break;
             }
 
-            Py_SETREF(data, PyBytes_Join(_BYTES_EMPTY, chunks));
+            Py_SETREF(data, PyBytes_Join(bytes_get_empty(), chunks));
             break;
         }
     }
@@ -1867,7 +1873,7 @@ _bufferedreader_read_fast(buffered *self, Py_ssize_t requested)
     if (self->read_buffer == NULL) {
         // No bytes available
         if (requested == 0) {
-            return _BYTES_EMPTY;
+            return bytes_get_empty();
         }
         // More requested than available.
         return Py_None;
@@ -1978,7 +1984,7 @@ _bufferedreader_peek_unlocked(buffered *self)
         return NULL;
     }
     if (r == -2 || r == 0) {
-        return _BYTES_EMPTY;
+        return bytes_get_empty();
     }
     // FIXME: does this need a Py_INCREF?
     assert(self->read_buffer != NULL);
