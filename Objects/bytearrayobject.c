@@ -141,22 +141,25 @@ PyByteArray_FromStringAndSize(const char *bytes, Py_ssize_t size)
     }
 
     new = PyObject_New(PyByteArrayObject, &PyByteArray_Type);
-    if (new == NULL)
+    if (new == NULL) {
         return NULL;
+    }
 
     if (size == 0) {
         new->ob_bytes = NULL;
+        new->ob_writer = NULL;
         alloc = 0;
     }
     else {
         alloc = size + 1;
-        new->ob_bytes = PyMem_Malloc(alloc);
-        if (new->ob_bytes == NULL) {
-            Py_DECREF(new);
-            return PyErr_NoMemory();
+        new->ob_writer = PyBytesWriter_Create(alloc);
+        if (new->ob_writer == NULL) {
+            return NULL;
         }
-        if (bytes != NULL && size > 0)
+        new->ob_bytes = PyBytesWriter_GetData(new->ob_writer);
+        if (bytes != NULL && size > 0) {
             memcpy(new->ob_bytes, bytes, size);
+        }
         new->ob_bytes[size] = '\0';  /* Trailing null byte */
     }
     Py_SET_SIZE(new, size);
@@ -245,21 +248,31 @@ bytearray_resize_lock_held(PyObject *self, Py_ssize_t requested_size)
     }
 
     if (logical_offset > 0) {
-        sval = PyMem_Malloc(alloc);
-        if (sval == NULL) {
-            PyErr_NoMemory();
+        // TODO: this might be able to just use PyByteWriter's internal
+        // overallocation on grow/resize rather than doing all this work by hand
+        PyBytesWriter *new = PyBytesWriter_Create(alloc);
+        if (new == NULL) {
             return -1;
         }
+        sval = PyBytesWriter_GetData(new);
         memcpy(sval, PyByteArray_AS_STRING(self),
                Py_MIN((size_t)requested_size, (size_t)Py_SIZE(self)));
-        PyMem_Free(obj->ob_bytes);
+        PyBytesWriter_Discard(obj->ob_writer);
+        obj->ob_writer = new;
     }
     else {
-        sval = PyMem_Realloc(obj->ob_bytes, alloc);
-        if (sval == NULL) {
-            PyErr_NoMemory();
-            return -1;
+        if (obj->ob_writer) {
+            if (PyBytesWriter_Resize(obj->ob_writer, alloc) < 0) {
+                return -1;
+            }
         }
+        else {
+            obj->ob_writer = PyBytesWriter_Create(alloc);
+            if (obj->ob_writer == NULL) {
+                return -1;
+            }
+        }
+        sval = PyBytesWriter_GetData(obj->ob_writer);
     }
 
     obj->ob_bytes = obj->ob_start = sval;
@@ -1244,8 +1257,10 @@ bytearray_dealloc(PyObject *op)
                         "deallocated bytearray object has exported buffers");
         PyErr_Print();
     }
-    if (self->ob_bytes != 0) {
-        PyMem_Free(self->ob_bytes);
+    if (self->ob_writer != NULL) {
+        PyBytesWriter_Discard(self->ob_writer);
+        self->ob_bytes = NULL;
+        self->ob_writer = NULL;
     }
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
