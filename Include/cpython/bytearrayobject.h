@@ -2,9 +2,6 @@
 #  error "this header file must not be included directly"
 #endif
 
-// FIXME(cmaloney): Not sure the right way to get this from bytesobject.h
-typedef struct PyBytesWriter PyBytesWriter;
-
 /* Object layout */
 typedef struct {
     PyObject_VAR_HEAD
