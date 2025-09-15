@@ -312,7 +312,7 @@ class IncrementalEncoder(codecs.BufferedIncrementalEncoder):
 
         result += trailing_dot
         size += len(trailing_dot)
-        return (bytes(result), size)
+        return (result.take_bytes(), size)
 
 class IncrementalDecoder(codecs.BufferedIncrementalDecoder):
     def _buffer_decode(self, input, errors, final):

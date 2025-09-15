@@ -973,7 +973,7 @@ class TZStrTest(ZoneInfoTestBase):
             # We will not write any of the manual transition parts
             out += struct.pack(">6l", 0, 0, 0, 0, 0, 0)
 
-        cls._tzif_header = bytes(out)
+        cls._tzif_header = out.take_bytes()
 
     def zone_from_tzstr(self, tzstr):
         """Creates a zoneinfo file following a POSIX rule."""

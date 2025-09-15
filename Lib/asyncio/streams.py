@@ -667,8 +667,7 @@ class StreamReader:
             # adds data which makes separator be found. That's why we check for
             # EOF *after* inspecting the buffer.
             if self._eof:
-                chunk = bytes(self._buffer)
-                self._buffer.clear()
+                chunk = self._buffer.take_bytes()
                 raise exceptions.IncompleteReadError(chunk, None)
 
             # _wait_for_data() will resume reading if stream was paused.
@@ -727,8 +726,9 @@ class StreamReader:
             await self._wait_for_data('read')
 
         # This will work right even if buffer is less than n bytes
-        data = bytes(memoryview(self._buffer)[:n])
-        del self._buffer[:n]
+        if n > len(self._buffer):
+            n = len(self._buffer)
+        data = self._buffer.take_bytes(n)
 
         self._maybe_resume_transport()
         return data
@@ -759,18 +759,12 @@ class StreamReader:
 
         while len(self._buffer) < n:
             if self._eof:
-                incomplete = bytes(self._buffer)
-                self._buffer.clear()
+                incomplete = self._buffer.take_bytes()
                 raise exceptions.IncompleteReadError(incomplete, n)
 
             await self._wait_for_data('readexactly')
 
-        if len(self._buffer) == n:
-            data = bytes(self._buffer)
-            self._buffer.clear()
-        else:
-            data = bytes(memoryview(self._buffer)[:n])
-            del self._buffer[:n]
+        data = self._buffer.take_bytes(n)
         self._maybe_resume_transport()
         return data
 
