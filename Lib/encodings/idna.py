@@ -226,7 +226,8 @@ class Codec(codecs.Codec):
                     offset + exc.end,
                     exc.reason,
                 )
-        return bytes(result+trailing_dot), len(input)
+        result += trailing_dot
+        return result.take_bytes(), len(input)
 
     def decode(self, input, errors='strict'):
 

@@ -678,10 +678,9 @@ class StreamReader:
             raise exceptions.LimitOverrunError(
                 'Separator is found, but chunk is longer than limit', match_start)
 
-        chunk = self._buffer[:match_end]
-        del self._buffer[:match_end]
+        chunk = self._buffer.take_bytes(match_end)
         self._maybe_resume_transport()
-        return bytes(chunk)
+        return chunk
 
     async def read(self, n=-1):
         """Read up to `n` bytes from the stream.
