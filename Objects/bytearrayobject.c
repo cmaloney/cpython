@@ -1641,13 +1641,20 @@ bytearray_take_bytes_impl(PyByteArrayObject *self, PyObject *n)
         /* +1 to copy across the null which always ends a bytearray. */
         if (PyBytesWriter_WriteBytes(
                 remaining,
-                self->ob_bytes + to_take, remaining_length + 1) < 0) {
+                self->ob_start + to_take, remaining_length + 1) < 0) {
             PyBytesWriter_Discard(remaining);
             return NULL;
         }
     }
 
-    PyObject *result = PyBytesWriter_FinishWithSize(self->ob_writer, to_take);
+    PyObject *result = NULL;
+    // If the bytes are offset inside the buffer must copy to a new bytes.
+    if (self->ob_start != self->ob_bytes) {
+        result = PyBytes_FromStringAndSize(self->ob_start, to_take);
+        PyBytesWriter_Discard(self->ob_writer);
+    } else {
+        result = PyBytesWriter_FinishWithSize(self->ob_writer, to_take);
+    }
     if (result == NULL) {
         if (remaining) {
             PyBytesWriter_Discard(remaining);

@@ -238,15 +238,7 @@ def _b32decode(alphabet, s, casefold=False, map01=None):
         last = acc.to_bytes(5)  # big endian
         leftover = (43 - 5 * padchars) // 8  # 1: 4, 3: 3, 4: 2, 6: 1
         decoded[-5:] = last[:leftover]
-    # FIXME(cmaloney): Not sure why take_bytes goes really bad in this case.
-    res = bytes(decoded)
-    """
-    assert len(res) == len(decoded)
-    print(decoded, res)
-    tb = decoded.take_bytes()
-    print("TB", tb == res, tb)
-    """
-    return res
+    return decoded.take_bytes()
 
 
 def b32encode(s):
