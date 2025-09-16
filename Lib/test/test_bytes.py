@@ -1479,6 +1479,8 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
         self.assertEqual(ba.take_bytes(None), b'')
 
         # FIXME(cmaloney): more tests!
+        # REQUIRED: Tests which cause the bytearray ob_start to be offset from
+        # ob_bytes.
 
     def test_setitem(self):
         def setitem_as_mapping(b, i, val):
