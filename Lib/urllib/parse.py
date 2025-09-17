@@ -670,9 +670,9 @@ _hextobyte = None
 
 def unquote_to_bytes(string):
     """unquote_to_bytes('abc%20def') -> b'abc def'."""
-    return bytes(_unquote_impl(string))
+    return _unquote_impl(string)
 
-def _unquote_impl(string: bytes | bytearray | str) -> bytes | bytearray:
+def _unquote_impl(string: bytes | bytearray | str) -> bytes:
     # Note: strings are encoded as UTF-8. This is only an issue if it contains
     # unescaped non-ASCII characters, which URIs should not.
     if not string:
@@ -699,7 +699,7 @@ def _unquote_impl(string: bytes | bytearray | str) -> bytes | bytearray:
         except KeyError:
             append(b'%')
             append(item)
-    return res
+    return res.take_bytes()
 
 _asciire = re.compile('([\x00-\x7f]+)')
 
