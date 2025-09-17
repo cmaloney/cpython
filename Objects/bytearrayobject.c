@@ -141,22 +141,25 @@ PyByteArray_FromStringAndSize(const char *bytes, Py_ssize_t size)
     }
 
     new = PyObject_New(PyByteArrayObject, &PyByteArray_Type);
-    if (new == NULL)
+    if (new == NULL) {
         return NULL;
+    }
 
     if (size == 0) {
         new->ob_bytes = NULL;
+        new->ob_writer = NULL;
         alloc = 0;
     }
     else {
         alloc = size + 1;
-        new->ob_bytes = PyMem_Malloc(alloc);
-        if (new->ob_bytes == NULL) {
-            Py_DECREF(new);
-            return PyErr_NoMemory();
+        new->ob_writer = PyBytesWriter_Create(alloc);
+        if (new->ob_writer == NULL) {
+            return NULL;
         }
-        if (bytes != NULL && size > 0)
+        new->ob_bytes = PyBytesWriter_GetData(new->ob_writer);
+        if (bytes != NULL && size > 0) {
             memcpy(new->ob_bytes, bytes, size);
+        }
         new->ob_bytes[size] = '\0';  /* Trailing null byte */
     }
     Py_SET_SIZE(new, size);
@@ -245,21 +248,31 @@ bytearray_resize_lock_held(PyObject *self, Py_ssize_t requested_size)
     }
 
     if (logical_offset > 0) {
-        sval = PyMem_Malloc(alloc);
-        if (sval == NULL) {
-            PyErr_NoMemory();
+        // TODO: this might be able to just use PyByteWriter's internal
+        // overallocation on grow/resize rather than doing all this work by hand
+        PyBytesWriter *new = PyBytesWriter_Create(alloc);
+        if (new == NULL) {
             return -1;
         }
+        sval = PyBytesWriter_GetData(new);
         memcpy(sval, PyByteArray_AS_STRING(self),
                Py_MIN((size_t)requested_size, (size_t)Py_SIZE(self)));
-        PyMem_Free(obj->ob_bytes);
+        PyBytesWriter_Discard(obj->ob_writer);
+        obj->ob_writer = new;
     }
     else {
-        sval = PyMem_Realloc(obj->ob_bytes, alloc);
-        if (sval == NULL) {
-            PyErr_NoMemory();
-            return -1;
+        if (obj->ob_writer) {
+            if (PyBytesWriter_Resize(obj->ob_writer, alloc) < 0) {
+                return -1;
+            }
         }
+        else {
+            obj->ob_writer = PyBytesWriter_Create(alloc);
+            if (obj->ob_writer == NULL) {
+                return -1;
+            }
+        }
+        sval = PyBytesWriter_GetData(obj->ob_writer);
     }
 
     obj->ob_bytes = obj->ob_start = sval;
@@ -1244,8 +1257,10 @@ bytearray_dealloc(PyObject *op)
                         "deallocated bytearray object has exported buffers");
         PyErr_Print();
     }
-    if (self->ob_bytes != 0) {
-        PyMem_Free(self->ob_bytes);
+    if (self->ob_writer != NULL) {
+        PyBytesWriter_Discard(self->ob_writer);
+        self->ob_bytes = NULL;
+        self->ob_writer = NULL;
     }
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
@@ -1544,14 +1559,14 @@ bytearray_removesuffix_impl(PyByteArrayObject *self, Py_buffer *suffix)
 /*[clinic input]
 bytearray.resize
     size: Py_ssize_t
-        New size to resize to..
+        New size to resize to.
     /
 Resize the internal buffer of bytearray to len.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_resize_impl(PyByteArrayObject *self, Py_ssize_t size)
-/*[clinic end generated code: output=f73524922990b2d9 input=75fd4d17c4aa47d3]*/
+/*[clinic end generated code: output=f73524922990b2d9 input=6c9a260ca7f72071]*/
 {
     Py_ssize_t start_size = PyByteArray_GET_SIZE(self);
     int result = PyByteArray_Resize((PyObject *)self, size);
@@ -1563,6 +1578,103 @@ bytearray_resize_impl(PyByteArrayObject *self, Py_ssize_t size)
         memset(PyByteArray_AS_STRING(self) + start_size, 0, size - start_size);
     }
     Py_RETURN_NONE;
+}
+
+/*[clinic input]
+@critical_section
+bytearray.take_bytes
+    n: object = None
+        Bytes to take, negative indexes from end. Default (None) is all bytes.
+    /
+Take *n* bytes from the bytearray and return them as a bytes object.
+[clinic start generated code]*/
+
+static PyObject *
+bytearray_take_bytes_impl(PyByteArrayObject *self, PyObject *n)
+/*[clinic end generated code: output=3147fbc0bbbe8d94 input=88b446df44ee88bc]*/
+{
+    Py_ssize_t to_take, original;
+    Py_ssize_t size = Py_SIZE(self);
+    if (Py_IsNone(n)) {
+        to_take = original = size;
+    }
+    // Integer index, from start (zero, positive) or end (negative)
+    else if (_PyIndex_Check(n)) {
+        to_take = original = PyNumber_AsSsize_t(n, PyExc_IndexError);
+        if (to_take == -1 && PyErr_Occurred()) {
+            return NULL;
+        }
+        if (to_take < 0) {
+            to_take += size;
+        }
+    } else {
+        PyErr_SetString(PyExc_TypeError, "quantity to take must be None or an integer");
+        return NULL;
+    }
+
+    if (to_take < 0 || to_take > size) {
+        PyErr_Format(PyExc_TypeError,
+            "can't take %d(%d) outside size %d",
+            original, to_take, size);
+        return NULL;
+    }
+
+    /* Don't allow a buffer which may still have mutable exports be turned into
+       an immutable bytes. */
+    if (!_canresize(self)) {
+        return NULL;
+    }
+
+    if (to_take == 0 || size == 0) {
+        return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
+    }
+
+    // Write remaining bytes, if any, to a new writer.
+    PyBytesWriter *remaining = NULL;
+    Py_ssize_t remaining_length = size - to_take;
+    if (remaining_length > 0) {
+        remaining = PyBytesWriter_Create(0);
+        if (remaining == NULL) {
+            return NULL;
+        }
+        /* +1 to copy across the null which always ends a bytearray. */
+        if (PyBytesWriter_WriteBytes(
+                remaining,
+                self->ob_start + to_take, remaining_length + 1) < 0) {
+            PyBytesWriter_Discard(remaining);
+            return NULL;
+        }
+    }
+
+    // If the bytes are offset inside the buffer must first align.
+    if (self->ob_start != self->ob_bytes) {
+        memmove(self->ob_bytes, self->ob_start, to_take);
+        self->ob_start = self->ob_bytes;
+    }
+
+    PyObject *result = PyBytesWriter_FinishWithSize(self->ob_writer, to_take);
+    if (result == NULL) {
+        if (remaining) {
+            PyBytesWriter_Discard(remaining);
+        }
+        return NULL;
+    }
+
+    // Point the bytearray towards the writer with the remaing data.
+    self->ob_writer = remaining;
+    if (remaining) {
+        self->ob_bytes = self->ob_start = PyBytesWriter_GetData(self->ob_writer);
+        Py_SET_SIZE(self, size - to_take);
+        FT_ATOMIC_STORE_SSIZE_RELAXED(self->ob_alloc, size - to_take + 1);
+    }
+    else {
+        self->ob_bytes = self->ob_start = NULL;
+        Py_SET_SIZE(self, 0);
+        FT_ATOMIC_STORE_SSIZE_RELAXED(self->ob_alloc, 0);
+    }
+
+    return result;
+
 }
 
 
@@ -2761,6 +2873,7 @@ static PyMethodDef bytearray_methods[] = {
     BYTEARRAY_STARTSWITH_METHODDEF
     BYTEARRAY_STRIP_METHODDEF
     {"swapcase", bytearray_swapcase, METH_NOARGS, _Py_swapcase__doc__},
+    BYTEARRAY_TAKE_BYTES_METHODDEF
     {"title", bytearray_title, METH_NOARGS, _Py_title__doc__},
     BYTEARRAY_TRANSLATE_METHODDEF
     {"upper", bytearray_upper, METH_NOARGS, _Py_upper__doc__},

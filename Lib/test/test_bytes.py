@@ -1451,6 +1451,36 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
         self.assertRaises(MemoryError, bytearray().resize, sys.maxsize)
         self.assertRaises(MemoryError, bytearray(1000).resize, sys.maxsize)
 
+    def test_take_bytes(self):
+        # Default
+        ba = bytearray(b'gh')
+        self.assertEqual(ba.take_bytes(), b'gh')
+        self.assertEqual(len(ba), 0)
+        self.assertEqual(ba, bytearray(b''))
+
+        # positive and negative slicing.
+        ba = bytearray(b'abcdef')
+        self.assertEqual(ba.take_bytes(1), b'a')
+        self.assertEqual(ba, bytearray(b'bcdef'))
+        self.assertEqual(len(ba), 5)
+        self.assertEqual(ba.take_bytes(-5), b'')
+        self.assertEqual(ba, bytearray(b'bcdef'))
+        self.assertEqual(len(ba), 5)
+        self.assertEqual(ba.take_bytes(-3), b'bc')
+        self.assertEqual(ba, bytearray(b'def'))
+        self.assertEqual(len(ba), 3)
+        self.assertEqual(ba.take_bytes(3), b'def')
+        self.assertEqual(ba, bytearray(b''))
+        self.assertEqual(len(ba), 0)
+
+        # Take nothing from emptiness
+        self.assertEqual(ba.take_bytes(0), b'')
+        self.assertEqual(ba.take_bytes(), b'')
+        self.assertEqual(ba.take_bytes(None), b'')
+
+        # FIXME(cmaloney): more tests!
+        # REQUIRED: Tests which cause the bytearray ob_start to be offset from
+        # ob_bytes.
 
     def test_setitem(self):
         def setitem_as_mapping(b, i, val):
