@@ -946,7 +946,7 @@ _io__RawIOBase_read_impl(PyObject *self, Py_ssize_t n)
         return NULL;
     }
 
-    res = PyBytes_FromStringAndSize(PyByteArray_AsString(b), n);
+    res = PyObject_CallMethod(b, "take_bytes", "i", n);
     Py_DECREF(b);
     return res;
 }
