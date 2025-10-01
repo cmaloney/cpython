@@ -1046,7 +1046,7 @@ class BufferedReader(_BufferedIOMixin):
             raise OSError('"raw" argument must be readable.')
 
         _BufferedIOMixin.__init__(self, raw)
-        if buffer_size <= 0:
+        if buffer_size < 0:
             raise ValueError("invalid buffer size")
         self.buffer_size = buffer_size
         self._reset_read_buf()
@@ -1137,6 +1137,8 @@ class BufferedReader(_BufferedIOMixin):
 
     def _peek_unlocked(self, n=0):
         want = min(n, self.buffer_size)
+        if want == 0:
+            raise ValueError("peek requires buffer_size greater than zero")
         have = len(self._read_buf) - self._read_pos
         if have < want or have <= 0:
             to_read = self.buffer_size - have
@@ -1153,6 +1155,10 @@ class BufferedReader(_BufferedIOMixin):
         self._checkClosed("read of closed file")
         if size < 0:
             size = self.buffer_size
+            # Making a buffer for the caller, not internal buffer so do give
+            # some data.
+            if size == 0:
+                size = DEFAULT_BUFFER_SIZE
         if size == 0:
             return b""
         with self._read_lock:
@@ -1242,7 +1248,7 @@ class BufferedWriter(_BufferedIOMixin):
             raise OSError('"raw" argument must be writable.')
 
         _BufferedIOMixin.__init__(self, raw)
-        if buffer_size <= 0:
+        if buffer_size < 0:
             raise ValueError("invalid buffer size")
         self.buffer_size = buffer_size
         self._write_buf = bytearray()
