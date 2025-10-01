@@ -209,26 +209,52 @@ class CommonBufferedTests:
 
 
 class SizeofTest:
-
     @support.cpython_only
     def test_sizeof(self):
-        bufsize1 = 4096
-        bufsize2 = 8192
-        rawio = self.MockRawIO()
-        bufio = self.tp(rawio, buffer_size=bufsize1)
-        size = sys.getsizeof(bufio) - bufsize1
-        rawio = self.MockRawIO()
-        bufio = self.tp(rawio, buffer_size=bufsize2)
-        self.assertEqual(sys.getsizeof(bufio), size + bufsize2)
+        # Unusual size to make sure we get this size piped through.
+        small_buffer_size = 1234
+        big_buffer_size = 6789
+        # Bigger than buffer_size data vailable to ensure buffer_size caps the
+        # amount read.
+        rawio = self.MockRawIO([b'x' * 4096])
+        small = self.tp(rawio, buffer_size=small_buffer_size)
+        small_size = sys.getsizeof(small)
+        rawio = self.MockRawIO([b'x' * 8192])
+        big = self.tp(rawio, buffer_size=big_buffer_size)
+        big_size = sys.getsizeof(big)
+        # No buffers allocated until at least one I/O; buffer_size doesn't
+        # effect object size.
+        self.assertEqual(small_size, big_size)
+
+        # Peek fills the buffer.
+        # FIXME(cmaloney): Need a better way to pass in how to ensure the buffer is filled
+        try:
+            small.peek()
+            big.peek()
+        # Writable instances
+        except AttributeError:
+            # TODO(cmaloney): Write too much and ensure buffer size caps?
+            small.write(b'x' * small_buffer_size)
+            big.write(b'x' * big_buffer_size)
+
+        self.assertEqual(sys.getsizeof(small), small_size + small_buffer_size)
+        self.assertEqual(sys.getsizeof(big), big_size + big_buffer_size)
+
 
     @support.cpython_only
-    def test_buffer_freeing(self) :
-        bufsize = 4096
-        rawio = self.MockRawIO()
-        bufio = self.tp(rawio, buffer_size=bufsize)
-        size = sys.getsizeof(bufio) - bufsize
+    def test_buffer_freeing(self):
+        # Unusual size to make sure we get this size piped through.
+        small_buffer_size = 1234
+        rawio = self.MockRawIO([b'x' * 4096])
+        bufio = self.tp(rawio, buffer_size=small_buffer_size)
+        # Read some so the buffer gets filled; ensure size up.
+        start_size = sys.getsizeof(bufio)
+        bufio.peek()
+        self.assertEqual(sys.getsizeof(bufio), start_size + small_buffer_size)
+        # Close, size should reset to initial.
         bufio.close()
-        self.assertEqual(sys.getsizeof(bufio), size)
+        self.assertEqual(sys.getsizeof(bufio), start_size)
+
 
 class BufferedReaderTest(CommonBufferedTests):
     read_mode = "rb"

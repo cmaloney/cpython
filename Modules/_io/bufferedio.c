@@ -410,7 +410,15 @@ static PyObject *
 _io__Buffered___sizeof___impl(buffered *self)
 /*[clinic end generated code: output=0231ef7f5053134e input=07a32d578073ea64]*/
 {
-    return PyLong_FromSize_t(_PyObject_SIZE(Py_TYPE(self)));
+    Py_ssize_t size = _PyObject_SIZE(Py_TYPE(self));
+    if (self->read_buffer) {
+        size += PyBytes_GET_SIZE(self->read_buffer);
+    }
+    if (self->write_buffer) {
+        size += PyBytes_GET_SIZE(self->write_buffer);
+    }
+
+    return PyLong_FromSsize_t(size);
 }
 
 static int
