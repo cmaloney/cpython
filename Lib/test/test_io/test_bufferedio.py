@@ -226,7 +226,7 @@ class SizeofTest:
         # effect object size.
         self.assertEqual(small_size, big_size)
 
-        # Peek fills the buffer.
+        # Fill the buffer.
         # FIXME(cmaloney): Need a better way to pass in how to ensure the buffer is filled
         try:
             small.peek()
@@ -249,7 +249,12 @@ class SizeofTest:
         bufio = self.tp(rawio, buffer_size=small_buffer_size)
         # Read some so the buffer gets filled; ensure size up.
         start_size = sys.getsizeof(bufio)
-        bufio.peek()
+        # Fill the buffer.
+        # FIXME(cmaloney): Need a better way to pass in how to ensure the buffer is filled
+        try:
+            bufio.peek()
+        except AttributeError:
+            bufio.write(b'x' * small_buffer_size)
         self.assertEqual(sys.getsizeof(bufio), start_size + small_buffer_size)
         # Close, size should reset to initial.
         bufio.close()
@@ -266,7 +271,10 @@ class BufferedReaderTest(CommonBufferedTests):
         bufio.__init__(rawio, buffer_size=1024)
         bufio.__init__(rawio, buffer_size=16)
         self.assertEqual(b"abc", bufio.read())
-        self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
+        bufio.__init__(rawio, buffer_size=0)
+        # no buffer, no peek
+        self.assertRaises(ValueError, bufio.peek)
+
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-16)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-1)
         rawio = self.MockRawIO([b"abc"])
@@ -597,8 +605,6 @@ class CBufferedReaderTest(BufferedReaderTest, SizeofTest, CTestCase):
     def test_initialization(self):
         rawio = self.MockRawIO([b"abc"])
         bufio = self.tp(rawio)
-        self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
-        self.assertRaises(ValueError, bufio.read)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-16)
         self.assertRaises(ValueError, bufio.read)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-1)
@@ -665,7 +671,7 @@ class BufferedWriterTest(CommonBufferedTests):
         bufio.__init__(rawio, buffer_size=16)
         self.assertEqual(3, bufio.write(b"abc"))
         bufio.flush()
-        self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
+        bufio.__init__(rawio, buffer_size=0)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-16)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-1)
         bufio.__init__(rawio)
@@ -955,8 +961,6 @@ class CBufferedWriterTest(BufferedWriterTest, SizeofTest, CTestCase):
     def test_initialization(self):
         rawio = self.MockRawIO()
         bufio = self.tp(rawio)
-        self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
-        self.assertRaises(ValueError, bufio.write, b"def")
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-16)
         self.assertRaises(ValueError, bufio.write, b"def")
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-1)

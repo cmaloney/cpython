@@ -808,6 +808,11 @@ _buffered_raw_seek(buffered *self, Py_off_t target, int whence)
 static int
 _buffered_init(buffered *self)
 {
+    if (self->buffer_size < 0) {
+        PyErr_SetString(PyExc_ValueError,
+            "buffer size must be 0 or greater");
+        return -1;
+    }
     if (self->lock) {
         PyThread_free_lock(self->lock);
     }
@@ -955,7 +960,7 @@ _io__Buffered_peek_impl(buffered *self, Py_ssize_t size)
     /* peek() needs buffering to return data without moving file position. */
     // FIXME: should this actually be around seekability? (Can't peek without going back?)
     if (self->buffer_size == 0) {
-        PyErr_SetString(PyExc_ValueError, "peek requires buffer_size >= 0");
+        PyErr_SetString(PyExc_ValueError, "peek requires buffer_size greater than zero");
         return NULL;
     }
 
@@ -2525,6 +2530,10 @@ _io_BufferedRandom___init___impl(buffered *self, PyObject *raw,
     }
     if (_PyIOBase_check_writable(state, raw, Py_True) == NULL) {
         return -1;
+    }
+
+    if (buffer_size < 0) {
+        PyErr_SetString(PyExc_ValueError, "");
     }
 
     Py_INCREF(raw);
