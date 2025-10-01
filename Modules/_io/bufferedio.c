@@ -1078,7 +1078,7 @@ _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
         return NULL;
     }
 
-    // FIXME: Can this be replaced with jsut a _buffered_readinto_generic?
+    // FIXME: Can this be replaced with just a _buffered_readinto_generic?
     // Really just need the byes on top / wrapping...
     // Need to do a read
     PyBytesWriter *writer = PyBytesWriter_Create(n);
@@ -1987,7 +1987,6 @@ _bufferedreader_peek_unlocked(buffered *self)
     Py_ssize_t r;
     // Already have bytes.
     if (self->read_buffer) {
-        // FIXME: does this need a Py_INCREF?
         Py_INCREF(self->read_buffer);
         return self->read_buffer;
     }
@@ -2000,7 +1999,6 @@ _bufferedreader_peek_unlocked(buffered *self)
     if (r == -2 || r == 0) {
         return bytes_get_empty();
     }
-    // FIXME: does this need a Py_INCREF?
     assert(self->read_buffer != NULL);
     Py_INCREF(self->read_buffer);
     return self->read_buffer;
