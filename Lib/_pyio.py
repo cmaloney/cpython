@@ -1136,9 +1136,9 @@ class BufferedReader(_BufferedIOMixin):
             return self._peek_unlocked(size)
 
     def _peek_unlocked(self, n=0):
-        want = min(n, self.buffer_size)
-        if want == 0:
+        if self.buffer_size == 0:
             raise ValueError("peek requires buffer_size greater than zero")
+        want = min(n, self.buffer_size)
         have = len(self._read_buf) - self._read_pos
         if have < want or have <= 0:
             to_read = self.buffer_size - have
@@ -1155,8 +1155,8 @@ class BufferedReader(_BufferedIOMixin):
         self._checkClosed("read of closed file")
         if size < 0:
             size = self.buffer_size
-            # Making a buffer for the caller, not internal buffer so do give
-            # some data.
+            # FIXME(cmaloney): this needs to look at bytes currently in buffer
+            # and return that (if any).
             if size == 0:
                 size = DEFAULT_BUFFER_SIZE
         if size == 0:
