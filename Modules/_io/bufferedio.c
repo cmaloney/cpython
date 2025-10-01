@@ -561,6 +561,10 @@ _io__Buffered_close_impl(buffered *self)
         _PyErr_ChainExceptions1(exc);
         Py_CLEAR(res);
     }
+    Py_CLEAR(self->read_buffer);
+
+    // FIXME(cmaloney): Write buffer having data here means data loss which is bad(tm)
+    Py_CLEAR(self->write_buffer);
 
 end:
     LEAVE_BUFFERED(self)
