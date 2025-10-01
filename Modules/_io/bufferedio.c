@@ -20,9 +20,7 @@
 
 static inline PyObject* bytes_get_empty(void)
 {
-    PyObject *empty = &(&_Py_SINGLETON(bytes_empty))->ob_base.ob_base;
-    assert(_Py_IsImmortal(empty));
-    return empty;
+    return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
 }
 
 /*[clinic input]
@@ -1917,14 +1915,14 @@ _bufferedreader_read_fast(buffered *self, Py_ssize_t requested)
     /* Return exactly as many bytes as requested.
 
        res, read_buffer = self->read_buffer[:n], self->read_buffer[n:] */
-    PyObject *res = self->read_buffer;
-    Py_INCREF(res);
-    if (buffered_shrink_read_buffer(self, requested) == -1) {
-        Py_CLEAR(res);
+    // FIXME(cmaloney): Would be nice to take the head of read_buffer without a
+    // memcpy. Maybe eventually can use bytearray...
+    PyObject *res = PyBytes_FromStringAndSize(PyBytes_AS_STRING(self->read_buffer), requested);
+    if (res == NULL) {
         return NULL;
     }
-    // FIXME(cmaloney): Need to use PyBytesWriter...
-    if (_PyBytes_Resize(&res, requested) == -1) {
+    if (buffered_shrink_read_buffer(self, requested) == -1) {
+        Py_CLEAR(res);
         return NULL;
     }
     return res;
