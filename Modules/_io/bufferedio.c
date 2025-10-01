@@ -1917,12 +1917,13 @@ _bufferedreader_read_fast(buffered *self, Py_ssize_t requested)
     /* Return exactly as many bytes as requested.
 
        res, read_buffer = self->read_buffer[:n], self->read_buffer[n:] */
-    Py_INCREF(self->read_buffer);
     PyObject *res = self->read_buffer;
+    Py_INCREF(res);
     if (buffered_shrink_read_buffer(self, requested) == -1) {
         Py_CLEAR(res);
         return NULL;
     }
+    // FIXME(cmaloney): Need to use PyBytesWriter...
     if (_PyBytes_Resize(&res, requested) == -1) {
         return NULL;
     }
