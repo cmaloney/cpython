@@ -1730,17 +1730,22 @@ _bufferedreader_fill_buffer(buffered *self)
     if (buffer_size == 0) {
         buffer_size = DEFAULT_BUFFER_SIZE;
     }
-    self->read_buffer = PyBytes_FromStringAndSize(NULL, buffer_size);
-    if (!self->read_buffer) {
+    PyBytesWriter *writer = PyBytesWriter_Create(buffer_size);
+    if (!writer) {
         return -1;
     }
+
+    // FIXME(cmaloney): This exports a temporary buffer that could have a
+    // reference escape (leading to a pointer to deallocated space).
     Py_ssize_t n = _bufferedreader_raw_read(self,
-        PyBytes_AS_STRING(self->read_buffer), buffer_size);
+            PyBytesWriter_GetData(writer), buffer_size);
+
     if (n <= 0) {
-        Py_CLEAR(self->read_buffer);
+        PyBytesWriter_Discard(writer);
         return n;
     }
-    if (_PyBytes_Resize(&self->read_buffer, n) == -1) {
+    self->read_buffer = PyBytesWriter_FinishWithSize(writer, n);
+    if (self->read_buffer == NULL) {
         return -1;
     }
     return n;
