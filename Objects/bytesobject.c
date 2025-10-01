@@ -3488,7 +3488,7 @@ static inline Py_ssize_t
 byteswriter_allocated(PyBytesWriter *writer)
 {
     if (writer->obj == NULL) {
-        return sizeof(writer->small_buffer);
+        return writer->small_buffer_size;
     }
     else if (writer->use_bytearray) {
         return PyByteArray_GET_SIZE(writer->obj);
@@ -3542,10 +3542,10 @@ byteswriter_resize(PyBytesWriter *writer, Py_ssize_t size, int resize)
             return -1;
         }
         if (resize) {
-            assert((size_t)size > sizeof(writer->small_buffer));
+            assert(size > writer->small_buffer_size);
             memcpy(PyByteArray_AS_STRING(writer->obj),
                    writer->small_buffer,
-                   sizeof(writer->small_buffer));
+                   writer->small_buffer_size);
         }
     }
     else {
@@ -3554,10 +3554,10 @@ byteswriter_resize(PyBytesWriter *writer, Py_ssize_t size, int resize)
             return -1;
         }
         if (resize) {
-            assert((size_t)size > sizeof(writer->small_buffer));
+            assert(size > writer->small_buffer_size);
             memcpy(PyBytes_AS_STRING(writer->obj),
                    writer->small_buffer,
-                   sizeof(writer->small_buffer));
+                   writer->small_buffer_size);
         }
     }
 
@@ -3581,18 +3581,32 @@ byteswriter_create(Py_ssize_t size, int use_bytearray)
         return NULL;
     }
 
-    PyBytesWriter *writer = _Py_FREELIST_POP_MEM(bytes_writers);
+    Py_ssize_t small_buffer_size = 0;
+    PyBytesWriter *writer = NULL;
+
+    if (size == 0) {
+        small_buffer_size = 256;
+        writer = _Py_FREELIST_POP_MEM(bytes_writers);
+    }
+
     if (writer == NULL) {
-        writer = (PyBytesWriter *)PyMem_Malloc(sizeof(PyBytesWriter));
+        writer = (PyBytesWriter *)PyMem_Malloc(sizeof(PyBytesWriter) + small_buffer_size);
         if (writer == NULL) {
             PyErr_NoMemory();
             return NULL;
         }
+    } else {
+        assert(writer->small_buffer_size == 256);
+        small_buffer_size = 256;
     }
     writer->obj = NULL;
     writer->size = 0;
     writer->use_bytearray = use_bytearray;
     writer->overallocate = !use_bytearray;
+    writer->small_buffer_size = small_buffer_size;
+    if (writer->small_buffer_size) {
+        memset(writer->small_buffer, 0, small_buffer_size);
+    }
 
     if (size >= 1) {
         if (byteswriter_resize(writer, size, 0) < 0) {
@@ -3628,7 +3642,14 @@ PyBytesWriter_Discard(PyBytesWriter *writer)
     }
 
     Py_XDECREF(writer->obj);
-    _Py_FREELIST_FREE(bytes_writers, writer, PyMem_Free);
+    // Small buffer ones use a freelist
+    if (writer->small_buffer_size) {
+        assert(writer->small_buffer_size == 256);
+        _Py_FREELIST_FREE(bytes_writers, writer, PyMem_Free);
+    }
+    else {
+        PyMem_Free(writer);
+    }
 }
 
 
@@ -3658,9 +3679,11 @@ PyBytesWriter_FinishWithSize(PyBytesWriter *writer, Py_ssize_t size)
         writer->obj = NULL;
     }
     else if (writer->use_bytearray) {
+        assert(size <= writer->small_buffer_size);
         result = PyByteArray_FromStringAndSize(writer->small_buffer, size);
     }
     else {
+        assert(size <= writer->small_buffer_size);
         result = PyBytes_FromStringAndSize(writer->small_buffer, size);
     }
     PyBytesWriter_Discard(writer);

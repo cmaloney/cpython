@@ -63,11 +63,12 @@ _PyBytes_Repeat(char* dest, Py_ssize_t len_dest,
 /* --- PyBytesWriter ------------------------------------------------------ */
 
 struct PyBytesWriter {
-    char small_buffer[256];
     PyObject *obj;
     Py_ssize_t size;
     int use_bytearray;
     int overallocate;
+    Py_ssize_t small_buffer_size;
+    char small_buffer[1];
 };
 
 // Export for '_testcapi' shared extension
