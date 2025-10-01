@@ -254,6 +254,9 @@ class SizeofTest:
         try:
             bufio.peek()
         except AttributeError:
+            # One less than max size, since max size gets special cased to pass
+            # through
+            small_buffer_size = small_buffer_size - 1
             bufio.write(b'x' * small_buffer_size)
         self.assertEqual(sys.getsizeof(bufio), start_size + small_buffer_size)
         # Close, size should reset to initial.
