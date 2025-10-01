@@ -234,6 +234,8 @@ class SizeofTest:
         # Writable instances
         except AttributeError:
             # TODO(cmaloney): Write too much and ensure buffer size caps?
+            small_buffer_size -= 1
+            big_buffer_size -= 1
             small.write(b'x' * small_buffer_size)
             big.write(b'x' * big_buffer_size)
 
@@ -256,7 +258,7 @@ class SizeofTest:
         except AttributeError:
             # One less than max size, since max size gets special cased to pass
             # through
-            small_buffer_size = small_buffer_size - 1
+            small_buffer_size -= 1
             bufio.write(b'x' * small_buffer_size)
         self.assertEqual(sys.getsizeof(bufio), start_size + small_buffer_size)
         # Close, size should reset to initial.
