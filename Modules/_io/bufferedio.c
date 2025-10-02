@@ -2110,7 +2110,7 @@ _bufferedwriter_write_retrying(buffered *self, char *buffer, Py_ssize_t len) {
         }
         else if (n == -2) {
             _set_BlockingIOError("write could not complete without blocking",
-                                 0);
+                                 written);
             return -1;
         }
 
