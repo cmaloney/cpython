@@ -2060,11 +2060,13 @@ _bufferedwriter_raw_write(buffered *self, char *start, Py_ssize_t len)
     Py_ssize_t n;
     int errnum;
     /* NOTE: the buffer needn't be released as its object is NULL. */
-    if (PyBuffer_FillInfo(&buf, NULL, start, len, 1, PyBUF_CONTIG_RO) == -1)
+    if (PyBuffer_FillInfo(&buf, NULL, start, len, 1, PyBUF_CONTIG_RO) == -1) {
         return -1;
+    }
     memobj = PyMemoryView_FromBuffer(&buf);
-    if (memobj == NULL)
+    if (memobj == NULL) {
         return -1;
+    }
     /* NOTE: PyErr_SetFromErrno() calls PyErr_CheckSignals() when EINTR
        occurs so we needn't do it ourselves.
        We then retry writing, ignoring the signal if no handler has
@@ -2076,8 +2078,9 @@ _bufferedwriter_raw_write(buffered *self, char *start, Py_ssize_t len)
         errnum = errno;
     } while (res == NULL && _PyIO_trap_eintr());
     Py_DECREF(memobj);
-    if (res == NULL)
+    if (res == NULL) {
         return -1;
+    }
     if (res == Py_None) {
         /* Non-blocking stream would have blocked. Special return code!
            Being paranoid we reset errno in case it is changed by code
