@@ -611,11 +611,6 @@ _io__IOBase_readline_impl(PyObject *self, Py_ssize_t limit)
                 Py_DECREF(readahead);
                 goto fail;
             }
-            // FIXME(cmaloney): This case shouldn't need to be added...
-            if (PyBytes_GET_SIZE(readahead) == 0) {
-                // hit EOF
-                nreadahead = 0;
-            }
             if (PyBytes_GET_SIZE(readahead) > 0) {
                 Py_ssize_t n = 0;
                 const char *buf = PyBytes_AS_STRING(readahead);
