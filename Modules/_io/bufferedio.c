@@ -2101,7 +2101,7 @@ _bufferedwriter_raw_write(buffered *self, char *start, Py_ssize_t len)
 }
 
 static Py_ssize_t
-_bufferedwriter_write_retrying(buffered *self, char *buffer, Py_ssize_t len) {
+_bufferedwriter_write_retrying(buffered *self, char *buffer, Py_ssize_t len, int add_to_buffer) {
     Py_ssize_t written = 0;
     Py_ssize_t n = 0;
     while (true) {
@@ -2112,6 +2112,24 @@ _bufferedwriter_write_retrying(buffered *self, char *buffer, Py_ssize_t len) {
             return -1;
         }
         else if (n == -2) {
+            /* FIXME(cmaloney): The data is already in memory and could just keep a memoryview on the bytes...
+
+                That also saves the allocation and copy...
+            */
+            /* Buffer as much as possible. */
+            if (add_to_buffer) {
+                assert(self->write_buffer == NULL);
+                Py_ssize_t saved = Py_MIN(len - written, self->buffer_size);
+
+                self->write_buffer = PyBytes_FromStringAndSize(buffer, saved);
+                if (self->write_buffer == NULL) {
+                    PyErr_Clear();
+                }
+                else {
+                    written += saved;
+                }
+            }
+
             _set_BlockingIOError("write could not complete without blocking",
                                  written);
             return -1;
@@ -2158,9 +2176,10 @@ _bufferedwriter_flush_unlocked(buffered *self)
     // FIXME(cmaloney): Should read_buffer be flushed here?
 
     // FIXME(cmaloney): Use writev if write_buffer is a list
-    Py_ssize_t n = _bufferedwriter_write_retrying(self, buffer_bytes, size);
+    Py_ssize_t n = _bufferedwriter_write_retrying(self, buffer_bytes, size, 0);
 
     if (n == -1) {
+        // FIXME(cmaloney): Remove actually written bytes from the cache?
         assert(PyErr_Occurred());
         return -1;
     }
@@ -2241,7 +2260,7 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
             return NULL;
         }
 
-        Py_ssize_t written = _bufferedwriter_write_retrying(self, buffer->buf, buffer->len);
+        Py_ssize_t written = _bufferedwriter_write_retrying(self, buffer->buf, buffer->len, 1);
         LEAVE_BUFFERED(self);
         if (PyErr_Occurred()) {
             return NULL;
@@ -2255,7 +2274,6 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
     if (_bufferedwriter_flush_unlocked(self) == -1) {
         return NULL;
     }
-
 
     // Write buffer should be cleared at this point
     assert(self->write_buffer == NULL);

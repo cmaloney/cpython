@@ -781,6 +781,7 @@ class BufferedWriterTest(CommonBufferedTests):
         # 8 bytes will be written, 8 will be buffered and the rest will be lost
         raw.block_on(b"0")
         try:
+            # FIXME(cmaloney): The bytestring is already in memory, would it be better to keep the remainder?
             bufio.write(b"opqrwxyz0123456789")
         except self.BlockingIOError as e:
             written = e.characters_written
