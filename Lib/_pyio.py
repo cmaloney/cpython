@@ -618,7 +618,7 @@ class RawIOBase(IOBase):
         if n is None:
             return None
         del b[n:]
-        return bytes(b)
+        return b.take_bytes()
 
     def readall(self):
         """Read until EOF, using multiple read() call."""
@@ -626,7 +626,7 @@ class RawIOBase(IOBase):
         while data := self.read(DEFAULT_BUFFER_SIZE):
             res += data
         if res:
-            return bytes(res)
+            return res.take_bytes()
         else:
             # b'' or None
             return data
@@ -1734,7 +1734,7 @@ class FileIO(RawIOBase):
         assert len(result) - bytes_read >= 1, \
             "os.readinto buffer size 0 will result in erroneous EOF / returns 0"
         result.resize(bytes_read)
-        return bytes(result)
+        return result.take_bytes()
 
     def readinto(self, buffer):
         """Same as RawIOBase.readinto()."""
