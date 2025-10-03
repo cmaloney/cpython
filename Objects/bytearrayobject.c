@@ -1011,10 +1011,17 @@ bytearray___init___impl(PyByteArrayObject *self, PyObject *arg,
         }
     }
 
-    /* unique reference bytes? Avoid copy by adopting*/
-    if (PyBytes_CheckExact(arg) && PyUnstable_Object_IsUniqueReferencedTemporary(arg)) {
+    /* FIXME(cmaloney): The unique reference logic here doesn't work;
+
+    The print definitely gets run
+    printf("FAST COPY %d %zd | %d\n", PyBytes_CheckExact(arg), Py_REFCNT(arg), PyUnstable_Object_IsUniquelyReferenced(arg));
+    */
+    /* unique reference bytes? Avoid copy by adopting. */
+    /*
+    if (PyBytes_CheckExact(arg) && _PyObject_IsUniquelyReferenced(arg)) {
         return bytearray_take_existing(self, arg);
     }
+    */
 
     /* Use the buffer API */
     if (PyObject_CheckBuffer(arg)) {
