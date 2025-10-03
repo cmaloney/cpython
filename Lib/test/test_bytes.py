@@ -1484,6 +1484,12 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
         self.assertEqual(ba, bytearray(b'cde'))
         self.assertEqual(ba.take_bytes(), b'cde')
 
+        # Take of a bytearray with references should fail.
+        ba = bytearray(b'abc')
+        with memoryview(ba) as mv:
+            self.assertRaises(BufferError, ba.take_bytes)
+        self.assertEqual(ba.take_bytes(), b'abc')
+
         # FIXME(cmaloney): more tests!
 
     def test_setitem(self):
