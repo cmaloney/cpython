@@ -887,6 +887,34 @@ bytearray_ass_subscript(PyObject *op, PyObject *index, PyObject *values)
     return ret;
 }
 
+static int bytearray_take_existing(PyByteArrayObject *self, PyObject *bytes) {
+    assert(PyBytes_CheckExact(bytes));
+    // Don't make immutable bytes mutable...
+    // assert(PyUnstable_Object_IsUniqueReferencedTemporary(bytes));
+
+    // Prep for usage as backing for a bytearray.
+    Py_ssize_t size = PyBytes_GET_SIZE(bytes);
+    Py_ssize_t alloc = size + 1;
+    if (_PyBytes_Resize(&bytes, alloc) == -1) {
+        return -1;
+    }
+
+    char *sval = PyBytes_AS_STRING(bytes);
+    sval[size] = '\0';
+
+    if (self->ob_bytes_object != NULL) {
+        Py_CLEAR(self->ob_bytes_object);
+    }
+
+    Py_BEGIN_CRITICAL_SECTION((PyObject*)self);
+    self->ob_bytes_object = bytes;
+    self->ob_bytes = self->ob_start = PyBytes_AS_STRING(bytes);
+    Py_SET_SIZE(self, size);
+    FT_ATOMIC_STORE_SSIZE_RELAXED(self->ob_alloc, alloc);
+    Py_END_CRITICAL_SECTION();
+    return 0;
+}
+
 /*[clinic input]
 bytearray.__init__
 
@@ -932,15 +960,24 @@ bytearray___init___impl(PyByteArrayObject *self, PyObject *arg,
             return -1;
         }
         encoded = PyUnicode_AsEncodedString(arg, encoding, errors);
-        if (encoded == NULL)
+        if (encoded == NULL) {
             return -1;
+        }
         assert(PyBytes_Check(encoded));
-        new = bytearray_iconcat((PyObject*)self, encoded);
-        Py_DECREF(encoded);
-        if (new == NULL)
-            return -1;
-        Py_DECREF(new);
-        return 0;
+        /* Encoding usually makes a new bytes; take ownership of it rather
+           than copying it when possible. */
+        if (Py_REFCNT(encoded) == 1) {
+            return bytearray_take_existing(self, encoded);
+        }
+        else {
+            new = bytearray_iconcat((PyObject*)self, encoded);
+            Py_DECREF(encoded);
+            if (new == NULL) {
+                return -1;
+            }
+            Py_DECREF(new);
+            return 0;
+        }
     }
 
     /* If it's not unicode, there can't be encoding or errors */
@@ -972,6 +1009,11 @@ bytearray___init___impl(PyByteArrayObject *self, PyObject *arg,
             }
             return 0;
         }
+    }
+
+    /* unique reference bytes? Avoid copy by adopting*/
+    if (PyBytes_CheckExact(arg) && PyUnstable_Object_IsUniqueReferencedTemporary(arg)) {
+        return bytearray_take_existing(self, arg);
     }
 
     /* Use the buffer API */
