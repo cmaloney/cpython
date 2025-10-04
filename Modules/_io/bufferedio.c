@@ -399,6 +399,29 @@ buffered_dealloc(PyObject *op)
     Py_DECREF(tp);
 }
 
+static Py_ssize_t
+_buffered_get_write_buffer_size(buffered *self) {
+    // TODO(cmaloney): Could this be made thread safe by doing a single pointer take + incref?
+    if (self->write_buffer == NULL) {
+        return 0;
+    }
+    // FIXME(cmaloney): Buffer protocol support.
+    if (PyBytes_CheckExact(self->write_buffer)) {
+        return PyBytes_GET_SIZE(self->write_buffer);
+    }
+
+    assert(PyList_CheckExact(self->write_buffer));
+    Py_ssize_t len = PyList_Size(self->write_buffer);
+    Py_ssize_t size = 0;
+    for(Py_ssize_t idx = 0; idx < len; ++idx) {
+        PyObject *elem = PyList_GET_ITEM(self->write_buffer, idx);
+        assert(elem);
+        assert(PyBytes_CheckExact(elem));
+        size += PyBytes_GET_SIZE(elem);
+    }
+    return size;
+}
+
 /*[clinic input]
 @critical_section
 _io._Buffered.__sizeof__
@@ -412,9 +435,7 @@ _io__Buffered___sizeof___impl(buffered *self)
     if (self->read_buffer) {
         size += PyBytes_GET_SIZE(self->read_buffer);
     }
-    if (self->write_buffer) {
-        size += PyBytes_GET_SIZE(self->write_buffer);
-    }
+    size += _buffered_get_write_buffer_size(self);
 
     return PyLong_FromSsize_t(size);
 }
@@ -2100,6 +2121,41 @@ _bufferedwriter_raw_write(buffered *self, char *start, Py_ssize_t len)
     return n;
 }
 
+// Append the given bytes to the write buffer.
+static int _buffered_add_to_write_buffer(buffered *self, PyObject *new_bytes) {
+    // TODO(cmaloney): Relax this to allow bytes-like.
+    // Can save significant copies that way (at the cost of held references potentially).
+    assert(PyBytes_CheckExact(new_bytes));
+
+    if (self->write_buffer == NULL) {
+        self->write_buffer = new_bytes;
+        return 0;
+    }
+
+    if (PyBytes_CheckExact(self->write_buffer)) {
+        // Make a list, append.
+        PyObject *list = PyList_New(2);
+        if (list == NULL) {
+            Py_DECREF(new_bytes);
+            return -1;
+        }
+        PyList_SET_ITEM(list, 0, self->write_buffer);
+        PyList_SET_ITEM(list, 1, new_bytes);
+        self->write_buffer = list;
+        return 0;
+    }
+
+    assert(PyList_CheckExact(self->write_buffer));
+
+    if (PyList_Append(self->write_buffer, new_bytes) < 0) {
+        Py_DECREF(new_bytes);
+        return -1;
+    }
+    Py_DECREF(new_bytes);
+    return 0;
+}
+
+// FIXME(cmaloney): This shold take a Py_buffer...
 static Py_ssize_t
 _bufferedwriter_write_retrying(buffered *self, char *buffer, Py_ssize_t len, int add_to_buffer) {
     Py_ssize_t written = 0;
@@ -2118,15 +2174,20 @@ _bufferedwriter_write_retrying(buffered *self, char *buffer, Py_ssize_t len, int
             */
             /* Buffer as much as possible. */
             if (add_to_buffer) {
-                assert(self->write_buffer == NULL);
                 Py_ssize_t saved = Py_MIN(len - written, self->buffer_size);
-
-                self->write_buffer = PyBytes_FromStringAndSize(buffer, saved);
-                if (self->write_buffer == NULL) {
+                PyObject *new_bytes = PyBytes_FromStringAndSize(buffer, saved);
+                // Couldn't save new bytes, abandon.
+                if (new_bytes == NULL) {
                     PyErr_Clear();
                 }
                 else {
-                    written += saved;
+                    if (_buffered_add_to_write_buffer(self, new_bytes) == -1) {
+                        PyErr_Clear();
+                        Py_CLEAR(new_bytes);
+                    }
+                    else {
+                        written += saved;
+                    }
                 }
             }
 
@@ -2156,6 +2217,33 @@ _bufferedwriter_write_retrying(buffered *self, char *buffer, Py_ssize_t len, int
     }
 }
 
+static Py_ssize_t
+_bufferedwriter_flush_write_chunk(buffered *self, PyObject *buffer) {
+    // FIXME(cmaloney): Relax to allow bytes-like
+    assert(PyBytes_CheckExact(buffer));
+
+    Py_ssize_t size = PyBytes_GET_SIZE(buffer);
+    char *buffer_bytes = PyBytes_AS_STRING(buffer);
+    Py_ssize_t n = _bufferedwriter_write_retrying(self, buffer_bytes, size, 0);
+    if (n == -1) {
+        // FIXME(cmaloney): Remove actually written bytes from the cache?
+        assert(PyErr_Occurred());
+        return -1;
+    }
+    assert(n <= size);
+    // FIXME: I don't think this is relevant anymore.
+    /* This ensures that after return from this function,
+    VALID_WRITE_BUFFER(self) returns false.
+
+    This is a required condition because when a tell() is called
+    after flushing and if VALID_READ_BUFFER(self) is false, we need
+    VALID_WRITE_BUFFER(self) to be false to have
+    RAW_OFFSET(self) == 0.
+
+    Issue: https://bugs.python.org/issue32228 */
+    return size - n;
+}
+
 /* Ensure all write buffering is empty.
 
    FIXME: Use this again when start buffering writes. For now leaving in
@@ -2170,44 +2258,61 @@ _bufferedwriter_flush_unlocked(buffered *self)
     if (self->write_buffer == NULL) {
         return 0;
     }
-    Py_ssize_t size = PyBytes_GET_SIZE(self->write_buffer);
-    char *buffer_bytes = PyBytes_AS_STRING(self->write_buffer);
 
-    // FIXME(cmaloney): Should read_buffer be flushed here?
+    // If there's a list of buffers, coalesce them.
+    // TODO(cmaloney): Fast path by using `writev` to write without any copies.
+    // FIXME(cmaloney): Testing currently asserts one write / coalesced. Is that
+    // actually best?
+    if (PyList_CheckExact(self->write_buffer)) {
+        // TODO(cmaloney): Can this provide a size hint easily?
+        PyBytesWriter *writer = PyBytesWriter_Create(0);
+        if (writer == NULL) {
+            return -1;
+        }
 
-    // FIXME(cmaloney): Use writev if write_buffer is a list
-    Py_ssize_t n = _bufferedwriter_write_retrying(self, buffer_bytes, size, 0);
+        Py_ssize_t buffer_count = PyList_GET_SIZE(self->write_buffer);
+        for (Py_ssize_t idx = 0; idx < buffer_count; ++idx) {
+            PyObject *buffer = PyList_GET_ITEM(self->write_buffer, idx);
+            assert(buffer); // Should always get out of list
+            if (PyBytesWriter_WriteBytes(
+                    writer,
+                    PyBytes_AS_STRING(buffer),
+                    PyBytes_GET_SIZE(buffer)) == -1) {
+                PyBytesWriter_Discard(writer);
+                return -1;
+            }
+        }
+        PyObject *new_buffer = PyBytesWriter_Finish(writer);
+        if (new_buffer == NULL) {
+            return -1;
+        }
+        Py_SETREF(self->write_buffer, new_buffer);
+    }
 
-    if (n == -1) {
-        // FIXME(cmaloney): Remove actually written bytes from the cache?
-        assert(PyErr_Occurred());
+    // Single buffer to write.
+    // FIXME(cmaloney): Evaluate cost of having this always be a list.
+    assert(PyBytes_CheckExact(self->write_buffer));
+
+    Py_ssize_t res = _bufferedwriter_flush_write_chunk(self, self->write_buffer);
+    if (res == -1) {
         return -1;
     }
-    /* Wrote all bytes */
-    else if (n == size) {
+    if (res == 0) {
         Py_CLEAR(self->write_buffer);
-        /* This ensures that after return from this function,
-        VALID_WRITE_BUFFER(self) returns false.
-
-        This is a required condition because when a tell() is called
-        after flushing and if VALID_READ_BUFFER(self) is false, we need
-        VALID_WRITE_BUFFER(self) to be false to have
-        RAW_OFFSET(self) == 0.
-
-        Issue: https://bugs.python.org/issue32228 */
-        // TODO(cmaloney): Was _bufferedwriter_reset_buf()
         return 0;
     }
-    /* Only wrote some, keep the rest. Not cleared even with retries (error) */
-    PyObject *remaining = PyBytes_FromStringAndSize(buffer_bytes, n);
-    if (remaining == NULL) {
-        // FIXME(cmaloney): Should this clear existing? Could have excess
-        // bytes remaining here...
+    // FIXME(cmaloney): Use a buffer object here...
+    // Partial write, stash back what remains.
+    Py_ssize_t write_buffer_len = PyBytes_GET_SIZE(self->write_buffer);
+    PyObject *leftover = PyBytes_FromStringAndSize(PyBytes_AS_STRING(self->write_buffer) + res, write_buffer_len - res);
+    Py_CLEAR(self->write_buffer);
+    if (leftover == NULL) {
         return -1;
     }
-    Py_SETREF(self->write_buffer, remaining);
+    self->write_buffer = leftover;
     return 0;
 }
+
 
 /*[clinic input]
 @critical_section
@@ -2251,7 +2356,9 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
         _buffered_reset_buf(self);
     }
 
-    /* Fast path: Just a write loop, no copying.
+    // TODO(cmaloney): This is all the same logic as TextIOWrapper write
+    // around self->pending_bytes;
+    /* Fast path: Just a write loop, no copying for big writes.
 
        NOTE: includes buffer_size == 0 (buffer->len is >= 0 always)*/
     if (buffer->len >= self->buffer_size) {
@@ -2268,21 +2375,29 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
         return PyLong_FromSsize_t(written);
     }
 
-    // Copy into the buffer.
-    // FIXME(cmaloney):  This is currently forcing buffer flushing when it
-    // shouldn't as well as forcing buffer push.
-    if (_bufferedwriter_flush_unlocked(self) == -1) {
+    /* Copy into the buffer. */
+    // Always append to the list
+    // FIXME(cmaloney): don't want to allocate a new buffer here ever...
+    // FIXME(cmaloney): Much copy is bad.
+    PyObject *new_bytes = PyBytes_FromStringAndSize(buffer->buf, buffer->len);
+    if (new_bytes == NULL) {
         return NULL;
     }
 
-    // Write buffer should be cleared at this point
-    assert(self->write_buffer == NULL);
-    // FIXME(cmaloney): don't want to allocate a new buffer here ever...
-    self->write_buffer = PyBytes_FromStringAndSize(buffer->buf, buffer->len);
-    LEAVE_BUFFERED(self);
-    if (self->write_buffer == NULL) {
+    if (_buffered_add_to_write_buffer(self, new_bytes) == -1) {
+        Py_DECREF(new_bytes);
+        LEAVE_BUFFERED(self);
         return NULL;
     }
+
+    if (_buffered_get_write_buffer_size(self) > self->buffer_size) {
+        if (_bufferedwriter_flush_unlocked(self) == -1) {
+            LEAVE_BUFFERED(self);
+            return NULL;
+        }
+    }
+
+    LEAVE_BUFFERED(self);
 
     return PyLong_FromSsize_t(buffer->len);
 }
