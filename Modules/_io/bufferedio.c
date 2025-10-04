@@ -1064,6 +1064,13 @@ _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
     if (!ENTER_BUFFERED(self)) {
         return NULL;
     }
+
+    if (_bufferedwriter_flush_unlocked(self) != 0) {
+        LEAVE_BUFFERED(self);
+        return NULL;
+    }
+
+
     if (n < 0) {
         // Called without an explicit size. Return available data or fill a buffer
         // a single time.
