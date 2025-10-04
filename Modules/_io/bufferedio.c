@@ -769,6 +769,11 @@ _buffered_raw_tell(buffered *self)
 {
     Py_off_t n;
     PyObject *res;
+
+    if (_bufferedwriter_flush_unlocked(self) != 0) {
+        return -1;
+    }
+
     res = PyObject_CallMethodNoArgs(self->raw, &_Py_ID(tell));
     if (res == NULL) {
         return -1;
