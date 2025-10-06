@@ -963,10 +963,10 @@ bytearray___init___impl(PyByteArrayObject *self, PyObject *arg,
         if (encoded == NULL) {
             return -1;
         }
-        assert(PyBytes_Check(encoded));
+        assert(PyBytes_CheckExact(encoded));
         /* Encoding usually makes a new bytes; take ownership of it rather
            than copying it when possible. */
-        if (Py_REFCNT(encoded) == 1) {
+        if (Py_REFCNT(encoded) == 1 && PyBytes_CheckExact(encoded)) {
             return bytearray_take_existing(self, encoded);
         }
         else {
@@ -1013,15 +1013,19 @@ bytearray___init___impl(PyByteArrayObject *self, PyObject *arg,
 
     /* FIXME(cmaloney): The unique reference logic here doesn't work;
 
-    The print definitely gets run
+    DO NOT SHIP THIS CODE
+
     printf("FAST COPY %d %zd | %d\n", PyBytes_CheckExact(arg), Py_REFCNT(arg), PyUnstable_Object_IsUniquelyReferenced(arg));
-    */
-    /* unique reference bytes? Avoid copy by adopting. */
-    /*
-    if (PyBytes_CheckExact(arg) && _PyObject_IsUniquelyReferenced(arg)) {
+
+    HACK: Because ByteArray is a static type (PyTypeObject) exposed in the C API
+    and using tp_init unfortunately arg is always inside a tuple.
+
+    That means it has refcount two. This is definitely the wrong way to avoid
+    copying it because it might have a refcount of 2 for other reasons. */
+    if (PyBytes_CheckExact(arg) && Py_REFCNT(arg) == 2) {
+        Py_INCREF(arg);
         return bytearray_take_existing(self, arg);
     }
-    */
 
     /* Use the buffer API */
     if (PyObject_CheckBuffer(arg)) {
@@ -2882,6 +2886,7 @@ Construct a mutable bytearray object from:\n\
   - a bytes or a buffer object\n\
   - any object implementing the buffer API.\n\
   - an integer");
+
 
 
 static PyObject *bytearray_iter(PyObject *seq);
