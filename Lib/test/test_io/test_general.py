@@ -1186,6 +1186,8 @@ class MiscIOTest:
                     self.assertEqual(e.args[2], e.characters_written)
                     sent[-1] = sent[-1][:e.characters_written]
                     received.append(rf.read())
+                    # What was sent and recieved should match.
+                    self.assertEqual(sent[-1], received[-1])
                     msg = b'BLOCKED'
                     wf.write(msg)
                     sent.append(msg)

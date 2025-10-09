@@ -354,7 +354,7 @@ _enter_buffered_busy(buffered *self)
     }
 
 #define IS_CLOSED(self) \
-    (self-> ok <= 0 || \
+    (self->ok <= 0 || \
     (self->fast_closed_checks \
      ? _PyFileIO_closed(self->raw) \
      : buffered_closed(self)))
@@ -373,6 +373,7 @@ buffered_clear(PyObject *op)
     self->ok = 0;
     Py_CLEAR(self->raw);
     Py_CLEAR(self->dict);
+    Py_CLEAR(self->write_buffer);
     return 0;
 }
 
@@ -389,7 +390,6 @@ buffered_dealloc(PyObject *op)
     self->ok = 0;
     FT_CLEAR_WEAKREFS(op, self->weakreflist);
     Py_CLEAR(self->read_buffer);
-    Py_CLEAR(self->write_buffer);
     if (self->lock) {
         PyThread_free_lock(self->lock);
         self->lock = NULL;
@@ -2278,25 +2278,8 @@ _bufferedwriter_flush_unlocked(buffered *self)
     // FIXME(cmaloney): Testing currently asserts one write / coalesced. Is that
     // actually best?
     if (PyList_CheckExact(self->write_buffer)) {
-        // TODO(cmaloney): Can this provide a size hint easily?
-        PyBytesWriter *writer = PyBytesWriter_Create(0);
-        if (writer == NULL) {
-            return -1;
-        }
-
-        Py_ssize_t buffer_count = PyList_GET_SIZE(self->write_buffer);
-        for (Py_ssize_t idx = 0; idx < buffer_count; ++idx) {
-            PyObject *buffer = PyList_GET_ITEM(self->write_buffer, idx);
-            assert(buffer); // Should always get out of list
-            if (PyBytesWriter_WriteBytes(
-                    writer,
-                    PyBytes_AS_STRING(buffer),
-                    PyBytes_GET_SIZE(buffer)) == -1) {
-                PyBytesWriter_Discard(writer);
-                return -1;
-            }
-        }
-        PyObject *new_buffer = PyBytesWriter_Finish(writer);
+        PyObject *new_buffer = PyObject_CallMethodOneArg(
+            Py_GetConstant(Py_CONSTANT_EMPTY_BYTES), &_Py_ID(join), self->write_buffer);
         if (new_buffer == NULL) {
             return -1;
         }
