@@ -2011,12 +2011,14 @@ _io_TextIOWrapper_read_impl(textio *self, Py_ssize_t n)
         }
 
         _PyIO_State *state = self->state;
-        if (Py_IS_TYPE(self->decoder, state->PyIncrementalNewlineDecoder_Type))
+        if (Py_IS_TYPE(self->decoder, state->PyIncrementalNewlineDecoder_Type)) {
             decoded = _PyIncrementalNewlineDecoder_decode(self->decoder,
                                                           bytes, 1);
-        else
+        }
+        else {
             decoded = PyObject_CallMethodObjArgs(
                 self->decoder, &_Py_ID(decode), bytes, Py_True, NULL);
+        }
         Py_DECREF(bytes);
         if (check_decoded(decoded) < 0)
             goto fail;

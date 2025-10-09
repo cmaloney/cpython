@@ -1038,8 +1038,7 @@ _io__Buffered_read_impl(buffered *self, Py_ssize_t n)
     }
 
     // FIXME(cmaloney): lock-free fast reading was in last version.
-    res = _bufferedreader_read_generic(self, n);
-    return res;
+    return _bufferedreader_read_generic(self, n);
 }
 
 /*[clinic input]
@@ -1836,10 +1835,13 @@ _bufferedreader_raw_readall(buffered *self) {
     if (self->read_buffer) {
         // FIXME(cmaloney): This whole function should probably take read_buffer
         // at the start / make it thread local.
-        // FIXME(cmaloney): Maybe use PyBytes_ConcatAndDel
-        PyBytes_Concat(&self->read_buffer, res);
-        Py_SETREF(res, self->read_buffer);
-        Py_CLEAR(self->read_buffer);
+        PyBytes_ConcatAndDel(&self->read_buffer, res);
+        if (self->read_buffer == NULL) {
+            assert(PyErr_Occurred());
+            return NULL;
+        }
+        res = self->read_buffer;
+        self->read_buffer = NULL;
     }
     return res;
 }
