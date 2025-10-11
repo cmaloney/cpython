@@ -2169,6 +2169,9 @@ static int _buffered_add_to_write_buffer(buffered *self, PyObject *new_bytes) {
     return 0;
 }
 
+// FIXME(cmaloney): This is the wrong abstraction... want to have a single write
+// function which _always_ works on a passed in list, returns the unwritten.
+// That way can use writev.
 // FIXME(cmaloney): This shold take a Py_buffer...
 static Py_ssize_t
 _bufferedwriter_write_retrying(buffered *self, char *buffer, Py_ssize_t len, int add_to_buffer) {
@@ -2187,10 +2190,11 @@ _bufferedwriter_write_retrying(buffered *self, char *buffer, Py_ssize_t len, int
                 That also saves the allocation and copy...
             */
             /* Buffer as much as possible. */
-            if (add_to_buffer) {
-                // TODO(cmaloney): Could buffer _more_ here; the data is already in memory in CPython...
-                Py_ssize_t remaining_size = self->buffer_size - _buffered_get_write_buffer_size(self);
-                Py_ssize_t saved = Py_MIN(len - written, remaining_size);
+            if (add_to_buffer && self->buffer_size != 0) {
+                // TODO(cmaloney): The bytes are already in memory, we could keep a reference to them rather
+                // than capping to buffer_size...
+                Py_ssize_t available = self->buffer_size - _buffered_get_write_buffer_size(self);
+                Py_ssize_t saved = Py_MIN(len - written, available);
                 PyObject *new_bytes = PyBytes_FromStringAndSize(buffer, saved);
                 // Couldn't save new bytes, abandon.
                 if (new_bytes == NULL) {
@@ -2198,6 +2202,7 @@ _bufferedwriter_write_retrying(buffered *self, char *buffer, Py_ssize_t len, int
                 }
                 else {
                     if (_buffered_add_to_write_buffer(self, new_bytes) == -1) {
+                        // FIXME(cmaloney): Unraisable exception here.
                         PyErr_Clear();
                         Py_CLEAR(new_bytes);
                     }
@@ -2355,16 +2360,40 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
         _buffered_reset_buf(self);
     }
 
+    // Fits in bufer size; cache write.
+    // FIXME(cmaloney): Calculating buffer size here is likely fairly expensive...
+    if (_buffered_get_write_buffer_size(self) + buffer->len <= self->buffer_size) {
+        // FIXME(cmaloney): Deduplicate.
+        // FIXME(cmaloney): don't copy unless absolutely mandatory.
+        PyObject *new_bytes = PyBytes_FromStringAndSize(buffer->buf, buffer->len);
+        if (new_bytes == NULL) {
+            LEAVE_BUFFERED(self);
+            return NULL;
+        }
+
+        if (_buffered_add_to_write_buffer(self, new_bytes) == -1) {
+            Py_DECREF(new_bytes);
+            LEAVE_BUFFERED(self);
+            return NULL;
+        }
+        LEAVE_BUFFERED(self);
+        return PyLong_FromSsize_t(buffer->len);
+    }
+
     // TODO(cmaloney): This is all the same logic as TextIOWrapper write
     // around self->pending_bytes;
+
+    // Flush existing data, if any.
+
+    if (_bufferedwriter_flush_unlocked(self) == -1) {
+        LEAVE_BUFFERED(self);
+        return NULL;
+    }
+
     /* Fast path: Just a write loop, no copying for big writes.
 
        NOTE: includes buffer_size == 0 (buffer->len is >= 0 always)*/
     if (buffer->len >= self->buffer_size) {
-        if (_bufferedwriter_flush_unlocked(self) == -1) {
-            LEAVE_BUFFERED(self);
-            return NULL;
-        }
 
         Py_ssize_t written = _bufferedwriter_write_retrying(self, buffer->buf, buffer->len, 1);
         LEAVE_BUFFERED(self);
@@ -2378,6 +2407,7 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
     // Always append to the list
     // FIXME(cmaloney): don't want to allocate a new buffer here ever...
     // FIXME(cmaloney): Much copy is bad.
+    // FIXME(cmaloney): Deduplicate.
     PyObject *new_bytes = PyBytes_FromStringAndSize(buffer->buf, buffer->len);
     if (new_bytes == NULL) {
         return NULL;
