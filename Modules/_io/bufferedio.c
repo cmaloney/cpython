@@ -2188,7 +2188,9 @@ _bufferedwriter_write_retrying(buffered *self, char *buffer, Py_ssize_t len, int
             */
             /* Buffer as much as possible. */
             if (add_to_buffer) {
-                Py_ssize_t saved = Py_MIN(len - written, self->buffer_size);
+                // TODO(cmaloney): Could buffer _more_ here; the data is already in memory in CPython...
+                Py_ssize_t remaining_size = self->buffer_size - _buffered_get_write_buffer_size(self);
+                Py_ssize_t saved = Py_MIN(len - written, remaining_size);
                 PyObject *new_bytes = PyBytes_FromStringAndSize(buffer, saved);
                 // Couldn't save new bytes, abandon.
                 if (new_bytes == NULL) {
