@@ -2177,10 +2177,11 @@ static Py_ssize_t
 _bufferedwriter_write_retrying(buffered *self, char *buffer, Py_ssize_t len, int add_to_buffer) {
     Py_ssize_t written = 0;
     Py_ssize_t n = 0;
+    Py_ssize_t remaining = len - written;
     while (true) {
         n = _bufferedwriter_raw_write(self,
             buffer,
-            len - written);
+            remaining);
         if (n == -1) {
             return -1;
         }
@@ -2194,7 +2195,7 @@ _bufferedwriter_write_retrying(buffered *self, char *buffer, Py_ssize_t len, int
                 // TODO(cmaloney): The bytes are already in memory, we could keep a reference to them rather
                 // than capping to buffer_size...
                 Py_ssize_t available = self->buffer_size - _buffered_get_write_buffer_size(self);
-                Py_ssize_t saved = Py_MIN(len - written, available);
+                Py_ssize_t saved = Py_MIN(remaining, buffer_space);
                 PyObject *new_bytes = PyBytes_FromStringAndSize(buffer, saved);
                 // Couldn't save new bytes, abandon.
                 if (new_bytes == NULL) {
