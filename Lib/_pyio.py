@@ -1245,7 +1245,7 @@ class BufferedWriter(_BufferedIOMixin):
         if buffer_size <= 0:
             raise ValueError("invalid buffer size")
         self.buffer_size = buffer_size
-        self._write_buf = bytearray()
+        self._write_buffers = list()
         self._write_lock = Lock()
 
     def writable(self):
@@ -1259,25 +1259,15 @@ class BufferedWriter(_BufferedIOMixin):
                 raise ValueError("write to closed file")
             # XXX we can implement some more tricks to try and avoid
             # partial writes
-            if len(self._write_buf) > self.buffer_size:
-                # We're full, so let's pre-flush the buffer.  (This may
-                # raise BlockingIOError with characters_written == 0.)
-                self._flush_unlocked()
-            before = len(self._write_buf)
-            self._write_buf.extend(b)
-            written = len(self._write_buf) - before
-            if len(self._write_buf) > self.buffer_size:
-                try:
-                    self._flush_unlocked()
-                except BlockingIOError as e:
-                    if len(self._write_buf) > self.buffer_size:
-                        # We've hit the buffer_size. We have to accept a partial
-                        # write and cut back our buffer.
-                        overage = len(self._write_buf) - self.buffer_size
-                        written -= overage
-                        self._write_buf = self._write_buf[:self.buffer_size]
-                        raise BlockingIOError(e.errno, e.strerror, written)
-            return written
+            # Optimistically accept the new buffer. Will copy the bytes into a
+            # new bytes-like only if needed.
+            if not isinstance(b, memoryview):
+                b = memoryview(b)
+            if b.nbytes == 0:
+                return 0
+            b = b.cast('B')
+            self._flush_unlocked(new_buffer=b)
+            return b.nbytes
 
     def truncate(self, pos=None):
         with self._write_lock:
@@ -1290,25 +1280,92 @@ class BufferedWriter(_BufferedIOMixin):
         with self._write_lock:
             self._flush_unlocked()
 
-    def _flush_unlocked(self):
+    def _flush_unlocked(self, new_buffer=None):
         if self.closed:
             raise ValueError("flush on closed file")
-        while self._write_buf:
+
+        if new_buffer is not None:
+            assert isinstance(new_buffer, memoryview)
+            assert new_buffer.ndim == 1
+            assert new_buffer.nbytes > 0
+            assert new_buffer.contiguous
+            self._write_buffers.append(new_buffer)
+            # Only flush on new_buffer if required.
+            if len(new_buffer) < self.buffer_size:
+                full_size = sum(map(len, self._write_buffers))
+                if full_size < self.buffer_size:
+                    # Don't keep long-lived memoryview to non-bytes (copy data
+                    # to avoid them). A memoryview can "lock" an object and
+                    # callers shouldn't need to guard from "maybe buffering is
+                    # keeping the object locked."
+                    if new_buffer.obj is None or type(new_buffer.obj) is not bytes:
+                        self._write_buffers[-1] = memoryview(bytes(new_buffer))
+                    return
+
+        # FIXME(cmaloney): writev support.
+        while self._write_buffers:
+            cur = self._write_buffers[0]
+            assert isinstance(cur, memoryview)
             try:
-                n = self.raw.write(self._write_buf)
+                n = self.raw.write(cur)
             except BlockingIOError:
                 raise RuntimeError("self.raw should implement RawIOBase: it "
                                    "should not raise BlockingIOError")
             if n is None:
-                raise BlockingIOError(
-                    errno.EAGAIN,
-                    "write could not complete without blocking", 0)
-            if n > len(self._write_buf) or n < 0:
+                # Never keep / buffer more than `buffer_size` bytes after a
+                # write. That means we may need to shorten new_buffer here.
+                # (No new_bytes implies can't be over buffer_size).
+                if new_buffer is not None:
+                    # We've hit the buffer_size. We have to accept a partial
+                    # write and cut back our buffer.
+                    if len(self._write_buffers) == 1:
+                        full_size = cur.nbytes
+                    else:
+                        full_size = sum(map(lambda x: x.nbytes, self._write_buffers))
+                    overwrite = full_size - self.buffer_size
+                    to_keep = new_buffer.nbytes - overwrite
+                    assert to_keep >= 0
+                    written = new_buffer.nbytes - to_keep
+                    assert written >= 0
+
+                    # No space for the new buffer + nothing written from it
+                    if to_keep == 0:
+                        del self._write_buffers[-1]
+                        raise BlockingIOError(
+                            errno.EAGAIN,
+                            "write could not complete without blocking",
+                            written
+                        )
+
+                    # Don't keep long-lived memoryview to non-bytes (copy data
+                    # to avoid them). A memoryview can "lock" an object and
+                    # callers shouldn't need to guard from "maybe buffering is
+                    # keeping the object locked."
+                    if cur.obj is None or type(cur.obj) is not bytes:
+                        self._write_buffers[-1] = memoryview(bytes(cur[:to_keep]))
+                    else:
+                        self._write_buffers[-1] = cur[:to_keep]
+
+                    raise BlockingIOError(
+                        errno.EAGAIN,
+                        "write could not complete without blocking",
+                        written)
+            if n > cur.nbytes or n < 0:
                 raise OSError("write() returned incorrect number of bytes")
-            del self._write_buf[:n]
+
+            if n == cur.nbytes:
+                # Chunk fully written, no longer needed.
+                del self._write_buffers[0]
+            else:
+                # Partial write, shrink and keep going.
+                self._write_buffers[0] = cur[n:]
+
 
     def tell(self):
-        return _BufferedIOMixin.tell(self) + len(self._write_buf)
+        pos = _BufferedIOMixin.tell(self)
+        for buf in self._write_buffers:
+            pos += buf.nbytes
+        return pos
 
     def seek(self, pos, whence=0):
         if whence not in valid_seek_flags:
@@ -1438,7 +1495,7 @@ class BufferedRandom(BufferedWriter, BufferedReader):
         return pos
 
     def tell(self):
-        if self._write_buf:
+        if self._write_buffers:
             return BufferedWriter.tell(self)
         else:
             return BufferedReader.tell(self)
