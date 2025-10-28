@@ -667,8 +667,7 @@ class StreamReader:
             # adds data which makes separator be found. That's why we check for
             # EOF *after* inspecting the buffer.
             if self._eof:
-                chunk = bytes(self._buffer)
-                self._buffer.clear()
+                chunk = self._buffer.take_bytes()
                 raise exceptions.IncompleteReadError(chunk, None)
 
             # _wait_for_data() will resume reading if stream was paused.
@@ -678,10 +677,9 @@ class StreamReader:
             raise exceptions.LimitOverrunError(
                 'Separator is found, but chunk is longer than limit', match_start)
 
-        chunk = self._buffer[:match_end]
-        del self._buffer[:match_end]
+        chunk = self._buffer.take_bytes(match_end)
         self._maybe_resume_transport()
-        return bytes(chunk)
+        return chunk
 
     async def read(self, n=-1):
         """Read up to `n` bytes from the stream.
@@ -712,6 +710,8 @@ class StreamReader:
             return b''
 
         if n < 0:
+            # FIXME(cmaloney): This requires 2x space and an extra memcpy of all
+            # the data; find a way to just keep filling _buffer instead.
             # This used to just loop creating a new waiter hoping to
             # collect everything in self._buffer, but that would
             # deadlock if the subprocess sends more than self.limit
@@ -728,8 +728,7 @@ class StreamReader:
             await self._wait_for_data('read')
 
         # This will work right even if buffer is less than n bytes
-        data = bytes(memoryview(self._buffer)[:n])
-        del self._buffer[:n]
+        data = self._buffer.take_bytes(min(len(self._buffer), n))
 
         self._maybe_resume_transport()
         return data
@@ -760,18 +759,12 @@ class StreamReader:
 
         while len(self._buffer) < n:
             if self._eof:
-                incomplete = bytes(self._buffer)
-                self._buffer.clear()
+                incomplete = self._buffer.take_bytes()
                 raise exceptions.IncompleteReadError(incomplete, n)
 
             await self._wait_for_data('readexactly')
 
-        if len(self._buffer) == n:
-            data = bytes(self._buffer)
-            self._buffer.clear()
-        else:
-            data = bytes(memoryview(self._buffer)[:n])
-            del self._buffer[:n]
+        data = self._buffer.take_bytes(n)
         self._maybe_resume_transport()
         return data
 
