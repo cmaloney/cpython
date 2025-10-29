@@ -19,7 +19,6 @@ typedef struct {
 static inline char* PyByteArray_AS_STRING(PyObject *op)
 {
     PyByteArrayObject *self = _PyByteArray_CAST(op);
-    assert(self->ob_start);
     return self->ob_start;
 }
 #define PyByteArray_AS_STRING(self) PyByteArray_AS_STRING(_PyObject_CAST(self))

@@ -890,8 +890,8 @@ bytearray___init___impl(PyByteArrayObject *self, PyObject *arg,
     PyObject *it;
     PyObject *(*iternext)(PyObject *);
 
-    /* First initialization. Make guarantee ob_bytes is always non-null. */
-    if (self->ob_bytes == NULL) {
+    /* First __init__; set ob_bytes_object so ob_bytes is always non-null. */
+    if (self->ob_bytes_object == NULL) {
         self->ob_bytes_object = Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
         self->ob_bytes = PyBytes_AS_STRING(self->ob_bytes_object);
         Py_SET_SIZE(self, 0);
