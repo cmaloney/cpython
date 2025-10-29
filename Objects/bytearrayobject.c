@@ -17,9 +17,6 @@ class bytearray "PyByteArrayObject *" "&PyByteArray_Type"
 [clinic start generated code]*/
 /*[clinic end generated code: output=da39a3ee5e6b4b0d input=5535b77c37a119e0]*/
 
-/* For PyByteArray_AS_STRING(). */
-char _PyByteArray_empty_string[] = "";
-
 /* Max number of bytes a bytearray can contain */
 #define PyByteArray_SIZE_MAX ((Py_ssize_t)(PY_SSIZE_T_MAX - _PyBytesObject_SIZE))
 
@@ -247,21 +244,10 @@ bytearray_resize_lock_held(PyObject *self, Py_ssize_t requested_size)
                 Py_MIN(requested_size, Py_SIZE(self)));
     }
 
-    if (obj->ob_bytes_object == NULL) {
-        obj->ob_bytes_object = PyBytes_FromStringAndSize(NULL, alloc);
-    }
-    else {
-        _PyBytes_Resize(&obj->ob_bytes_object, alloc);
-    }
-
-    int ret;
-    if (obj->ob_bytes_object == NULL) {
+    int ret = _PyBytes_Resize(&obj->ob_bytes_object, alloc);
+    if (ret == -1) {
         obj->ob_bytes_object = Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
         size = alloc = 0;
-        ret = -1;
-    }
-    else {
-        ret = 0;
     }
 
     obj->ob_bytes = obj->ob_start = PyBytes_AS_STRING(obj->ob_bytes_object);
@@ -903,6 +889,16 @@ bytearray___init___impl(PyByteArrayObject *self, PyObject *arg,
     Py_ssize_t count;
     PyObject *it;
     PyObject *(*iternext)(PyObject *);
+
+    /* First initialization. Make guarantee ob_bytes is always non-null. */
+    if (self->ob_bytes == NULL) {
+        self->ob_bytes_object = Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
+        self->ob_bytes = PyBytes_AS_STRING(self->ob_bytes_object);
+        Py_SET_SIZE(self, 0);
+        self->ob_alloc = 0;
+        self->ob_exports = 0;
+        self->ob_start = self->ob_bytes;
+    }
 
     if (Py_SIZE(self) != 0) {
         /* Empty previous contents (yes, do this first of all!) */
