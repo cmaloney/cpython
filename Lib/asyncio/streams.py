@@ -710,19 +710,14 @@ class StreamReader:
             return b''
 
         if n < 0:
-            # FIXME(cmaloney): This requires 2x space and an extra memcpy of all
-            # the data; find a way to just keep filling _buffer instead.
             # This used to just loop creating a new waiter hoping to
             # collect everything in self._buffer, but that would
             # deadlock if the subprocess sends more than self.limit
             # bytes.  So just call self.read(self._limit) until EOF.
-            blocks = []
-            while True:
-                block = await self.read(self._limit)
-                if not block:
-                    break
-                blocks.append(block)
-            return b''.join(blocks)
+            joined = bytearray()
+            while block := await self.read(self._limit):
+                joined += block
+            return joined.take_bytes()
 
         if not self._buffer and not self._eof:
             await self._wait_for_data('read')
