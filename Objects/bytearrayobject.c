@@ -43,6 +43,13 @@ _getbytevalue(PyObject* arg, int *value)
     return 1;
 }
 
+static void
+bytearray_fill_from_bytes(PyByteArrayObject *self, Py_ssize_t size, Py_ssize_t alloc) {
+    self->ob_bytes = self->ob_start = PyBytes_AS_STRING(self->ob_bytes_object);
+    Py_SET_SIZE(self, size);
+    FT_ATOMIC_STORE_SSIZE_RELAXED(self->ob_alloc, alloc);
+}
+
 static int
 bytearray_getbuffer_lock_held(PyObject *self, Py_buffer *view, int flags)
 {
@@ -148,14 +155,10 @@ PyByteArray_FromStringAndSize(const char *bytes, Py_ssize_t size)
         Py_DECREF(new);
         return NULL;
     }
-    new->ob_bytes = PyBytes_AS_STRING(new->ob_bytes_object);
-    assert(new->ob_bytes);
+    bytearray_fill_from_bytes(new, size, size);
     if (bytes != NULL && size > 0) {
         memcpy(new->ob_bytes, bytes, size);
     }
-    Py_SET_SIZE(new, size);
-    new->ob_alloc = size;
-    new->ob_start = new->ob_bytes;
     new->ob_exports = 0;
 
     return (PyObject *)new;
@@ -249,10 +252,7 @@ bytearray_resize_lock_held(PyObject *self, Py_ssize_t requested_size)
         obj->ob_bytes_object = Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
         size = alloc = 0;
     }
-
-    obj->ob_bytes = obj->ob_start = PyBytes_AS_STRING(obj->ob_bytes_object);
-    Py_SET_SIZE(self, size);
-    FT_ATOMIC_STORE_SSIZE_RELAXED(obj->ob_alloc, alloc);
+    bytearray_fill_from_bytes(obj, size, alloc);
     if (alloc != size) {
         /* Add mid-buffer null; end provided by bytes. */
         obj->ob_bytes[size] = '\0';
@@ -893,11 +893,8 @@ bytearray___init___impl(PyByteArrayObject *self, PyObject *arg,
     /* First __init__; set ob_bytes_object so ob_bytes is always non-null. */
     if (self->ob_bytes_object == NULL) {
         self->ob_bytes_object = Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
-        self->ob_bytes = PyBytes_AS_STRING(self->ob_bytes_object);
-        Py_SET_SIZE(self, 0);
-        self->ob_alloc = 0;
+        bytearray_fill_from_bytes(self, 0, 0);
         self->ob_exports = 0;
-        self->ob_start = self->ob_bytes;
     }
 
     if (Py_SIZE(self) != 0) {
@@ -1560,9 +1557,7 @@ bytearray_take_bytes_impl(PyByteArrayObject *self, PyObject *n)
     // Point the bytearray towards the buffer with the remaining data.
     PyObject *result = self->ob_bytes_object;
     self->ob_bytes_object = remaining;
-    self->ob_bytes = self->ob_start = PyBytes_AS_STRING(self->ob_bytes_object);
-    Py_SET_SIZE(self, remaining_length);
-    FT_ATOMIC_STORE_SSIZE_RELAXED(self->ob_alloc, remaining_length);
+    bytearray_fill_from_bytes(self, remaining_length, remaining_length);
     return result;
 }
 
