@@ -1,3 +1,4 @@
+import importlib
 import unittest
 from test import support
 from test.support import warnings_helper
@@ -19,6 +20,46 @@ if support.check_sanitizer(address=True, memory=True):
     ))
 else:
     SKIP_MODULES = ()
+
+# Validate intent when new names are added to modules with an __all__.
+#
+# In particular new names should be one of the following:
+# 1. Private / internal (stat with a `_` or `del` before end of module)
+# 2. Public and exported (add to module __all__)
+# 3. Public and intentionally not exported (add to config here)
+#
+# The 'uncategorized' key is pre-existing non-exported items which don't have a
+# decision if they should be added to non_exported or __all__. Keeping a
+# registry of existing ones means can detect when new ones are created. Want to
+# reduce uncategorized entries.
+#
+# All skip entries should comment why it's okay to skip. In particular, what
+# test covers the __all__.
+#
+# NOTE: Please keep this dictionary alphabetical and use trailing commas to
+# minimize conflicts.
+CHECK__ALL__CONFIG = {
+    'tempfile': {
+        'not_exported': ['template'],
+    },
+    'typing': 'skip test.test_typing',
+    'wave': 'skip test.test_wave',
+    'weakref': {
+        'uncategorized': ['KeyedRef'],
+    },
+    'xml.etree.ElementTree': 'skip test.test_xml_etree',
+}
+
+
+def _get_checkall_config(modname):
+    if modname.startswith('test.'):
+        return 'skip reason:test'
+
+    # Internal modules
+    if modname.startswith('_') or '._' in modname:
+        return 'skip reason:internal'
+
+    return CHECK__ALL__CONFIG.get(modname, dict())
 
 
 class NoAll(RuntimeError):
@@ -74,6 +115,29 @@ class AllTest(unittest.TestCase):
                 self.assertEqual(keys, all_set, "in module {}".format(modname))
                 # Verify __dir__ is non-empty and doesn't produce an error
                 self.assertTrue(dir(sys.modules[modname]))
+
+                config = _get_checkall_config(modname)
+                if isinstance(config, str):
+                    test_name = config.removeprefix('skip ')
+                    if test_name in ('reason:test', 'reason:internal'):
+                        pass
+                    else:
+                        # Validate the test module actually exists.
+                        spec = importlib.util.find_spec(test_name)
+                        self.assertIsNotNone(spec, "skip test module not found")
+                else:
+                    assert set(config.keys()) <= set(["not_exported", "uncategorized"])
+                    not_exported = config.get('not_exported', [])
+                    not_exported += config.get('uncategorizd', [])
+                    assert isinstance(not_exported, list)
+                    assert all(val is str for val in not_exported)
+                    # not_exported should not contain exported names.
+                    for name in not_exported:
+                        self.assertNotIn(name, names)
+
+                    support.check__all__(self, sys.modules[modname], modname,
+                                        extra=names,
+                                        not_exported=not_exported)
 
     def walk_modules(self, basedir, modpath):
         for fn in sorted(os.listdir(basedir)):
