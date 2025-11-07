@@ -51,6 +51,46 @@ bytearray_reinit_from_bytes(PyByteArrayObject *self, Py_ssize_t size,
     FT_ATOMIC_STORE_SSIZE_RELAXED(self->ob_alloc, alloc);
 }
 
+/* Avoid a copy if can just "take" ownership of storage.
+
+When other is uniquely referenced bytes or bytearray rather than copying to a
+new byes just reuse the existing storage.
+
+Returns 1 on success, 0 for "didn't work", -1 on error.
+*/
+static int
+bytearray_try_take_other(PyByteArrayObject *self, PyObject *other) {
+    _Py_CRITICAL_SECTION_ASSERT_OBJECT_LOCKED(self);
+
+    Py_ssize_t size = Py_SIZE(self);
+    if (size != 0 || !_PyObject_IsUniquelyReferenced(other)) {
+        return 0;
+    }
+
+    if (PyBytes_CheckExact(other)) {
+        size = Py_SIZE(other);
+        self->ob_bytes_object = other;
+        bytearray_reinit_from_bytes(self, size, size);
+        Py_INCREF(other);
+        return 1;
+    }
+
+    if (!PyByteArray_CheckExact(other)) {
+        return 0;
+    }
+
+    // Other is a bytearray; extract the bytes and internalize them.
+    PyObject *bytes = PyObject_CallMethod((PyObject*)other, "take_bytes", NULL);
+    if (bytes == NULL) {
+        return -1;
+    }
+    self->ob_bytes_object = bytes;
+    bytearray_reinit_from_bytes(self, size, size);
+
+    return 1;
+
+}
+
 static int
 bytearray_getbuffer_lock_held(PyObject *self, Py_buffer *view, int flags)
 {
@@ -332,18 +372,21 @@ bytearray_iconcat_lock_held(PyObject *op, PyObject *other)
 {
     _Py_CRITICAL_SECTION_ASSERT_OBJECT_LOCKED(op);
     PyByteArrayObject *self = _PyByteArray_CAST(op);
+    Py_ssize_t size = Py_SIZE(self);
+
+    int try_result = bytearray_try_take_other(self, other);
+    if (try_result == -1) {
+        return NULL;
+    }
+    if (try_result) {
+        return Py_NewRef(self);
+    }
 
     Py_buffer vo;
     if (PyObject_GetBuffer(other, &vo, PyBUF_SIMPLE) != 0) {
         PyErr_Format(PyExc_TypeError, "can't concat %.100s to %.100s",
                      Py_TYPE(other)->tp_name, Py_TYPE(self)->tp_name);
         return NULL;
-    }
-
-    Py_ssize_t size = Py_SIZE(self);
-    if (size > PyByteArray_SIZE_MAX - vo.len) {
-        PyBuffer_Release(&vo);
-        return PyErr_NoMemory();
     }
 
     if (bytearray_resize_lock_held((PyObject *)self, size + vo.len) < 0) {
@@ -2123,6 +2166,14 @@ bytearray_extend_impl(PyByteArrayObject *self, PyObject *iterable_of_ints)
     Py_ssize_t buf_size = 0, len = 0;
     int value;
     char *buf;
+
+    int try_result = bytearray_try_take_other(self, iterable_of_ints);
+    if (try_result == -1) {
+        return NULL;
+    }
+    if (try_result) {
+        Py_RETURN_NONE;
+    }
 
     /* bytearray_setslice code only accepts something supporting PEP 3118. */
     if (PyObject_CheckBuffer(iterable_of_ints)) {
