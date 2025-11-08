@@ -111,6 +111,7 @@ class Function:
     critical_section: bool = False
     disable_fastcall: bool = False
     target_critical_section: list[str] = dc.field(default_factory=list)
+    vectorcall: bool = False
 
     def __post_init__(self) -> None:
         self.parent = self.cls or self.module

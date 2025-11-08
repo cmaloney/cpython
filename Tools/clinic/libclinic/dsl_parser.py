@@ -265,7 +265,7 @@ class DSLParser:
     from_version_re = re.compile(r'([*/]) +\[from +(.+)\]')
     permit_long_summary = False
     permit_long_docstring_body = False
-    vectorcall = False
+    vectorcall: bool = False
 
     def __init__(self, clinic: Clinic) -> None:
         self.clinic = clinic
@@ -730,8 +730,13 @@ class DSLParser:
             critical_section=self.critical_section,
             disable_fastcall=self.disable_fastcall,
             target_critical_section=self.target_critical_section,
-            forced_text_signature=self.forced_text_signature
+            forced_text_signature=self.forced_text_signature,
+            vectorcall=self.vectorcall
         )
+
+        if self.vectorcall and not func.kind.new_or_init:
+            fail("Can only use @vectorcall with __new__ and __init__")
+
         self.add_function(func)
 
         self.next(self.state_parameters_start)

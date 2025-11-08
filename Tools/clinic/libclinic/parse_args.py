@@ -205,6 +205,7 @@ class ParseArgsCodeGen:
 
     # Use METH_FASTCALL calling convention?
     fastcall: bool
+    vectorcall: bool
 
     # Declaration of the return variable (ex: "int return_value;")
     return_value_declaration: str

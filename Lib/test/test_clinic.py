@@ -1685,6 +1685,50 @@ class ClinicParserTest(TestCase):
         # but it *is* a parameter
         self.assertEqual(1, len(function.parameters))
 
+    def test_vectorcall_init(self):
+        function = self.parse_function("""
+            module foo
+            class foo.Bar "unused" "notneeded"
+            @vectorcall
+            foo.Bar.__init__
+
+            Docstring
+
+        """, signatures_in_block=3, function_index=2)
+
+        # self is not in the signature
+        self.assertEqual("Bar()\n--\n\nDocstring", function.docstring)
+        # but it *is* a parameter
+        self.assertEqual(1, len(function.parameters))
+
+    def test_vectorcall_new(self):
+        function = self.parse_function("""
+            module foo
+            class foo.Bar "unused" "notneeded"
+            @classmethod
+            foo.Bar.__new__
+
+            Docstring
+
+        """, signatures_in_block=3, function_index=2)
+
+        # self is not in the signature
+        self.assertEqual("Bar()\n--\n\nDocstring", function.docstring)
+        # but it *is* a parameter
+        self.assertEqual(1, len(function.parameters))
+
+    def test_vectorcall_non_type(self):
+        err = "Can only use @vectorcall with __new__ and __init__"
+        self.expect_failure("""
+            module foo
+            class foo.Bar "unused" "notneeded"
+            @vectorcall
+            foo.bar
+
+            Docstring
+
+        """, err)
+
     def test_illegal_module_line(self):
         block = """
             module foo
