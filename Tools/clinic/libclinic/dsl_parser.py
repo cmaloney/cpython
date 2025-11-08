@@ -265,6 +265,7 @@ class DSLParser:
     from_version_re = re.compile(r'([*/]) +\[from +(.+)\]')
     permit_long_summary = False
     permit_long_docstring_body = False
+    vectorcall = False
 
     def __init__(self, clinic: Clinic) -> None:
         self.clinic = clinic
@@ -304,6 +305,7 @@ class DSLParser:
         self.disable_fastcall = False
         self.permit_long_summary = False
         self.permit_long_docstring_body = False
+        self.vectorcall = False
 
     def directive_module(self, name: str) -> None:
         fields = name.split('.')[:-1]
@@ -485,6 +487,11 @@ class DSLParser:
         if self.permit_long_docstring_body:
             fail("Called @permit_long_docstring_body twice!")
         self.permit_long_docstring_body = True
+
+    def at_vectorcall(self) -> None:
+        if self.vectorcall:
+            fail("Called @vectorcall twice!")
+        self.vectorcall = True
 
     def parse(self, block: Block) -> None:
         self.reset()
