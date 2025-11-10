@@ -5300,6 +5300,87 @@ Test___init___impl(TestObj *self, PyObject *a)
 /*[clinic end generated code: output=5c1e743f6a2a0b8b input=a8f9222a6ab35c59]*/
 
 
+// TODO(cmaloney): Add a vectorcall __new__
+/*[clinic input]
+@vectorcall
+Test.__init__
+    a: object
+    /
+    ab: object = None
+Vectorcall __init__ with args and kwargs.
+[clinic start generated code]*/
+
+PyDoc_STRVAR(Test___init____doc__,
+"Test(a, /, ab=None)\n"
+"--\n"
+"\n"
+"Vectorcall __init__ with args and kwargs.");
+
+static int
+Test___init___impl(TestObj *self, PyObject *a, PyObject *ab);
+
+static int
+Test___init__(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    int return_value = -1;
+    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
+
+    #define NUM_KEYWORDS 1
+    static struct {
+        PyGC_Head _this_is_not_used;
+        PyObject_VAR_HEAD
+        Py_hash_t ob_hash;
+        PyObject *ob_item[NUM_KEYWORDS];
+    } _kwtuple = {
+        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
+        .ob_hash = -1,
+        .ob_item = { &_Py_ID(ab), },
+    };
+    #undef NUM_KEYWORDS
+    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
+
+    #else  // !Py_BUILD_CORE
+    #  define KWTUPLE NULL
+    #endif  // !Py_BUILD_CORE
+
+    static const char * const _keywords[] = {"", "ab", NULL};
+    static _PyArg_Parser _parser = {
+        .keywords = _keywords,
+        .fname = "Test",
+        .kwtuple = KWTUPLE,
+    };
+    #undef KWTUPLE
+    PyObject *argsbuf[2];
+    PyObject * const *fastargs;
+    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
+    Py_ssize_t noptargs = nargs + (kwargs ? PyDict_GET_SIZE(kwargs) : 0) - 1;
+    PyObject *a;
+    PyObject *ab = Py_None;
+
+    fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser,
+            /*minpos*/ 1, /*maxpos*/ 2, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
+    if (!fastargs) {
+        goto exit;
+    }
+    a = fastargs[0];
+    if (!noptargs) {
+        goto skip_optional_pos;
+    }
+    ab = fastargs[1];
+skip_optional_pos:
+    return_value = Test___init___impl((TestObj *)self, a, ab);
+
+exit:
+    return return_value;
+}
+
+PyObject *
+Test___init___vectorcall(PyObject *type, PyObject *const *args, size_t nargsf, PyObject *kwnames)
+
+static int
+Test___init___impl(TestObj *self, PyObject *a, PyObject *ab)
+/*[clinic end generated code: output=0a8ee1d21b2b7c95 input=7c762bdea5f8d321]*/
+
 /*[clinic input]
 @classmethod
 Test.class_method

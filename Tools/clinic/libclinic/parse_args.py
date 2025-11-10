@@ -106,6 +106,10 @@ PARSER_PROTOTYPE_KEYWORD___INIT__: Final[str] = libclinic.normalize_snippet("""
     static int
     {c_basename}({self_type}{self_name}, PyObject *args, PyObject *kwargs)
 """)
+PARSER_PROTOTYPE_VECTORCALL: Final[str] = libclinic.normalize_snippet("""
+    PyObject *
+    {c_basename}_vectorcall(PyObject *type, PyObject *const *args, size_t nargsf, PyObject *kwnames)
+""")
 PARSER_PROTOTYPE_VARARGS: Final[str] = libclinic.normalize_snippet("""
     static PyObject *
     {c_basename}({self_type}{self_name}, PyObject *args)
@@ -999,6 +1003,16 @@ class ParseArgsCodeGen:
         if self.is_new_or_init():
             self.handle_new_or_init()
         self.process_methoddef(clang)
+
+        # Vectorcall __new__ and __init__ output a second method of parsing the
+        # items that calls the same impl funciton.
+        if self.func.vectorcall:
+            # self.parser_prototype += PARSER_PROTOTYPE_VECTORCALL
+            self.parser_definition += "\n\n" + PARSER_PROTOTYPE_VECTORCALL
+
         self.finalize(clang)
 
-        return self.create_template_dict()
+        d = self.create_template_dict()
+        if self.func.vectorcall:
+            print(f"{d!r}")
+        return d
