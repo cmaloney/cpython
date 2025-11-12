@@ -8,6 +8,7 @@ import codecs
 import errno
 import stat
 import sys
+import threading
 # Import _thread instead of threading to reduce startup cost
 from _thread import allocate_lock as Lock
 if sys.platform in {'win32', 'cygwin'}:
@@ -64,6 +65,116 @@ def text_encoding(encoding, stacklevel=2):
                           EncodingWarning, stacklevel + 1)
     return encoding
 
+# FIXME: Maybe return an id / index to get a flush info rather than the flush
+#        info itself?
+class _FlushInfo:
+    def __init__(self, buffers, *, length):
+        self.buffers = buffers
+        self._length = length
+
+    def coalesce(self):
+        # One allocation + one copy per byte.
+        res = bytearray(self._length)
+        offset = 0
+        for buf in self.buffers:
+            end = offset + len(buf)
+            # FIXME(cmaloney): Remove assert.
+            assert (end <= len(res))
+            res[offset:end] = buf
+            offset = end
+        return res
+
+    def __len__(self):
+        return self._length
+
+class _Nibbler:
+    """Consume everything and create condensed bytes.
+
+    Thread-safe efficient buffering of lots of little chunks of data.
+    """
+
+    def __init__(self, trigger_size: int):
+        # FIXME(cmaloney): This should be possible to do as an atomic int?
+        self._cond = threading.Condition(threading.Lock())
+        # FIXME(cmaloney): Measure value of TextIOWrapper's optimization that a
+        # single buffer doesn't have a list.
+        self._flushing = list()
+        self._buffer = list()
+        self._trigger_size = trigger_size
+        self._written = 0
+
+    def _take_locked(self):
+        if not self._buffer:
+            return _FlushInfo([], length=0)
+
+        res = self._buffer
+        length = self._written
+        self._written = 0
+        self._flushing.append(res)
+        self._buffer = list()
+        return _FlushInfo(res, length=length)
+
+    def take(self):
+        with self._cond:
+            return self._take_locked()
+
+    # FIXME(cmaloney): allow properly encoded strings for TextIOWrapper!
+
+    def append(self, buf):
+        # FIXME(cmaloney): If we're immediately flushing don't
+        # bother copying it until _after_ the flush fails and we have to return
+        # to user code which may modify.
+        # FIXME(cmaloney): Have nibbler allocate and own this memory and _REUSE_
+        # it when needed (Most things that need these cases will do so repeatedly).
+
+        # Mutable values (bytearray, memoryview) need to be copied so if the
+        # write is cached then they are changed before the flush we don't pick
+        # up the changed value.
+        if isinstance(buf, bytearray):
+            if sys.getrefcount(buf) == 1:
+                buf = buf.take_bytes()
+            else:
+                buf = bytes(buf)
+        elif isinstance(buf, bytes):
+            pass
+        else:
+            buf = memoryview(buf).cast('B')
+
+        # Don't insert empty buffers
+        if not buf:
+            return None
+
+        if isinstance(buf, bytearray):
+            if sys.getrefcount(buf) == 1:
+                buf = buf.take_bytes()
+            else:
+                buf = bytes(buf)
+        if isinstance(buf, memoryview):
+            if type(buf.obj) is not bytes:
+                buf = buf.tobytes()
+
+        # FIXME(cmaloney): Allow append in parallel.
+        with self._cond:
+            self._written += len(buf)
+            self._buffer.append(buf)
+            if self._written > self._trigger_size:
+                return self._take_locked()
+            return None
+
+    def _return(self, buf: memoryview):
+        # buf must be immutable bytes.
+        assert isinstance(self._buffer, list)
+        with self._cond:
+            self._buffer.insert(0, buf)
+            self._written += len(buf)
+
+    def __len__(self):
+        return self._written
+
+    # FIXME(cmaloney): If nibbler contains data on __del__ warn about data loss?
+    def __del__(self):
+        if self:
+            raise ResourceWarning("_Nibbler GCd while containing data. Possible data loss.")
 
 # Wrapper for builtins.open
 #
@@ -1246,9 +1357,7 @@ class BufferedWriter(_BufferedIOMixin):
         _BufferedIOMixin.__init__(self, raw)
         if buffer_size <= 0:
             raise ValueError("invalid buffer size")
-        self.buffer_size = buffer_size
-        self._write_buf = bytearray()
-        self._write_lock = Lock()
+        self._write_nibbler = _Nibbler(buffer_size)
 
     def writable(self):
         return self.raw.writable()
@@ -1256,83 +1365,122 @@ class BufferedWriter(_BufferedIOMixin):
     def write(self, b):
         if isinstance(b, str):
             raise TypeError("can't write str to binary stream")
-        with self._write_lock:
-            if self.closed:
-                raise ValueError("write to closed file")
-            # XXX we can implement some more tricks to try and avoid
-            # partial writes
-            if len(self._write_buf) > self.buffer_size:
-                # We're full, so let's pre-flush the buffer.  (This may
-                # raise BlockingIOError with characters_written == 0.)
-                self._flush_unlocked()
-            before = len(self._write_buf)
-            self._write_buf.extend(b)
-            written = len(self._write_buf) - before
-            if len(self._write_buf) > self.buffer_size:
-                try:
-                    self._flush_unlocked()
-                except BlockingIOError as e:
-                    if len(self._write_buf) > self.buffer_size:
-                        # We've hit the buffer_size. We have to accept a partial
-                        # write and cut back our buffer.
-                        overage = len(self._write_buf) - self.buffer_size
-                        written -= overage
-                        self._write_buf = self._write_buf[:self.buffer_size]
-                        raise BlockingIOError(e.errno, e.strerror, written)
-            return written
-
-    def truncate(self, pos=None):
-        with self._write_lock:
-            self._flush_unlocked()
-            if pos is None:
-                pos = self.raw.tell()
-            return self.raw.truncate(pos)
-
-    def flush(self):
-        with self._write_lock:
-            self._flush_unlocked()
-
-    def _flush_unlocked(self):
+        # FIXME: If already over limit, flush _before_ append or have to undo
+        # the append in full...
         if self.closed:
-            raise ValueError("flush on closed file")
-        while self._write_buf:
+            raise ValueError("write to closed file")
+        # FIXME(cmaloney): Get calculated byte length back from nibbler
+        # rather than calculating twice.
+        with memoryview(b) as mv:
+            byte_length = mv.nbytes
+        flush_info = self._write_nibbler.append(b)
+        if flush_info:
             try:
-                n = self.raw.write(self._write_buf)
-            except BlockingIOError:
-                raise RuntimeError("self.raw should implement RawIOBase: it "
-                                   "should not raise BlockingIOError")
-            if n is None:
+                self._do_flush(flush_info)
+            except BlockingIOError as ex:
+                # Adjust characters_written by the amount of data that was
+                # dropped in buffering truncation.
+                dropped = len(flush_info) - byte_length
+                characters_written = ex.characters_written - dropped
+                # Make a new exception because can't modify args in place.
                 raise BlockingIOError(
                     errno.EAGAIN,
-                    "write could not complete without blocking", 0)
-            if n > len(self._write_buf) or n < 0:
+                    "write could not complete without blocking",
+                    characters_written
+                )
+
+        return byte_length
+
+    def truncate(self, pos=None):
+        self.flush()
+        if pos is None:
+            pos = self.raw.tell()
+        return self.raw.truncate(pos)
+
+    def _do_flush(self, flush_info):
+        if self.closed:
+            raise ValueError("write to losed file")
+
+        # nothing to flush.
+        if not flush_info:
+            return
+
+        if self.closed:
+            raise ValueError("flush on closed file")
+
+        # FIXME(cmaloney): Stash write function early / at open.
+        try:
+            if write_nibble := getattr(self.raw, '_write_nibble', None):
+                write_nibble(flush_info)
+                return
+        except BlockingIOError as ex:
+            # FIXME(cmaloney): We already have non-mutable memory here... So let
+            # it all stand...
+
+            # old: Calculate the overage, return just the written/kept part of
+            # the overage.
+            raise
+
+        coalesced = flush_info.coalesce()
+        written = 0
+        while written < len(coalesced):
+            try:
+                res = self.raw.write(memoryview(coalesced)[written:])
+            except BlockingIOError:
+                raise RuntimeError("self.raw should implement RawIOBase: it "
+                                    "should not raise BlockingIOError")
+
+            if res is None:
+                # FIXME(cmaloney): Tests require this but it seems overly strict.
+                # The memory is already allocated and in use...
+                remaining = len(coalesced) - written
+                max_size = self._write_nibbler._trigger_size
+                # Reduce length to fit into buffer_size
+                if remaining > max_size:
+                    to_store = bytes(coalesced[written:written+max_size])
+                    written += max_size
+                else:
+                    # Discard what was already written but don't make a new
+                    # allocation / copy
+                    to_store = memoryview(coalesced)[written:]
+                # Don't keep more than buffer_size bytes
+                # Keep as many bytes as possible in the nibbler.
+                self._write_nibbler._return(to_store)
+                raise BlockingIOError(
+                    errno.EAGAIN,
+                    "write could not complete without blocking", written)
+
+            if res > len(coalesced):
                 raise OSError("write() returned incorrect number of bytes")
-            del self._write_buf[:n]
+
+            written += res
+
+        # FIXME: Would it be useful to explicitly log success into the flush_info.
+
+    def flush(self):
+        self._do_flush(self._write_nibbler.take())
 
     def tell(self):
-        return _BufferedIOMixin.tell(self) + len(self._write_buf)
+        return _BufferedIOMixin.tell(self) + len(self._write_nibbler)
 
     def seek(self, pos, whence=0):
         if whence not in valid_seek_flags:
             raise ValueError("invalid whence value")
-        with self._write_lock:
-            self._flush_unlocked()
-            return _BufferedIOMixin.seek(self, pos, whence)
+        self.flush()
+        return _BufferedIOMixin.seek(self, pos, whence)
 
     def close(self):
-        with self._write_lock:
-            if self.raw is None or self.closed:
-                return
+        if self.raw is None or self.closed:
+            return
+        # FIXME: No longer true?
         # We have to release the lock and call self.flush() (which will
         # probably just re-take the lock) in case flush has been overridden in
         # a subclass or the user set self.flush to something. This is the same
         # behavior as the C implementation.
         try:
-            # may raise BlockingIOError or BrokenPipeError etc
             self.flush()
         finally:
-            with self._write_lock:
-                self.raw.close()
+            self.raw.close()
 
 
 class BufferedRWPair(BufferedIOBase):
@@ -1440,7 +1588,7 @@ class BufferedRandom(BufferedWriter, BufferedReader):
         return pos
 
     def tell(self):
-        if self._write_buf:
+        if self._write_nibbler:
             return BufferedWriter.tell(self)
         else:
             return BufferedReader.tell(self)
