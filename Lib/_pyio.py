@@ -119,7 +119,6 @@ class _Nibbler:
             return self._take_locked()
 
     # FIXME(cmaloney): allow properly encoded strings for TextIOWrapper!
-
     def append(self, buf):
         # FIXME(cmaloney): If we're immediately flushing don't
         # bother copying it until _after_ the flush fails and we have to return
@@ -1355,7 +1354,7 @@ class BufferedWriter(_BufferedIOMixin):
             raise OSError('"raw" argument must be writable.')
 
         _BufferedIOMixin.__init__(self, raw)
-        if buffer_size <= 0:
+        if buffer_size < 0:
             raise ValueError("invalid buffer size")
         self._write_nibbler = _Nibbler(buffer_size)
 
