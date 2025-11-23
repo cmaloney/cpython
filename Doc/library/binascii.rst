@@ -67,14 +67,21 @@ The :mod:`binascii` module defines the following functions:
       Added the *strict_mode* parameter.
 
 
-.. function:: b2a_base64(data, *, newline=True)
+.. function:: b2a_base64(data, *, newline=True, bytes_per_line=None)
 
    Convert binary data to a line of ASCII characters in base64 coding. The return
    value is the converted line, including a newline char if *newline* is
    true.  The output of this function conforms to :rfc:`3548`.
 
+   If *newline* is true and *bytes_per_line* is specified every
+   *bytes_per_line* of processed a newline will be added and the last byte of
+   the returned bytes will always be a newline. By default a newline will
+
    .. versionchanged:: 3.6
       Added the *newline* parameter.
+
+   .. versionchanged:: next
+      Added *bytes_per_line* parameter.
 
 
 .. function:: a2b_qp(data, header=False)

@@ -6,6 +6,7 @@ preserve
 #  include "pycore_gc.h"          // PyGC_Head
 #  include "pycore_runtime.h"     // _Py_ID()
 #endif
+#include "pycore_abstract.h"      // _Py_convert_optional_to_non_negative_ssize_t()
 #include "pycore_modsupport.h"    // _PyArg_UnpackKeywords()
 
 PyDoc_STRVAR(binascii_a2b_uu__doc__,
@@ -193,7 +194,8 @@ exit:
 }
 
 PyDoc_STRVAR(binascii_b2a_base64__doc__,
-"b2a_base64($module, data, /, *, newline=True)\n"
+"b2a_base64($module, data, /, *, newline=True,\n"
+"           bytes_per_line=sys.maxsize)\n"
 "--\n"
 "\n"
 "Base64-code line of data.");
@@ -202,7 +204,8 @@ PyDoc_STRVAR(binascii_b2a_base64__doc__,
     {"b2a_base64", _PyCFunction_CAST(binascii_b2a_base64), METH_FASTCALL|METH_KEYWORDS, binascii_b2a_base64__doc__},
 
 static PyObject *
-binascii_b2a_base64_impl(PyObject *module, Py_buffer *data, int newline);
+binascii_b2a_base64_impl(PyObject *module, Py_buffer *data, int newline,
+                         Py_ssize_t bytes_per_line);
 
 static PyObject *
 binascii_b2a_base64(PyObject *module, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
@@ -210,7 +213,7 @@ binascii_b2a_base64(PyObject *module, PyObject *const *args, Py_ssize_t nargs, P
     PyObject *return_value = NULL;
     #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
 
-    #define NUM_KEYWORDS 1
+    #define NUM_KEYWORDS 2
     static struct {
         PyGC_Head _this_is_not_used;
         PyObject_VAR_HEAD
@@ -219,7 +222,7 @@ binascii_b2a_base64(PyObject *module, PyObject *const *args, Py_ssize_t nargs, P
     } _kwtuple = {
         .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
         .ob_hash = -1,
-        .ob_item = { &_Py_ID(newline), },
+        .ob_item = { &_Py_ID(newline), &_Py_ID(bytes_per_line), },
     };
     #undef NUM_KEYWORDS
     #define KWTUPLE (&_kwtuple.ob_base.ob_base)
@@ -228,17 +231,18 @@ binascii_b2a_base64(PyObject *module, PyObject *const *args, Py_ssize_t nargs, P
     #  define KWTUPLE NULL
     #endif  // !Py_BUILD_CORE
 
-    static const char * const _keywords[] = {"", "newline", NULL};
+    static const char * const _keywords[] = {"", "newline", "bytes_per_line", NULL};
     static _PyArg_Parser _parser = {
         .keywords = _keywords,
         .fname = "b2a_base64",
         .kwtuple = KWTUPLE,
     };
     #undef KWTUPLE
-    PyObject *argsbuf[2];
+    PyObject *argsbuf[3];
     Py_ssize_t noptargs = nargs + (kwnames ? PyTuple_GET_SIZE(kwnames) : 0) - 1;
     Py_buffer data = {NULL, NULL};
     int newline = 1;
+    Py_ssize_t bytes_per_line = PY_SSIZE_T_MAX;
 
     args = _PyArg_UnpackKeywords(args, nargs, NULL, kwnames, &_parser,
             /*minpos*/ 1, /*maxpos*/ 1, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
@@ -251,12 +255,20 @@ binascii_b2a_base64(PyObject *module, PyObject *const *args, Py_ssize_t nargs, P
     if (!noptargs) {
         goto skip_optional_kwonly;
     }
-    newline = PyObject_IsTrue(args[1]);
-    if (newline < 0) {
+    if (args[1]) {
+        newline = PyObject_IsTrue(args[1]);
+        if (newline < 0) {
+            goto exit;
+        }
+        if (!--noptargs) {
+            goto skip_optional_kwonly;
+        }
+    }
+    if (!_Py_convert_optional_to_non_negative_ssize_t(args[2], &bytes_per_line)) {
         goto exit;
     }
 skip_optional_kwonly:
-    return_value = binascii_b2a_base64_impl(module, &data, newline);
+    return_value = binascii_b2a_base64_impl(module, &data, newline, bytes_per_line);
 
 exit:
     /* Cleanup for data */
@@ -812,4 +824,4 @@ exit:
 
     return return_value;
 }
-/*[clinic end generated code: output=fba6a71e0d7d092f input=a9049054013a1b77]*/
+/*[clinic end generated code: output=6861879810b11ded input=a9049054013a1b77]*/

@@ -524,25 +524,30 @@ binascii.b2a_base64
     /
     *
     newline: bool = True
+    bytes_per_line: Py_ssize_t(c_default="PY_SSIZE_T_MAX", allow_negative=False, accept={int, NoneType}) = sys.maxsize
 
 Base64-code line of data.
 [clinic start generated code]*/
 
 static PyObject *
-binascii_b2a_base64_impl(PyObject *module, Py_buffer *data, int newline)
-/*[clinic end generated code: output=4ad62c8e8485d3b3 input=0e20ff59c5f2e3e1]*/
+binascii_b2a_base64_impl(PyObject *module, Py_buffer *data, int newline,
+                         Py_ssize_t bytes_per_line)
+/*[clinic end generated code: output=60ddff4c9f4c1e8f input=8158e367b8ab1fa9]*/
 {
     const unsigned char *bin_data;
     int leftbits = 0;
     unsigned char this_ch;
     unsigned int leftchar = 0;
     Py_ssize_t bin_len;
+    Py_ssize_t line_bytes = 0;
     binascii_state *state;
 
     bin_data = data->buf;
     bin_len = data->len;
 
     assert(bin_len >= 0);
+    /* Validate always past at end of buffer */
+    assert(PY_SSIZE_T_MAX > BASE64_MAXBIN);
 
     if ( bin_len > BASE64_MAXBIN ) {
         state = get_binascii_state(module);
@@ -558,7 +563,7 @@ binascii_b2a_base64_impl(PyObject *module, Py_buffer *data, int newline)
        Note that 'b' gets encoded as 'Yg==\n' (1 in, 5 out). */
     Py_ssize_t out_len = bin_len*2 + 2;
     if (newline) {
-        out_len++;
+        out_len += 1 + bin_len / bytes_per_line;
     }
     PyBytesWriter *writer = PyBytesWriter_Create(out_len);
     if (writer == NULL) {
@@ -566,7 +571,22 @@ binascii_b2a_base64_impl(PyObject *module, Py_buffer *data, int newline)
     }
     unsigned char *ascii_data = PyBytesWriter_GetData(writer);
 
-    for( ; bin_len > 0 ; bin_len--, bin_data++ ) {
+    for( ; bin_len > 0 ; bin_len--, line_bytes++, bin_data++) {
+        /* End the current line if needed */
+        if (newline && line_bytes > bytes_per_line) {
+            // TODO: Deduplicate
+            if ( leftbits == 2 ) {
+                *ascii_data++ = table_b2a_base64[(leftchar&3) << 4];
+                *ascii_data++ = BASE64_PAD;
+                *ascii_data++ = BASE64_PAD;
+            } else if ( leftbits == 4 ) {
+                *ascii_data++ = table_b2a_base64[(leftchar&0xf) << 2];
+                *ascii_data++ = BASE64_PAD;
+            }
+            *ascii_data++ = '\n';
+            line_bytes = 0;
+        }
+
         /* Shift the data into our buffer */
         leftchar = (leftchar << 8) | *bin_data;
         leftbits += 8;
@@ -578,6 +598,8 @@ binascii_b2a_base64_impl(PyObject *module, Py_buffer *data, int newline)
             *ascii_data++ = table_b2a_base64[this_ch];
         }
     }
+
+    /* end the current line */
     if ( leftbits == 2 ) {
         *ascii_data++ = table_b2a_base64[(leftchar&3) << 4];
         *ascii_data++ = BASE64_PAD;
@@ -586,8 +608,9 @@ binascii_b2a_base64_impl(PyObject *module, Py_buffer *data, int newline)
         *ascii_data++ = table_b2a_base64[(leftchar&0xf) << 2];
         *ascii_data++ = BASE64_PAD;
     }
-    if (newline)
+    if (newline && line_bytes) {
         *ascii_data++ = '\n';       /* Append a courtesy newline */
+    }
 
     return PyBytesWriter_FinishWithPointer(writer, ascii_data);
 }

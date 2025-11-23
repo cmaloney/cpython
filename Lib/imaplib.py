@@ -1726,28 +1726,9 @@ class _Authenticator:
         return self.encode(ret)
 
     def encode(self, inp):
-        #
-        #  Invoke binascii.b2a_base64 iteratively with
-        #  short even length buffers, strip the trailing
-        #  line feed from the result and append.  "Even"
-        #  means a number that factors to both 6 and 8,
-        #  so when it gets to the end of the 8-bit input
-        #  there's no partial 6-bit output.
-        #
-        oup = b''
         if isinstance(inp, str):
             inp = inp.encode('utf-8')
-        while inp:
-            if len(inp) > 48:
-                t = inp[:48]
-                inp = inp[48:]
-            else:
-                t = inp
-                inp = b''
-            e = binascii.b2a_base64(t)
-            if e:
-                oup = oup + e[:-1]
-        return oup
+        return binascii.b2a_base64(inp, newline=False, bytes_per_line=48)
 
     def decode(self, inp):
         if not inp:

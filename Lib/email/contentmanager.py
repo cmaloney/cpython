@@ -129,17 +129,10 @@ def _finalize_set(msg, disposition, filename, cid, params):
             msg.set_param(key, value)
 
 
-# XXX: This is a cleaned-up version of base64mime.body_encode (including a bug
-# fix in the calculation of unencoded_bytes_per_line).  It would be nice to
-# drop both this and quoprimime.body_encode in favor of enhanced binascii
-# routines that accepted a max_line_length parameter.
 def _encode_base64(data, max_line_length):
-    encoded_lines = []
     unencoded_bytes_per_line = max_line_length // 4 * 3
-    for i in range(0, len(data), unencoded_bytes_per_line):
-        thisline = data[i:i+unencoded_bytes_per_line]
-        encoded_lines.append(binascii.b2a_base64(thisline).decode('ascii'))
-    return ''.join(encoded_lines)
+    data = binascii.b2a_base64(data,bytes_per_line=unencoded_bytes_per_line)
+    return data.decode('ascii')
 
 
 def _encode_text(string, charset, cte, policy):
