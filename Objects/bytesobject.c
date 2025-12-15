@@ -1450,9 +1450,11 @@ bytes_concat(PyObject *a, PyObject *b)
 {
     Py_buffer va, vb;
     PyObject *result = NULL;
+    int unique_ref = PyUnstable_Object_IsUniqueReferencedTemporary(a);
 
     va.len = -1;
     vb.len = -1;
+
     if (PyObject_GetBuffer(a, &va, PyBUF_SIMPLE) != 0 ||
         PyObject_GetBuffer(b, &vb, PyBUF_SIMPLE) != 0) {
         PyErr_Format(PyExc_TypeError, "can't concat %.100s to %.100s",
@@ -1472,6 +1474,21 @@ bytes_concat(PyObject *a, PyObject *b)
 
     if (va.len > PY_SSIZE_T_MAX - vb.len) {
         PyErr_NoMemory();
+        goto done;
+    }
+
+    /* If a can be mutated avoid a new independent allocation by resizing and
+       modifying in place. */
+    if (unique_ref && PyBytes_CheckExact(a)) {
+        // FIXME: PyBuferr_Release can call arbitrary code, need ot revalidate
+        // assumptions.
+        PyBuffer_Release(&va);
+        va.len = -1;
+        if (_PyBytes_Resize_InPlace(&a, va.len + vb.len)) {
+            goto done;
+        }
+        memcpy(PyBytes_AS_STRING(a) + va.len, vb.buf, vb.len);
+        result = Py_NewRef(a);
         goto done;
     }
 
@@ -3223,12 +3240,38 @@ PyBytes_ConcatAndDel(PyObject **pv, PyObject *w)
    As always, an extra byte is allocated for a trailing \0 byte (newsize
    does *not* include that), and a trailing \0 byte is stored.
 */
+int _PyBytes_Resize_InPlace(PyObject **pv, Py_ssize_t newsize) {
+    assert(_PyObject_IsUniquelyReferenced(*pv));
+    PyBytesObject *sv;
+    PyObject *v = *pv;
+
+#ifdef Py_TRACE_REFS
+    _Py_ForgetReference(v);
+#endif
+    _PyReftracerTrack(v, PyRefTracer_DESTROY);
+    *pv = (PyObject *)
+        PyObject_Realloc(v, PyBytesObject_SIZE + newsize);
+    if (*pv == NULL) {
+#ifdef Py_REF_DEBUG
+        _Py_DecRefTotal(_PyThreadState_GET());
+#endif
+        PyObject_Free(v);
+        PyErr_NoMemory();
+        return -1;
+    }
+    _Py_NewReferenceNoTotal(*pv);
+    sv = (PyBytesObject *) *pv;
+    Py_SET_SIZE(sv, newsize);
+    sv->ob_sval[newsize] = '\0';
+    set_ob_shash(sv, -1);          /* invalidate cached hash value */
+    return 0;
+}
+
 
 int
 _PyBytes_Resize(PyObject **pv, Py_ssize_t newsize)
 {
     PyObject *v;
-    PyBytesObject *sv;
     v = *pv;
     if (!PyBytes_Check(v) || newsize < 0) {
         *pv = 0;
@@ -3265,26 +3308,8 @@ _PyBytes_Resize(PyObject **pv, Py_ssize_t newsize)
         return (*pv == NULL) ? -1 : 0;
     }
 
-#ifdef Py_TRACE_REFS
-    _Py_ForgetReference(v);
-#endif
-    _PyReftracerTrack(v, PyRefTracer_DESTROY);
-    *pv = (PyObject *)
-        PyObject_Realloc(v, PyBytesObject_SIZE + newsize);
-    if (*pv == NULL) {
-#ifdef Py_REF_DEBUG
-        _Py_DecRefTotal(_PyThreadState_GET());
-#endif
-        PyObject_Free(v);
-        PyErr_NoMemory();
-        return -1;
-    }
-    _Py_NewReferenceNoTotal(*pv);
-    sv = (PyBytesObject *) *pv;
-    Py_SET_SIZE(sv, newsize);
-    sv->ob_sval[newsize] = '\0';
-    set_ob_shash(sv, -1);          /* invalidate cached hash value */
-    return 0;
+    return _PyBytes_Resize_InPlace(pv, newsize);
+
 }
 
 

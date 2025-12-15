@@ -68,6 +68,9 @@ _PyBytes_Repeat(char* dest, Py_ssize_t len_dest,
 */
 #define _PyBytesObject_SIZE (offsetof(PyBytesObject, ob_sval) + 1)
 
+/* Resize a bytes which is known to be unqiuely referenced. */
+int _PyBytes_Resize_InPlace(PyObject **pv, Py_ssize_t newsize);
+
 /* --- PyBytesWriter ------------------------------------------------------ */
 
 struct PyBytesWriter {
