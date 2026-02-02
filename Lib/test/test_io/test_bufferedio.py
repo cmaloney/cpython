@@ -1529,9 +1529,11 @@ class BufferSizeTest:
             self.assertEqual(line, s)
             line = f.readline()
             self.assertFalse(line) # Must be at EOF
-            f.close()
         finally:
-            os_helper.unlink(os_helper.TESTFN)
+            try:
+                f.close()
+            finally:
+                os_helper.unlink(os_helper.TESTFN)
 
     def drive_one(self, pattern):
         for length in lengths:
