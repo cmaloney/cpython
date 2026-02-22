@@ -240,6 +240,31 @@ exit:
     return return_value;
 }
 
+static PyObject *
+float_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyObject *x = NULL;
+
+    if (!_PyArg_NoKwnames("float", kwnames)) {
+        goto exit;
+    }
+    if (!_PyArg_CheckPositional("float", nargs, 0, 1)) {
+        goto exit;
+    }
+    if (nargs < 1) {
+        goto skip_optional_vc;
+    }
+    x = args[0];
+skip_optional_vc:
+    return_value = float_new_impl(_PyType_CAST(type), x);
+
+exit:
+    return return_value;
+}
+
 PyDoc_STRVAR(float_from_number__doc__,
 "from_number($type, number, /)\n"
 "--\n"
@@ -353,4 +378,4 @@ float___format__(PyObject *self, PyObject *arg)
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=927035897ea3573f input=a9049054013a1b77]*/
+/*[clinic end generated code: output=e30e0ba86fd98fe8 input=a9049054013a1b77]*/
