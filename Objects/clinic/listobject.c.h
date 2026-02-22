@@ -433,6 +433,43 @@ exit:
     return return_value;
 }
 
+static PyObject *
+list_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyObject *iterable = NULL;
+
+    if (!_PyArg_NoKwnames("list", kwnames)) {
+        goto exit;
+    }
+    if (!_PyArg_CheckPositional("list", nargs, 0, 1)) {
+        goto exit;
+    }
+    if (nargs < 1) {
+        goto skip_optional_vc;
+    }
+    iterable = args[0];
+skip_optional_vc:
+    {
+        PyObject *self = _PyType_CAST(type)->tp_alloc(
+            _PyType_CAST(type), 0);
+        if (self == NULL) {
+            goto exit;
+        }
+        int _result = list___init___impl((PyListObject *)self, iterable);
+        if (_result != 0) {
+            Py_DECREF(self);
+            goto exit;
+        }
+        return_value = self;
+    }
+
+exit:
+    return return_value;
+}
+
 PyDoc_STRVAR(list___sizeof____doc__,
 "__sizeof__($self, /)\n"
 "--\n"
@@ -468,4 +505,4 @@ list___reversed__(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
     return list___reversed___impl((PyListObject *)self);
 }
-/*[clinic end generated code: output=ae13fc2b56dc27c2 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=8c3a1f4fd37614da input=a9049054013a1b77]*/

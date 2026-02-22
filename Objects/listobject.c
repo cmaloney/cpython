@@ -3486,6 +3486,7 @@ list_richcompare(PyObject *v, PyObject *w, int op)
 }
 
 /*[clinic input]
+@vectorcall
 list.__init__
 
     iterable: object(c_default="NULL") = ()
@@ -3499,7 +3500,7 @@ The argument must be an iterable if specified.
 
 static int
 list___init___impl(PyListObject *self, PyObject *iterable)
-/*[clinic end generated code: output=0f3c21379d01de48 input=b3f3fe7206af8f6b]*/
+/*[clinic end generated code: output=0f3c21379d01de48 input=838498bcc51b7290]*/
 {
     /* Verify list invariants established by PyType_GenericAlloc() */
     assert(0 <= Py_SIZE(self));
@@ -3519,31 +3520,6 @@ list___init___impl(PyListObject *self, PyObject *iterable)
         }
     }
     return 0;
-}
-
-static PyObject *
-list_vectorcall(PyObject *type, PyObject * const*args,
-                size_t nargsf, PyObject *kwnames)
-{
-    if (!_PyArg_NoKwnames("list", kwnames)) {
-        return NULL;
-    }
-    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
-    if (!_PyArg_CheckPositional("list", nargs, 0, 1)) {
-        return NULL;
-    }
-
-    PyObject *list = PyType_GenericAlloc(_PyType_CAST(type), 0);
-    if (list == NULL) {
-        return NULL;
-    }
-    if (nargs) {
-        if (list___init___impl((PyListObject *)list, args[0])) {
-            Py_DECREF(list);
-            return NULL;
-        }
-    }
-    return list;
 }
 
 
