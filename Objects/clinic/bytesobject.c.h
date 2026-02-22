@@ -1411,4 +1411,142 @@ skip_optional_pos:
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=08b9507244f73638 input=a9049054013a1b77]*/
+
+static PyObject *
+bytes_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyObject *x = NULL;
+    const char *encoding = NULL;
+    const char *errors = NULL;
+
+    if (kwnames == NULL) {
+        if (!_PyArg_CheckPositional("bytes", nargs, 0, 3)) {
+            goto exit;
+        }
+        if (nargs < 1) {
+            goto skip_optional_vc_fast;
+        }
+        x = args[0];
+        if (nargs < 2) {
+            goto skip_optional_vc_fast;
+        }
+        if (!PyUnicode_Check(args[1])) {
+            _PyArg_BadArgument("bytes", "argument 'encoding'", "str", args[1]);
+            goto exit;
+        }
+        Py_ssize_t encoding_length;
+        encoding = PyUnicode_AsUTF8AndSize(args[1], &encoding_length);
+        if (encoding == NULL) {
+            goto exit;
+        }
+        if (strlen(encoding) != (size_t)encoding_length) {
+            PyErr_SetString(PyExc_ValueError, "embedded null character");
+            goto exit;
+        }
+        if (nargs < 3) {
+            goto skip_optional_vc_fast;
+        }
+        if (!PyUnicode_Check(args[2])) {
+            _PyArg_BadArgument("bytes", "argument 'errors'", "str", args[2]);
+            goto exit;
+        }
+        Py_ssize_t errors_length;
+        errors = PyUnicode_AsUTF8AndSize(args[2], &errors_length);
+        if (errors == NULL) {
+            goto exit;
+        }
+        if (strlen(errors) != (size_t)errors_length) {
+            PyErr_SetString(PyExc_ValueError, "embedded null character");
+            goto exit;
+        }
+    skip_optional_vc_fast:
+        goto vc_fast_end;
+    }
+    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
+
+    #define NUM_KEYWORDS 3
+    static struct {
+        PyGC_Head _this_is_not_used;
+        PyObject_VAR_HEAD
+        Py_hash_t ob_hash;
+        PyObject *ob_item[NUM_KEYWORDS];
+    } _kwtuple = {
+        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
+        .ob_hash = -1,
+        .ob_item = { &_Py_ID(source), &_Py_ID(encoding), &_Py_ID(errors), },
+    };
+    #undef NUM_KEYWORDS
+    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
+
+    #else  // !Py_BUILD_CORE
+    #  define KWTUPLE NULL
+    #endif  // !Py_BUILD_CORE
+
+    static const char * const _keywords[] = {"source", "encoding", "errors", NULL};
+    static _PyArg_Parser _parser = {
+        .keywords = _keywords,
+        .fname = "bytes",
+        .kwtuple = KWTUPLE,
+    };
+    #undef KWTUPLE
+    PyObject *argsbuf[3];
+    Py_ssize_t noptargs = nargs + (kwnames ? PyTuple_GET_SIZE(kwnames) : 0) - 0;
+    args = _PyArg_UnpackKeywords(args, nargs, NULL, kwnames,
+        &_parser,
+        /*minpos*/ 0, /*maxpos*/ 3,
+        /*minkw*/ 0,
+        /*varpos*/ 0, argsbuf);
+    if (!args) {
+        goto exit;
+    }
+    if (!noptargs) {
+        goto skip_optional_pos_vc;
+    }
+    if (args[0]) {
+        x = args[0];
+        if (!--noptargs) {
+            goto skip_optional_pos_vc;
+        }
+    }
+    if (args[1]) {
+        if (!PyUnicode_Check(args[1])) {
+            _PyArg_BadArgument("bytes", "argument 'encoding'", "str", args[1]);
+            goto exit;
+        }
+        Py_ssize_t encoding_length;
+        encoding = PyUnicode_AsUTF8AndSize(args[1], &encoding_length);
+        if (encoding == NULL) {
+            goto exit;
+        }
+        if (strlen(encoding) != (size_t)encoding_length) {
+            PyErr_SetString(PyExc_ValueError, "embedded null character");
+            goto exit;
+        }
+        if (!--noptargs) {
+            goto skip_optional_pos_vc;
+        }
+    }
+    if (!PyUnicode_Check(args[2])) {
+        _PyArg_BadArgument("bytes", "argument 'errors'", "str", args[2]);
+        goto exit;
+    }
+    Py_ssize_t errors_length;
+    errors = PyUnicode_AsUTF8AndSize(args[2], &errors_length);
+    if (errors == NULL) {
+        goto exit;
+    }
+    if (strlen(errors) != (size_t)errors_length) {
+        PyErr_SetString(PyExc_ValueError, "embedded null character");
+        goto exit;
+    }
+skip_optional_pos_vc:
+vc_fast_end:
+    return_value = bytes_new_impl(_PyType_CAST(type), x, encoding, errors);
+
+exit:
+    return return_value;
+}
+/*[clinic end generated code: output=538f41dd52cd7b27 input=a9049054013a1b77]*/
