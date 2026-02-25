@@ -72,6 +72,88 @@ exit:
     return return_value;
 }
 
+static PyObject *
+long_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyObject *x = NULL;
+    PyObject *obase = NULL;
+
+    if (nargs == 0 && kwnames == NULL) {
+        return _PyLong_GetZero();
+    }
+    if (kwnames == NULL) {
+        if (!_PyArg_CheckPositional("int", nargs, 0, 2)) {
+            goto exit;
+        }
+        if (nargs < 1) {
+            goto skip_optional_vc_fast;
+        }
+        x = args[0];
+        if (nargs < 2) {
+            goto skip_optional_vc_fast;
+        }
+        obase = args[1];
+    skip_optional_vc_fast:
+        goto vc_fast_end;
+    }
+    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
+
+    #define NUM_KEYWORDS 1
+    static struct {
+        PyGC_Head _this_is_not_used;
+        PyObject_VAR_HEAD
+        Py_hash_t ob_hash;
+        PyObject *ob_item[NUM_KEYWORDS];
+    } _kwtuple = {
+        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
+        .ob_hash = -1,
+        .ob_item = { &_Py_ID(base), },
+    };
+    #undef NUM_KEYWORDS
+    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
+
+    #else  // !Py_BUILD_CORE
+    #  define KWTUPLE NULL
+    #endif  // !Py_BUILD_CORE
+
+    static const char * const _keywords[] = {"", "base", NULL};
+    static _PyArg_Parser _parser = {
+        .keywords = _keywords,
+        .fname = "int",
+        .kwtuple = KWTUPLE,
+    };
+    #undef KWTUPLE
+    PyObject *argsbuf[2];
+    Py_ssize_t noptargs = nargs + (kwnames ? PyTuple_GET_SIZE(kwnames) : 0) - 0;
+    args = _PyArg_UnpackKeywords(args, nargs, NULL, kwnames,
+        &_parser,
+        /*minpos*/ 0, /*maxpos*/ 2,
+        /*minkw*/ 0,
+        /*varpos*/ 0, argsbuf);
+    if (!args) {
+        goto exit;
+    }
+    if (nargs < 1) {
+        goto skip_optional_posonly_vc;
+    }
+    noptargs--;
+    x = args[0];
+skip_optional_posonly_vc:
+    if (!noptargs) {
+        goto skip_optional_pos_vc;
+    }
+    obase = args[1];
+skip_optional_pos_vc:
+vc_fast_end:
+    return_value = long_new_impl(_PyType_CAST(type), x, obase);
+
+exit:
+    return return_value;
+}
+
 PyDoc_STRVAR(int___getnewargs____doc__,
 "__getnewargs__($self, /)\n"
 "--\n"
@@ -490,4 +572,4 @@ int_is_integer(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
     return int_is_integer_impl(self);
 }
-/*[clinic end generated code: output=e68f4e23ead3f649 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=f696b6b95a415b36 input=a9049054013a1b77]*/

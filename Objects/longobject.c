@@ -5969,6 +5969,7 @@ static PyObject *
 long_subtype_new(PyTypeObject *type, PyObject *x, PyObject *obase);
 
 /*[clinic input]
+@vectorcall zero_arg=_PyLong_GetZero()
 @classmethod
 int.__new__ as long_new
     x: object(c_default="NULL") = 0
@@ -5978,7 +5979,7 @@ int.__new__ as long_new
 
 static PyObject *
 long_new_impl(PyTypeObject *type, PyObject *x, PyObject *obase)
-/*[clinic end generated code: output=e47cfe777ab0f24c input=81c98f418af9eb6f]*/
+/*[clinic end generated code: output=e47cfe777ab0f24c input=fa144948f64fa26d]*/
 {
     Py_ssize_t base;
 
@@ -6533,29 +6534,6 @@ int_is_integer_impl(PyObject *self)
 /*[clinic end generated code: output=90f8e794ce5430ef input=7e41c4d4416e05f2]*/
 {
     Py_RETURN_TRUE;
-}
-
-static PyObject *
-long_vectorcall(PyObject *type, PyObject * const*args,
-                 size_t nargsf, PyObject *kwnames)
-{
-    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
-    if (kwnames != NULL) {
-        PyThreadState *tstate = PyThreadState_GET();
-        return _PyObject_MakeTpCall(tstate, type, args, nargs, kwnames);
-    }
-    switch (nargs) {
-        case 0:
-            return _PyLong_GetZero();
-        case 1:
-            return PyNumber_Long(args[0]);
-        case 2:
-            return long_new_impl(_PyType_CAST(type), args[0], args[1]);
-        default:
-            return PyErr_Format(PyExc_TypeError,
-                                "int expected at most 2 arguments, got %zd",
-                                nargs);
-    }
 }
 
 static PyMethodDef long_methods[] = {
