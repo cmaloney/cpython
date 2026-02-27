@@ -38,6 +38,12 @@ BlockingIOError = BlockingIOError
 # Does open() check its 'errors' argument?
 _CHECK_ERRORS = (hasattr(sys, "gettotalrefcount") or sys.flags.dev_mode)
 
+# Maximum number of buffers writev(2) accepts. Exceeding this causes EINVAL.
+try:
+    _IOV_MAX = os.sysconf('SC_IOV_MAX')
+except (AttributeError, ValueError):
+    _IOV_MAX = 16  # POSIX minimum guarantee
+
 
 def text_encoding(encoding, stacklevel=2):
     """
@@ -73,7 +79,7 @@ class _Morsel:
     THREAD SAFETY: NOT thread-safe. Internal to _Nibbler.
     A Morsel has a single owner from creation until destruction.
 
-    LOCKING: Lock held by _Nibbler via `with self._cond:` during buffer
+    LOCKING: Lock held by _Nibbler via `with self._lock:` during buffer
     extraction and return. Lock NOT held during write operations (I/O must
     not block other threads).
 
@@ -150,7 +156,12 @@ class _Morsel:
                         # Check: Is it faster to copy lots of small (1-10 byte)
                         # buffers into a contiguous buffer than pass lots of small
                         # buffers. (main use case: print)
-                        if writev := getattr(raw, '_writev', None):
+                        #
+                        # writev(2) fails with EINVAL if the number of
+                        # buffers exceeds IOV_MAX. Fall back to coalescing
+                        # into a single buffer when we have too many segments.
+                        if (len(self._remaining) <= _IOV_MAX
+                                and (writev := getattr(raw, '_writev', None))):
                             written = writev(self._remaining)
                         else:
                             self._coalesce()
@@ -210,7 +221,7 @@ class _Nibbler:
     THREAD SAFETY MODEL:
     - The Nibbler itself is thread-safe and may be shared between threads.
     - Internal state (_buffer, _bytes_buffered, _current_morsel) is protected
-      by self._cond.
+      by self._lock.
     - Locks are held ONLY during buffer access (extracting/returning buffers),
       NOT during I/O operations.
 
@@ -231,8 +242,8 @@ class _Nibbler:
         :param: int flush_size: Number of bytes that should trigger a flush.
         """
         # NOTE: Plan is to use finer grained locking on the buffer to avoid
-        # needing the full context variable.
-        self._cond = threading.Condition(threading.RLock())
+        # needing the full lock.
+        self._lock = threading.RLock()
         # TODO(cmaloney): Measure value of TextIOWrapper's optimization that a
         # single buffer doesn't have a list.
         self._current_morsel = None
@@ -278,12 +289,12 @@ class _Nibbler:
             BlockingIOError: If write couldn't complete without blocking
         """
         # CRITICAL SECTION 1: Extract all buffers
-        with self._cond:
+        with self._lock:
             morsel = self._make_morsel_locked(None)
         # Lock released
 
         if not morsel:
-            with self._cond:
+            with self._lock:
                 self._current_morsel = None
             return
 
@@ -292,7 +303,7 @@ class _Nibbler:
         morsel.write(raw)
 
         # CRITICAL SECTION 2: Return unwritten data
-        with self._cond:
+        with self._lock:
             self._return_morsel_locked(morsel)
 
     # TODO(cmaloney): allow properly encoded strings for TextIOWrapper!
@@ -309,34 +320,37 @@ class _Nibbler:
         Raises:
             BlockingIOError: If flush couldn't complete without blocking
         """
-        # Normalize using buffer protocol. NO LOCK.
-        if not isinstance(buf, (bytearray, bytes)):
-            buf = memoryview(buf).cast('B')
+        # Fast path for the common case: buf is already bytes.
+        # Skips all isinstance checks and mutable-buffer handling.
+        if type(buf) is not bytes:
+            # Normalize using buffer protocol. NO LOCK.
+            if not isinstance(buf, (bytearray, bytes)):
+                buf = memoryview(buf).cast('B')
+
+            # Mutable values (ex. bytearray, memoryview) need to be copied
+            # because they may be modified by caller after return.
+            # FIXME(cmaloney): If we're immediately flushing don't copy until
+            # _after_ the flush fails and we have to return to user code which
+            # may modify.
+            # FIXME(cmaloney): Have nibbler allocate and own this memory and
+            # _REUSE_ it when needed (Most things that need these cases will do
+            # so repeatedly).
+            if isinstance(buf, bytearray):
+                if sys.getrefcount(buf) == 1:
+                    buf = buf.take_bytes()
+                else:
+                    buf = bytes(buf)
+            elif isinstance(buf, memoryview):
+                if type(buf.obj) is not bytes:
+                    buf = buf.tobytes()
 
         # optimization: Don't insert empty buffers
         added_bytes = len(buf)
         if added_bytes == 0:
             return 0
 
-        # Mutable values (ex. bytearray, memoryview) need to be copied because
-        # they may be modified by caller after return.
-        # FIXME(cmaloney): If we're immediately flushing don't
-        # copy until _after_ the flush fails and we have to return to user code
-        # which may modify.
-        # FIXME(cmaloney): Have nibbler allocate and own this memory and _REUSE_
-        # it when needed (Most things that need these cases will do so repeatedly).
-        # If the buffer is mutable, copy the data.
-        if isinstance(buf, bytearray):
-            if sys.getrefcount(buf) == 1:
-                buf = buf.take_bytes()
-            else:
-                buf = bytes(buf)
-        elif isinstance(buf, memoryview):
-            if type(buf.obj) is not bytes:
-                buf = buf.tobytes()
-
         # CRITICAL SECTION 1: Add to buffer and create morsel
-        with self._cond:
+        with self._lock:
             self._bytes_buffered += len(buf)
             self._buffer.append(buf)
 
@@ -352,11 +366,11 @@ class _Nibbler:
         morsel.write(raw)
 
         # CRITICAL SECTION 2: Return unwritten data to nibbler
-        with self._cond:
+        with self._lock:
             return self._return_morsel_locked(morsel)
 
     def _return_morsel_locked(self, morsel):
-        """Return morsel data to nibbler. Caller must hold self._cond.
+        """Return morsel data to nibbler. Caller must hold self._lock.
 
         Returns:
             int: Bytes written from last_buffer, or 0 if none
