@@ -37,6 +37,12 @@ BlockingIOError = BlockingIOError
 # Does open() check its 'errors' argument?
 _CHECK_ERRORS = (hasattr(sys, "gettotalrefcount") or sys.flags.dev_mode)
 
+# Maximum number of buffers writev(2) accepts. Exceeding this causes EINVAL.
+try:
+    _IOV_MAX = os.sysconf('SC_IOV_MAX')
+except (AttributeError, ValueError):
+    _IOV_MAX = 16  # POSIX minimum guarantee
+
 
 def text_encoding(encoding, stacklevel=2):
     """
@@ -63,6 +69,322 @@ def text_encoding(encoding, stacklevel=2):
             warnings.warn("'encoding' argument not specified.",
                           EncodingWarning, stacklevel + 1)
     return encoding
+
+# FIXME(cmaloney): Maybe do start and stop offsets rather than a list?
+class _Morsel:
+    """Block of bytes which needs to be flushed.
+
+    THREAD SAFETY: NOT thread-safe. Internal to _Nibbler.
+    A Morsel has a single owner from creation until destruction.
+
+    LOCKING: Lock held by _Nibbler via `with self._lock:` during buffer
+    extraction and return. Lock NOT held during write operations (I/O must
+    not block other threads).
+
+    LIFECYCLE:
+    1. Created: _Nibbler extracts buffers into Morsel (under lock)
+    2. Writing: _Nibbler writes Morsel data via write() (no lock)
+    3. Return: _Nibbler returns unwritten data to its buffer (under lock)
+    """
+    def __init__(self, nibbler, buffers, *, last_buffer, length):
+        self._nibbler = nibbler
+        self._remaining = buffers
+        self._length = length
+
+        # If a `write` causes a flush and that flush blocks, the write must
+        # return the number of bytes of the _last buffer_ written which were
+        # written / stored to the internal buffer.
+        self._last_buffer = last_buffer
+
+    def _consume(self, consumed):
+        if consumed > self._length:
+            raise OSError("write() returned incorrect number of bytes")
+
+        self._length -= consumed
+        if self._length == 0:
+            self._remaining = []
+            return
+
+        # Drop fully-written buffers from the front.
+        cur_buf = 0
+        while consumed >= len(self._remaining[cur_buf]):
+            consumed -= len(self._remaining[cur_buf])
+            cur_buf += 1
+        del self._remaining[:cur_buf]
+
+        if consumed == 0:
+            return
+
+        # Partially-written buffer: slice the remainder without copying.
+        if not isinstance(self._remaining[0], memoryview):
+            self._remaining[0] = memoryview(self._remaining[0])
+        self._remaining[0] = self._remaining[0][consumed:]
+
+    def write(self, raw):
+        """Write morsel to raw, stopping only if blocked or an exception occurs.
+
+        Uses the most efficient method available on raw, only merging buffers
+        when needed.
+        """
+        while self._length > 0:
+            try:
+                match len(self._remaining):
+                    case 0:
+                        raise SystemError("Should have at least one buffer")
+                    case 1:
+                        written = raw.write(self._remaining[0])
+                    case _:
+                        # TODO(cmaloney): Measure and determine when it's better to
+                        # coalesce and do one write vs a writev
+                        #
+                        # Focus: TextIOWrapper on a big flush-causing write will coalesce
+                        # everything but the big write and do two calls.
+                        #
+                        # Check: Is it faster to copy lots of small (1-10 byte)
+                        # buffers into a contiguous buffer than pass lots of small
+                        # buffers. (main use case: print)
+                        #
+                        # writev(2) fails with EINVAL if the number of
+                        # buffers exceeds IOV_MAX. Fall back to coalescing
+                        # into a single buffer when we have too many segments.
+                        if (len(self._remaining) <= _IOV_MAX
+                                and (writev := getattr(raw, '_writev', None))):
+                            written = writev(self._remaining)
+                        else:
+                            self._coalesce()
+                            written = raw.write(self._remaining[0])
+            except BlockingIOError as ex:
+                raise RuntimeError("raw should implement RawIOBase: it "
+                                   "should not raise BlockingIOError") from ex
+
+            # Blocked, no further retries.
+            if written is None:
+                return
+            self._consume(written)
+
+    def _coalesce(self):
+        """Combine buffers, guaranteeing at least one buffer for writing.
+
+        At the end of this function self._remaining is guaranteed to be length
+        one.
+
+        The `bytearray` is not provided by caller code so it can be left
+        mutable for future use / reuse."""
+        assert len(self._remaining) >= 1
+
+        # Already in coalesced form
+        if len(self._remaining) == 1:
+            return
+
+        # TODO(cmaloney): Can this cap coalescing at BUFFER_SIZE / never
+        # allocate too much? (Just keep unused buffers in a "next"?)
+        res = bytearray(self._length)
+        # TODO(cmaloney): Try using storage allocated/owned by the nibbler
+        offset = 0
+        for buf in self._remaining:
+            end = offset + len(buf)
+            assert end <= len(res), "Should be inside the just allocated result"
+            res[offset:end] = buf
+            offset = end
+        self._remaining = [res]
+
+    def __len__(self):
+        return self._length
+
+
+class _Nibbler:
+    """Thread-safe buffer manager that handles flushing internally.
+
+    Accumulates small writes into larger chunks. When the buffer exceeds the
+    flush size, creates a Morsel internally, writes it, and returns unwritten
+    data to the buffer. Callers never see _Morsel objects.
+
+    Thread safety:
+        The Nibbler may be shared between threads. Internal state (_buffer,
+        _bytes_buffered, _current_morsel) is protected by self._lock. The
+        lock is held end-to-end through raw I/O (see Ordering); a slow
+        raw.write therefore blocks other appenders.
+
+    Ordering:
+        Every write() reaches the raw stream contiguously and in the order
+        callers acquired self._lock. This matches the behavior of the
+        pre-Nibbler BufferedWriter, so applications that implicitly rely on
+        cross-thread write ordering (e.g. logging) keep working.
+
+        Future direction: split into two locks - a short buffer lock for
+        _buffer/_bytes_buffered and an I/O lock held across raw.write -
+        so concurrent appenders can queue work while one thread is in
+        raw I/O. The I/O lock preserves global ordering because the thread
+        holding it extracts everything buffered so far in one shot before
+        writing; the next holder sees only newer data. That refactor is
+        deferred until profiling shows the current end-to-end lock is a
+        real bottleneck.
+
+    Invariants (under lock):
+        - If _current_morsel is not None, its buffers are NOT in _buffer.
+        - _bytes_buffered equals sum(len(b) for b in _buffer).
+        - _buffer entries are bytes objects or memoryviews backed by
+          immutable storage.
+    """
+
+    def __init__(self, flush_size: int):
+        """Buffer up to flush_size, return data when overflow.
+
+        :param int flush_size: Number of bytes that should trigger a flush.
+        """
+        self._lock = Lock()
+        # TODO(cmaloney): Measure value of TextIOWrapper's optimization that a
+        # single buffer doesn't have a list.
+        self._current_morsel = None
+        self._buffer = []
+        self._flush_size = flush_size
+        self._bytes_buffered = 0
+
+    def _make_morsel_locked(self, last_buffer):
+        """Extract the current buffer into a Morsel. Caller must hold the lock."""
+        if not self._buffer and not last_buffer:
+            return _Morsel(self, [], last_buffer=last_buffer, length=0)
+
+        # FIXME(cmaloney): Maybe change morsel to be just a slice of the buffer
+        # list and returning is just deleting part of that slice.
+        length = self._bytes_buffered
+        buf = self._buffer
+        assert sum(map(len, buf)) == length, f"{length=}|{buf=}"
+        self._buffer = []
+        self._bytes_buffered = 0
+        ret = _Morsel(self, buf, last_buffer=last_buffer, length=length)
+        self._current_morsel = ret
+        return ret
+
+    def flush_all(self, get_raw_stream):
+        """Take all buffered data and flush to stream.
+
+        Args:
+            get_raw_stream: Callable returning RawIOBase (validates stream state)
+
+        Raises:
+            BlockingIOError: If write couldn't complete without blocking
+        """
+        # Lock held across raw I/O to preserve cross-thread write order.
+        # See the class docstring for the two-lock refactor that would
+        # let appenders run concurrently with an in-progress flush.
+        with self._lock:
+            morsel = self._make_morsel_locked(None)
+            if not morsel:
+                return
+            morsel.write(get_raw_stream())
+            self._return_morsel_locked(morsel)
+
+    # TODO(cmaloney): allow properly encoded strings for TextIOWrapper!
+    def append(self, buf, get_raw_stream):
+        """Add data to buffer. If buffer becomes full, flush to stream.
+
+        Args:
+            buf: bytes-like object to append
+            get_raw_stream: Callable returning RawIOBase (validates stream state)
+
+        Returns:
+            int: Number of bytes written/buffered from buf
+
+        Raises:
+            BlockingIOError: If flush couldn't complete without blocking
+        """
+        # Fast path: buf is already bytes. Skips isinstance checks and
+        # mutable-buffer handling below.
+        if type(buf) is not bytes:
+            # Normalize via the buffer protocol.
+            if not isinstance(buf, (bytearray, bytes)):
+                buf = memoryview(buf).cast('B')
+
+            # Mutable values (e.g. bytearray, memoryview) need to be copied
+            # because they may be modified by the caller after return.
+            # FIXME(cmaloney): If we're immediately flushing don't copy until
+            # _after_ the flush fails and we have to return to user code which
+            # may modify.
+            # FIXME(cmaloney): Have nibbler allocate and own this memory and
+            # _REUSE_ it when needed (Most things that need these cases will do
+            # so repeatedly).
+            if isinstance(buf, bytearray):
+                if sys.getrefcount(buf) == 1:
+                    buf = buf.take_bytes()
+                else:
+                    buf = bytes(buf)
+            elif isinstance(buf, memoryview):
+                if type(buf.obj) is not bytes:
+                    buf = buf.tobytes()
+
+        added_bytes = len(buf)
+        if added_bytes == 0:
+            return 0
+
+        # Lock held across raw I/O to preserve cross-thread write order.
+        # See the class docstring for the two-lock refactor that would
+        # let appenders run concurrently with an in-progress flush.
+        with self._lock:
+            self._bytes_buffered += len(buf)
+            self._buffer.append(buf)
+
+            if self._bytes_buffered < self._flush_size:
+                return added_bytes
+
+            morsel = self._make_morsel_locked(buf)
+            morsel.write(get_raw_stream())
+            return self._return_morsel_locked(morsel)
+
+    def _return_morsel_locked(self, morsel):
+        """Return morsel data to nibbler. Caller must hold self._lock.
+
+        Returns:
+            int: Bytes written from last_buffer, or 0 if none
+
+        Raises:
+            BlockingIOError: If data was dropped due to overflow
+        """
+        # No bytes remain in morsel.
+        if not morsel:
+            self._current_morsel = None
+            return len(morsel._last_buffer) if morsel._last_buffer else 0
+
+        # Partially written - return data to buffer
+        morsel._coalesce()
+        assert len(morsel._remaining) == 1
+        overwrite = morsel._length - self._flush_size
+
+        if overwrite <= 0:
+            to_store = memoryview(morsel._remaining[0])
+        else:
+            match morsel._remaining[0]:
+                case bytearray() as ba:
+                    to_store = ba
+                    ba.resize(self._flush_size)
+                case bytes() as b:
+                    to_store = b[:self._flush_size]
+                case memoryview() as mv:
+                    to_store = mv[:self._flush_size].tobytes()
+
+        # Prepend the leftover ahead of anything appended while the lock was
+        # released.
+        self._buffer.insert(0, to_store)
+        self._bytes_buffered += len(to_store)
+        self._current_morsel = None
+
+        # Calculate return value / raise if overflow
+        if morsel._last_buffer is None:
+            return 0
+        if overwrite <= 0:
+            return len(morsel._last_buffer)
+        else:
+            # `overwrite` may exceed last_buffer when older buffered data is
+            # also being dropped; in that case nothing of last_buffer made it.
+            written = max(0, len(morsel._last_buffer) - overwrite)
+            raise BlockingIOError(
+                errno.EAGAIN,
+                "write could not complete without blocking",
+                written
+            )
+
+    def __len__(self):
+        return self._bytes_buffered
 
 
 # Wrapper for builtins.open
@@ -1031,6 +1353,7 @@ class BytesIO(BufferedIOBase):
         return True
 
 
+# FIXME(cmaloney): Move to nibbler.
 class BufferedReader(_BufferedIOMixin):
 
     """BufferedReader(raw[, buffer_size])
@@ -1245,95 +1568,69 @@ class BufferedWriter(_BufferedIOMixin):
             raise OSError('"raw" argument must be writable.')
 
         _BufferedIOMixin.__init__(self, raw)
-        if buffer_size <= 0:
+        if buffer_size < 0:
             raise ValueError("invalid buffer size")
-        self.buffer_size = buffer_size
-        self._write_buf = bytearray()
-        self._write_lock = Lock()
+        self._write_nibbler = _Nibbler(buffer_size)
 
     def writable(self):
         return self.raw.writable()
 
+    def _dealloc_warn(self, source):
+        if len(self._write_nibbler) > 0:
+            import warnings
+            warnings.warn(
+                f'unclosed file {source!r} with {len(self._write_nibbler)} bytes buffered',
+                ResourceWarning,
+                stacklevel=2,
+                source=self
+            )
+        if dealloc_warn := getattr(self.raw, "_dealloc_warn", None):
+            dealloc_warn(source)
+
     def write(self, b):
         if isinstance(b, str):
             raise TypeError("can't write str to binary stream")
-        with self._write_lock:
-            if self.closed:
-                raise ValueError("write to closed file")
-            # XXX we can implement some more tricks to try and avoid
-            # partial writes
-            if len(self._write_buf) > self.buffer_size:
-                # We're full, so let's pre-flush the buffer.  (This may
-                # raise BlockingIOError with characters_written == 0.)
-                self._flush_unlocked()
-            before = len(self._write_buf)
-            self._write_buf.extend(b)
-            written = len(self._write_buf) - before
-            if len(self._write_buf) > self.buffer_size:
-                try:
-                    self._flush_unlocked()
-                except BlockingIOError as e:
-                    if len(self._write_buf) > self.buffer_size:
-                        # We've hit the buffer_size. We have to accept a partial
-                        # write and cut back our buffer.
-                        overage = len(self._write_buf) - self.buffer_size
-                        written -= overage
-                        self._write_buf = self._write_buf[:self.buffer_size]
-                        raise BlockingIOError(e.errno, e.strerror, written)
-            return written
+        if self.closed:
+            raise ValueError("write to closed file")
+
+        return self._write_nibbler.append(b, lambda: self.raw)
 
     def truncate(self, pos=None):
-        with self._write_lock:
-            self._flush_unlocked()
-            if pos is None:
-                pos = self.raw.tell()
-            return self.raw.truncate(pos)
+        self.flush()
+        if pos is None:
+            pos = self.raw.tell()
+        return self.raw.truncate(pos)
 
     def flush(self):
-        with self._write_lock:
-            self._flush_unlocked()
-
-    def _flush_unlocked(self):
         if self.closed:
             raise ValueError("flush on closed file")
-        while self._write_buf:
-            try:
-                n = self.raw.write(self._write_buf)
-            except BlockingIOError:
-                raise RuntimeError("self.raw should implement RawIOBase: it "
-                                   "should not raise BlockingIOError")
-            if n is None:
-                raise BlockingIOError(
-                    errno.EAGAIN,
-                    "write could not complete without blocking", 0)
-            if n > len(self._write_buf) or n < 0:
-                raise OSError("write() returned incorrect number of bytes")
-            del self._write_buf[:n]
+
+        self._write_nibbler.flush_all(lambda: self.raw)
+        # If the raw stream blocked and data couldn't be written,
+        # it will have been returned to the nibbler. Detect this and raise.
+        if len(self._write_nibbler) > 0:
+            raise BlockingIOError(
+                errno.EAGAIN,
+                "flush could not complete without blocking",
+                0
+            )
 
     def tell(self):
-        return _BufferedIOMixin.tell(self) + len(self._write_buf)
+        return _BufferedIOMixin.tell(self) + len(self._write_nibbler)
 
     def seek(self, pos, whence=0):
         if whence not in valid_seek_flags:
             raise ValueError("invalid whence value")
-        with self._write_lock:
-            self._flush_unlocked()
-            return _BufferedIOMixin.seek(self, pos, whence)
+        self.flush()
+        return _BufferedIOMixin.seek(self, pos, whence)
 
     def close(self):
-        with self._write_lock:
-            if self.raw is None or self.closed:
-                return
-        # We have to release the lock and call self.flush() (which will
-        # probably just re-take the lock) in case flush has been overridden in
-        # a subclass or the user set self.flush to something. This is the same
-        # behavior as the C implementation.
+        if self.raw is None or self.closed:
+            return
         try:
-            # may raise BlockingIOError or BrokenPipeError etc
             self.flush()
         finally:
-            with self._write_lock:
-                self.raw.close()
+            self.raw.close()
 
 
 class BufferedRWPair(BufferedIOBase):
@@ -1441,7 +1738,7 @@ class BufferedRandom(BufferedWriter, BufferedReader):
         return pos
 
     def tell(self):
-        if self._write_buf:
+        if self._write_nibbler:
             return BufferedWriter.tell(self)
         else:
             return BufferedReader.tell(self)
@@ -1761,6 +2058,19 @@ class FileIO(RawIOBase):
         self._checkWritable()
         try:
             return os.write(self._fd, b)
+        except BlockingIOError:
+            return None
+
+    def _writev(self, buffers):
+        """Like write(), but accepts multiple buffers and issues a single writev(2).
+
+        Private: the shape of a public vectored-write API is not yet settled.
+        """
+        self._checkClosed()
+        self._checkWritable()
+
+        try:
+            return os.writev(self._fd, buffers)
         except BlockingIOError:
             return None
 
