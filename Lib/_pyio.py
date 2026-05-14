@@ -70,323 +70,6 @@ def text_encoding(encoding, stacklevel=2):
                           EncodingWarning, stacklevel + 1)
     return encoding
 
-# FIXME(cmaloney): Maybe do start and stop offsets rather than a list?
-class _Morsel:
-    """Block of bytes which needs to be flushed.
-
-    THREAD SAFETY: NOT thread-safe. Internal to _Nibbler.
-    A Morsel has a single owner from creation until destruction.
-
-    LOCKING: Lock held by _Nibbler via `with self._lock:` during buffer
-    extraction and return. Lock NOT held during write operations (I/O must
-    not block other threads).
-
-    LIFECYCLE:
-    1. Created: _Nibbler extracts buffers into Morsel (under lock)
-    2. Writing: _Nibbler writes Morsel data via write() (no lock)
-    3. Return: _Nibbler returns unwritten data to its buffer (under lock)
-    """
-    def __init__(self, nibbler, buffers, *, last_buffer, length):
-        self._nibbler = nibbler
-        self._remaining = buffers
-        self._length = length
-
-        # If a `write` causes a flush and that flush blocks, the write must
-        # return the number of bytes of the _last buffer_ written which were
-        # written / stored to the internal buffer.
-        self._last_buffer = last_buffer
-
-    def _consume(self, consumed):
-        if consumed > self._length:
-            raise OSError("write() returned incorrect number of bytes")
-
-        self._length -= consumed
-        if self._length == 0:
-            self._remaining = []
-            return
-
-        # Drop fully-written buffers from the front.
-        cur_buf = 0
-        while consumed >= len(self._remaining[cur_buf]):
-            consumed -= len(self._remaining[cur_buf])
-            cur_buf += 1
-        del self._remaining[:cur_buf]
-
-        if consumed == 0:
-            return
-
-        # Partially-written buffer: slice the remainder without copying.
-        if not isinstance(self._remaining[0], memoryview):
-            self._remaining[0] = memoryview(self._remaining[0])
-        self._remaining[0] = self._remaining[0][consumed:]
-
-    def write(self, raw):
-        """Write morsel to raw, stopping only if blocked or an exception occurs.
-
-        Uses the most efficient method available on raw, only merging buffers
-        when needed.
-        """
-        while self._length > 0:
-            try:
-                match len(self._remaining):
-                    case 0:
-                        raise SystemError("Should have at least one buffer")
-                    case 1:
-                        written = raw.write(self._remaining[0])
-                    case _:
-                        # TODO(cmaloney): Measure and determine when it's better to
-                        # coalesce and do one write vs a writev
-                        #
-                        # Focus: TextIOWrapper on a big flush-causing write will coalesce
-                        # everything but the big write and do two calls.
-                        #
-                        # Check: Is it faster to copy lots of small (1-10 byte)
-                        # buffers into a contiguous buffer than pass lots of small
-                        # buffers. (main use case: print)
-                        #
-                        # writev(2) fails with EINVAL if the number of
-                        # buffers exceeds IOV_MAX. Fall back to coalescing
-                        # into a single buffer when we have too many segments.
-                        if (len(self._remaining) <= _IOV_MAX
-                                and (writev := getattr(raw, '_writev', None))):
-                            written = writev(self._remaining)
-                        else:
-                            self._coalesce()
-                            written = raw.write(self._remaining[0])
-            except BlockingIOError as ex:
-                raise RuntimeError("raw should implement RawIOBase: it "
-                                   "should not raise BlockingIOError") from ex
-
-            # Blocked, no further retries.
-            if written is None:
-                return
-            self._consume(written)
-
-    def _coalesce(self):
-        """Combine buffers, guaranteeing at least one buffer for writing.
-
-        At the end of this function self._remaining is guaranteed to be length
-        one.
-
-        The `bytearray` is not provided by caller code so it can be left
-        mutable for future use / reuse."""
-        assert len(self._remaining) >= 1
-
-        # Already in coalesced form
-        if len(self._remaining) == 1:
-            return
-
-        # TODO(cmaloney): Can this cap coalescing at BUFFER_SIZE / never
-        # allocate too much? (Just keep unused buffers in a "next"?)
-        res = bytearray(self._length)
-        # TODO(cmaloney): Try using storage allocated/owned by the nibbler
-        offset = 0
-        for buf in self._remaining:
-            end = offset + len(buf)
-            assert end <= len(res), "Should be inside the just allocated result"
-            res[offset:end] = buf
-            offset = end
-        self._remaining = [res]
-
-    def __len__(self):
-        return self._length
-
-
-class _Nibbler:
-    """Thread-safe buffer manager that handles flushing internally.
-
-    Accumulates small writes into larger chunks. When the buffer exceeds the
-    flush size, creates a Morsel internally, writes it, and returns unwritten
-    data to the buffer. Callers never see _Morsel objects.
-
-    Thread safety:
-        The Nibbler may be shared between threads. Internal state (_buffer,
-        _bytes_buffered, _current_morsel) is protected by self._lock. The
-        lock is held end-to-end through raw I/O (see Ordering); a slow
-        raw.write therefore blocks other appenders.
-
-    Ordering:
-        Every write() reaches the raw stream contiguously and in the order
-        callers acquired self._lock. This matches the behavior of the
-        pre-Nibbler BufferedWriter, so applications that implicitly rely on
-        cross-thread write ordering (e.g. logging) keep working.
-
-        Future direction: split into two locks - a short buffer lock for
-        _buffer/_bytes_buffered and an I/O lock held across raw.write -
-        so concurrent appenders can queue work while one thread is in
-        raw I/O. The I/O lock preserves global ordering because the thread
-        holding it extracts everything buffered so far in one shot before
-        writing; the next holder sees only newer data. That refactor is
-        deferred until profiling shows the current end-to-end lock is a
-        real bottleneck.
-
-    Invariants (under lock):
-        - If _current_morsel is not None, its buffers are NOT in _buffer.
-        - _bytes_buffered equals sum(len(b) for b in _buffer).
-        - _buffer entries are bytes objects or memoryviews backed by
-          immutable storage.
-    """
-
-    def __init__(self, flush_size: int):
-        """Buffer up to flush_size, return data when overflow.
-
-        :param int flush_size: Number of bytes that should trigger a flush.
-        """
-        self._lock = Lock()
-        # TODO(cmaloney): Measure value of TextIOWrapper's optimization that a
-        # single buffer doesn't have a list.
-        self._current_morsel = None
-        self._buffer = []
-        self._flush_size = flush_size
-        self._bytes_buffered = 0
-
-    def _make_morsel_locked(self, last_buffer):
-        """Extract the current buffer into a Morsel. Caller must hold the lock."""
-        if not self._buffer and not last_buffer:
-            return _Morsel(self, [], last_buffer=last_buffer, length=0)
-
-        # FIXME(cmaloney): Maybe change morsel to be just a slice of the buffer
-        # list and returning is just deleting part of that slice.
-        length = self._bytes_buffered
-        buf = self._buffer
-        assert sum(map(len, buf)) == length, f"{length=}|{buf=}"
-        self._buffer = []
-        self._bytes_buffered = 0
-        ret = _Morsel(self, buf, last_buffer=last_buffer, length=length)
-        self._current_morsel = ret
-        return ret
-
-    def flush_all(self, get_raw_stream):
-        """Take all buffered data and flush to stream.
-
-        Args:
-            get_raw_stream: Callable returning RawIOBase (validates stream state)
-
-        Raises:
-            BlockingIOError: If write couldn't complete without blocking
-        """
-        # Lock held across raw I/O to preserve cross-thread write order.
-        # See the class docstring for the two-lock refactor that would
-        # let appenders run concurrently with an in-progress flush.
-        with self._lock:
-            morsel = self._make_morsel_locked(None)
-            if not morsel:
-                return
-            morsel.write(get_raw_stream())
-            self._return_morsel_locked(morsel)
-
-    # TODO(cmaloney): allow properly encoded strings for TextIOWrapper!
-    def append(self, buf, get_raw_stream):
-        """Add data to buffer. If buffer becomes full, flush to stream.
-
-        Args:
-            buf: bytes-like object to append
-            get_raw_stream: Callable returning RawIOBase (validates stream state)
-
-        Returns:
-            int: Number of bytes written/buffered from buf
-
-        Raises:
-            BlockingIOError: If flush couldn't complete without blocking
-        """
-        # Fast path: buf is already bytes. Skips isinstance checks and
-        # mutable-buffer handling below.
-        if type(buf) is not bytes:
-            # Normalize via the buffer protocol.
-            if not isinstance(buf, (bytearray, bytes)):
-                buf = memoryview(buf).cast('B')
-
-            # Mutable values (e.g. bytearray, memoryview) need to be copied
-            # because they may be modified by the caller after return.
-            # FIXME(cmaloney): If we're immediately flushing don't copy until
-            # _after_ the flush fails and we have to return to user code which
-            # may modify.
-            # FIXME(cmaloney): Have nibbler allocate and own this memory and
-            # _REUSE_ it when needed (Most things that need these cases will do
-            # so repeatedly).
-            if isinstance(buf, bytearray):
-                if sys.getrefcount(buf) == 1:
-                    buf = buf.take_bytes()
-                else:
-                    buf = bytes(buf)
-            elif isinstance(buf, memoryview):
-                if type(buf.obj) is not bytes:
-                    buf = buf.tobytes()
-
-        added_bytes = len(buf)
-        if added_bytes == 0:
-            return 0
-
-        # Lock held across raw I/O to preserve cross-thread write order.
-        # See the class docstring for the two-lock refactor that would
-        # let appenders run concurrently with an in-progress flush.
-        with self._lock:
-            self._bytes_buffered += len(buf)
-            self._buffer.append(buf)
-
-            if self._bytes_buffered < self._flush_size:
-                return added_bytes
-
-            morsel = self._make_morsel_locked(buf)
-            morsel.write(get_raw_stream())
-            return self._return_morsel_locked(morsel)
-
-    def _return_morsel_locked(self, morsel):
-        """Return morsel data to nibbler. Caller must hold self._lock.
-
-        Returns:
-            int: Bytes written from last_buffer, or 0 if none
-
-        Raises:
-            BlockingIOError: If data was dropped due to overflow
-        """
-        # No bytes remain in morsel.
-        if not morsel:
-            self._current_morsel = None
-            return len(morsel._last_buffer) if morsel._last_buffer else 0
-
-        # Partially written - return data to buffer
-        morsel._coalesce()
-        assert len(morsel._remaining) == 1
-        overwrite = morsel._length - self._flush_size
-
-        if overwrite <= 0:
-            to_store = memoryview(morsel._remaining[0])
-        else:
-            match morsel._remaining[0]:
-                case bytearray() as ba:
-                    to_store = ba
-                    ba.resize(self._flush_size)
-                case bytes() as b:
-                    to_store = b[:self._flush_size]
-                case memoryview() as mv:
-                    to_store = mv[:self._flush_size].tobytes()
-
-        # Prepend the leftover ahead of anything appended while the lock was
-        # released.
-        self._buffer.insert(0, to_store)
-        self._bytes_buffered += len(to_store)
-        self._current_morsel = None
-
-        # Calculate return value / raise if overflow
-        if morsel._last_buffer is None:
-            return 0
-        if overwrite <= 0:
-            return len(morsel._last_buffer)
-        else:
-            # `overwrite` may exceed last_buffer when older buffered data is
-            # also being dropped; in that case nothing of last_buffer made it.
-            written = max(0, len(morsel._last_buffer) - overwrite)
-            raise BlockingIOError(
-                errno.EAGAIN,
-                "write could not complete without blocking",
-                written
-            )
-
-    def __len__(self):
-        return self._bytes_buffered
-
-
 # Wrapper for builtins.open
 #
 # Trick so that open() won't become a bound method when stored
@@ -1080,66 +763,258 @@ class BufferedIOBase(IOBase):
 io.BufferedIOBase.register(BufferedIOBase)
 
 
-class _BufferedIOMixin(BufferedIOBase):
+# FIXME(cmaloney): Maybe do start and stop offsets rather than a list?
+class _Morsel:
+    """Block of bytes which needs to be flushed.
 
-    """A mixin implementation of BufferedIOBase with an underlying raw stream.
+    THREAD SAFETY: NOT thread-safe. Internal to _Nibbler.
+    A Morsel has a single owner from creation until destruction.
 
-    This passes most requests on to the underlying raw stream.  It
-    does *not* provide implementations of read(), readinto() or
-    write().
+    LOCKING: Lock held by _Nibbler via `with self._lock:` during buffer
+    extraction and return. Lock NOT held during write operations (I/O must
+    not block other threads).
+
+    LIFECYCLE:
+    1. Created: _Nibbler extracts buffers into Morsel (under lock)
+    2. Writing: _Nibbler writes Morsel data via write() (no lock)
+    3. Return: _Nibbler returns unwritten data to its buffer (under lock)
+    """
+    def __init__(self, nibbler, buffers, *, last_buffer, length):
+        self._nibbler = nibbler
+        self._remaining = buffers
+        self._length = length
+
+        # If a `write` causes a flush and that flush blocks, the write must
+        # return the number of bytes of the _last buffer_ written which were
+        # written / stored to the internal buffer.
+        self._last_buffer = last_buffer
+
+    def _consume(self, consumed):
+        if consumed > self._length:
+            raise OSError("write() returned incorrect number of bytes")
+
+        self._length -= consumed
+        if self._length == 0:
+            self._remaining = []
+            return
+
+        # Drop fully-written buffers from the front.
+        cur_buf = 0
+        while consumed >= len(self._remaining[cur_buf]):
+            consumed -= len(self._remaining[cur_buf])
+            cur_buf += 1
+        del self._remaining[:cur_buf]
+
+        if consumed == 0:
+            return
+
+        # Partially-written buffer: slice the remainder without copying.
+        if not isinstance(self._remaining[0], memoryview):
+            self._remaining[0] = memoryview(self._remaining[0])
+        self._remaining[0] = self._remaining[0][consumed:]
+
+    def write(self, raw):
+        """Write morsel to raw, stopping only if blocked or an exception occurs.
+
+        Uses the most efficient method available on raw, only merging buffers
+        when needed.
+        """
+        while self._length > 0:
+            try:
+                match len(self._remaining):
+                    case 0:
+                        raise SystemError("Should have at least one buffer")
+                    case 1:
+                        written = raw.write(self._remaining[0])
+                    case _:
+                        # writev(2) fails with EINVAL if the number of
+                        # buffers exceeds IOV_MAX. Fall back to coalescing
+                        # into a single buffer when we have too many segments.
+                        if (len(self._remaining) <= _IOV_MAX
+                                and (writev := getattr(raw, '_writev', None))):
+                            written = writev(self._remaining)
+                        else:
+                            self._coalesce()
+                            written = raw.write(self._remaining[0])
+            except BlockingIOError as ex:
+                raise RuntimeError("raw should implement RawIOBase: it "
+                                   "should not raise BlockingIOError") from ex
+
+            # Blocked, no further retries.
+            if written is None:
+                return
+            self._consume(written)
+
+    def _coalesce(self):
+        """Combine buffers, guaranteeing at least one buffer for writing.
+
+        At the end of this function self._remaining is guaranteed to be length
+        one.
+
+        The `bytearray` is not provided by caller code so it can be left
+        mutable for future use / reuse."""
+        assert len(self._remaining) >= 1
+
+        # Already in coalesced form
+        if len(self._remaining) == 1:
+            return
+
+        res = bytearray(self._length)
+        offset = 0
+        for buf in self._remaining:
+            end = offset + len(buf)
+            assert end <= len(res), "Should be inside the just allocated result"
+            res[offset:end] = buf
+            offset = end
+        self._remaining = [res]
+
+    def __len__(self):
+        return self._length
+
+
+class _Nibbler(BufferedIOBase):
+    """Concrete buffered I/O implementation. Mirrors the _io.buffered C struct.
+
+    Holds the raw stream, a list of byte chunks, a mode flag, and the lock
+    that serializes access. Subclasses (BufferedReader, BufferedWriter,
+    BufferedRandom) only validate raw on init and override readable() /
+    writable() to gate which operations are permitted.
+
+    Mode tracking:
+        Two modes — READING (default) and WRITING. The first write flips to
+        WRITING; the first read after writes flushes the buffer and flips to
+        READING. Mode switches happen atomically inside the lock. With
+        buffer_size=0 the buffer is always empty so transitions are no-ops.
+
+    Transition-failure semantics:
+        - READING -> WRITING raw.seek failure: leave _mode=READING, buffer
+          intact, propagate the exception. Mirrors the existing rule in
+          BufferedRandom.seek that "if the raw seek fails, we don't lose
+          buffered data forever."
+        - WRITING -> READING flush partial-block: stay _mode=WRITING,
+          propagate BlockingIOError. Caller must retry or close.
+        - peek raw-read overflow: anything raw returns is appended to the
+          buffer list, never truncated.
+
+    Thread safety:
+        The Nibbler may be shared between threads. _lock is held end-to-end
+        through raw I/O. A future two-lock split (short buffer lock + I/O
+        lock) preserves cross-thread ordering and lets appenders queue work
+        while one thread is in raw I/O — deferred until profiling shows the
+        current end-to-end lock is a real bottleneck.
+
+    Invariants (under lock):
+        - If _current_morsel is not None, its buffers are NOT in _buffer.
+        - _bytes_buffered equals sum(len(b) for b in _buffer).
+        - _buffer entries are bytes objects or memoryviews backed by
+          immutable storage.
     """
 
-    def __init__(self, raw):
+    READING = 0
+    WRITING = 1
+
+    def __init__(self, raw, buffer_size=DEFAULT_BUFFER_SIZE):
+        if buffer_size < 0:
+            raise ValueError("invalid buffer size")
         self._raw = raw
+        self._lock = Lock()
+        self._buffer = []
+        self._bytes_buffered = 0
+        self._size = buffer_size
+        self._mode = self.READING
+        self._current_morsel = None
 
     ### Positioning ###
 
     def seek(self, pos, whence=0):
-        new_position = self.raw.seek(pos, whence)
-        if new_position < 0:
-            raise OSError("seek() returned an invalid position")
-        return new_position
+        if whence not in valid_seek_flags:
+            raise ValueError("invalid whence value")
+        if self.closed:
+            raise ValueError("seek of closed file")
+        with self._lock:
+            if self._mode == self.WRITING:
+                # Flush moves raw forward by `_bytes_buffered`; whence=1 needs
+                # no extra adjustment after that.
+                self._flush_buffer_locked()
+            else:  # READING
+                if whence == 1:
+                    # Buffered read-ahead is between user position and raw
+                    # position; back the seek up by that amount.
+                    pos -= self._bytes_buffered
+                self._buffer = []
+                self._bytes_buffered = 0
+            new_position = self._raw.seek(pos, whence)
+            if new_position < 0:
+                raise OSError("seek() returned an invalid position")
+            return new_position
 
     def tell(self):
-        pos = self.raw.tell()
+        pos = self._raw.tell()
         if pos < 0:
             raise OSError("tell() returned an invalid position")
-        return pos
+        if self._mode == self.WRITING:
+            return pos + self._bytes_buffered
+        # READING
+        return max(pos - self._bytes_buffered, 0)
 
     def truncate(self, pos=None):
-        self._checkClosed()
-        self._checkWritable()
-
-        # Flush the stream.  We're mixing buffered I/O with lower-level I/O,
-        # and a flush may be necessary to synch both views of the current
-        # file state.
+        if not self.writable():
+            self._unsupported("truncate")
+        if self.closed:
+            raise ValueError("truncate on closed file")
         self.flush()
-
         if pos is None:
+            # Use the logical position (mode-aware tell), not raw.tell(),
+            # so a truncate after a read on BufferedRandom truncates at the
+            # caller's current position rather than past the read-ahead.
             pos = self.tell()
-        # XXX: Should seek() be used, instead of passing the position
-        # XXX  directly to truncate?
-        return self.raw.truncate(pos)
+        return self._raw.truncate(pos)
 
     ### Flush and close ###
 
     def flush(self):
         if self.closed:
             raise ValueError("flush on closed file")
-        self.raw.flush()
+        if not self.writable():
+            # Read-only stream: nothing of ours to flush; pass through.
+            self._raw.flush()
+            return
+        with self._lock:
+            if self._mode != self.WRITING:
+                return
+            self._flush_buffer_locked()
+            if self._bytes_buffered > 0:
+                raise BlockingIOError(
+                    errno.EAGAIN,
+                    "flush could not complete without blocking",
+                    0,
+                )
+
+    def _flush_buffer_locked(self):
+        """Best-effort flush. Caller holds _lock."""
+        morsel = self._make_morsel_locked(None)
+        if not morsel:
+            return
+        morsel.write(self._raw)
+        self._return_morsel_locked(morsel)
 
     def close(self):
-        if self.raw is not None and not self.closed:
-            try:
-                # may raise BlockingIOError or BrokenPipeError etc
-                self.flush()
-            finally:
-                self.raw.close()
+        if self._raw is None or self.closed:
+            return
+        try:
+            # Always invoke self.flush() so subclasses or per-instance
+            # overrides participate. flush() itself no-ops on a read-only
+            # stream once it sees writable() is False, beyond passing
+            # through to the raw stream.
+            self.flush()
+        finally:
+            self._raw.close()
 
     def detach(self):
-        if self.raw is None:
+        if self._raw is None:
             raise ValueError("raw stream already detached")
-        self.flush()
+        if self.writable():
+            self.flush()
         raw = self._raw
         self._raw = None
         return raw
@@ -1147,7 +1022,7 @@ class _BufferedIOMixin(BufferedIOBase):
     ### Inquiries ###
 
     def seekable(self):
-        return self.raw.seekable()
+        return self._raw.seekable()
 
     @property
     def raw(self):
@@ -1155,15 +1030,15 @@ class _BufferedIOMixin(BufferedIOBase):
 
     @property
     def closed(self):
-        return self.raw.closed
+        return self._raw.closed
 
     @property
     def name(self):
-        return self.raw.name
+        return self._raw.name
 
     @property
     def mode(self):
-        return self.raw.mode
+        return self._raw.mode
 
     def __getstate__(self):
         raise TypeError(f"cannot pickle {self.__class__.__name__!r} object")
@@ -1178,17 +1053,395 @@ class _BufferedIOMixin(BufferedIOBase):
         else:
             return "<{}.{} name={!r}>".format(modname, clsname, name)
 
+    def __del__(self):
+        # IOBase.__del__ runs _dealloc_warn before close() and skips close
+        # if _dealloc_warn raises — under "-W error" the ResourceWarning
+        # we emit becomes an exception, which would lose buffered writes.
+        # Override here to guarantee close() always runs. The exception
+        # from _dealloc_warn (if any) still escapes __del__ and is
+        # reported via sys.unraisablehook, matching IOBase's contract.
+        try:
+            closed = self.closed
+        except AttributeError:
+            return
+        if closed:
+            return
+        try:
+            self._dealloc_warn(self)
+        finally:
+            self.close()
+
     def _dealloc_warn(self, source):
-        if dealloc_warn := getattr(self.raw, "_dealloc_warn", None):
+        # Only warn for pending *writes*. Read-mode buffered bytes are
+        # just unconsumed read-ahead — not a data loss risk.
+        if self._mode == self.WRITING and self._bytes_buffered > 0:
+            import warnings
+            warnings.warn(
+                f'unclosed file {source!r} with {self._bytes_buffered} '
+                f'bytes buffered',
+                ResourceWarning,
+                stacklevel=2,
+                source=self,
+            )
+        if dealloc_warn := getattr(self._raw, "_dealloc_warn", None):
             dealloc_warn(source)
 
     ### Lower-level APIs ###
 
     def fileno(self):
-        return self.raw.fileno()
+        return self._raw.fileno()
 
     def isatty(self):
-        return self.raw.isatty()
+        return self._raw.isatty()
+
+    ### Write API ###
+
+    def write(self, b):
+        if not self.writable():
+            self._unsupported("write")
+        if isinstance(b, str):
+            raise TypeError("can't write str to binary stream")
+        if self.closed:
+            raise ValueError("write to closed file")
+
+        # Fast path: buf is already bytes. Skips isinstance checks and
+        # mutable-buffer handling below.
+        if type(b) is not bytes:
+            # Normalize via the buffer protocol.
+            if not isinstance(b, (bytearray, bytes)):
+                b = memoryview(b).cast('B')
+
+            # Mutable values (e.g. bytearray, memoryview) need to be copied
+            # because they may be modified by the caller after return.
+            if isinstance(b, bytearray):
+                if sys.getrefcount(b) == 1:
+                    b = b.take_bytes()
+                else:
+                    b = bytes(b)
+            elif isinstance(b, memoryview):
+                if type(b.obj) is not bytes:
+                    b = b.tobytes()
+
+        added_bytes = len(b)
+        if added_bytes == 0:
+            return 0
+
+        # Lock held across raw I/O to preserve cross-thread write order.
+        with self._lock:
+            # READING -> WRITING transition. With an empty buffer (typical
+            # for write-only streams or a fresh nibbler) the seek is skipped.
+            if self._mode == self.READING:
+                if self._bytes_buffered:
+                    self._raw.seek(-self._bytes_buffered, 1)
+                    self._buffer = []
+                    self._bytes_buffered = 0
+                self._mode = self.WRITING
+
+            self._bytes_buffered += len(b)
+            self._buffer.append(b)
+
+            if self._bytes_buffered < self._size:
+                return added_bytes
+
+            morsel = self._make_morsel_locked(b)
+            morsel.write(self._raw)
+            return self._return_morsel_locked(morsel)
+
+    def _make_morsel_locked(self, last_buffer):
+        """Extract the current buffer into a Morsel."""
+        if not self._buffer and not last_buffer:
+            return _Morsel(self, [], last_buffer=last_buffer, length=0)
+
+        length = self._bytes_buffered
+        buf = self._buffer
+        assert sum(map(len, buf)) == length, f"{length=}|{buf=}"
+        self._buffer = []
+        self._bytes_buffered = 0
+        ret = _Morsel(self, buf, last_buffer=last_buffer, length=length)
+        self._current_morsel = ret
+        return ret
+
+    def _return_morsel_locked(self, morsel):
+        """Return morsel data to the nibbler buffer.
+
+        Returns the number of bytes of `last_buffer` accepted, or raises
+        BlockingIOError if data overflowed and was dropped.
+        """
+        if not morsel:
+            self._current_morsel = None
+            return len(morsel._last_buffer) if morsel._last_buffer else 0
+
+        morsel._coalesce()
+        assert len(morsel._remaining) == 1
+        # When _size == 0 every remaining byte counts as overflow; otherwise
+        # only bytes past the buffer threshold are dropped.
+        threshold = self._size
+        overwrite = morsel._length - threshold
+
+        if overwrite <= 0:
+            to_store = memoryview(morsel._remaining[0])
+        else:
+            match morsel._remaining[0]:
+                case bytearray() as ba:
+                    to_store = ba
+                    ba.resize(threshold)
+                case bytes() as b:
+                    to_store = b[:threshold]
+                case memoryview() as mv:
+                    to_store = mv[:threshold].tobytes()
+
+        if to_store:
+            self._buffer.insert(0, to_store)
+            self._bytes_buffered += len(to_store)
+        self._current_morsel = None
+
+        if morsel._last_buffer is None:
+            return 0
+        if overwrite <= 0:
+            return len(morsel._last_buffer)
+        # `overwrite` may exceed last_buffer when older buffered data is
+        # also being dropped; in that case nothing of last_buffer made it.
+        written = max(0, len(morsel._last_buffer) - overwrite)
+        raise BlockingIOError(
+            errno.EAGAIN,
+            "write could not complete without blocking",
+            written,
+        )
+
+    ### Read API ###
+
+    def read(self, size=-1):
+        if not self.readable():
+            self._unsupported("read")
+        if size is None:
+            size = -1
+        elif size < -1:
+            raise ValueError("invalid number of bytes to read")
+        if self.closed:
+            raise ValueError("read of closed file")
+
+        with self._lock:
+            self._switch_to_reading_locked()
+
+            if size == -1:
+                return self._read_all_locked()
+            return self._read_n_locked(size)
+
+    def read1(self, size=-1):
+        if not self.readable():
+            self._unsupported("read1")
+        if self.closed:
+            raise ValueError("read of closed file")
+        if size < 0:
+            size = self._size if self._size > 0 else DEFAULT_BUFFER_SIZE
+        if size == 0:
+            return b""
+
+        with self._lock:
+            self._switch_to_reading_locked()
+
+            if self._bytes_buffered == 0:
+                # No buffered data — do exactly one raw read of the requested
+                # size.
+                chunk = self._raw.read(size)
+                if not chunk:
+                    return b""
+                # If the raw chunk is larger than requested (shouldn't happen
+                # for well-behaved raw streams, but guard anyway), buffer the
+                # excess.
+                if len(chunk) > size:
+                    if self._size == 0:
+                        # No buffer available; truncate.
+                        return bytes(chunk[:size])
+                    self._buffer.append(memoryview(chunk)[size:])
+                    self._bytes_buffered += len(chunk) - size
+                    return bytes(chunk[:size])
+                return chunk if isinstance(chunk, bytes) else bytes(chunk)
+            return self._take_locked(min(size, self._bytes_buffered))
+
+    def readinto(self, b):
+        return self._readinto(b, read1=False)
+
+    def readinto1(self, b):
+        return self._readinto(b, read1=True)
+
+    def _readinto(self, buf, read1):
+        if not self.readable():
+            self._unsupported("readinto" if not read1 else "readinto1")
+        if self.closed:
+            raise ValueError("readinto of closed file")
+
+        if not isinstance(buf, memoryview):
+            buf = memoryview(buf)
+        if buf.nbytes == 0:
+            return 0
+        buf = buf.cast('B')
+
+        written = 0
+        with self._lock:
+            self._switch_to_reading_locked()
+
+            while written < len(buf):
+                # Drain buffered first.
+                avail = min(self._bytes_buffered, len(buf) - written)
+                if avail:
+                    data = self._take_locked(avail)
+                    buf[written:written + avail] = data
+                    written += avail
+                    if written == len(buf):
+                        break
+
+                # If the remaining space exceeds the buffer size (or there is
+                # no internal buffer), read directly into the caller's buffer.
+                if len(buf) - written > self._size:
+                    n = self._raw.readinto(buf[written:])
+                    if not n:
+                        break  # EOF
+                    written += n
+                # Otherwise refill the internal buffer — unless we're in
+                # read1 mode and already have some data.
+                elif not (read1 and written):
+                    chunk = self._raw.read(self._size)
+                    if not chunk:
+                        break  # EOF
+                    self._buffer.append(chunk)
+                    self._bytes_buffered += len(chunk)
+
+                # In read1 mode, return as soon as we have any data.
+                if read1 and written:
+                    break
+        return written
+
+    def peek(self, size=0):
+        if not self.readable():
+            self._unsupported("peek")
+        if self.closed:
+            raise ValueError("peek of closed file")
+        if self._size == 0:
+            raise UnsupportedOperation("peek requires buffer_size > 0")
+
+        with self._lock:
+            self._switch_to_reading_locked()
+
+            want = min(size, self._size)
+            if self._bytes_buffered < want or self._bytes_buffered <= 0:
+                to_read = self._size - self._bytes_buffered
+                if to_read > 0:
+                    chunk = self._raw.read(to_read)
+                    if chunk:
+                        self._buffer.append(chunk)
+                        self._bytes_buffered += len(chunk)
+            return self._coalesce_view_locked()
+
+    def _switch_to_reading_locked(self):
+        """Flush write-side data, then enter READING mode. Caller holds lock."""
+        if self._mode == self.READING:
+            return
+        self._flush_buffer_locked()
+        if self._bytes_buffered > 0:
+            # Flush partial-blocked; stay in WRITING and surface the failure.
+            raise BlockingIOError(
+                errno.EAGAIN,
+                "flush could not complete without blocking",
+                0,
+            )
+        self._mode = self.READING
+
+    def _read_all_locked(self):
+        """Read remaining buffered + raw to EOF/EAGAIN."""
+        if hasattr(self._raw, 'readall'):
+            chunk = self._raw.readall()
+            if chunk is None:
+                buffered = self._drain_locked()
+                return buffered or None
+            if chunk:
+                self._buffer.append(chunk)
+                self._bytes_buffered += len(chunk)
+            return self._drain_locked()
+
+        nodata_val = b""
+        while True:
+            chunk = self._raw.read()
+            if chunk in (b"", None):
+                nodata_val = chunk
+                break
+            self._buffer.append(chunk)
+            self._bytes_buffered += len(chunk)
+        result = self._drain_locked()
+        return result if result else nodata_val
+
+    def _read_n_locked(self, n):
+        if n == 0:
+            return b""
+        if n <= self._bytes_buffered:
+            return self._take_locked(n)
+
+        # Need more from raw. With buffer_size=0 we ask for the requested
+        # amount directly; otherwise we ask for max(_size, n) so the buffer
+        # gets a useful chunk size.
+        wanted = max(self._size, n) if self._size > 0 else n
+        nodata_val = b""
+        while self._bytes_buffered < n:
+            chunk = self._raw.read(wanted)
+            if chunk in (b"", None):
+                nodata_val = chunk
+                break
+            self._buffer.append(chunk)
+            self._bytes_buffered += len(chunk)
+
+        n = min(n, self._bytes_buffered)
+        if n == 0:
+            return nodata_val
+        return self._take_locked(n)
+
+    def _take_locked(self, n):
+        """Consume `n` bytes from the front of the buffer. Returns bytes."""
+        if n == 0:
+            return b""
+        if n == self._bytes_buffered:
+            return self._drain_locked()
+
+        chunks = []
+        idx = 0
+        taken = 0
+        while taken < n:
+            cur = self._buffer[idx]
+            need = n - taken
+            cur_len = len(cur)
+            if cur_len <= need:
+                chunks.append(cur)
+                taken += cur_len
+                idx += 1
+            else:
+                chunks.append(cur[:need])
+                if not isinstance(cur, memoryview):
+                    cur = memoryview(cur)
+                self._buffer[idx] = cur[need:]
+                taken = n
+                break
+
+        del self._buffer[:idx]
+        self._bytes_buffered -= n
+        return b"".join(chunks)
+
+    def _drain_locked(self):
+        """Consume the entire buffer; returns bytes."""
+        if not self._buffer:
+            return b""
+        out = b"".join(self._buffer)
+        self._buffer = []
+        self._bytes_buffered = 0
+        return out
+
+    def _coalesce_view_locked(self):
+        """Return a contiguous bytes view of the entire buffer (does not consume)."""
+        if not self._buffer:
+            return b""
+        if len(self._buffer) == 1 and isinstance(self._buffer[0], bytes):
+            return self._buffer[0]
+        out = b"".join(self._buffer)
+        self._buffer = [out]
+        return out
 
 
 class BytesIO(BufferedIOBase):
@@ -1353,8 +1606,7 @@ class BytesIO(BufferedIOBase):
         return True
 
 
-# FIXME(cmaloney): Move to nibbler.
-class BufferedReader(_BufferedIOMixin):
+class BufferedReader(_Nibbler):
 
     """BufferedReader(raw[, buffer_size])
 
@@ -1366,195 +1618,14 @@ class BufferedReader(_BufferedIOMixin):
     """
 
     def __init__(self, raw, buffer_size=DEFAULT_BUFFER_SIZE):
-        """Create a new buffered reader using the given readable raw IO object.
-        """
         if not raw.readable():
             raise OSError('"raw" argument must be readable.')
+        super().__init__(raw, buffer_size)
 
-        _BufferedIOMixin.__init__(self, raw)
-        if buffer_size <= 0:
-            raise ValueError("invalid buffer size")
-        self.buffer_size = buffer_size
-        self._reset_read_buf()
-        self._read_lock = Lock()
+    def readable(self): return True
+    def writable(self): return False
 
-    def readable(self):
-        return self.raw.readable()
-
-    def _reset_read_buf(self):
-        self._read_buf = b""
-        self._read_pos = 0
-
-    def read(self, size=None):
-        """Read size bytes.
-
-        Returns exactly size bytes of data unless the underlying raw IO
-        stream reaches EOF or if the call would block in non-blocking
-        mode. If size is negative, read until EOF or until read() would
-        block.
-        """
-        if size is not None and size < -1:
-            raise ValueError("invalid number of bytes to read")
-        with self._read_lock:
-            return self._read_unlocked(size)
-
-    def _read_unlocked(self, n=None):
-        nodata_val = b""
-        empty_values = (b"", None)
-        buf = self._read_buf
-        pos = self._read_pos
-
-        # Special case for when the number of bytes to read is unspecified.
-        if n is None or n == -1:
-            self._reset_read_buf()
-            if hasattr(self.raw, 'readall'):
-                chunk = self.raw.readall()
-                if chunk is None:
-                    return buf[pos:] or None
-                else:
-                    return buf[pos:] + chunk
-            chunks = [buf[pos:]]  # Strip the consumed bytes.
-            current_size = 0
-            while True:
-                # Read until EOF or until read() would block.
-                chunk = self.raw.read()
-                if chunk in empty_values:
-                    nodata_val = chunk
-                    break
-                current_size += len(chunk)
-                chunks.append(chunk)
-            return b"".join(chunks) or nodata_val
-
-        # The number of bytes to read is specified, return at most n bytes.
-        avail = len(buf) - pos  # Length of the available buffered data.
-        if n <= avail:
-            # Fast path: the data to read is fully buffered.
-            self._read_pos += n
-            return buf[pos:pos+n]
-        # Slow path: read from the stream until enough bytes are read,
-        # or until an EOF occurs or until read() would block.
-        chunks = [buf[pos:]]
-        wanted = max(self.buffer_size, n)
-        while avail < n:
-            chunk = self.raw.read(wanted)
-            if chunk in empty_values:
-                nodata_val = chunk
-                break
-            avail += len(chunk)
-            chunks.append(chunk)
-        # n is more than avail only when an EOF occurred or when
-        # read() would have blocked.
-        n = min(n, avail)
-        out = b"".join(chunks)
-        self._read_buf = out[n:]  # Save the extra data in the buffer.
-        self._read_pos = 0
-        return out[:n] if out else nodata_val
-
-    def peek(self, size=0):
-        """Returns buffered bytes without advancing the position.
-
-        The argument indicates a desired minimal number of bytes; we
-        do at most one raw read to satisfy it.  We never return more
-        than self.buffer_size.
-        """
-        self._checkClosed("peek of closed file")
-        with self._read_lock:
-            return self._peek_unlocked(size)
-
-    def _peek_unlocked(self, n=0):
-        want = min(n, self.buffer_size)
-        have = len(self._read_buf) - self._read_pos
-        if have < want or have <= 0:
-            to_read = self.buffer_size - have
-            current = self.raw.read(to_read)
-            if current:
-                self._read_buf = self._read_buf[self._read_pos:] + current
-                self._read_pos = 0
-        return self._read_buf[self._read_pos:]
-
-    def read1(self, size=-1):
-        """Reads up to size bytes, with at most one read() system call."""
-        # Returns up to size bytes.  If at least one byte is buffered, we
-        # only return buffered bytes.  Otherwise, we do one raw read.
-        self._checkClosed("read of closed file")
-        if size < 0:
-            size = self.buffer_size
-        if size == 0:
-            return b""
-        with self._read_lock:
-            self._peek_unlocked(1)
-            return self._read_unlocked(
-                min(size, len(self._read_buf) - self._read_pos))
-
-    # Implementing readinto() and readinto1() is not strictly necessary (we
-    # could rely on the base class that provides an implementation in terms of
-    # read() and read1()). We do it anyway to keep the _pyio implementation
-    # similar to the io implementation (which implements the methods for
-    # performance reasons).
-    def _readinto(self, buf, read1):
-        """Read data into *buf* with at most one system call."""
-
-        self._checkClosed("readinto of closed file")
-
-        # Need to create a memoryview object of type 'b', otherwise
-        # we may not be able to assign bytes to it, and slicing it
-        # would create a new object.
-        if not isinstance(buf, memoryview):
-            buf = memoryview(buf)
-        if buf.nbytes == 0:
-            return 0
-        buf = buf.cast('B')
-
-        written = 0
-        with self._read_lock:
-            while written < len(buf):
-
-                # First try to read from internal buffer
-                avail = min(len(self._read_buf) - self._read_pos, len(buf))
-                if avail:
-                    buf[written:written+avail] = \
-                        self._read_buf[self._read_pos:self._read_pos+avail]
-                    self._read_pos += avail
-                    written += avail
-                    if written == len(buf):
-                        break
-
-                # If remaining space in callers buffer is larger than
-                # internal buffer, read directly into callers buffer
-                if len(buf) - written > self.buffer_size:
-                    n = self.raw.readinto(buf[written:])
-                    if not n:
-                        break # eof
-                    written += n
-
-                # Otherwise refill internal buffer - unless we're
-                # in read1 mode and already got some data
-                elif not (read1 and written):
-                    if not self._peek_unlocked(1):
-                        break # eof
-
-                # In readinto1 mode, return as soon as we have some data
-                if read1 and written:
-                    break
-
-        return written
-
-    def tell(self):
-        # GH-95782: Keep return value non-negative
-        return max(_BufferedIOMixin.tell(self) - len(self._read_buf) + self._read_pos, 0)
-
-    def seek(self, pos, whence=0):
-        if whence not in valid_seek_flags:
-            raise ValueError("invalid whence value")
-        self._checkClosed("seek of closed file")
-        with self._read_lock:
-            if whence == 1:
-                pos -= len(self._read_buf) - self._read_pos
-            pos = _BufferedIOMixin.seek(self, pos, whence)
-            self._reset_read_buf()
-            return pos
-
-class BufferedWriter(_BufferedIOMixin):
+class BufferedWriter(_Nibbler):
 
     """A buffer for a writeable sequential RawIO object.
 
@@ -1566,71 +1637,10 @@ class BufferedWriter(_BufferedIOMixin):
     def __init__(self, raw, buffer_size=DEFAULT_BUFFER_SIZE):
         if not raw.writable():
             raise OSError('"raw" argument must be writable.')
+        super().__init__(raw, buffer_size)
 
-        _BufferedIOMixin.__init__(self, raw)
-        if buffer_size < 0:
-            raise ValueError("invalid buffer size")
-        self._write_nibbler = _Nibbler(buffer_size)
-
-    def writable(self):
-        return self.raw.writable()
-
-    def _dealloc_warn(self, source):
-        if len(self._write_nibbler) > 0:
-            import warnings
-            warnings.warn(
-                f'unclosed file {source!r} with {len(self._write_nibbler)} bytes buffered',
-                ResourceWarning,
-                stacklevel=2,
-                source=self
-            )
-        if dealloc_warn := getattr(self.raw, "_dealloc_warn", None):
-            dealloc_warn(source)
-
-    def write(self, b):
-        if isinstance(b, str):
-            raise TypeError("can't write str to binary stream")
-        if self.closed:
-            raise ValueError("write to closed file")
-
-        return self._write_nibbler.append(b, lambda: self.raw)
-
-    def truncate(self, pos=None):
-        self.flush()
-        if pos is None:
-            pos = self.raw.tell()
-        return self.raw.truncate(pos)
-
-    def flush(self):
-        if self.closed:
-            raise ValueError("flush on closed file")
-
-        self._write_nibbler.flush_all(lambda: self.raw)
-        # If the raw stream blocked and data couldn't be written,
-        # it will have been returned to the nibbler. Detect this and raise.
-        if len(self._write_nibbler) > 0:
-            raise BlockingIOError(
-                errno.EAGAIN,
-                "flush could not complete without blocking",
-                0
-            )
-
-    def tell(self):
-        return _BufferedIOMixin.tell(self) + len(self._write_nibbler)
-
-    def seek(self, pos, whence=0):
-        if whence not in valid_seek_flags:
-            raise ValueError("invalid whence value")
-        self.flush()
-        return _BufferedIOMixin.seek(self, pos, whence)
-
-    def close(self):
-        if self.raw is None or self.closed:
-            return
-        try:
-            self.flush()
-        finally:
-            self.raw.close()
+    def readable(self): return False
+    def writable(self): return True
 
 
 class BufferedRWPair(BufferedIOBase):
@@ -1717,67 +1727,10 @@ class BufferedRandom(BufferedWriter, BufferedReader):
 
     def __init__(self, raw, buffer_size=DEFAULT_BUFFER_SIZE):
         raw._checkSeekable()
-        BufferedReader.__init__(self, raw, buffer_size)
-        BufferedWriter.__init__(self, raw, buffer_size)
+        super().__init__(raw, buffer_size)  # MRO: Writer -> Reader -> _Nibbler
 
-    def seek(self, pos, whence=0):
-        if whence not in valid_seek_flags:
-            raise ValueError("invalid whence value")
-        self.flush()
-        if self._read_buf:
-            # Undo read ahead.
-            with self._read_lock:
-                self.raw.seek(self._read_pos - len(self._read_buf), 1)
-        # First do the raw seek, then empty the read buffer, so that
-        # if the raw seek fails, we don't lose buffered data forever.
-        pos = self.raw.seek(pos, whence)
-        with self._read_lock:
-            self._reset_read_buf()
-        if pos < 0:
-            raise OSError("seek() returned invalid position")
-        return pos
-
-    def tell(self):
-        if self._write_nibbler:
-            return BufferedWriter.tell(self)
-        else:
-            return BufferedReader.tell(self)
-
-    def truncate(self, pos=None):
-        if pos is None:
-            pos = self.tell()
-        # Use seek to flush the read buffer.
-        return BufferedWriter.truncate(self, pos)
-
-    def read(self, size=None):
-        if size is None:
-            size = -1
-        self.flush()
-        return BufferedReader.read(self, size)
-
-    def readinto(self, b):
-        self.flush()
-        return BufferedReader.readinto(self, b)
-
-    def peek(self, size=0):
-        self.flush()
-        return BufferedReader.peek(self, size)
-
-    def read1(self, size=-1):
-        self.flush()
-        return BufferedReader.read1(self, size)
-
-    def readinto1(self, b):
-        self.flush()
-        return BufferedReader.readinto1(self, b)
-
-    def write(self, b):
-        if self._read_buf:
-            # Undo readahead
-            with self._read_lock:
-                self.raw.seek(self._read_pos - len(self._read_buf), 1)
-                self._reset_read_buf()
-        return BufferedWriter.write(self, b)
+    def readable(self): return True
+    def writable(self): return True
 
 
 def _new_buffersize(bytes_read):
