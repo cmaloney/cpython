@@ -251,9 +251,7 @@ def open(file, mode="r", buffering=-1, encoding=None, errors=None,
             buffering = max(min(raw._blksize, 8192 * 1024), DEFAULT_BUFFER_SIZE)
         if buffering < 0:
             raise ValueError("invalid buffering size")
-        if buffering == 0:
-            if binary:
-                return result
+        if buffering == 0 and not binary:
             raise ValueError("can't have unbuffered text I/O")
         if updating:
             buffer = BufferedRandom(raw, buffering)
@@ -1209,6 +1207,12 @@ class _Nibbler(BufferedIOBase):
         )
 
     ### Read API ###
+
+    def readall(self):
+        # Provided so callers used to FileIO.readall() (e.g. via
+        # open(..., 'wb', buffering=0) that now returns a buffered stream)
+        # see the same UnsupportedOperation when the stream is write-only.
+        return self.read(-1)
 
     def read(self, size=-1):
         if not self.readable():
