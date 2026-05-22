@@ -1235,35 +1235,32 @@ def set_memlimit(limit: str) -> None:
     max_memuse = memlimit
 
 
-class _MemoryWatchdog:
-    """An object which periodically watches the process' memory consumption
-    and prints it out.
-    """
+@contextlib.contextmanager
+def _run_bigmem(size, memuse, dry_run):
+    """Run a bigmem test possibly with a memory watchdog."""
 
-    def __init__(self):
-        self.procfile = '/proc/{pid}/statm'.format(pid=os.getpid())
-        self.started = False
+    # Skip the test if there isn't enough memory.
+    maxsize = size if real_max_memuse else 5147
+    peak = size * memuse / 1024**3
+    if ((real_max_memuse or not dry_run)
+        and real_max_memuse < maxsize * memuse):
+        raise unittest.SkipTest(f"not enough memory: {peak:.1f}G minimum needed")
 
-    def start(self):
-        try:
-            f = open(self.procfile, 'r')
-        except OSError as e:
-            logging.getLogger(__name__).warning('/proc not available for stats: %s', e, exc_info=e)
-            sys.stderr.flush()
-            return
+    # Run test without watchdog.
+    if not (real_max_memuse and verbose):
+        yield maxsize
+        return
 
-        import subprocess
-        with f:
-            watchdog_script = findfile("memory_watchdog.py")
-            self.mem_watchdog = subprocess.Popen([sys.executable, watchdog_script],
-                                                 stdin=f,
-                                                 stderr=subprocess.DEVNULL)
-        self.started = True
+    print()
+    print(f" ... expected peak memory use: {peak:.1f}G", flush=True)
 
-    def stop(self):
-        if self.started:
-            self.mem_watchdog.terminate()
-            self.mem_watchdog.wait()
+    from test.memory_watchdog import get_watchdog
+    watchdog = get_watchdog()
+    if watchdog is None:
+        yield maxsize
+        return
+    with watchdog:
+        yield maxsize
 
 
 def bigmemtest(size, memuse, dry_run=True):
@@ -1281,33 +1278,8 @@ def bigmemtest(size, memuse, dry_run=True):
     """
     def decorator(f):
         def wrapper(self):
-            size = wrapper.size
-            memuse = wrapper.memuse
-            if not real_max_memuse:
-                maxsize = 5147
-            else:
-                maxsize = size
-
-            if ((real_max_memuse or not dry_run)
-                and real_max_memuse < maxsize * memuse):
-                raise unittest.SkipTest(
-                    "not enough memory: %.1fG minimum needed"
-                    % (size * memuse / (1024 ** 3)))
-
-            if real_max_memuse and verbose:
-                print()
-                print(" ... expected peak memory use: {peak:.1f}G"
-                      .format(peak=size * memuse / (1024 ** 3)))
-                watchdog = _MemoryWatchdog()
-                watchdog.start()
-            else:
-                watchdog = None
-
-            try:
+            with _run_bigmem(wrapper.size, wrapper.memuse, dry_run) as maxsize:
                 return f(self, maxsize)
-            finally:
-                if watchdog:
-                    watchdog.stop()
 
         wrapper.size = size
         wrapper.memuse = memuse

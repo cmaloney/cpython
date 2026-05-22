@@ -1,0 +1,3 @@
+Update :mod:`test.support` to report process memory usage during verbose
+runs of ``@bigmemtest`` runs on macOS and Windows. Print peak usage at the end
+of each test.

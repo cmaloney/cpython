@@ -1858,6 +1858,36 @@ exit:
     return return_value;
 }
 
+PyDoc_STRVAR(_winapi_GetProcessMemoryInfo__doc__,
+"GetProcessMemoryInfo($module, handle, /)\n"
+"--\n"
+"\n"
+"Return the private memory usage (in bytes) of the given process handle.\n"
+"\n"
+"Wraps GetProcessMemoryInfo() and returns the PrivateUsage field of\n"
+"PROCESS_MEMORY_COUNTERS_EX.");
+
+#define _WINAPI_GETPROCESSMEMORYINFO_METHODDEF    \
+    {"GetProcessMemoryInfo", (PyCFunction)_winapi_GetProcessMemoryInfo, METH_O, _winapi_GetProcessMemoryInfo__doc__},
+
+static PyObject *
+_winapi_GetProcessMemoryInfo_impl(PyObject *module, HANDLE handle);
+
+static PyObject *
+_winapi_GetProcessMemoryInfo(PyObject *module, PyObject *arg)
+{
+    PyObject *return_value = NULL;
+    HANDLE handle;
+
+    if (!PyArg_Parse(arg, "" F_HANDLE ":GetProcessMemoryInfo", &handle)) {
+        goto exit;
+    }
+    return_value = _winapi_GetProcessMemoryInfo_impl(module, handle);
+
+exit:
+    return return_value;
+}
+
 PyDoc_STRVAR(_winapi_WriteFile__doc__,
 "WriteFile($module, /, handle, buffer, overlapped=False)\n"
 "--\n"
@@ -2334,4 +2364,4 @@ exit:
 #ifndef _WINAPI_GETSHORTPATHNAME_METHODDEF
     #define _WINAPI_GETSHORTPATHNAME_METHODDEF
 #endif /* !defined(_WINAPI_GETSHORTPATHNAME_METHODDEF) */
-/*[clinic end generated code: output=4ab94eaee93a0a90 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=c86fc4eae93351ae input=a9049054013a1b77]*/

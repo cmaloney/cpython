@@ -47,6 +47,11 @@
 #include <windows.h>
 #include <winioctl.h>
 #include <crtdbg.h>
+// PSAPI_VERSION=2 redirects GetProcessMemoryInfo to K32GetProcessMemoryInfo
+// in kernel32.dll so we don't need to link psapi.lib.
+// https://learn.microsoft.com/windows/win32/api/psapi/nf-psapi-getprocessmemoryinfo
+#define PSAPI_VERSION 2
+#include <psapi.h>
 #include "winreparse.h"
 
 #if defined(MS_WIN32) && !defined(MS_WIN64)
@@ -2681,6 +2686,36 @@ _winapi_WaitForSingleObject_impl(PyObject *module, HANDLE handle,
 }
 
 /*[clinic input]
+_winapi.GetProcessMemoryInfo
+
+    handle: HANDLE
+    /
+
+Return the private memory usage (in bytes) of the given process handle.
+
+Wraps GetProcessMemoryInfo() and returns the PrivateUsage field of
+PROCESS_MEMORY_COUNTERS_EX.
+[clinic start generated code]*/
+
+static PyObject *
+_winapi_GetProcessMemoryInfo_impl(PyObject *module, HANDLE handle)
+/*[clinic end generated code: output=00a5d09732e84120 input=5c099a6e3107378b]*/
+{
+    PROCESS_MEMORY_COUNTERS_EX pmc;
+    BOOL ok;
+
+    pmc.cb = sizeof(pmc);
+    Py_BEGIN_ALLOW_THREADS
+    ok = GetProcessMemoryInfo(handle, (PROCESS_MEMORY_COUNTERS *)&pmc,
+                              sizeof(pmc));
+    Py_END_ALLOW_THREADS
+    if (!ok) {
+        return PyErr_SetFromWindowsErr(0);
+    }
+    return PyLong_FromSize_t(pmc.PrivateUsage);
+}
+
+/*[clinic input]
 _winapi.WriteFile
 
     handle: HANDLE
@@ -3123,6 +3158,7 @@ static PyMethodDef winapi_functions[] = {
     _WINAPI_WAITFORMULTIPLEOBJECTS_METHODDEF
     _WINAPI_BATCHEDWAITFORMULTIPLEOBJECTS_METHODDEF
     _WINAPI_WAITFORSINGLEOBJECT_METHODDEF
+    _WINAPI_GETPROCESSMEMORYINFO_METHODDEF
     _WINAPI_WRITEFILE_METHODDEF
     _WINAPI_GETACP_METHODDEF
     _WINAPI_GETOEMCP_METHODDEF
@@ -3226,6 +3262,7 @@ static int winapi_exec(PyObject *m)
     WINAPI_CONSTANT(F_DWORD, PROCESS_ALL_ACCESS);
     WINAPI_CONSTANT(F_DWORD, SYNCHRONIZE);
     WINAPI_CONSTANT(F_DWORD, PROCESS_DUP_HANDLE);
+    WINAPI_CONSTANT(F_DWORD, PROCESS_QUERY_LIMITED_INFORMATION);
     WINAPI_CONSTANT(F_DWORD, SEC_COMMIT);
     WINAPI_CONSTANT(F_DWORD, SEC_IMAGE);
     WINAPI_CONSTANT(F_DWORD, SEC_LARGE_PAGES);

@@ -2,6 +2,20 @@
 
 #include <stddef.h>
 
+#ifdef __APPLE__
+#  include <TargetConditionals.h>
+#  if defined(TARGET_OS_OSX) && TARGET_OS_OSX
+#    include <mach/mach.h>        // mach_task_self(), task_info()
+#  endif
+#endif
+
+#include "clinic/mem.c.h"
+
+/*[clinic input]
+module _testcapi
+[clinic start generated code]*/
+/*[clinic end generated code: output=da39a3ee5e6b4b0d input=6361033e795369fc]*/
+
 
 typedef struct {
     PyMemAllocatorEx alloc;
@@ -684,7 +698,33 @@ error:
 }
 
 
+#if defined(__APPLE__) && defined(TARGET_OS_OSX) && TARGET_OS_OSX
+/*[clinic input]
+_testcapi.task_vm_phys_footprint
+
+Return the physical memory footprint of the current process in bytes, via
+task_info(mach_task_self(), TASK_VM_INFO).
+[clinic start generated code]*/
+
+static PyObject *
+_testcapi_task_vm_phys_footprint_impl(PyObject *module)
+/*[clinic end generated code: output=0cb6642ca48de98e input=f0b6cff4f9e0dcca]*/
+{
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    kern_return_t kr = task_info(mach_task_self(), TASK_VM_INFO,
+                                 (task_info_t)&info, &count);
+    if (kr != KERN_SUCCESS) {
+        PyErr_SetString(PyExc_OSError, mach_error_string(kr));
+        return NULL;
+    }
+    return PyLong_FromUnsignedLongLong(info.phys_footprint);
+}
+#endif
+
+
 static PyMethodDef test_methods[] = {
+    _TESTCAPI_TASK_VM_PHYS_FOOTPRINT_METHODDEF
     {"pymem_api_misuse",              pymem_api_misuse,              METH_NOARGS},
     {"pymem_buffer_overflow",         pymem_buffer_overflow,         METH_NOARGS},
     {"pymem_malloc_without_gil",      pymem_malloc_without_gil,      METH_NOARGS},

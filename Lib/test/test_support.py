@@ -6,6 +6,7 @@ import inspect
 import io
 import logging
 import os
+import re
 import shutil
 import signal
 import socket
@@ -756,6 +757,37 @@ class TestSupport(unittest.TestCase):
         finally:
             support.max_memuse = old_max_memuse
             support.real_max_memuse = old_real_max_memuse
+
+    @support.requires_subprocess()
+    def test_memory_watchdog(self):
+        """Check memory_watchdog works."""
+        # Allocate 0.1G so the watchdog sees memory usage.
+        ballast = bytearray(128 * 1024 * 1024)
+        result = subprocess.run(
+            [sys.executable, support.findfile("memory_watchdog.py"),
+             str(os.getpid())],
+            # input='' closes the child's stdin immediately; the EOF
+            # triggers the watchdog's shutdown path.
+            input='',
+            capture_output=True,
+            timeout=10,
+            text=True,
+        )
+        del ballast
+        if sys.platform in ('linux', 'darwin', 'win32'):
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            # Every reading should be non-zero.
+            values = re.findall(
+                r'process memory: ([\d.]+)G', result.stdout)
+            self.assertTrue(values, msg=result.stdout)
+            for value in values:
+                self.assertGreater(float(value), 0.0)
+            # max should be printed.
+            self.assertIn("max process memory", result.stdout)
+        else:
+            # NotImplementedError bubbles up uncaught.
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("NotImplementedError", result.stderr)
 
     def test_copy_python_src_ignore(self):
         # Get source directory
