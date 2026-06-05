@@ -21,7 +21,7 @@ custom_converter(PyObject *obj, custom_t *val)
 }
 
 
-/* Forward declarations for vectorcall exemplar types, needed because
+/* Forward declarations for vectorcall types, needed because
  * clinic/_testclinic.c.h is included before the type definitions. */
 static PyTypeObject VcNew_Type;
 static PyTypeObject VcInit_Type;
@@ -2321,7 +2321,7 @@ output pop
 /*[clinic end generated code: output=da39a3ee5e6b4b0d input=e7c7c42daced52b0]*/
 
 
-/* @vectorcall test types. One type per exemplar because tp_vectorcall is a single slot. */
+/* @vectorcall test types. Multiple types as tp_vectorcall is a single slot. */
 
 /* VcNew: __new__ with one optional positional-or-keyword arg */
 
