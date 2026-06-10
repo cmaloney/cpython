@@ -11,12 +11,12 @@ from collections import deque, UserList
 from itertools import cycle, count
 from test import support
 from test.support import check_sanitizer, os_helper, threading_helper
-from .utils import byteslike, CTestCase, PyTestCase
+from .utils import byteslike, CTestCase, PyTestCase, NibblerMixin
 
 
 import io # C implementation.
 import _pyio as pyio # Python implementation.
-
+from _io import _nibbler # Nibbler C implementation.
 
 class CommonBufferedTests:
     # Tests common to BufferedReader, BufferedWriter and BufferedRandom
@@ -1496,6 +1496,23 @@ class CBufferedRandomTest(BufferedRandomTest, SizeofTest, CTestCase):
 
 class PyBufferedRandomTest(BufferedRandomTest, PyTestCase):
     tp = pyio.BufferedRandom
+
+
+# _io._nibbler buffered classes, run through the full C test suites.
+class NibblerBufferedReaderTest(NibblerMixin, CBufferedReaderTest):
+    tp = _nibbler.BufferedReader
+
+
+class NibblerBufferedWriterTest(NibblerMixin, CBufferedWriterTest):
+    tp = _nibbler.BufferedWriter
+
+
+class NibblerBufferedRWPairTest(NibblerMixin, CBufferedRWPairTest):
+    tp = _nibbler.BufferedRWPair
+
+
+class NibblerBufferedRandomTest(NibblerMixin, CBufferedRandomTest):
+    tp = _nibbler.BufferedRandom
 
 
 # Simple test to ensure that optimizations in the IO library deliver the

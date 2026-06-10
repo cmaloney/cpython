@@ -5,6 +5,8 @@ import unittest
 
 import io  # C implementation of io
 import _pyio as pyio # Python implementation of io
+# _io._nibbler: C buffered classes cloned into an _io submodule.
+from _io import _nibbler
 
 
 try:
@@ -316,3 +318,24 @@ class PyTestCase(unittest.TestCase):
     # Use the class as a proxy to the _pyio module members.
     def __getattr__(self, name):
         return getattr(pyio, name)
+
+
+_NIBBLER_BUFFERED = {
+    "BufferedReader": _nibbler.BufferedReader,
+    "BufferedWriter": _nibbler.BufferedWriter,
+    "BufferedRWPair": _nibbler.BufferedRWPair,
+    "BufferedRandom": _nibbler.BufferedRandom,
+    "BufferedIOBase": _nibbler._BufferedIOBase,
+    "_BufferedIOBase": _nibbler._BufferedIOBase,
+}
+
+
+class NibblerMixin:
+    """Route buffered types to _io._nibbler; other members stay C io."""
+    is_nibbler = True
+
+    def __getattr__(self, name):
+        try:
+            return _NIBBLER_BUFFERED[name]
+        except KeyError:
+            return getattr(io, name)

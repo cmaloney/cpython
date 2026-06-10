@@ -519,6 +519,7 @@
     <ClCompile Include="..\Modules\_io\bytesio.c" />
     <ClCompile Include="..\Modules\_io\stringio.c" />
     <ClCompile Include="..\Modules\_io\bufferedio.c" />
+    <ClCompile Include="..\Modules\_io\_nibbler\bufferedio.c" />
     <ClCompile Include="..\Modules\_io\iobase.c" />
     <ClCompile Include="..\Modules\_io\textio.c" />
     <ClCompile Include="..\Modules\_io\winconsoleio.c" />
