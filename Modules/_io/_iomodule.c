@@ -717,6 +717,12 @@ iomodule_exec(PyObject *m)
              state->PyTextIOBase_Type);
 
 #undef ADD_TYPE
+
+    // Create the _io._nibbler submodule (after IOBase/FileIO are registered).
+    if (_PyIO_create_nibbler_submodule(m) == NULL) {
+        return -1;
+    }
+
     return 0;
 }
 

@@ -192,6 +192,9 @@ find_io_state_by_def(PyTypeObject *type)
 
 extern PyObject *_PyIOBase_cannot_pickle(PyObject *self, PyObject *args);
 
+/* Create and register the _io._nibbler submodule. */
+extern PyObject *_PyIO_create_nibbler_submodule(PyObject *io_module);
+
 #ifdef HAVE_WINDOWS_CONSOLE_IO
 extern char _PyIO_get_console_type(PyObject *);
 #endif

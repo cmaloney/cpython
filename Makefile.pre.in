@@ -363,6 +363,7 @@ IO_OBJS=	\
 		Modules/_io/iobase.o \
 		Modules/_io/fileio.o \
 		Modules/_io/bufferedio.o \
+		Modules/_io/_nibbler/bufferedio.o \
 		Modules/_io/textio.o \
 		Modules/_io/bytesio.o \
 		Modules/_io/stringio.o
