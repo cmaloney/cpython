@@ -21,7 +21,7 @@ from test.support import (
     import_helper, is_apple, os_helper, threading_helper, warnings_helper,
 )
 from test.support.os_helper import FakePath
-from .utils import byteslike, CTestCase, PyTestCase
+from .utils import byteslike, CTestCase, PyTestCase, NibblerMixin
 
 import io  # C implementation of io
 import _pyio as pyio # Python implementation of io
@@ -1407,6 +1407,15 @@ class PyMiscIOTest(MiscIOTest, PyTestCase):
     name_of_module = "_pyio", "io"
     extra_exported = "BlockingIOError", "open_code",
     not_exported = "valid_seek_flags",
+
+
+# Same suites, with the buffered layer routed to _io._nibbler.
+class NibblerIOTest(NibblerMixin, CIOTest):
+    pass
+
+
+class NibblerMiscIOTest(NibblerMixin, CMiscIOTest):
+    pass
 
 
 class ProtocolsTest(unittest.TestCase):
