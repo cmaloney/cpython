@@ -5,6 +5,7 @@ import unittest
 
 import io  # C implementation of io
 import _pyio as pyio # Python implementation of io
+import _io
 # _io._nibbler: C buffered classes cloned into an _io submodule.
 from _io import _nibbler
 
@@ -320,19 +321,25 @@ class PyTestCase(unittest.TestCase):
         return getattr(pyio, name)
 
 
+# Only the concrete classes route to nibbler; BufferedIOBase stays the shared
+# io ABC so isinstance/ABCMeta checks work across implementations.
 _NIBBLER_BUFFERED = {
     "BufferedReader": _nibbler.BufferedReader,
     "BufferedWriter": _nibbler.BufferedWriter,
     "BufferedRWPair": _nibbler.BufferedRWPair,
     "BufferedRandom": _nibbler.BufferedRandom,
-    "BufferedIOBase": _nibbler._BufferedIOBase,
-    "_BufferedIOBase": _nibbler._BufferedIOBase,
 }
 
 
 class NibblerMixin:
-    """Route buffered types to _io._nibbler; other members stay C io."""
+    """Route the buffered layer (self.* types and open()) to _io._nibbler."""
     is_nibbler = True
+
+    def setUp(self):
+        super().setUp()
+        prev = _io._default_impl
+        _io._default_impl = '_nibbler'
+        self.addCleanup(setattr, _io, '_default_impl', prev)
 
     def __getattr__(self, name):
         try:
