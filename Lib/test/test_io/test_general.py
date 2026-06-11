@@ -1098,8 +1098,15 @@ class MiscIOTest:
     def _check_abc_inheritance(self, abcmodule):
         with self.open(os_helper.TESTFN, "wb", buffering=0) as f:
             self.assertIsInstance(f, abcmodule.IOBase)
-            self.assertIsInstance(f, abcmodule.RawIOBase)
-            self.assertNotIsInstance(f, abcmodule.BufferedIOBase)
+            if self.io is pyio:
+                # _pyio.open(..., buffering=0) returns a BufferedWriter
+                # (buffer_size=0) so writes get retry-on-partial semantics.
+                # The C io.open still returns a raw FileIO here.
+                self.assertNotIsInstance(f, abcmodule.RawIOBase)
+                self.assertIsInstance(f, abcmodule.BufferedIOBase)
+            else:
+                self.assertIsInstance(f, abcmodule.RawIOBase)
+                self.assertNotIsInstance(f, abcmodule.BufferedIOBase)
             self.assertNotIsInstance(f, abcmodule.TextIOBase)
         with self.open(os_helper.TESTFN, "wb") as f:
             self.assertIsInstance(f, abcmodule.IOBase)
