@@ -558,7 +558,6 @@ class PyBytesIOTest(MemoryTestMixin, MemorySeekTestMixin, unittest.TestCase):
         memio.seek(1, 1)
         self.assertEqual(memio.read(), buf[1:])
 
-
     def test_truncate_extend(self):
         # gh-71448: Extending with truncate should allocate space.
         buf = self.buftype("123")
@@ -583,7 +582,6 @@ class PyBytesIOTest(MemoryTestMixin, MemorySeekTestMixin, unittest.TestCase):
         self.assertEqual(len(memio.getbuffer()), 12)
         self.assertEqual(memio.getvalue(), b"\x00" * 12)
         self.assertEqual(memio.tell(), 12)
-
 
     def test_issue141311(self):
         memio = self.ioclass()
