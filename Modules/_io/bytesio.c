@@ -667,7 +667,7 @@ _io_BytesIO_truncate_impl(bytesio *self, PyObject *size)
         }
     }
 
-    if (new_size < self->string_size) {
+    if (new_size != self->string_size) {
         self->string_size = new_size;
         if (resize_buffer_lock_held(self, new_size) < 0)
             return NULL;
