@@ -625,11 +625,10 @@ static const unsigned int _Py_STATX_KNOWN = (STATX_BASIC_STATS | STATX_BTIME
 // --- os module ------------------------------------------------------------
 
 #define MODNAME "os"
+#define INITFUNC PyInit_posix
 #ifdef MS_WINDOWS
-#  define INITFUNC PyInit_nt
 #  define MODNAME_OBJ &_Py_ID(nt)
 #else
-#  define INITFUNC PyInit_posix
 #  define MODNAME_OBJ &_Py_ID(posix)
 #endif
 
