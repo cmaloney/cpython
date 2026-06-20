@@ -624,13 +624,12 @@ static const unsigned int _Py_STATX_KNOWN = (STATX_BASIC_STATS | STATX_BTIME
 
 // --- os module ------------------------------------------------------------
 
+#define MODNAME "os"
 #ifdef MS_WINDOWS
 #  define INITFUNC PyInit_nt
-#  define MODNAME "nt"
 #  define MODNAME_OBJ &_Py_ID(nt)
 #else
 #  define INITFUNC PyInit_posix
-#  define MODNAME "posix"
 #  define MODNAME_OBJ &_Py_ID(posix)
 #endif
 
@@ -18888,7 +18887,7 @@ static PyModuleDef_Slot posixmodile_slots[] = {
 
 static struct PyModuleDef posixmodule = {
     PyModuleDef_HEAD_INIT,
-    .m_name = MODNAME,
+    .m_name = "posix",
     .m_doc = posix__doc__,
     .m_size = sizeof(_posixstate),
     .m_methods = posix_methods,
