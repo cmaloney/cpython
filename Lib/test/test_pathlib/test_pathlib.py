@@ -31,10 +31,7 @@ try:
     import grp, pwd
 except ImportError:
     grp = pwd = None
-try:
-    import posix
-except ImportError:
-    posix = None
+import posix
 
 
 def patch_replace(old_test):
@@ -1525,7 +1522,7 @@ class PathTest(PurePathTest):
         with contextlib.ExitStack() as ctx:
             if fcntl and hasattr(fcntl, 'FICLONE'):
                 ctx.enter_context(mock.patch('fcntl.ioctl', make_raiser(errno.EXDEV)))
-            if posix and hasattr(posix, '_fcopyfile'):
+            if hasattr(posix, '_fcopyfile'):
                 ctx.enter_context(mock.patch('posix._fcopyfile', make_raiser(errno.ENOTSUP)))
             if hasattr(os, 'copy_file_range'):
                 ctx.enter_context(mock.patch('os.copy_file_range', make_raiser(errno.EXDEV)))

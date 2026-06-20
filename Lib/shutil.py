@@ -40,9 +40,7 @@ except ImportError:
     _ZSTD_SUPPORTED = False
 
 _WINDOWS = os.name == 'nt'
-posix = None
-if os.name == 'posix':
-    import posix
+import posix
 
 if sys.platform == 'win32':
     import _winapi
@@ -55,7 +53,7 @@ COPY_BUFSIZE = 1024 * 1024 if _WINDOWS else 256 * 1024
 _USE_CP_SENDFILE = (hasattr(os, "sendfile")
                     and sys.platform.startswith(("linux", "android", "sunos")))
 _USE_CP_COPY_FILE_RANGE = hasattr(os, "copy_file_range")
-_HAS_FCOPYFILE = posix and hasattr(posix, "_fcopyfile")  # macOS
+_HAS_FCOPYFILE = hasattr(posix, "_fcopyfile")  # macOS
 
 # CMD defaults in Windows 10
 _WIN_DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC"

@@ -23,10 +23,7 @@ from shutil import (make_archive,
                     SameFileError, _GiveupOnFastCopy)
 import tarfile
 import zipfile
-try:
-    import posix
-except ImportError:
-    posix = None
+import posix
 
 from test import support
 from test.support import os_helper

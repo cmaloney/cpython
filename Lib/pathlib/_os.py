@@ -10,10 +10,7 @@ try:
     import fcntl
 except ImportError:
     fcntl = None
-try:
-    import posix
-except ImportError:
-    posix = None
+import posix
 try:
     import _winapi
 except ImportError:
@@ -51,7 +48,7 @@ else:
     _ficlone = None
 
 
-if posix and hasattr(posix, '_fcopyfile'):
+if hasattr(posix, '_fcopyfile'):
     def _fcopyfile(source_fd, target_fd):
         """
         Copy a regular file content using high-performance fcopyfile(3)

@@ -51,12 +51,7 @@ from .render import (
 from .trace import trace, trace_text
 from .unix_eventqueue import EventQueue
 
-# declare posix optional to allow None assignment on other platforms
-posix: types.ModuleType | None
-try:
-    import posix
-except ImportError:
-    posix = None
+import posix
 
 # types
 if TYPE_CHECKING:
@@ -726,7 +721,7 @@ class UnixConsole(Console):
     def input_hook(self):
         # avoid inline imports here so the repl doesn't get flooded
         # with import logging from -X importtime=2
-        if posix is not None and posix._is_inputhook_installed():
+        if posix._is_inputhook_installed():
             return posix._inputhook
 
     def __enable_bracketed_paste(self) -> None:

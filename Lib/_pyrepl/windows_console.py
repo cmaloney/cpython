@@ -305,7 +305,7 @@ class WindowsConsole(Console):
     def input_hook(self):
         # avoid inline imports here so the repl doesn't get flooded
         # with import logging from -X importtime=2
-        if hasattr(os, '_is_inputhook_installed') and os._is_inputhook_installed():
+        if os._is_inputhook_installed():
             return os._inputhook
 
     def __plan_changed_line(  # keep in sync with UnixConsole.__plan_changed_line

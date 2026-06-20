@@ -14,10 +14,7 @@ from test.support import os_helper
 from test.support.os_helper import FakePath, TESTFN
 from unittest import mock
 
-try:
-    import posix
-except ImportError:
-    posix = None
+import posix
 
 
 # An absolute path to a temporary filename for testing. We can't rely on TESTFN
@@ -244,7 +241,7 @@ class PosixPathTest(unittest.TestCase):
         finally:
             os_helper.unlink(ABSTFN)
 
-    @unittest.skipIf(posix is None, "Test requires posix module")
+
     def test_ismount_different_device(self):
         # Simulate the path being on a different device from its parent by
         # mocking out st_dev.
@@ -262,7 +259,7 @@ class PosixPathTest(unittest.TestCase):
         finally:
             os.lstat = save_lstat
 
-    @unittest.skipIf(posix is None, "Test requires posix module")
+
     def test_ismount_directory_not_readable(self):
         # issue #2466: Simulate ismount run on a directory that is not
         # readable, which used to return False.
