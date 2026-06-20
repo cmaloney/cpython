@@ -49,8 +49,6 @@ def _get_exports_list(module):
 
 # Any new dependencies of the os module and/or changes in path separator
 # requires updating importlib as well.
-if 'posix' not in _names:
-    raise ImportError('no os specific module found')
 
 from posix import *
 from posix import _exit
