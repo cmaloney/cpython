@@ -166,15 +166,14 @@ class MiscTests(unittest.TestCase):
         def fqdn(obj):
             return (obj.__module__, obj.__qualname__)
 
-        native = os.name
         self.assertEqual(fqdn(os.stat_result), ("os", "stat_result"))
-        self.assertEqual(fqdn(os.times_result), (native, "times_result"))
+        self.assertEqual(fqdn(os.times_result), ("os", "times_result"))
         if hasattr(os, "statvfs_result"):
             self.assertEqual(fqdn(os.statvfs_result), ("os", "statvfs_result"))
         if hasattr(os, "sched_param"):
-            self.assertEqual(fqdn(os.sched_param), (native, "sched_param"))
+            self.assertEqual(fqdn(os.sched_param), ("os", "sched_param"))
         if hasattr(os, "waitid_result"):
-            self.assertEqual(fqdn(os.waitid_result), (native, "waitid_result"))
+            self.assertEqual(fqdn(os.waitid_result), ("os", "waitid_result"))
 
 
 # Tests creating TESTFN
