@@ -21,10 +21,7 @@ import warnings
 import textwrap
 from contextlib import contextmanager
 
-try:
-    import posix
-except ImportError:
-    import nt as posix
+import posix
 
 try:
     import pwd

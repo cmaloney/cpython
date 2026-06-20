@@ -16,12 +16,7 @@ from test import test_genericpath
 from tempfile import TemporaryFile
 
 
-try:
-    import nt
-except ImportError:
-    # Most tests can complete without the nt module,
-    # but for those that require it we import here.
-    nt = None
+nt = os if os.name == 'nt' else None
 
 try:
     ntpath._getfinalpathname

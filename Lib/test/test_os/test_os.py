@@ -2915,7 +2915,7 @@ class TestInvalidFD(unittest.TestCase):
             self.assertIn(ctx.exception.errno, (errno.EBADF, errno.EINVAL))
 
         if support.MS_WINDOWS:
-            import nt
+            nt = os
             self.assertFalse(nt._path_exists(fd))
             self.assertFalse(nt._path_lexists(fd))
             self.assertFalse(nt._path_isdir(fd))
