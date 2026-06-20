@@ -53,11 +53,8 @@ if 'posix' not in _names:
     raise ImportError('no os specific module found')
 
 from posix import *
-try:
-    from posix import _exit
-    __all__.append('_exit')
-except ImportError:
-    pass
+from posix import _exit
+__all__.append('_exit')
 try:
     from posix import _clearenv
     __all__.append('_clearenv')
@@ -73,14 +70,8 @@ else:
     linesep = '\n'
     import posixpath as path
 
-try:
-    from posix import _have_functions
-except ImportError:
-    pass
-try:
-    from posix import _create_environ
-except ImportError:
-    pass
+from posix import _have_functions
+from posix import _create_environ
 
 import posix
 __all__.extend(_get_exports_list(posix))
