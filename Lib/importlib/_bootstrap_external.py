@@ -31,11 +31,9 @@ import marshal
 
 
 _MS_WINDOWS = (sys.platform == 'win32')
+import posix as _os
 if _MS_WINDOWS:
-    import nt as _os
     import winreg
-else:
-    import posix as _os
 
 
 if _MS_WINDOWS:

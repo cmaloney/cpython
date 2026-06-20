@@ -593,11 +593,9 @@ def can_colorize(*, file: IO[str] | IO[bytes] | None = None) -> bool:
 
     if sys.platform == "win32":
         try:
-            import nt
-
-            if not nt._supports_virtual_terminal():
+            if not os._supports_virtual_terminal():
                 return False
-        except (ImportError, AttributeError):
+        except AttributeError:
             return False
 
     try:

@@ -49,61 +49,42 @@ def _get_exports_list(module):
 
 # Any new dependencies of the os module and/or changes in path separator
 # requires updating importlib as well.
-if 'posix' in _names:
-    name = 'posix'
-    linesep = '\n'
-    from posix import *
-    try:
-        from posix import _exit
-        __all__.append('_exit')
-    except ImportError:
-        pass
-    try:
-        from posix import _clearenv
-        __all__.append('_clearenv')
-    except ImportError:
-        pass
-    import posixpath as path
+if 'posix' not in _names:
+    raise ImportError('no os specific module found')
 
-    try:
-        from posix import _have_functions
-    except ImportError:
-        pass
-    try:
-        from posix import _create_environ
-    except ImportError:
-        pass
+from posix import *
+try:
+    from posix import _exit
+    __all__.append('_exit')
+except ImportError:
+    pass
+try:
+    from posix import _clearenv
+    __all__.append('_clearenv')
+except ImportError:
+    pass
 
-    import posix
-    __all__.extend(_get_exports_list(posix))
-    del posix
-
-elif 'nt' in _names:
+if sys.platform == 'win32':
     name = 'nt'
     linesep = '\r\n'
-    from nt import *
-    try:
-        from nt import _exit
-        __all__.append('_exit')
-    except ImportError:
-        pass
     import ntpath as path
-
-    import nt
-    __all__.extend(_get_exports_list(nt))
-    del nt
-
-    try:
-        from nt import _have_functions
-    except ImportError:
-        pass
-    try:
-        from nt import _create_environ
-    except ImportError:
-        pass
-
 else:
-    raise ImportError('no os specific module found')
+    name = 'posix'
+    linesep = '\n'
+    import posixpath as path
+
+try:
+    from posix import _have_functions
+except ImportError:
+    pass
+try:
+    from posix import _create_environ
+except ImportError:
+    pass
+
+import posix
+__all__.extend(_get_exports_list(posix))
+del posix
 
 sys.modules['os.path'] = path
 from os.path import (curdir, pardir, sep, pathsep, defpath, extsep, altsep,
@@ -1194,12 +1175,11 @@ if name == 'nt':
         Remove the directory by calling close() on the returned object or
         using it in a with statement.
         """
-        import nt
-        cookie = nt._add_dll_directory(path)
+        cookie = _add_dll_directory(path)
         return _AddedDllDirectory(
             path,
             cookie,
-            nt._remove_dll_directory
+            _remove_dll_directory
         )
 
 

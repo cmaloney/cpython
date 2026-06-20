@@ -40,11 +40,9 @@ except ImportError:
     _ZSTD_SUPPORTED = False
 
 _WINDOWS = os.name == 'nt'
-posix = nt = None
+posix = None
 if os.name == 'posix':
     import posix
-elif _WINDOWS:
-    import nt
 
 if sys.platform == 'win32':
     import _winapi
@@ -1446,7 +1444,7 @@ elif _WINDOWS:
         Returned values is a named tuple with attributes 'total', 'used' and
         'free', which are the amount of total, used and free space, in bytes.
         """
-        total, free = nt._getdiskusage(path)
+        total, free = os._getdiskusage(path)
         used = total - free
         return _ntuple_diskusage(total, used, free)
 
