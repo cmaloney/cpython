@@ -194,8 +194,6 @@ METHODDEF_PROTOTYPE_IFNDEF: Final[str] = libclinic.normalize_snippet("""
         #define {methoddef_name}
     #endif /* !defined({methoddef_name}) */
 """)
-# Shared parser/vectorcall finale: call the impl, convert the result and
-# clean up.  vectorcall_body() swaps {impl_arguments} for {vc_impl_arguments}.
 PARSER_FINALE: Final[str] = libclinic.normalize_snippet("""
         {modifications}
         {lock}
@@ -209,21 +207,6 @@ PARSER_FINALE: Final[str] = libclinic.normalize_snippet("""
         return return_value;
     }}
 """)
-
-
-def vectorcall_basename(func: Function) -> str:
-    """Compute the vectorcall function name from the C basename.
-
-    Strips __init__/__new__ suffixes from c_basename and appends
-    _vectorcall.  Respects 'as' renaming in clinic input, e.g.
-    'str.__new__ as unicode_new' produces 'unicode_vectorcall'.
-    """
-    name = func.c_basename
-    for suffix in ('___init__', '___new__', '_new', '_init'):
-        if name.endswith(suffix):
-            name = name[:-len(suffix)]
-            break
-    return f'{name}_vectorcall'
 
 
 class ParseArgsCodeGen:
@@ -1125,7 +1108,7 @@ class ParseArgsCodeGen:
         would be unreachable), so only a closing brace is emitted.
         """
         prototype = PARSER_PROTOTYPE_VECTORCALL.replace(
-            "{vc_basename}", vectorcall_basename(self.func))
+            "{vc_basename}", self.func.c_basename_vectorcall)
         lines = [prototype]
 
         if needs_finale:

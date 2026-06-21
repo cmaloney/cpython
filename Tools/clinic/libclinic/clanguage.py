@@ -478,14 +478,11 @@ class CLanguage(Language):
         template_dict['parser_parameters'] = ", ".join(data.impl_parameters[1:])
         template_dict['impl_arguments'] = ", ".join(data.impl_arguments)
 
-        # Vectorcall impl arguments: replace self/type with the appropriate
-        # expression for the vectorcall calling convention.
+        # Vectorcall: Handle first argument based on method
         if f.vectorcall and f.cls:
             if f.kind is METHOD_INIT:
-                # For __init__: self is a locally-allocated PyObject*
                 vc_first = f"({f.cls.typedef})self"
             elif f.kind is METHOD_NEW:
-                # For __new__: type is PyObject* in vectorcall, need cast
                 vc_first = "_PyType_CAST(type)"
             else:
                 raise AssertionError(
