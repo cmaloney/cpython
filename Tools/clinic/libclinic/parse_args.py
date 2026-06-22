@@ -248,7 +248,7 @@ class ParseArgsCodeGen:
     methoddef_define: str
     parser_prototype: str
     parser_definition: str
-    parser_helper_definition: str
+    parser_helper: str
     cpp_if: str
     cpp_endif: str
     methoddef_ifndef: str
@@ -906,11 +906,10 @@ class ParseArgsCodeGen:
 
         parses_keywords = 'METH_KEYWORDS' in self.flags
 
+        # Both parsers need the same keyword processing with slightly different
+        # args. Move the code to a function both call.
         if self.func.vectorcall and parses_keywords:
-            # parse_general emitted a helper body into parser_definition;
-            # move it to parser_helper_definition and replace
-            # parser_definition with a thin shim that calls the helper.
-            self.parser_helper_definition = self.parser_definition
+            self.parser_helper = self.parser_definition
             self.parser_prototype = entry_prototype
             self.parser_definition = '\n'.join([
                 entry_prototype,
@@ -998,8 +997,8 @@ class ParseArgsCodeGen:
             self.impl_prototype += ";"
 
         self.parser_definition = self.parser_definition.replace("{return_value_declaration}", self.return_value_declaration)
-        if self.parser_helper_definition:
-            self.parser_helper_definition = self.parser_helper_definition.replace(
+        if self.parser_helper:
+            self.parser_helper = self.parser_helper.replace(
                 "{return_value_declaration}", self.return_value_declaration)
 
         compiler_warning = clang.compiler_deprecated_warning(self.func, self.parameters)
@@ -1014,7 +1013,7 @@ class ParseArgsCodeGen:
             "methoddef_define" : self.methoddef_define,
             "parser_prototype" : self.parser_prototype,
             "parser_definition" : self.parser_definition,
-            "parser_helper_definition" : self.parser_helper_definition,
+            "parser_helper" : self.parser_helper,
             "impl_definition" : self.impl_definition,
             "cpp_if" : self.cpp_if,
             "cpp_endif" : self.cpp_endif,
@@ -1264,7 +1263,7 @@ class ParseArgsCodeGen:
         self.declarations = ""
         self.parser_prototype = ""
         self.parser_definition = ""
-        self.parser_helper_definition = ""
+        self.parser_helper = ""
         self.impl_prototype = None
         self.impl_definition = IMPL_DEFINITION_PROTOTYPE
         self.vectorcall_definition = ""
