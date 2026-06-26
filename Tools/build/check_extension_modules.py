@@ -50,6 +50,7 @@ SRC_DIR = pathlib.Path(__file__).parent.parent.parent
 CORE_MODULES = {
     "_ast",
     "_imp",
+    "_os",
     "_string",
     "_tokenize",
     "_warnings",

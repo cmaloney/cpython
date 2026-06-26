@@ -103,7 +103,7 @@ struct _inittab _PyImport_Inittab[] = {
     {"gc", PyInit_gc},
     {"_math_integer", PyInit__math_integer},
     {"math", PyInit_math},
-    {"nt", PyInit_nt}, /* Use the NT os functions, not posix */
+    {"_os", PyInit_nt}, /* Use the NT os functions, not posix */
     {"_operator", PyInit__operator},
     {"_signal", PyInit__signal},
     {"_sysconfig", PyInit__sysconfig},

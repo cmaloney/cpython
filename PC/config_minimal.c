@@ -34,7 +34,7 @@ struct _inittab _PyImport_Inittab[] = {
     {"_ast", PyInit__ast},
     {"faulthandler", PyInit_faulthandler},
     {"gc", PyInit_gc},
-    {"nt", PyInit_nt}, /* Use the NT os functions, not posix */
+    {"_os", PyInit_nt}, /* Use the NT os functions, not posix */
     {"_signal", PyInit__signal},
     {"_tokenize", PyInit__tokenize},
     {"_tracemalloc", PyInit__tracemalloc},

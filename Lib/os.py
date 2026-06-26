@@ -30,11 +30,9 @@ from _collections_abc import _check_methods
 
 GenericAlias = type(list[int])
 
-_names = sys.builtin_module_names
-
 # Note:  more names are added to __all__ later.
 __all__ = ["altsep", "curdir", "pardir", "sep", "pathsep", "linesep",
-           "defpath", "name", "path", "devnull", "SEEK_SET", "SEEK_CUR",
+           "defpath", "path", "devnull", "SEEK_SET", "SEEK_CUR",
            "SEEK_END", "fsencode", "fsdecode", "get_exec_path", "fdopen",
            "extsep"]
 
@@ -47,69 +45,34 @@ def _get_exports_list(module):
     except AttributeError:
         return [n for n in dir(module) if n[0] != '_']
 
+
 # Any new dependencies of the os module and/or changes in path separator
 # requires updating importlib as well.
-if 'posix' in _names:
-    name = 'posix'
+import _os
+
+# Add in older aliases.
+sys.modules[_os.name] = _os
+
+# FIXME(cmaloney): Move linesep to _os module init.
+if _os.name == 'posix':
     linesep = '\n'
-    from posix import *
-    try:
-        from posix import _exit
-        __all__.append('_exit')
-    except ImportError:
-        pass
-    try:
-        from posix import _clearenv
-        __all__.append('_clearenv')
-    except ImportError:
-        pass
     import posixpath as path
-
-    try:
-        from posix import _have_functions
-    except ImportError:
-        pass
-    try:
-        from posix import _create_environ
-    except ImportError:
-        pass
-
-    import posix
-    __all__.extend(_get_exports_list(posix))
-    del posix
-
-elif 'nt' in _names:
-    name = 'nt'
+elif _os.name == 'nt':
     linesep = '\r\n'
-    from nt import *
-    try:
-        from nt import _exit
-        __all__.append('_exit')
-    except ImportError:
-        pass
     import ntpath as path
-
-    import nt
-    __all__.extend(_get_exports_list(nt))
-    del nt
-
-    try:
-        from nt import _have_functions
-    except ImportError:
-        pass
-    try:
-        from nt import _create_environ
-    except ImportError:
-        pass
-
 else:
     raise ImportError('no os specific module found')
+
+from _os import *
+from _os import _clearenv, _create_environ, _exit, _have_functions
+__all__.append('_exit')
+__all__.extend(_get_exports_list(_os))
 
 sys.modules['os.path'] = path
 from os.path import (curdir, pardir, sep, pathsep, defpath, extsep, altsep,
     devnull)
 
-del _names
+del _os
 
 
 if _exists("_have_functions"):
