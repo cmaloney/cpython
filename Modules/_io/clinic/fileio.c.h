@@ -389,6 +389,50 @@ exit:
     return return_value;
 }
 
+#if defined(HAVE_WRITEV)
+
+PyDoc_STRVAR(_io_FileIO__writev__doc__,
+"_writev($self, buffers, /)\n"
+"--\n"
+"\n"
+"Write a sequence of buffers with a single writev(2) call.\n"
+"\n"
+"Each buffer must be an object supporting the contiguous buffer\n"
+"protocol. Like write(), only one system call is made; not all\n"
+"data may be written. Returns the number of bytes written. In\n"
+"non-blocking mode, returns None if the write would block.\n"
+"\n"
+"Private: used by buffered I/O to write gathered buffers without\n"
+"an extra copy into contiguous memory. The shape of a public\n"
+"vectored write API is not yet settled.");
+
+#define _IO_FILEIO__WRITEV_METHODDEF    \
+    {"_writev", _PyCFunction_CAST(_io_FileIO__writev), METH_METHOD|METH_FASTCALL|METH_KEYWORDS, _io_FileIO__writev__doc__},
+
+static PyObject *
+_io_FileIO__writev_impl(fileio *self, PyTypeObject *cls, PyObject *buffers);
+
+static PyObject *
+_io_FileIO__writev(PyObject *self, PyTypeObject *cls, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    PyObject *buffers;
+
+    if (!_PyArg_NoKwnames("_writev", kwnames)) {
+        goto exit;
+    }
+    if (!_PyArg_CheckPositional("_writev", nargs, 1, 1)) {
+        goto exit;
+    }
+    buffers = args[0];
+    return_value = _io_FileIO__writev_impl((fileio *)self, cls, buffers);
+
+exit:
+    return return_value;
+}
+
+#endif /* defined(HAVE_WRITEV) */
+
 PyDoc_STRVAR(_io_FileIO_seek__doc__,
 "seek($self, pos, whence=0, /)\n"
 "--\n"
@@ -610,6 +654,10 @@ exit:
     return return_value;
 }
 
+#ifndef _IO_FILEIO__WRITEV_METHODDEF
+    #define _IO_FILEIO__WRITEV_METHODDEF
+#endif /* !defined(_IO_FILEIO__WRITEV_METHODDEF) */
+
 #ifndef _IO_FILEIO_TRUNCATE_METHODDEF
     #define _IO_FILEIO_TRUNCATE_METHODDEF
 #endif /* !defined(_IO_FILEIO_TRUNCATE_METHODDEF) */
@@ -621,4 +669,4 @@ exit:
 
 #define _IO_FILEIO__BLKSIZE_GETSETDEF {"_blksize", (getter)_io_FileIO__blksize_get, (setter)NULL, _io_FileIO__blksize__doc__},
 
-/*[clinic end generated code: output=b8d6d338bfd0a58f input=a9049054013a1b77]*/
+/*[clinic end generated code: output=784089ca9208690c input=a9049054013a1b77]*/
