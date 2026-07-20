@@ -503,6 +503,48 @@ class CAutoFileTests(AutoFileTests, unittest.TestCase):
     FileIO = _io.FileIO
     modulename = '_io'
 
+    @unittest.skipUnless(hasattr(_io.FileIO, "_writev"),
+                         "requires FileIO._writev")
+    def testWritev(self):
+        # One writev(2) call accepting any mix of objects supporting
+        # the contiguous buffer protocol.
+        buffers = [b"abc", bytearray(b"def"), memoryview(b"ghi")]
+        self.assertEqual(self.f._writev(buffers), 9)
+        self.assertEqual(self.f._writev([]), 0)
+        self.f.close()
+        with self.FileIO(TESTFN, 'r') as f:
+            self.assertEqual(f.read(), b"abcdefghi")
+
+    @unittest.skipUnless(hasattr(_io.FileIO, "_writev"),
+                         "requires FileIO._writev")
+    def testWritevErrors(self):
+        self.assertRaises(TypeError, self.f._writev, 42)
+        self.assertRaises(TypeError, self.f._writev, [b"abc", "str"])
+        with self.FileIO(TESTFN, 'r') as f:
+            self.assertRaises(_io.UnsupportedOperation,
+                              f._writev, [b"abc"])
+        self.f.close()
+        self.assertRaises(ValueError, self.f._writev, [b"abc"])
+
+    @unittest.skipUnless(hasattr(_io.FileIO, "_writev"),
+                         "requires FileIO._writev")
+    @unittest.skipUnless(hasattr(os, "set_blocking"),
+                         "requires os.set_blocking")
+    def testWritevNonBlocking(self):
+        # Like write(), a blocked non-blocking stream returns None.
+        r, w = os.pipe()
+        self.addCleanup(os.close, r)
+        os.set_blocking(w, False)
+        chunk = b"x" * 65536
+        with self.FileIO(w, "w") as f:
+            for _ in range(4096):    # bounded: pipe capacity is finite
+                n = f._writev([chunk, chunk])
+                if n is None:
+                    break
+                self.assertGreater(n, 0)
+            else:
+                self.fail("_writev never signalled a blocked pipe")
+
 class PyAutoFileTests(AutoFileTests, unittest.TestCase):
     FileIO = _pyio.FileIO
     modulename = '_pyio'

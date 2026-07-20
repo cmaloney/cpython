@@ -19,6 +19,9 @@
 #ifdef HAVE_FCNTL_H
 #  include <fcntl.h>              // open()
 #endif
+#ifdef HAVE_SYS_UIO_H
+#  include <sys/uio.h>            // writev()
+#endif
 
 #include "_iomodule.h"
 
@@ -952,6 +955,102 @@ _io_FileIO_write_impl(fileio *self, PyTypeObject *cls, Py_buffer *b)
     return PyLong_FromSsize_t(n);
 }
 
+#ifdef HAVE_WRITEV
+/*[clinic input]
+_io.FileIO._writev
+    cls: defining_class
+    buffers: object
+    /
+
+Write a sequence of buffers with a single writev(2) call.
+
+Each buffer must be an object supporting the contiguous buffer
+protocol. Like write(), only one system call is made; not all
+data may be written. Returns the number of bytes written. In
+non-blocking mode, returns None if the write would block.
+
+Private: used by buffered I/O to write gathered buffers without
+an extra copy into contiguous memory. The shape of a public
+vectored write API is not yet settled.
+[clinic start generated code]*/
+
+static PyObject *
+_io_FileIO__writev_impl(fileio *self, PyTypeObject *cls, PyObject *buffers)
+/*[clinic end generated code: output=ecd5e35ee9ad4052 input=9690299ab052988e]*/
+{
+    if (self->fd < 0) {
+        return err_closed();
+    }
+    if (!self->writable) {
+        _PyIO_State *state = get_io_state_by_cls(cls);
+        return err_mode(state, "writing");
+    }
+
+    PyObject *seq = PySequence_Fast(buffers,
+                                    "_writev() argument must be a sequence");
+    if (seq == NULL) {
+        return NULL;
+    }
+    Py_ssize_t cnt = PySequence_Fast_GET_SIZE(seq);
+    if (cnt == 0) {
+        Py_DECREF(seq);
+        return PyLong_FromLong(0);
+    }
+
+    struct iovec *iov = PyMem_New(struct iovec, cnt);
+    Py_buffer *views = PyMem_New(Py_buffer, cnt);
+    if (iov == NULL || views == NULL) {
+        PyMem_Free(iov);
+        PyMem_Free(views);
+        Py_DECREF(seq);
+        return PyErr_NoMemory();
+    }
+
+    Py_ssize_t nviews = 0;
+    PyObject *res = NULL;
+    for (; nviews < cnt; nviews++) {
+        PyObject *item = PySequence_Fast_GET_ITEM(seq, nviews);
+        if (PyObject_GetBuffer(item, &views[nviews], PyBUF_SIMPLE) < 0) {
+            goto done;
+        }
+        iov[nviews].iov_base = views[nviews].buf;
+        iov[nviews].iov_len = views[nviews].len;
+    }
+
+    Py_ssize_t n;
+    int err, async_err = 0;
+    do {
+        Py_BEGIN_ALLOW_THREADS
+        errno = 0;
+        n = writev(self->fd, iov, (int)cnt);
+        err = errno;
+        Py_END_ALLOW_THREADS
+    } while (n < 0 && err == EINTR && !(async_err = PyErr_CheckSignals()));
+
+    if (n >= 0) {
+        res = PyLong_FromSsize_t(n);
+    }
+    else if (!async_err) {
+        if (err == EAGAIN) {
+            res = Py_NewRef(Py_None);
+        }
+        else {
+            errno = err;
+            PyErr_SetFromErrno(PyExc_OSError);
+        }
+    }
+
+done:
+    for (Py_ssize_t i = 0; i < nviews; i++) {
+        PyBuffer_Release(&views[i]);
+    }
+    PyMem_Free(iov);
+    PyMem_Free(views);
+    Py_DECREF(seq);
+    return res;
+}
+#endif /* HAVE_WRITEV */
+
 /* XXX Windows support below is likely incomplete */
 
 /* Cribbed from posix_lseek() */
@@ -1260,6 +1359,7 @@ static PyMethodDef fileio_methods[] = {
     _IO_FILEIO_READALL_METHODDEF
     _IO_FILEIO_READINTO_METHODDEF
     _IO_FILEIO_WRITE_METHODDEF
+    _IO_FILEIO__WRITEV_METHODDEF
     _IO_FILEIO_SEEK_METHODDEF
     _IO_FILEIO_TELL_METHODDEF
     _IO_FILEIO_TRUNCATE_METHODDEF
