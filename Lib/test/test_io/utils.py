@@ -287,6 +287,8 @@ class PyMockNonBlockWriterIO(MockNonBlockWriterIO, pyio.RawIOBase):
 class CTestCase(unittest.TestCase):
     io = io
     is_C = True
+    # Does the buffered layer under test accept buffer_size=0 (unbuffered)?
+    supports_buffer_size_zero = False
 
     MockRawIO = CMockRawIO
     MisbehavedRawIO = CMisbehavedRawIO
@@ -306,6 +308,7 @@ class CTestCase(unittest.TestCase):
 class PyTestCase(unittest.TestCase):
     io = pyio
     is_C = False
+    supports_buffer_size_zero = False
 
     MockRawIO = PyMockRawIO
     MisbehavedRawIO = PyMisbehavedRawIO
@@ -334,7 +337,7 @@ _NIBBLER_BUFFERED = {
 
 class NibblerMixin:
     """Route the buffered layer (self.* types and open()) to _io._nibbler."""
-    is_nibbler = True
+    supports_buffer_size_zero = True
 
     def setUp(self):
         super().setUp()

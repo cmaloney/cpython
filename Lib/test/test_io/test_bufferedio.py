@@ -240,12 +240,23 @@ class BufferedReaderTest(CommonBufferedTests):
         bufio.__init__(rawio, buffer_size=1024)
         bufio.__init__(rawio, buffer_size=16)
         self.assertEqual(b"abc", bufio.read())
-        self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
+        if not self.supports_buffer_size_zero:
+            self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-16)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-1)
         rawio = self.MockRawIO([b"abc"])
         bufio.__init__(rawio)
         self.assertEqual(b"abc", bufio.read())
+
+    def test_unbuffered_read(self):
+        if not self.supports_buffer_size_zero:
+            self.skipTest("buffer_size=0 is not supported")
+        # buffer_size=0: no read-ahead is retained between calls.
+        rawio = self.MockRawIO((b"abc", b"d"))
+        bufio = self.tp(rawio, 0)
+        self.assertEqual(bufio.read(2), b"ab")
+        self.assertEqual(bufio.read(2), b"cd")
+        self.assertEqual(bufio.read(2), b"")
 
     def test_uninitialized(self):
         bufio = self.tp.__new__(self.tp)
@@ -571,8 +582,9 @@ class CBufferedReaderTest(BufferedReaderTest, SizeofTest, CTestCase):
     def test_initialization(self):
         rawio = self.MockRawIO([b"abc"])
         bufio = self.tp(rawio)
-        self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
-        self.assertRaises(ValueError, bufio.read)
+        if not self.supports_buffer_size_zero:
+            self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
+            self.assertRaises(ValueError, bufio.read)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-16)
         self.assertRaises(ValueError, bufio.read)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-1)
@@ -658,13 +670,25 @@ class BufferedWriterTest(CommonBufferedTests):
         bufio.__init__(rawio, buffer_size=16)
         self.assertEqual(3, bufio.write(b"abc"))
         bufio.flush()
-        self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
+        if not self.supports_buffer_size_zero:
+            self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-16)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-1)
         bufio.__init__(rawio)
         self.assertEqual(3, bufio.write(b"ghi"))
         bufio.flush()
         self.assertEqual(b"".join(rawio._write_stack), b"abcghi")
+
+    def test_unbuffered_write_through(self):
+        if not self.supports_buffer_size_zero:
+            self.skipTest("buffer_size=0 is not supported")
+        # buffer_size=0: every write is submitted immediately.
+        rawio = self.MockRawIO()
+        bufio = self.tp(rawio, 0)
+        self.assertEqual(bufio.write(b"abc"), 3)
+        self.assertEqual(rawio._write_stack, [b"abc"])
+        self.assertEqual(bufio.write(b"de"), 2)
+        self.assertEqual(rawio._write_stack, [b"abc", b"de"])
 
     def test_uninitialized(self):
         bufio = self.tp.__new__(self.tp)
@@ -948,8 +972,9 @@ class CBufferedWriterTest(BufferedWriterTest, SizeofTest, CTestCase):
     def test_initialization(self):
         rawio = self.MockRawIO()
         bufio = self.tp(rawio)
-        self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
-        self.assertRaises(ValueError, bufio.write, b"def")
+        if not self.supports_buffer_size_zero:
+            self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
+            self.assertRaises(ValueError, bufio.write, b"def")
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-16)
         self.assertRaises(ValueError, bufio.write, b"def")
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-1)
@@ -1499,12 +1524,36 @@ class PyBufferedRandomTest(BufferedRandomTest, PyTestCase):
 
 
 # _io._nibbler buffered classes, run through the full C test suites.
+# The nibbler gathers chunks instead of pre-allocating buffer_size bytes,
+# so sys.getsizeof() does not scale with buffer_size.
 class NibblerBufferedReaderTest(NibblerMixin, CBufferedReaderTest):
     tp = _nibbler.BufferedReader
+
+    test_sizeof = None
+    test_buffer_freeing = None
 
 
 class NibblerBufferedWriterTest(NibblerMixin, CBufferedWriterTest):
     tp = _nibbler.BufferedWriter
+
+    test_sizeof = None
+    test_buffer_freeing = None
+
+    def test_writev_gather(self):
+        # Gathered chunks go out in a single _writev call when the raw
+        # stream provides one.
+        rawio = self.MockRawIO()
+        writev_calls = []
+        def _writev(buffers):
+            writev_calls.append([bytes(b) for b in buffers])
+            return sum(len(b) for b in buffers)
+        rawio._writev = _writev
+        bufio = self.tp(rawio, 8)
+        bufio.write(b"aaa")
+        bufio.write(b"bbb")
+        bufio.write(b"ccc")     # crosses buffer_size: flushed as one morsel
+        self.assertEqual(writev_calls, [[b"aaa", b"bbb", b"ccc"]])
+        self.assertEqual(rawio._write_stack, [])
 
 
 class NibblerBufferedRWPairTest(NibblerMixin, CBufferedRWPairTest):
@@ -1513,6 +1562,9 @@ class NibblerBufferedRWPairTest(NibblerMixin, CBufferedRWPairTest):
 
 class NibblerBufferedRandomTest(NibblerMixin, CBufferedRandomTest):
     tp = _nibbler.BufferedRandom
+
+    test_sizeof = None
+    test_buffer_freeing = None
 
 
 # Simple test to ensure that optimizations in the IO library deliver the

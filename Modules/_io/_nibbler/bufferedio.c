@@ -18,6 +18,18 @@
 
 #include "_iomodule.h"
 
+#include <limits.h>                     // IOV_MAX
+
+/* Most chunks a morsel may pass to raw._writev(); larger morsels are
+   coalesced into a single buffer first. */
+#ifndef IOV_MAX
+#  ifdef UIO_MAXIOV
+#    define IOV_MAX UIO_MAXIOV
+#  else
+#    define IOV_MAX 16                  // POSIX minimum
+#  endif
+#endif
+
 /*[clinic input]
 module _io
 class _io._BufferedIOBase "PyObject *" "clinic_state()->PyBufferedIOBase_Type"
@@ -248,6 +260,12 @@ _io__BufferedIOBase_write_impl(PyObject *self, PyTypeObject *cls,
 }
 
 
+/* rw_mode values: what the chunk list currently holds. Fresh objects
+   start READING with an empty buffer; the first write() flips to
+   WRITING, the first read after writes flushes and flips back. */
+#define NIBBLER_READING 0
+#define NIBBLER_WRITING 1
+
 typedef struct {
     PyObject_HEAD
 
@@ -262,31 +280,26 @@ typedef struct {
        class) *and* the raw stream is a vanilla FileIO object. */
     int fast_closed_checks;
 
-    /* Absolute position inside the raw stream (-1 if unknown). */
-    Py_off_t abs_pos;
+    /* The nibbler: buffered data as a list of bytes objects ("chunks"),
+       consumed from the front. NULL only before __init__ and after
+       close(). */
+    PyObject *chunks;
+    /* Consumed prefix of chunks[0]. */
+    Py_ssize_t chunks_offset;
+    /* Unconsumed bytes across all chunks. */
+    Py_ssize_t bytes_buffered;
+    /* NIBBLER_READING (chunks are read-ahead) or NIBBLER_WRITING
+       (chunks are pending writes). */
+    char rw_mode;
 
-    /* A static buffer of size `buffer_size` */
-    char *buffer;
-    /* Current logical position in the buffer. */
-    Py_off_t pos;
-    /* Position of the raw stream in the buffer. */
-    Py_off_t raw_pos;
-
-    /* Just after the last buffered byte in the buffer, or -1 if the buffer
-       isn't ready for reading. */
-    Py_off_t read_end;
-
-    /* Just after the last byte actually written */
-    Py_off_t write_pos;
-    /* Just after the last byte waiting to be written, or -1 if the buffer
-       isn't ready for writing. */
-    Py_off_t write_end;
+    /* raw._writev(buffers), when the raw stream provides it (else NULL).
+       Lets a multi-chunk morsel be written without coalescing. */
+    PyObject *raw_writev;
 
     PyThread_type_lock lock;
     volatile unsigned long owner;
 
     Py_ssize_t buffer_size;
-    Py_ssize_t buffer_mask;
 
     PyObject *dict;
     PyObject *weakreflist;
@@ -295,26 +308,31 @@ typedef struct {
 #define buffered_CAST(op)   ((buffered *)(op))
 
 /*
-    Implementation notes:
+    Implementation notes (nibbler):
 
-    * BufferedReader, BufferedWriter and BufferedRandom try to share most
-      methods (this is helped by the members `readable` and `writable`, which
-      are initialized in the respective constructors)
-    * They also share a single buffer for reading and writing. This enables
-      interleaved reads and writes without flushing. It also makes the logic
-      a bit trickier to get right.
-    * The absolute position of the raw stream is cached, if possible, in the
-      `abs_pos` member. It must be updated every time an operation is done
-      on the raw stream. If not sure, it can be reinitialized by calling
-      _buffered_raw_tell(), which queries the raw stream (_buffered_raw_seek()
-      also does it). To read it, use RAW_TELL().
-    * Three helpers, _bufferedreader_raw_read, _bufferedwriter_raw_write and
-      _bufferedwriter_flush_unlocked do a lot of useful housekeeping.
+    * BufferedReader, BufferedWriter and BufferedRandom share this one
+      implementation; the members `readable` and `writable` plus per-type
+      method tables gate which operations are allowed.
+    * There is no pre-allocated buffer. write() appends bytes objects to
+      `chunks` (immutable bytes without copying); once `buffer_size` is
+      reached the gathered chunks -- the "morsel" -- are written out with
+      raw._writev() when available, or coalesced into one buffer and
+      passed to raw.write(). Reads append raw chunks to the same list and
+      consume from the front.
+    * The raw stream position is never cached. tell() queries the raw
+      stream and offsets by `bytes_buffered`; seek() flushes (WRITING) or
+      compensates and drops read-ahead (READING).
+    * Reads and writes never share buffered data: switching direction
+      flushes pending writes, or rewinds the raw stream past unread
+      read-ahead. buffer_size == 0 is supported; the buffer is then empty
+      at rest and every write is submitted immediately.
 
-    NOTE: we should try to maintain block alignment of reads and writes to the
-    raw stream (according to the buffer size), but for now it is only done
-    in read() and friends.
-
+    Invariants (lock held, between operations):
+    * bytes_buffered == sum(len(c) for c in chunks) - chunks_offset
+    * 0 <= chunks_offset < len(chunks[0]) whenever chunks is non-empty;
+      chunks never contains an empty bytes object.
+    * In WRITING mode bytes_buffered <= buffer_size, except transiently
+      inside write() between appending and flushing the morsel.
 */
 
 /* These macros protect the buffered object against concurrent operations. */
@@ -390,10 +408,15 @@ _enter_buffered_busy(buffered *self)
     }
 
 #define IS_CLOSED(self) \
-    (!self->buffer ? 1 : \
+    (!self->chunks ? 1 : \
     (self->fast_closed_checks \
      ? _PyFileIO_closed(self->raw) \
      : buffered_closed(self)))
+
+/* Unconsumed read-ahead (0 when the chunks are pending writes). */
+#define READAHEAD(self) \
+    ((self->readable && self->rw_mode == NIBBLER_READING) \
+        ? self->bytes_buffered : 0)
 
 #define CHECK_CLOSED(self, error_msg) \
     do { \
@@ -401,42 +424,12 @@ _enter_buffered_busy(buffered *self)
         if (_closed < 0) { \
             return NULL; \
         } \
-        if (_closed && \
-            (Py_SAFE_DOWNCAST(READAHEAD(self), Py_off_t, Py_ssize_t) == 0)) \
+        if (_closed && READAHEAD(self) == 0) \
         { \
             PyErr_SetString(PyExc_ValueError, error_msg); \
             return NULL; \
         } \
     } while (0);
-
-#define VALID_READ_BUFFER(self) \
-    (self->readable && self->read_end != -1)
-
-#define VALID_WRITE_BUFFER(self) \
-    (self->writable && self->write_end != -1)
-
-#define ADJUST_POSITION(self, _new_pos) \
-    do { \
-        self->pos = _new_pos; \
-        if (VALID_READ_BUFFER(self) && self->read_end < self->pos) \
-            self->read_end = self->pos; \
-    } while(0)
-
-#define READAHEAD(self) \
-    ((self->readable && VALID_READ_BUFFER(self)) \
-        ? (self->read_end - self->pos) : 0)
-
-#define RAW_OFFSET(self) \
-    (((VALID_READ_BUFFER(self) || VALID_WRITE_BUFFER(self)) \
-        && self->raw_pos >= 0) ? self->raw_pos - self->pos : 0)
-
-#define RAW_TELL(self) \
-    (self->abs_pos != -1 ? self->abs_pos : _buffered_raw_tell(self))
-
-#define MINUS_LAST_BLOCK(self, size) \
-    (self->buffer_mask ? \
-        (size & ~self->buffer_mask) : \
-        (self->buffer_size * (size / self->buffer_size)))
 
 
 static int
@@ -445,6 +438,8 @@ buffered_clear(PyObject *op)
     buffered *self = buffered_CAST(op);
     self->ok = 0;
     Py_CLEAR(self->raw);
+    Py_CLEAR(self->chunks);
+    Py_CLEAR(self->raw_writev);
     Py_CLEAR(self->dict);
     return 0;
 }
@@ -460,10 +455,6 @@ buffered_dealloc(PyObject *op)
     _PyObject_GC_UNTRACK(self);
     self->ok = 0;
     FT_CLEAR_WEAKREFS(op, self->weakreflist);
-    if (self->buffer) {
-        PyMem_Free(self->buffer);
-        self->buffer = NULL;
-    }
     if (self->lock) {
         PyThread_free_lock(self->lock);
         self->lock = NULL;
@@ -482,11 +473,8 @@ static PyObject *
 _io__Buffered___sizeof___impl(buffered *self)
 /*[clinic end generated code: output=0231ef7f5053134e input=07a32d578073ea64]*/
 {
-    size_t res = _PyObject_SIZE(Py_TYPE(self));
-    if (self->buffer) {
-        res += (size_t)self->buffer_size;
-    }
-    return PyLong_FromSize_t(res);
+    /* Buffered data lives in separately-tracked bytes objects. */
+    return PyLong_FromSize_t(_PyObject_SIZE(Py_TYPE(self)));
 }
 
 static int
@@ -495,6 +483,8 @@ buffered_traverse(PyObject *op, visitproc visit, void *arg)
     buffered *self = buffered_CAST(op);
     Py_VISIT(Py_TYPE(self));
     Py_VISIT(self->raw);
+    Py_VISIT(self->chunks);
+    Py_VISIT(self->raw_writev);
     Py_VISIT(self->dict);
     return 0;
 }
@@ -618,18 +608,15 @@ _io__Buffered_close_impl(buffered *self)
 
     res = PyObject_CallMethodNoArgs(self->raw, &_Py_ID(close));
 
-    if (self->buffer) {
-        PyMem_Free(self->buffer);
-        self->buffer = NULL;
-    }
+    /* Drop the buffer; a NULL chunks also makes IS_CLOSED() true. */
+    Py_CLEAR(self->chunks);
+    self->chunks_offset = 0;
+    self->bytes_buffered = 0;
 
     if (exc != NULL) {
         _PyErr_ChainExceptions1(exc);
         Py_CLEAR(res);
     }
-
-    self->read_end = 0;
-    self->pos = 0;
 
 end:
     LEAVE_BUFFERED(self)
@@ -755,26 +742,6 @@ _io__Buffered_isatty_impl(buffered *self)
     return PyObject_CallMethodNoArgs(self->raw, &_Py_ID(isatty));
 }
 
-/* Forward decls */
-static PyObject *
-_bufferedwriter_flush_unlocked(buffered *);
-static Py_ssize_t
-_bufferedreader_fill_buffer(buffered *self);
-static void
-_bufferedreader_reset_buf(buffered *self);
-static void
-_bufferedwriter_reset_buf(buffered *self);
-static PyObject *
-_bufferedreader_peek_unlocked(buffered *self);
-static PyObject *
-_bufferedreader_read_all(buffered *self);
-static PyObject *
-_bufferedreader_read_fast(buffered *self, Py_ssize_t);
-static PyObject *
-_bufferedreader_read_generic(buffered *self, Py_ssize_t);
-static Py_ssize_t
-_bufferedreader_raw_read(buffered *self, char *start, Py_ssize_t len);
-
 /*
  * Helpers
  */
@@ -790,22 +757,6 @@ _set_BlockingIOError(const char *msg, Py_ssize_t written)
     if (err)
         PyErr_SetObject(PyExc_BlockingIOError, err);
     Py_XDECREF(err);
-}
-
-/* Returns the address of the `written` member if a BlockingIOError was
-   raised, NULL otherwise. The error is always re-raised. */
-static Py_ssize_t *
-_buffered_check_blocking_error(void)
-{
-    PyObject *exc = PyErr_GetRaisedException();
-    if (exc == NULL || !PyErr_GivenExceptionMatches(exc, PyExc_BlockingIOError)) {
-        PyErr_SetRaisedException(exc);
-        return NULL;
-    }
-    PyOSErrorObject *err = (PyOSErrorObject *)exc;
-    /* TODO: sanity check (err->written >= 0) */
-    PyErr_SetRaisedException(exc);
-    return &err->written;
 }
 
 static Py_off_t
@@ -825,7 +776,6 @@ _buffered_raw_tell(buffered *self)
                          (PY_OFF_T_COMPAT)n);
         return -1;
     }
-    self->abs_pos = n;
     return n;
 }
 
@@ -858,26 +808,33 @@ _buffered_raw_seek(buffered *self, Py_off_t target, int whence)
                          (PY_OFF_T_COMPAT)n);
         return -1;
     }
-    self->abs_pos = n;
     return n;
 }
 
 static int
 _buffered_init(buffered *self)
 {
-    Py_ssize_t n;
-    if (self->buffer_size <= 0) {
+    if (self->buffer_size < 0) {
         PyErr_SetString(PyExc_ValueError,
-            "buffer size must be strictly positive");
+            "buffer size must be non-negative");
         return -1;
     }
-    if (self->buffer)
-        PyMem_Free(self->buffer);
-    self->buffer = PyMem_Malloc(self->buffer_size);
-    if (self->buffer == NULL) {
-        PyErr_NoMemory();
+    PyObject *chunks = PyList_New(0);
+    if (chunks == NULL)
+        return -1;
+    Py_XSETREF(self->chunks, chunks);
+    self->chunks_offset = 0;
+    self->bytes_buffered = 0;
+    self->rw_mode = NIBBLER_READING;
+
+    /* Vectored write support is optional on the raw stream. */
+    Py_CLEAR(self->raw_writev);
+    if (self->writable
+        && PyObject_GetOptionalAttrString(self->raw, "_writev",
+                                          &self->raw_writev) < 0) {
         return -1;
     }
+
     if (self->lock)
         PyThread_free_lock(self->lock);
     self->lock = PyThread_allocate_lock();
@@ -886,46 +843,560 @@ _buffered_init(buffered *self)
         return -1;
     }
     self->owner = 0;
-    /* Find out whether buffer_size is a power of 2 */
-    /* XXX is this optimization useful? */
-    for (n = self->buffer_size - 1; n & 1; n >>= 1)
-        ;
-    if (n == 0)
-        self->buffer_mask = self->buffer_size - 1;
-    else
-        self->buffer_mask = 0;
-    if (_buffered_raw_tell(self) == -1)
-        PyErr_Clear();
     return 0;
 }
 
 /* _PyIO_trap_eintr() is reused from _io (see _iomodule.h). */
 
 /*
- * Shared methods and wrappers
+ * Nibbler core. Helpers run with the buffered lock held and return -1
+ * (or NULL) with an exception set on error. Raw I/O helpers return -2
+ * when a non-blocking raw stream signals "would block".
  */
 
-static PyObject *
-buffered_flush_and_rewind_unlocked(buffered *self)
+/* Empty the chunk list. */
+static int
+nibbler_clear_chunks(buffered *self)
 {
-    PyObject *res;
+    Py_ssize_t nchunks = PyList_GET_SIZE(self->chunks);
+    if (nchunks > 0 && PyList_SetSlice(self->chunks, 0, nchunks, NULL) < 0)
+        return -1;
+    self->chunks_offset = 0;
+    self->bytes_buffered = 0;
+    return 0;
+}
 
-    res = _bufferedwriter_flush_unlocked(self);
-    if (res == NULL)
+/* Append a chunk to the buffer. */
+static int
+nibbler_append(buffered *self, PyObject *chunk)
+{
+    assert(PyBytes_Check(chunk) && PyBytes_GET_SIZE(chunk) > 0);
+    if (PyList_Append(self->chunks, chunk) < 0)
+        return -1;
+    self->bytes_buffered += PyBytes_GET_SIZE(chunk);
+    return 0;
+}
+
+/* Consume `n` bytes from the front of the buffer, copying them to `dst`
+   unless it is NULL. */
+static int
+nibbler_consume(buffered *self, char *dst, Py_ssize_t n)
+{
+    assert(0 <= n && n <= self->bytes_buffered);
+    Py_ssize_t whole = 0;    /* chunks fully consumed */
+    Py_ssize_t offset = self->chunks_offset;
+    Py_ssize_t remaining = n;
+    while (remaining > 0) {
+        PyObject *chunk = PyList_GET_ITEM(self->chunks, whole);
+        Py_ssize_t avail = PyBytes_GET_SIZE(chunk) - offset;
+        Py_ssize_t take = Py_MIN(avail, remaining);
+        if (dst != NULL) {
+            memcpy(dst, PyBytes_AS_STRING(chunk) + offset, take);
+            dst += take;
+        }
+        remaining -= take;
+        if (take == avail) {
+            whole++;
+            offset = 0;
+        }
+        else {
+            offset += take;
+        }
+    }
+    /* Commit last: a failed delete consumes nothing. */
+    if (whole > 0 && PyList_SetSlice(self->chunks, 0, whole, NULL) < 0)
+        return -1;
+    self->chunks_offset = offset;
+    self->bytes_buffered -= n;
+    return 0;
+}
+
+/* Take `n` buffered bytes as a bytes object; zero-copy when `n` is
+   exactly the first (unconsumed) chunk. */
+static PyObject *
+nibbler_take_bytes(buffered *self, Py_ssize_t n)
+{
+    assert(0 <= n && n <= self->bytes_buffered);
+    if (n == 0)
+        return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
+
+    if (self->chunks_offset == 0) {
+        PyObject *chunk = PyList_GET_ITEM(self->chunks, 0);
+        if (PyBytes_GET_SIZE(chunk) == n) {
+            Py_INCREF(chunk);
+            if (PyList_SetSlice(self->chunks, 0, 1, NULL) < 0) {
+                Py_DECREF(chunk);
+                return NULL;
+            }
+            self->bytes_buffered -= n;
+            return chunk;
+        }
+    }
+
+    PyBytesWriter *writer = PyBytesWriter_Create(n);
+    if (writer == NULL)
         return NULL;
+    if (nibbler_consume(self, PyBytesWriter_GetData(writer), n) < 0) {
+        PyBytesWriter_Discard(writer);
+        return NULL;
+    }
+    return PyBytesWriter_Finish(writer);
+}
+
+/* Merge everything buffered into a single chunk with no consumed
+   prefix. No-op when already in that form. */
+static int
+nibbler_coalesce(buffered *self)
+{
+    Py_ssize_t nchunks = PyList_GET_SIZE(self->chunks);
+    if (nchunks == 0 || (nchunks == 1 && self->chunks_offset == 0))
+        return 0;
+
+    PyObject *joined = nibbler_take_bytes(self, self->bytes_buffered);
+    if (joined == NULL)
+        return -1;
+    assert(PyList_GET_SIZE(self->chunks) == 0);
+    int err = nibbler_append(self, joined);
+    Py_DECREF(joined);
+    return err;
+}
+
+/* Call raw.readinto() to fill `len` bytes at `start`. Returns bytes
+   read (0 on EOF), -1 on error, -2 when the raw stream would block. */
+static Py_ssize_t
+nibbler_raw_read(buffered *self, char *start, Py_ssize_t len)
+{
+    Py_buffer buf;
+    PyObject *memobj, *res;
+    Py_ssize_t n;
+    /* NOTE: the buffer needn't be released as its object is NULL. */
+    if (PyBuffer_FillInfo(&buf, NULL, start, len, 0, PyBUF_CONTIG) == -1)
+        return -1;
+    memobj = PyMemoryView_FromBuffer(&buf);
+    if (memobj == NULL)
+        return -1;
+    /* NOTE: PyErr_SetFromErrno() calls PyErr_CheckSignals() when EINTR
+       occurs so we needn't do it ourselves.
+       We then retry reading, ignoring the signal if no handler has
+       raised (see issue #10956).
+    */
+    do {
+        res = PyObject_CallMethodOneArg(self->raw, &_Py_ID(readinto), memobj);
+    } while (res == NULL && _PyIO_trap_eintr());
+    Py_DECREF(memobj);
+    if (res == NULL)
+        return -1;
+    if (res == Py_None) {
+        /* Non-blocking stream would have blocked. Special return code! */
+        Py_DECREF(res);
+        return -2;
+    }
+    n = PyNumber_AsSsize_t(res, PyExc_ValueError);
     Py_DECREF(res);
 
-    if (self->readable) {
-        /* Rewind the raw stream so that its position corresponds to
-           the current logical position. */
-        Py_off_t n;
-        n = _buffered_raw_seek(self, -RAW_OFFSET(self), 1);
-        _bufferedreader_reset_buf(self);
+    if (n == -1 && PyErr_Occurred()) {
+        _PyErr_FormatFromCause(
+            PyExc_OSError,
+            "raw readinto() failed"
+        );
+        return -1;
+    }
+
+    if (n < 0 || n > len) {
+        PyErr_Format(PyExc_OSError,
+                     "raw readinto() returned invalid length %zd "
+                     "(should have been between 0 and %zd)", n, len);
+        return -1;
+    }
+    return n;
+}
+
+/* Read up to `n` bytes from raw into a fresh chunk appended to the
+   buffer. Same return convention as nibbler_raw_read(). */
+static Py_ssize_t
+nibbler_fill(buffered *self, Py_ssize_t n)
+{
+    assert(n > 0);
+    PyBytesWriter *writer = PyBytesWriter_Create(n);
+    if (writer == NULL)
+        return -1;
+    Py_ssize_t r = nibbler_raw_read(self, PyBytesWriter_GetData(writer), n);
+    if (r <= 0) {
+        PyBytesWriter_Discard(writer);
+        return r;
+    }
+    PyObject *chunk = PyBytesWriter_FinishWithSize(writer, r);
+    if (chunk == NULL)
+        return -1;
+    int err = nibbler_append(self, chunk);
+    Py_DECREF(chunk);
+    return err < 0 ? -1 : r;
+}
+
+/* Interpret the result of a raw write() or _writev() call. Returns bytes
+   written, -1 on error, -2 when the raw stream would block (with errno
+   restored to `errnum` for _set_BlockingIOError()). */
+static Py_ssize_t
+nibbler_write_result(PyObject *res, Py_ssize_t len, int errnum,
+                     const char *what)
+{
+    if (res == NULL)
+        return -1;
+    if (res == Py_None) {
+        /* Non-blocking stream would have blocked. Special return code! */
+        Py_DECREF(res);
+        errno = errnum;
+        return -2;
+    }
+    Py_ssize_t n = PyNumber_AsSsize_t(res, PyExc_ValueError);
+    Py_DECREF(res);
+    if (n < 0 || n > len) {
+        PyErr_Format(PyExc_OSError,
+                     "raw %s returned invalid length %zd "
+                     "(should have been between 0 and %zd)", what, n, len);
+        return -1;
+    }
+    return n;
+}
+
+/* Submit the morsel (all buffered chunks) to the raw stream with one
+   call: a plain write for a single chunk, raw._writev() for several, or
+   coalesce-and-write when _writev is unavailable or the chunk count
+   exceeds IOV_MAX. Returns bytes written, -1 on error, -2 on "would
+   block". Consuming what was written is the caller's job. */
+static Py_ssize_t
+nibbler_write_step(buffered *self)
+{
+    assert(self->bytes_buffered > 0);
+    Py_ssize_t nchunks = PyList_GET_SIZE(self->chunks);
+
+    if (nchunks > 1 && (self->raw_writev == NULL || nchunks > IOV_MAX)) {
+        if (nibbler_coalesce(self) < 0)
+            return -1;
+        nchunks = 1;
+    }
+
+    PyObject *res;
+    int errnum;
+    if (nchunks == 1) {
+        PyObject *chunk = PyList_GET_ITEM(self->chunks, 0);
+        Py_ssize_t len = PyBytes_GET_SIZE(chunk) - self->chunks_offset;
+        PyObject *arg;
+        if (self->chunks_offset == 0) {
+            arg = Py_NewRef(chunk);
+        }
+        else {
+            /* Unwritten tail of a partly-written chunk. The chunk stays
+               alive in self->chunks across the call. */
+            arg = PyMemoryView_FromMemory(
+                PyBytes_AS_STRING(chunk) + self->chunks_offset, len,
+                PyBUF_READ);
+            if (arg == NULL)
+                return -1;
+        }
+        do {
+            errno = 0;
+            res = PyObject_CallMethodOneArg(self->raw, &_Py_ID(write), arg);
+            errnum = errno;
+        } while (res == NULL && _PyIO_trap_eintr());
+        Py_DECREF(arg);
+        return nibbler_write_result(res, len, errnum, "write()");
+    }
+
+    /* Vectored write: chunks[0] may have a consumed prefix; every chunk
+       is passed without copying. */
+    PyObject *buffers = PyList_New(nchunks);
+    if (buffers == NULL)
+        return -1;
+    for (Py_ssize_t i = 0; i < nchunks; i++) {
+        PyObject *chunk = PyList_GET_ITEM(self->chunks, i);
+        PyObject *item;
+        if (i == 0 && self->chunks_offset > 0) {
+            item = PyMemoryView_FromMemory(
+                PyBytes_AS_STRING(chunk) + self->chunks_offset,
+                PyBytes_GET_SIZE(chunk) - self->chunks_offset, PyBUF_READ);
+            if (item == NULL) {
+                Py_DECREF(buffers);
+                return -1;
+            }
+        }
+        else {
+            item = Py_NewRef(chunk);
+        }
+        PyList_SET_ITEM(buffers, i, item);
+    }
+    do {
+        errno = 0;
+        res = PyObject_CallOneArg(self->raw_writev, buffers);
+        errnum = errno;
+    } while (res == NULL && _PyIO_trap_eintr());
+    Py_DECREF(buffers);
+    return nibbler_write_result(res, self->bytes_buffered, errnum,
+                                "_writev()");
+}
+
+/* Write buffered chunks until none remain or the raw stream blocks.
+   Returns 0 when the buffer was emptied, 1 when the raw stream would
+   block (unwritten data stays buffered, no exception set), -1 on
+   error. */
+static int
+nibbler_flush_locked(buffered *self)
+{
+    while (self->bytes_buffered > 0) {
+        Py_ssize_t n = nibbler_write_step(self);
         if (n == -1)
+            return -1;
+        if (n == -2)
+            return 1;
+        if (nibbler_consume(self, NULL, n) < 0)
+            return -1;
+        /* Partial writes can return successfully when interrupted by a
+           signal (see write(2)). We must run signal handlers before
+           blocking another time, possibly indefinitely. */
+        if (PyErr_CheckSignals() < 0)
+            return -1;
+    }
+    return 0;
+}
+
+/* Drop `excess` bytes from the tail of the buffer (the newest data). */
+static int
+nibbler_drop_tail(buffered *self, Py_ssize_t excess)
+{
+    assert(0 < excess && excess <= self->bytes_buffered);
+    while (excess > 0) {
+        Py_ssize_t i = PyList_GET_SIZE(self->chunks) - 1;
+        PyObject *chunk = PyList_GET_ITEM(self->chunks, i);
+        Py_ssize_t start = i == 0 ? self->chunks_offset : 0;
+        Py_ssize_t avail = PyBytes_GET_SIZE(chunk) - start;
+        if (avail <= excess) {
+            if (PyList_SetSlice(self->chunks, i, i + 1, NULL) < 0)
+                return -1;
+            if (i == 0)
+                self->chunks_offset = 0;
+            self->bytes_buffered -= avail;
+            excess -= avail;
+        }
+        else {
+            PyObject *head = PyBytes_FromStringAndSize(
+                PyBytes_AS_STRING(chunk) + start, avail - excess);
+            if (head == NULL)
+                return -1;
+            PyList_SetItem(self->chunks, i, head);    /* steals head */
+            if (i == 0)
+                self->chunks_offset = 0;
+            self->bytes_buffered -= excess;
+            excess = 0;
+        }
+    }
+    return 0;
+}
+
+/* Enter READING mode, flushing pending writes first. A blocked flush
+   raises BlockingIOError and leaves the object in WRITING mode with the
+   unwritten data still buffered. */
+static int
+nibbler_ensure_reading(buffered *self)
+{
+    if (self->rw_mode == NIBBLER_READING)
+        return 0;
+    int r = nibbler_flush_locked(self);
+    if (r < 0)
+        return -1;
+    if (r > 0) {
+        _set_BlockingIOError("write could not complete without blocking", 0);
+        return -1;
+    }
+    self->rw_mode = NIBBLER_READING;
+    return 0;
+}
+
+/* Enter WRITING mode, rewinding the raw stream past unread read-ahead
+   so the next write lands at the logical position. */
+static int
+nibbler_ensure_writing(buffered *self)
+{
+    if (self->rw_mode == NIBBLER_WRITING)
+        return 0;
+    if (self->bytes_buffered > 0) {
+        if (_buffered_raw_seek(self, -(Py_off_t)self->bytes_buffered, 1) == -1)
+            return -1;
+        if (nibbler_clear_chunks(self) < 0)
+            return -1;
+    }
+    self->rw_mode = NIBBLER_WRITING;
+    return 0;
+}
+
+/* Fill dst[0:len]: buffered bytes first, then the raw stream -- read
+   directly into dst when more than buffer_size is wanted, otherwise via
+   a buffered chunk (read-ahead). With read1, at most one raw read is
+   made. Returns bytes read, -1 on error, -2 when the raw stream would
+   block before anything was read. */
+static Py_ssize_t
+nibbler_read_into(buffered *self, char *dst, Py_ssize_t len, int read1)
+{
+    Py_ssize_t written = 0;
+    while (written < len) {
+        if (self->bytes_buffered > 0) {
+            Py_ssize_t take = Py_MIN(self->bytes_buffered, len - written);
+            if (nibbler_consume(self, dst + written, take) < 0)
+                return -1;
+            written += take;
+            if (written == len)
+                break;
+        }
+        Py_ssize_t r;
+        Py_ssize_t remaining = len - written;
+        if (remaining > self->buffer_size) {
+            r = nibbler_raw_read(self, dst + written, remaining);
+            if (r > 0) {
+                written += r;
+                /* In read1 mode, one raw read is enough. */
+                if (read1)
+                    break;
+                continue;
+            }
+        }
+        else if (!(read1 && written)) {
+            r = nibbler_fill(self, self->buffer_size);
+            if (r > 0)
+                continue;     /* loop back to drain the buffer */
+        }
+        else {
+            break;
+        }
+        if (r == 0)
+            break;            /* EOF */
+        if (r == -2) {
+            if (written > 0)
+                break;
+            return -2;
+        }
+        return -1;
+    }
+    return written;
+}
+
+/* read(-1): buffered bytes plus everything to EOF, using raw.readall()
+   when available. Returns None when the raw stream would block before
+   any data was read. On error everything gathered so far stays
+   buffered. */
+static PyObject *
+nibbler_read_all_locked(buffered *self)
+{
+    PyObject *readall;
+    if (PyObject_GetOptionalAttr(self->raw, &_Py_ID(readall), &readall) < 0)
+        return NULL;
+    if (readall) {
+        PyObject *tail = _PyObject_CallNoArgs(readall);
+        Py_DECREF(readall);
+        if (tail == NULL)
+            return NULL;
+        if (tail != Py_None && !PyBytes_Check(tail)) {
+            PyErr_SetString(PyExc_TypeError, "readall() should return bytes");
+            Py_DECREF(tail);
+            return NULL;
+        }
+        if (self->bytes_buffered == 0)
+            return tail;      /* bytes; or None when it would block */
+        PyObject *prefix = nibbler_take_bytes(self, self->bytes_buffered);
+        if (prefix == NULL || tail == Py_None) {
+            Py_DECREF(tail);
+            return prefix;
+        }
+        PyBytes_Concat(&prefix, tail);    /* sets prefix to NULL on error */
+        Py_DECREF(tail);
+        return prefix;
+    }
+
+    /* No readall(): gather raw.read() chunks into the buffer until EOF
+       or blocked, then hand over the whole buffer. */
+    for (;;) {
+        PyObject *data = PyObject_CallMethodNoArgs(self->raw, &_Py_ID(read));
+        if (data == NULL)
+            return NULL;
+        if (data != Py_None && !PyBytes_Check(data)) {
+            Py_DECREF(data);
+            PyErr_SetString(PyExc_TypeError, "read() should return bytes");
+            return NULL;
+        }
+        if (data == Py_None || PyBytes_GET_SIZE(data) == 0) {
+            if (self->bytes_buffered == 0)
+                return data;      /* b"" at EOF, None when blocked */
+            Py_DECREF(data);
+            return nibbler_take_bytes(self, self->bytes_buffered);
+        }
+        int err = nibbler_append(self, data);
+        Py_DECREF(data);
+        if (err < 0)
             return NULL;
     }
-    Py_RETURN_NONE;
 }
+
+/* Logical index one past the first '\n' in [start, end) of the
+   unconsumed buffer, or -1 when absent. */
+static Py_ssize_t
+nibbler_find_newline(buffered *self, Py_ssize_t start, Py_ssize_t end)
+{
+    Py_ssize_t base = 0;
+    Py_ssize_t nchunks = PyList_GET_SIZE(self->chunks);
+    for (Py_ssize_t i = 0; i < nchunks && base < end; i++) {
+        PyObject *chunk = PyList_GET_ITEM(self->chunks, i);
+        const char *data = PyBytes_AS_STRING(chunk);
+        Py_ssize_t size = PyBytes_GET_SIZE(chunk);
+        if (i == 0) {
+            data += self->chunks_offset;
+            size -= self->chunks_offset;
+        }
+        Py_ssize_t lo = start > base ? start - base : 0;
+        Py_ssize_t hi = Py_MIN(end - base, size);
+        if (lo < hi) {
+            const char *found = memchr(data + lo, '\n', hi - lo);
+            if (found != NULL)
+                return base + (found - data) + 1;
+        }
+        base += size;
+    }
+    return -1;
+}
+
+/* readline core: consume through the first newline, at most `limit`
+   bytes (unlimited when negative). EOF or a blocked non-blocking raw
+   stream ends the line early. */
+static PyObject *
+nibbler_readline_locked(buffered *self, Py_ssize_t limit)
+{
+    if (nibbler_ensure_reading(self) < 0)
+        return NULL;
+
+    Py_ssize_t scanned = 0;
+    for (;;) {
+        Py_ssize_t window = self->bytes_buffered;
+        if (limit >= 0 && limit < window)
+            window = limit;
+        if (scanned < window) {
+            Py_ssize_t end = nibbler_find_newline(self, scanned, window);
+            if (end >= 0)
+                return nibbler_take_bytes(self, end);
+            scanned = window;
+        }
+        if (limit >= 0 && self->bytes_buffered >= limit)
+            return nibbler_take_bytes(self, limit);
+        /* An unbuffered stream must not read past the newline: go byte
+           by byte. */
+        Py_ssize_t r = nibbler_fill(
+            self, self->buffer_size > 0 ? self->buffer_size : 1);
+        if (r == -1)
+            return NULL;
+        if (r <= 0)      /* EOF, or non-blocking with no data */
+            return nibbler_take_bytes(self, self->bytes_buffered);
+    }
+}
+
+/*
+ * Shared methods and wrappers
+ */
 
 /*[clinic input]
 @critical_section
@@ -936,16 +1407,25 @@ static PyObject *
 _io__Buffered_flush_impl(buffered *self)
 /*[clinic end generated code: output=da2674ef1ce71f3a input=6b30de9f083419c2]*/
 {
-    PyObject *res;
+    PyObject *res = NULL;
 
     CHECK_INITIALIZED(self)
     CHECK_CLOSED(self, "flush of closed file")
 
     if (!ENTER_BUFFERED(self))
         return NULL;
-    res = buffered_flush_and_rewind_unlocked(self);
+    if (self->rw_mode == NIBBLER_WRITING) {
+        int r = nibbler_flush_locked(self);
+        if (r > 0) {
+            _set_BlockingIOError("write could not complete without blocking",
+                                 0);
+        }
+        if (r != 0)
+            goto end;
+    }
+    res = Py_NewRef(Py_None);
+end:
     LEAVE_BUFFERED(self)
-
     return res;
 }
 
@@ -966,16 +1446,34 @@ _io__Buffered_peek_impl(buffered *self, Py_ssize_t size)
     CHECK_INITIALIZED(self)
     CHECK_CLOSED(self, "peek of closed file")
 
+    if (self->buffer_size == 0) {
+        /* An unbuffered stream cannot hold data without advancing the
+           logical position. */
+        _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
+        return bufferediobase_unsupported(state, "peek");
+    }
+
     if (!ENTER_BUFFERED(self))
         return NULL;
+    if (nibbler_ensure_reading(self) < 0)
+        goto end;
 
-    if (self->writable) {
-        res = buffered_flush_and_rewind_unlocked(self);
-        if (res == NULL)
+    /* Top up with at most one raw read when the request is not already
+       satisfied. */
+    Py_ssize_t want = Py_MIN(size, self->buffer_size);
+    if (self->bytes_buffered < want || self->bytes_buffered == 0) {
+        Py_ssize_t to_read = self->buffer_size - self->bytes_buffered;
+        if (to_read > 0 && nibbler_fill(self, to_read) == -1)
             goto end;
-        Py_CLEAR(res);
     }
-    res = _bufferedreader_peek_unlocked(self);
+
+    /* Return a view of everything buffered, without consuming it. */
+    if (nibbler_coalesce(self) < 0)
+        goto end;
+    if (PyList_GET_SIZE(self->chunks) == 0)
+        res = Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
+    else
+        res = Py_NewRef(PyList_GET_ITEM(self->chunks, 0));
 
 end:
     LEAVE_BUFFERED(self)
@@ -993,7 +1491,7 @@ static PyObject *
 _io__Buffered_read_impl(buffered *self, Py_ssize_t n)
 /*[clinic end generated code: output=f41c78bb15b9bbe9 input=bdb4b0425b295472]*/
 {
-    PyObject *res;
+    PyObject *res = NULL;
 
     CHECK_INITIALIZED(self)
     if (n < -1) {
@@ -1004,22 +1502,42 @@ _io__Buffered_read_impl(buffered *self, Py_ssize_t n)
 
     CHECK_CLOSED(self, "read of closed file")
 
+    if (n == 0)
+        return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
+
+    if (!ENTER_BUFFERED(self))
+        return NULL;
+    if (nibbler_ensure_reading(self) < 0)
+        goto end;
+
     if (n == -1) {
         /* The number of bytes is unspecified, read until the end of stream */
-        if (!ENTER_BUFFERED(self))
-            return NULL;
-        res = _bufferedreader_read_all(self);
+        res = nibbler_read_all_locked(self);
+    }
+    else if (n <= self->bytes_buffered) {
+        res = nibbler_take_bytes(self, n);
     }
     else {
-        res = _bufferedreader_read_fast(self, n);
-        if (res != Py_None)
-            return res;
-        Py_DECREF(res);
-        if (!ENTER_BUFFERED(self))
-            return NULL;
-        res = _bufferedreader_read_generic(self, n);
+        PyBytesWriter *writer = PyBytesWriter_Create(n);
+        if (writer == NULL)
+            goto end;
+        Py_ssize_t r = nibbler_read_into(self, PyBytesWriter_GetData(writer),
+                                         n, 0);
+        if (r == -1) {
+            PyBytesWriter_Discard(writer);
+            goto end;
+        }
+        if (r == -2) {
+            /* Would block, and nothing was read. */
+            PyBytesWriter_Discard(writer);
+            res = Py_NewRef(Py_None);
+        }
+        else {
+            res = PyBytesWriter_FinishWithSize(writer, r);
+        }
     }
 
+end:
     LEAVE_BUFFERED(self)
     return res;
 }
@@ -1037,7 +1555,7 @@ _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
 {
     CHECK_INITIALIZED(self)
     if (n < 0) {
-        n = self->buffer_size;
+        n = self->buffer_size > 0 ? self->buffer_size : DEFAULT_BUFFER_SIZE;
     }
 
     CHECK_CLOSED(self, "read of closed file")
@@ -1046,128 +1564,59 @@ _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
         return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     }
 
-    /* Return up to n bytes.  If at least one byte is buffered, we
-       only return buffered bytes.  Otherwise, we do one raw read. */
-
-    Py_ssize_t have = Py_SAFE_DOWNCAST(READAHEAD(self), Py_off_t, Py_ssize_t);
-    if (have > 0) {
-        n = Py_MIN(have, n);
-        PyObject *res = _bufferedreader_read_fast(self, n);
-        assert(res != Py_None);
-        return res;
-    }
-
     if (!ENTER_BUFFERED(self)) {
         return NULL;
     }
+    PyObject *res = NULL;
+    if (nibbler_ensure_reading(self) < 0)
+        goto end;
 
-    /* Flush the write buffer if necessary */
-    if (self->writable) {
-        PyObject *res = buffered_flush_and_rewind_unlocked(self);
-        if (res == NULL) {
-            LEAVE_BUFFERED(self)
-            return NULL;
-        }
-        Py_DECREF(res);
+    /* Return up to n bytes.  If at least one byte is buffered, we
+       only return buffered bytes.  Otherwise, we do one raw read. */
+    if (self->bytes_buffered > 0) {
+        res = nibbler_take_bytes(self, Py_MIN(n, self->bytes_buffered));
+        goto end;
     }
-    _bufferedreader_reset_buf(self);
 
     PyBytesWriter *writer = PyBytesWriter_Create(n);
-    if (writer == NULL) {
-        LEAVE_BUFFERED(self)
-        return NULL;
-    }
-
-    Py_ssize_t r = _bufferedreader_raw_read(self,
-                                            PyBytesWriter_GetData(writer), n);
-    LEAVE_BUFFERED(self)
+    if (writer == NULL)
+        goto end;
+    Py_ssize_t r = nibbler_raw_read(self, PyBytesWriter_GetData(writer), n);
     if (r == -1) {
         PyBytesWriter_Discard(writer);
-        return NULL;
+        goto end;
     }
     if (r == -2) {
         r = 0;
     }
+    res = PyBytesWriter_FinishWithSize(writer, r);
 
-    return PyBytesWriter_FinishWithSize(writer, r);
+end:
+    LEAVE_BUFFERED(self)
+    return res;
 }
 
 static PyObject *
 _buffered_readinto_generic(buffered *self, Py_buffer *buffer, char readinto1)
 {
-    Py_ssize_t n, written = 0, remaining;
     PyObject *res = NULL;
 
     CHECK_INITIALIZED(self)
     CHECK_CLOSED(self, "readinto of closed file")
 
-    n = Py_SAFE_DOWNCAST(READAHEAD(self), Py_off_t, Py_ssize_t);
-    if (n > 0) {
-        if (n >= buffer->len) {
-            memcpy(buffer->buf, self->buffer + self->pos, buffer->len);
-            self->pos += buffer->len;
-            return PyLong_FromSsize_t(buffer->len);
-        }
-        memcpy(buffer->buf, self->buffer + self->pos, n);
-        self->pos += n;
-        written = n;
-    }
-
     if (!ENTER_BUFFERED(self))
         return NULL;
+    if (nibbler_ensure_reading(self) < 0)
+        goto end;
 
-    if (self->writable) {
-        res = buffered_flush_and_rewind_unlocked(self);
-        if (res == NULL)
-            goto end;
-        Py_CLEAR(res);
-    }
-
-    _bufferedreader_reset_buf(self);
-    self->pos = 0;
-
-    for (remaining = buffer->len - written;
-         remaining > 0;
-         written += n, remaining -= n) {
-        /* If remaining bytes is larger than internal buffer size, copy
-         * directly into caller's buffer. */
-        if (remaining > self->buffer_size) {
-            n = _bufferedreader_raw_read(self, (char *) buffer->buf + written,
-                                         remaining);
-        }
-
-        /* In readinto1 mode, we do not want to fill the internal
-           buffer if we already have some data to return */
-        else if (!(readinto1 && written)) {
-            n = _bufferedreader_fill_buffer(self);
-            if (n > 0) {
-                if (n > remaining)
-                    n = remaining;
-                memcpy((char *) buffer->buf + written,
-                       self->buffer + self->pos, n);
-                self->pos += n;
-                continue; /* short circuit */
-            }
-        }
-        else
-            n = 0;
-
-        if (n == 0 || (n == -2 && written > 0))
-            break;
-        if (n < 0) {
-            if (n == -2) {
-                res = Py_NewRef(Py_None);
-            }
-            goto end;
-        }
-
-        /* At most one read in readinto1 mode */
-        if (readinto1) {
-            written += n;
-            break;
-        }
-    }
-    res = PyLong_FromSsize_t(written);
+    Py_ssize_t n = nibbler_read_into(self, (char *)buffer->buf, buffer->len,
+                                     readinto1);
+    if (n == -1)
+        goto end;
+    if (n == -2)
+        res = Py_NewRef(Py_None);
+    else
+        res = PyLong_FromSsize_t(n);
 
 end:
     LEAVE_BUFFERED(self);
@@ -1206,108 +1655,14 @@ _io__Buffered_readinto1_impl(buffered *self, Py_buffer *buffer)
 static PyObject *
 _buffered_readline(buffered *self, Py_ssize_t limit)
 {
-    PyObject *res = NULL;
-    PyObject *chunks = NULL;
-    Py_ssize_t n;
-    const char *start, *s, *end;
+    PyObject *res;
 
     CHECK_CLOSED(self, "readline of closed file")
 
-    /* First, try to find a line in the buffer. This can run unlocked because
-       the calls to the C API are simple enough that they can't trigger
-       any thread switch. */
-    n = Py_SAFE_DOWNCAST(READAHEAD(self), Py_off_t, Py_ssize_t);
-    if (limit >= 0 && n > limit)
-        n = limit;
-    start = self->buffer + self->pos;
-    s = memchr(start, '\n', n);
-    if (s != NULL) {
-        res = PyBytes_FromStringAndSize(start, s - start + 1);
-        if (res != NULL)
-            self->pos += s - start + 1;
-        goto end_unlocked;
-    }
-    if (n == limit) {
-        res = PyBytes_FromStringAndSize(start, n);
-        if (res != NULL)
-            self->pos += n;
-        goto end_unlocked;
-    }
-
     if (!ENTER_BUFFERED(self))
-        goto end_unlocked;
-
-    /* Now we try to get some more from the raw stream */
-    chunks = PyList_New(0);
-    if (chunks == NULL)
-        goto end;
-    if (n > 0) {
-        res = PyBytes_FromStringAndSize(start, n);
-        if (res == NULL)
-            goto end;
-        if (PyList_Append(chunks, res) < 0) {
-            Py_CLEAR(res);
-            goto end;
-        }
-        Py_CLEAR(res);
-        self->pos += n;
-        if (limit >= 0)
-            limit -= n;
-    }
-    if (self->writable) {
-        PyObject *r = buffered_flush_and_rewind_unlocked(self);
-        if (r == NULL)
-            goto end;
-        Py_DECREF(r);
-    }
-
-    for (;;) {
-        _bufferedreader_reset_buf(self);
-        n = _bufferedreader_fill_buffer(self);
-        if (n == -1)
-            goto end;
-        if (n <= 0)
-            break;
-        if (limit >= 0 && n > limit)
-            n = limit;
-        start = self->buffer;
-        end = start + n;
-        s = start;
-        while (s < end) {
-            if (*s++ == '\n') {
-                res = PyBytes_FromStringAndSize(start, s - start);
-                if (res == NULL)
-                    goto end;
-                self->pos = s - start;
-                goto found;
-            }
-        }
-        res = PyBytes_FromStringAndSize(start, n);
-        if (res == NULL)
-            goto end;
-        if (n == limit) {
-            self->pos = n;
-            break;
-        }
-        if (PyList_Append(chunks, res) < 0) {
-            Py_CLEAR(res);
-            goto end;
-        }
-        Py_CLEAR(res);
-        if (limit >= 0)
-            limit -= n;
-    }
-found:
-    if (res != NULL && PyList_Append(chunks, res) < 0) {
-        Py_CLEAR(res);
-        goto end;
-    }
-    Py_XSETREF(res, PyBytes_Join((PyObject *)&_Py_SINGLETON(bytes_empty), chunks));
-
-end:
+        return NULL;
+    res = nibbler_readline_locked(self, limit);
     LEAVE_BUFFERED(self)
-end_unlocked:
-    Py_XDECREF(chunks);
     return res;
 }
 
@@ -1342,11 +1697,18 @@ _io__Buffered_tell_impl(buffered *self)
     pos = _buffered_raw_tell(self);
     if (pos == -1)
         return NULL;
-    pos -= RAW_OFFSET(self);
+    if (self->rw_mode == NIBBLER_WRITING) {
+        /* Pending writes sit past the raw position. */
+        pos += self->bytes_buffered;
+    }
+    else {
+        /* Read-ahead sits between the logical and the raw position. */
+        pos -= self->bytes_buffered;
 
-    // GH-95782
-    if (pos < 0)
-        pos = 0;
+        // GH-95782
+        if (pos < 0)
+            pos = 0;
+    }
 
     return PyLong_FromOff_t(pos);
 }
@@ -1395,59 +1757,33 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
     if (target == -1 && PyErr_Occurred())
         return NULL;
 
-    /* SEEK_SET and SEEK_CUR are special because we could seek inside the
-       buffer. Other whence values must be managed without this optimization.
-       Some Operating Systems can provide additional values, like
-       SEEK_HOLE/SEEK_DATA. */
-    if (((whence == 0) || (whence == 1)) && self->readable) {
-        Py_off_t current, avail;
-        /* Check if seeking leaves us inside the current buffer,
-           so as to return quickly if possible. Also, we needn't take the
-           lock in this fast path.
-           Don't know how to do that when whence == 2, though. */
-        /* NOTE: RAW_TELL() can release the GIL but the object is in a stable
-           state at this point. */
-        current = RAW_TELL(self);
-        avail = READAHEAD(self);
-        if (avail > 0) {
-            Py_off_t offset;
-            if (whence == 0)
-                offset = target - (current - RAW_OFFSET(self));
-            else
-                offset = target;
-            if (offset >= -self->pos && offset <= avail) {
-                self->pos += offset;
-
-                // GH-95782
-                if (current - avail + offset < 0)
-                    return PyLong_FromOff_t(0);
-
-                return PyLong_FromOff_t(current - avail + offset);
-            }
-        }
-    }
-
     if (!ENTER_BUFFERED(self))
         return NULL;
 
-    /* Fallback: invoke raw seek() method and clear buffer */
-    if (self->writable) {
-        res = _bufferedwriter_flush_unlocked(self);
-        if (res == NULL)
+    if (self->rw_mode == NIBBLER_WRITING) {
+        /* The flush moves the raw position up to the logical position,
+           so a SEEK_CUR target needs no adjustment. */
+        int r = nibbler_flush_locked(self);
+        if (r > 0) {
+            _set_BlockingIOError("write could not complete without blocking",
+                                 0);
+        }
+        if (r != 0)
             goto end;
-        Py_CLEAR(res);
     }
-
-    /* TODO: align on block boundary and read buffer if needed? */
-    if (whence == 1)
-        target -= RAW_OFFSET(self);
+    else if (whence == 1) {
+        /* The raw position is `bytes_buffered` ahead of the logical
+           position; compensate relative seeks. */
+        target -= self->bytes_buffered;
+    }
     n = _buffered_raw_seek(self, target, whence);
     if (n == -1)
         goto end;
-    self->raw_pos = -1;
+    /* Drop read-ahead only after a successful raw seek, so a failed
+       seek does not lose buffered data. */
+    if (self->rw_mode == NIBBLER_READING && nibbler_clear_chunks(self) < 0)
+        goto end;
     res = PyLong_FromOff_t(n);
-    if (res != NULL && self->readable)
-        _bufferedreader_reset_buf(self);
 
 end:
     LEAVE_BUFFERED(self)
@@ -1477,18 +1813,18 @@ _io__Buffered_truncate_impl(buffered *self, PyTypeObject *cls, PyObject *pos)
     if (!ENTER_BUFFERED(self))
         return NULL;
 
-    res = buffered_flush_and_rewind_unlocked(self);
-    if (res == NULL) {
+    /* Flush pending writes, or rewind past read-ahead, so that
+       raw.truncate(None) acts at the logical position. */
+    if (nibbler_ensure_writing(self) < 0)
         goto end;
+    int r = nibbler_flush_locked(self);
+    if (r > 0) {
+        _set_BlockingIOError("write could not complete without blocking", 0);
     }
-    Py_CLEAR(res);
+    if (r != 0)
+        goto end;
 
     res = PyObject_CallMethodOneArg(self->raw, &_Py_ID(truncate), pos);
-    if (res == NULL)
-        goto end;
-    /* Reset cached position */
-    if (_buffered_raw_tell(self) == -1)
-        PyErr_Clear();
 
 end:
     LEAVE_BUFFERED(self)
@@ -1576,11 +1912,6 @@ buffered_repr(PyObject *op)
  * class BufferedReader
  */
 
-static void _bufferedreader_reset_buf(buffered *self)
-{
-    self->read_end = -1;
-}
-
 /*[clinic input]
 _io.BufferedReader.__init__
     raw: object
@@ -1610,7 +1941,6 @@ _io_BufferedReader___init___impl(buffered *self, PyObject *raw,
 
     if (_buffered_init(self) < 0)
         return -1;
-    _bufferedreader_reset_buf(self);
 
     self->fast_closed_checks = (
         Py_IS_TYPE(self, nstate->PyBufferedReader_Type) &&
@@ -1621,314 +1951,10 @@ _io_BufferedReader___init___impl(buffered *self, PyObject *raw,
     return 0;
 }
 
-static Py_ssize_t
-_bufferedreader_raw_read(buffered *self, char *start, Py_ssize_t len)
-{
-    Py_buffer buf;
-    PyObject *memobj, *res;
-    Py_ssize_t n;
-    /* NOTE: the buffer needn't be released as its object is NULL. */
-    if (PyBuffer_FillInfo(&buf, NULL, start, len, 0, PyBUF_CONTIG) == -1)
-        return -1;
-    memobj = PyMemoryView_FromBuffer(&buf);
-    if (memobj == NULL)
-        return -1;
-    /* NOTE: PyErr_SetFromErrno() calls PyErr_CheckSignals() when EINTR
-       occurs so we needn't do it ourselves.
-       We then retry reading, ignoring the signal if no handler has
-       raised (see issue #10956).
-    */
-    do {
-        res = PyObject_CallMethodOneArg(self->raw, &_Py_ID(readinto), memobj);
-    } while (res == NULL && _PyIO_trap_eintr());
-    Py_DECREF(memobj);
-    if (res == NULL)
-        return -1;
-    if (res == Py_None) {
-        /* Non-blocking stream would have blocked. Special return code! */
-        Py_DECREF(res);
-        return -2;
-    }
-    n = PyNumber_AsSsize_t(res, PyExc_ValueError);
-    Py_DECREF(res);
-
-    if (n == -1 && PyErr_Occurred()) {
-        _PyErr_FormatFromCause(
-            PyExc_OSError,
-            "raw readinto() failed"
-        );
-        return -1;
-    }
-
-    if (n < 0 || n > len) {
-        PyErr_Format(PyExc_OSError,
-                     "raw readinto() returned invalid length %zd "
-                     "(should have been between 0 and %zd)", n, len);
-        return -1;
-    }
-    if (n > 0 && self->abs_pos != -1)
-        self->abs_pos += n;
-    return n;
-}
-
-static Py_ssize_t
-_bufferedreader_fill_buffer(buffered *self)
-{
-    Py_ssize_t start, len, n;
-    if (VALID_READ_BUFFER(self))
-        start = Py_SAFE_DOWNCAST(self->read_end, Py_off_t, Py_ssize_t);
-    else
-        start = 0;
-    len = self->buffer_size - start;
-    n = _bufferedreader_raw_read(self, self->buffer + start, len);
-    if (n <= 0)
-        return n;
-    self->read_end = start + n;
-    self->raw_pos = start + n;
-    return n;
-}
-
-static PyObject *
-_bufferedreader_read_all(buffered *self)
-{
-    Py_ssize_t current_size;
-    PyObject *res = NULL, *data = NULL, *tmp = NULL, *chunks = NULL, *readall;
-
-    /* First copy what we have in the current buffer. */
-    current_size = Py_SAFE_DOWNCAST(READAHEAD(self), Py_off_t, Py_ssize_t);
-    if (current_size) {
-        data = PyBytes_FromStringAndSize(
-            self->buffer + self->pos, current_size);
-        if (data == NULL)
-            return NULL;
-        self->pos += current_size;
-    }
-    /* We're going past the buffer's bounds, flush it */
-    if (self->writable) {
-        tmp = buffered_flush_and_rewind_unlocked(self);
-        if (tmp == NULL)
-            goto cleanup;
-        Py_CLEAR(tmp);
-    }
-    _bufferedreader_reset_buf(self);
-
-    if (PyObject_GetOptionalAttr(self->raw, &_Py_ID(readall), &readall) < 0) {
-        goto cleanup;
-    }
-    if (readall) {
-        tmp = _PyObject_CallNoArgs(readall);
-        Py_DECREF(readall);
-        if (tmp == NULL)
-            goto cleanup;
-        if (tmp != Py_None && !PyBytes_Check(tmp)) {
-            PyErr_SetString(PyExc_TypeError, "readall() should return bytes");
-            goto cleanup;
-        }
-        if (current_size == 0) {
-            res = tmp;
-        } else {
-            if (tmp != Py_None) {
-                PyBytes_Concat(&data, tmp);
-            }
-            res = data;
-        }
-        goto cleanup;
-    }
-
-    chunks = PyList_New(0);
-    if (chunks == NULL)
-        goto cleanup;
-
-    while (1) {
-        if (data) {
-            if (PyList_Append(chunks, data) < 0)
-                goto cleanup;
-            Py_CLEAR(data);
-        }
-
-        /* Read until EOF or until read() would block. */
-        data = PyObject_CallMethodNoArgs(self->raw, &_Py_ID(read));
-        if (data == NULL)
-            goto cleanup;
-        if (data != Py_None && !PyBytes_Check(data)) {
-            PyErr_SetString(PyExc_TypeError, "read() should return bytes");
-            goto cleanup;
-        }
-        if (data == Py_None || PyBytes_GET_SIZE(data) == 0) {
-            if (current_size == 0) {
-                res = data;
-                goto cleanup;
-            }
-            else {
-                tmp = PyBytes_Join((PyObject *)&_Py_SINGLETON(bytes_empty), chunks);
-                res = tmp;
-                goto cleanup;
-            }
-        }
-        current_size += PyBytes_GET_SIZE(data);
-        if (self->abs_pos != -1)
-            self->abs_pos += PyBytes_GET_SIZE(data);
-    }
-cleanup:
-    /* res is either NULL or a borrowed ref */
-    Py_XINCREF(res);
-    Py_XDECREF(data);
-    Py_XDECREF(tmp);
-    Py_XDECREF(chunks);
-    return res;
-}
-
-/* Read n bytes from the buffer if it can, otherwise return None.
-   This function is simple enough that it can run unlocked. */
-static PyObject *
-_bufferedreader_read_fast(buffered *self, Py_ssize_t n)
-{
-    Py_ssize_t current_size;
-
-    current_size = Py_SAFE_DOWNCAST(READAHEAD(self), Py_off_t, Py_ssize_t);
-    if (n <= current_size) {
-        /* Fast path: the data to read is fully buffered. */
-        PyObject *res = PyBytes_FromStringAndSize(self->buffer + self->pos, n);
-        if (res != NULL)
-            self->pos += n;
-        return res;
-    }
-    Py_RETURN_NONE;
-}
-
-/* Generic read function: read from the stream until enough bytes are read,
- * or until an EOF occurs or until read() would block.
- */
-static PyObject *
-_bufferedreader_read_generic(buffered *self, Py_ssize_t n)
-{
-    Py_ssize_t current_size, remaining, written;
-
-    current_size = Py_SAFE_DOWNCAST(READAHEAD(self), Py_off_t, Py_ssize_t);
-    if (n <= current_size)
-        return _bufferedreader_read_fast(self, n);
-
-    PyBytesWriter *writer = PyBytesWriter_Create(n);
-    if (writer == NULL) {
-        goto error;
-    }
-    char *out = PyBytesWriter_GetData(writer);
-
-    remaining = n;
-    written = 0;
-    if (current_size > 0) {
-        memcpy(out, self->buffer + self->pos, current_size);
-        remaining -= current_size;
-        written += current_size;
-        self->pos += current_size;
-    }
-    /* Flush the write buffer if necessary */
-    if (self->writable) {
-        PyObject *r = buffered_flush_and_rewind_unlocked(self);
-        if (r == NULL)
-            goto error;
-        Py_DECREF(r);
-    }
-    _bufferedreader_reset_buf(self);
-    while (remaining > 0) {
-        /* We want to read a whole block at the end into buffer.
-           If we had readv() we could do this in one pass. */
-        Py_ssize_t r = MINUS_LAST_BLOCK(self, remaining);
-        if (r == 0)
-            break;
-        r = _bufferedreader_raw_read(self, out + written, r);
-        if (r == -1)
-            goto error;
-        if (r == 0 || r == -2) {
-            /* EOF occurred or read() would block. */
-            if (r == 0 || written > 0) {
-                return PyBytesWriter_FinishWithSize(writer, written);
-            }
-            PyBytesWriter_Discard(writer);
-            Py_RETURN_NONE;
-        }
-        remaining -= r;
-        written += r;
-    }
-    assert(remaining <= self->buffer_size);
-    self->pos = 0;
-    self->raw_pos = 0;
-    self->read_end = 0;
-    /* NOTE: when the read is satisfied, we avoid issuing any additional
-       reads, which could block indefinitely (e.g. on a socket).
-       See issue #9550. */
-    while (remaining > 0 && self->read_end < self->buffer_size) {
-        Py_ssize_t r = _bufferedreader_fill_buffer(self);
-        if (r == -1)
-            goto error;
-        if (r == 0 || r == -2) {
-            /* EOF occurred or read() would block. */
-            if (r == 0 || written > 0) {
-                return PyBytesWriter_FinishWithSize(writer, written);
-            }
-            PyBytesWriter_Discard(writer);
-            Py_RETURN_NONE;
-        }
-        if (remaining > r) {
-            memcpy(out + written, self->buffer + self->pos, r);
-            written += r;
-            self->pos += r;
-            remaining -= r;
-        }
-        else if (remaining > 0) {
-            memcpy(out + written, self->buffer + self->pos, remaining);
-            written += remaining;
-            self->pos += remaining;
-            remaining = 0;
-        }
-        if (remaining == 0)
-            break;
-    }
-
-    return PyBytesWriter_Finish(writer);
-
-error:
-    PyBytesWriter_Discard(writer);
-    return NULL;
-}
-
-static PyObject *
-_bufferedreader_peek_unlocked(buffered *self)
-{
-    Py_ssize_t have, r;
-
-    have = Py_SAFE_DOWNCAST(READAHEAD(self), Py_off_t, Py_ssize_t);
-    /* Constraints:
-       1. we don't want to advance the file position.
-       2. we don't want to lose block alignment, so we can't shift the buffer
-          to make some place.
-       Therefore, we either return `have` bytes (if > 0), or a full buffer.
-    */
-    if (have > 0) {
-        return PyBytes_FromStringAndSize(self->buffer + self->pos, have);
-    }
-
-    /* Fill the buffer from the raw stream, and copy it to the result. */
-    _bufferedreader_reset_buf(self);
-    r = _bufferedreader_fill_buffer(self);
-    if (r == -1)
-        return NULL;
-    if (r == -2)
-        r = 0;
-    self->pos = 0;
-    return PyBytes_FromStringAndSize(self->buffer, r);
-}
-
 
 /*
  * class BufferedWriter
  */
-static void
-_bufferedwriter_reset_buf(buffered *self)
-{
-    self->write_pos = 0;
-    self->write_end = -1;
-}
 
 /*[clinic input]
 _io.BufferedWriter.__init__
@@ -1964,8 +1990,6 @@ _io_BufferedWriter___init___impl(buffered *self, PyObject *raw,
     self->buffer_size = buffer_size;
     if (_buffered_init(self) < 0)
         return -1;
-    _bufferedwriter_reset_buf(self);
-    self->pos = 0;
 
     self->fast_closed_checks = (
         Py_IS_TYPE(self, nstate->PyBufferedWriter_Type) &&
@@ -1974,109 +1998,6 @@ _io_BufferedWriter___init___impl(buffered *self, PyObject *raw,
 
     self->ok = 1;
     return 0;
-}
-
-static Py_ssize_t
-_bufferedwriter_raw_write(buffered *self, char *start, Py_ssize_t len)
-{
-    Py_buffer buf;
-    PyObject *memobj, *res;
-    Py_ssize_t n;
-    int errnum;
-    /* NOTE: the buffer needn't be released as its object is NULL. */
-    if (PyBuffer_FillInfo(&buf, NULL, start, len, 1, PyBUF_CONTIG_RO) == -1)
-        return -1;
-    memobj = PyMemoryView_FromBuffer(&buf);
-    if (memobj == NULL)
-        return -1;
-    /* NOTE: PyErr_SetFromErrno() calls PyErr_CheckSignals() when EINTR
-       occurs so we needn't do it ourselves.
-       We then retry writing, ignoring the signal if no handler has
-       raised (see issue #10956).
-    */
-    do {
-        errno = 0;
-        res = PyObject_CallMethodOneArg(self->raw, &_Py_ID(write), memobj);
-        errnum = errno;
-    } while (res == NULL && _PyIO_trap_eintr());
-    Py_DECREF(memobj);
-    if (res == NULL)
-        return -1;
-    if (res == Py_None) {
-        /* Non-blocking stream would have blocked. Special return code!
-           Being paranoid we reset errno in case it is changed by code
-           triggered by a decref.  errno is used by _set_BlockingIOError(). */
-        Py_DECREF(res);
-        errno = errnum;
-        return -2;
-    }
-    n = PyNumber_AsSsize_t(res, PyExc_ValueError);
-    Py_DECREF(res);
-    if (n < 0 || n > len) {
-        PyErr_Format(PyExc_OSError,
-                     "raw write() returned invalid length %zd "
-                     "(should have been between 0 and %zd)", n, len);
-        return -1;
-    }
-    if (n > 0 && self->abs_pos != -1)
-        self->abs_pos += n;
-    return n;
-}
-
-static PyObject *
-_bufferedwriter_flush_unlocked(buffered *self)
-{
-    Py_off_t n, rewind;
-
-    if (!VALID_WRITE_BUFFER(self) || self->write_pos == self->write_end)
-        goto end;
-    /* First, rewind */
-    rewind = RAW_OFFSET(self) + (self->pos - self->write_pos);
-    if (rewind != 0) {
-        n = _buffered_raw_seek(self, -rewind, 1);
-        if (n < 0) {
-            goto error;
-        }
-        self->raw_pos -= rewind;
-    }
-    while (self->write_pos < self->write_end) {
-        n = _bufferedwriter_raw_write(self,
-            self->buffer + self->write_pos,
-            Py_SAFE_DOWNCAST(self->write_end - self->write_pos,
-                             Py_off_t, Py_ssize_t));
-        if (n == -1) {
-            goto error;
-        }
-        else if (n == -2) {
-            _set_BlockingIOError("write could not complete without blocking",
-                                 0);
-            goto error;
-        }
-        self->write_pos += n;
-        self->raw_pos = self->write_pos;
-        /* Partial writes can return successfully when interrupted by a
-           signal (see write(2)).  We must run signal handlers before
-           blocking another time, possibly indefinitely. */
-        if (PyErr_CheckSignals() < 0)
-            goto error;
-    }
-
-
-end:
-    /* This ensures that after return from this function,
-       VALID_WRITE_BUFFER(self) returns false.
-
-       This is a required condition because when a tell() is called
-       after flushing and if VALID_READ_BUFFER(self) is false, we need
-       VALID_WRITE_BUFFER(self) to be false to have
-       RAW_OFFSET(self) == 0.
-
-       Issue: https://bugs.python.org/issue32228 */
-    _bufferedwriter_reset_buf(self);
-    Py_RETURN_NONE;
-
-error:
-    return NULL;
 }
 
 /*[clinic input]
@@ -2091,9 +2012,6 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
 /*[clinic end generated code: output=7f8d1365759bfc6b input=6a9c041de0c337be]*/
 {
     PyObject *res = NULL;
-    Py_ssize_t written, avail, remaining;
-    Py_off_t offset;
-    int r;
 
     CHECK_INITIALIZED(self)
 
@@ -2102,136 +2020,68 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
 
     /* Issue #31976: Check for closed file after acquiring the lock. Another
        thread could be holding the lock while closing the file. */
-    r = IS_CLOSED(self);
+    int r = IS_CLOSED(self);
     if (r < 0) {
-        goto error;
+        goto end;
     }
     if (r > 0) {
         PyErr_SetString(PyExc_ValueError, "write to closed file");
-        goto error;
-    }
-
-    /* Fast path: the data to write can be fully buffered. */
-    if (!VALID_READ_BUFFER(self) && !VALID_WRITE_BUFFER(self)) {
-        self->pos = 0;
-        self->raw_pos = 0;
-    }
-    avail = Py_SAFE_DOWNCAST(self->buffer_size - self->pos, Py_off_t, Py_ssize_t);
-    if (buffer->len <= avail && buffer->len < self->buffer_size) {
-        memcpy(self->buffer + self->pos, buffer->buf, buffer->len);
-        if (!VALID_WRITE_BUFFER(self) || self->write_pos > self->pos) {
-            self->write_pos = self->pos;
-        }
-        ADJUST_POSITION(self, self->pos + buffer->len);
-        if (self->pos > self->write_end)
-            self->write_end = self->pos;
-        written = buffer->len;
         goto end;
     }
 
-    /* First write the current buffer */
-    res = _bufferedwriter_flush_unlocked(self);
-    if (res == NULL) {
-        Py_ssize_t *w = _buffered_check_blocking_error();
-        if (w == NULL)
-            goto error;
-        if (self->readable)
-            _bufferedreader_reset_buf(self);
-        /* Make some place by shifting the buffer. */
-        assert(VALID_WRITE_BUFFER(self));
-        memmove(self->buffer, self->buffer + self->write_pos,
-                Py_SAFE_DOWNCAST(self->write_end - self->write_pos,
-                                 Py_off_t, Py_ssize_t));
-        self->write_end -= self->write_pos;
-        self->raw_pos -= self->write_pos;
-        self->pos -= self->write_pos;
-        self->write_pos = 0;
-        avail = Py_SAFE_DOWNCAST(self->buffer_size - self->write_end,
-                                 Py_off_t, Py_ssize_t);
-        if (buffer->len <= avail) {
-            /* Everything can be buffered */
-            PyErr_Clear();
-            memcpy(self->buffer + self->write_end, buffer->buf, buffer->len);
-            self->write_end += buffer->len;
-            self->pos += buffer->len;
-            written = buffer->len;
+    if (buffer->len == 0) {
+        res = PyLong_FromSsize_t(0);
+        goto end;
+    }
+
+    if (nibbler_ensure_writing(self) < 0)
+        goto end;
+
+    /* Gather the data. Immutable bytes are appended without a copy;
+       everything else is copied because the caller may modify the
+       buffer after write() returns. */
+    PyObject *chunk;
+    if (PyBytes_CheckExact(buffer->obj)) {
+        chunk = Py_NewRef(buffer->obj);
+    }
+    else {
+        chunk = PyBytes_FromStringAndSize(buffer->buf, buffer->len);
+        if (chunk == NULL)
+            goto end;
+    }
+    int err = nibbler_append(self, chunk);
+    Py_DECREF(chunk);
+    if (err < 0)
+        goto end;
+
+    if (self->bytes_buffered < self->buffer_size) {
+        res = PyLong_FromSsize_t(buffer->len);
+        goto end;
+    }
+
+    /* buffer_size reached: the gathered chunks form a morsel, write it
+       out. */
+    r = nibbler_flush_locked(self);
+    if (r < 0)
+        goto end;
+    if (r > 0) {
+        /* Blocked. Keep at most buffer_size bytes; the rest of this
+           write was not accepted and is reported via BlockingIOError.
+           Only the tail of this write can overflow because at most
+           buffer_size bytes were buffered when write() was entered. */
+        Py_ssize_t overflow = self->bytes_buffered - self->buffer_size;
+        if (overflow > 0) {
+            assert(overflow <= buffer->len);
+            if (nibbler_drop_tail(self, overflow) < 0)
+                goto end;
+            _set_BlockingIOError("write could not complete without blocking",
+                                 buffer->len - overflow);
             goto end;
         }
-        /* Buffer as much as possible. */
-        memcpy(self->buffer + self->write_end, buffer->buf, avail);
-        self->write_end += avail;
-        self->pos += avail;
-        /* XXX Modifying the existing exception e using the pointer w
-           will change e.characters_written but not e.args[2].
-           Therefore we just replace with a new error. */
-        _set_BlockingIOError("write could not complete without blocking",
-                             avail);
-        goto error;
     }
-    Py_CLEAR(res);
-
-    /* Adjust the raw stream position if it is away from the logical stream
-       position. This happens if the read buffer has been filled but not
-       modified (and therefore _bufferedwriter_flush_unlocked() didn't rewind
-       the raw stream by itself).
-       Fixes issue #6629.
-    */
-    offset = RAW_OFFSET(self);
-    if (offset != 0) {
-        if (_buffered_raw_seek(self, -offset, 1) < 0)
-            goto error;
-        self->raw_pos -= offset;
-    }
-
-    /* Then write buf itself. At this point the buffer has been emptied. */
-    remaining = buffer->len;
-    written = 0;
-    while (remaining >= self->buffer_size) {
-        Py_ssize_t n = _bufferedwriter_raw_write(
-            self, (char *) buffer->buf + written, buffer->len - written);
-        if (n == -1) {
-            goto error;
-        } else if (n == -2) {
-            /* Write failed because raw file is non-blocking */
-            if (remaining > self->buffer_size) {
-                /* Can't buffer everything, still buffer as much as possible */
-                memcpy(self->buffer,
-                       (char *) buffer->buf + written, self->buffer_size);
-                self->raw_pos = 0;
-                ADJUST_POSITION(self, self->buffer_size);
-                self->write_end = self->buffer_size;
-                written += self->buffer_size;
-                _set_BlockingIOError("write could not complete without "
-                                     "blocking", written);
-                goto error;
-            }
-            PyErr_Clear();
-            break;
-        }
-        written += n;
-        remaining -= n;
-        /* Partial writes can return successfully when interrupted by a
-           signal (see write(2)).  We must run signal handlers before
-           blocking another time, possibly indefinitely. */
-        if (PyErr_CheckSignals() < 0)
-            goto error;
-    }
-    if (self->readable)
-        _bufferedreader_reset_buf(self);
-    if (remaining > 0) {
-        memcpy(self->buffer, (char *) buffer->buf + written, remaining);
-        written += remaining;
-    }
-    self->write_pos = 0;
-    /* TODO: sanity check (remaining >= 0) */
-    self->write_end = remaining;
-    ADJUST_POSITION(self, remaining);
-    self->raw_pos = 0;
+    res = PyLong_FromSsize_t(buffer->len);
 
 end:
-    res = PyLong_FromSsize_t(written);
-
-error:
     LEAVE_BUFFERED(self)
     return res;
 }
@@ -2513,9 +2363,6 @@ _io_BufferedRandom___init___impl(buffered *self, PyObject *raw,
 
     if (_buffered_init(self) < 0)
         return -1;
-    _bufferedreader_reset_buf(self);
-    _bufferedwriter_reset_buf(self);
-    self->pos = 0;
 
     self->fast_closed_checks = (Py_IS_TYPE(self, nstate->PyBufferedRandom_Type) &&
                                 Py_IS_TYPE(raw, state->PyFileIO_Type));
