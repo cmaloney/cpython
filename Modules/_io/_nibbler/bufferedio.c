@@ -11,6 +11,7 @@
 #include "pycore_call.h"                // _PyObject_CallNoArgs()
 #include "pycore_fileutils.h"           // _PyFile_Flush
 #include "pycore_lock.h"                // _PyRecursiveMutex
+#include "pycore_pyatomic_ft_wrappers.h" // FT_ATOMIC_LOAD_SSIZE_RELAXED()
 #include "pycore_object.h"              // _PyObject_GC_UNTRACK()
 #include "pycore_pyerrors.h"            // _Py_FatalErrorFormat()
 #include "pycore_pylifecycle.h"         // _Py_IsInterpreterFinalizing()
@@ -266,21 +267,37 @@ _io__BufferedIOBase_write_impl(PyObject *self, PyTypeObject *cls,
 #define STATE_READY         1
 #define STATE_DETACHED      2   /* detach() removed the raw stream */
 
-/* rw_state values: the directions the object supports and which one
-   the nibbler currently holds. One-way objects keep their value for
-   life; only BufferedRandom transitions, between the RANDOM_ values
-   (reads drain pending writes first; writes rewind read-ahead). */
-#define NIBBLER_READER          0   /* read-only: always read-ahead */
-#define NIBBLER_WRITER          1   /* write-only: always pending writes */
-#define NIBBLER_RANDOM_READING  2   /* read+write, holding read-ahead */
-#define NIBBLER_RANDOM_WRITING  3   /* read+write, holding pending writes */
+/* Directions the object supports; fixed per class at __init__. */
+#define CAPS_READ  1
+#define CAPS_WRITE 2
+#define CAN_READ(self)   ((self)->caps & CAPS_READ)
+#define CAN_WRITE(self)  ((self)->caps & CAPS_WRITE)
 
-#define IS_READING(self) ((self)->rw_state == NIBBLER_READER || \
-                          (self)->rw_state == NIBBLER_RANDOM_READING)
-#define IS_WRITING(self) ((self)->rw_state == NIBBLER_WRITER || \
-                          (self)->rw_state == NIBBLER_RANDOM_WRITING)
-#define CAN_READ(self)   ((self)->rw_state != NIBBLER_WRITER)
-#define CAN_WRITE(self)  ((self)->rw_state != NIBBLER_READER)
+/* A gathered write, staged on `wstate` until a flusher takes it. */
+typedef struct wnode {
+    struct wnode *next;
+    PyObject *chunk;        /* owned bytes */
+} wnode;
+
+/* wstate: one atomic word fusing the staged-write LIFO head with the
+   nibbler's current direction. wnode allocations are pointer-aligned,
+   freeing the low bits for the tag. Pushing a node, taking the whole
+   list, and changing direction all linearize on this word, which is
+   what lets gathering run without a lock: a push can only succeed
+   against the WRITING tag, and a direction change can only succeed
+   against an empty list -- there is no window between "the buffer
+   emptied" and "the direction changed" for a write to slip through. */
+#define WTAG_READING ((uintptr_t)0)  /* nibbler holds read-ahead */
+#define WTAG_WRITING ((uintptr_t)1)  /* gathering allowed */
+#define WTAG_DRAIN   ((uintptr_t)2)  /* gatherers divert to io_lock */
+#define WTAG_MASK    ((uintptr_t)3)
+#define WSTATE_PTR(w)   ((wnode *)((w) & ~WTAG_MASK))
+#define WSTATE_TAG(w)   ((int)((w) & WTAG_MASK))
+#define WSTATE(p, tag)  ((uintptr_t)(p) | (uintptr_t)(tag))
+
+#define WTAG(self) WSTATE_TAG(_Py_atomic_load_uintptr(&(self)->wstate))
+#define IS_READING(self) (WTAG(self) == WTAG_READING)
+#define IS_WRITING(self) (!IS_READING(self))
 
 /* A run of buffered bytes: a list of bytes objects ("chunks") consumed
    from the front. The object's live buffer is one; a detached morsel
@@ -306,15 +323,18 @@ typedef struct {
        class) *and* the raw stream is a vanilla FileIO object. */
     int fast_closed_checks;
 
-    /* The nibbler: read-ahead or pending writes, per rw_state. */
+    /* Read-ahead, consumed under io_lock. */
     nibbler buf;
-    char rw_state;
-    /* True while a drain or close() must not race new gathering;
-       write() waits on io_lock instead of appending. */
-    char draining;
-    /* Bytes in a detached morsel currently being written to the raw
-       stream. tell() counts them as still pending. */
-    Py_ssize_t io_in_flight;
+    /* Unwritten leftovers of a blocked flush; owned by the flusher
+       (io_lock) and written out ahead of newly staged chunks. */
+    nibbler pending;
+    /* The fused staging word; see WTAG_* above. */
+    uintptr_t wstate;
+    /* Bytes gathered, pending, or in a morsel mid-write. tell() adds
+       them to the raw position while writing. */
+    Py_ssize_t write_pending;
+    /* CAPS_READ / CAPS_WRITE. */
+    uint8_t caps;
 
     /* raw._writev(buffers), when the raw stream provides it (else NULL).
        Lets a multi-chunk morsel be written without coalescing. */
@@ -355,47 +375,48 @@ typedef struct {
       read-ahead. buffer_size == 0 is supported; the buffer is then
       empty at rest and every write is submitted immediately.
 
-    Locking: one lock, io_lock. It is held for raw stream I/O, whole
-    read operations, flush/seek/truncate, mode transitions, and the
-    closing of the raw stream -- everything whose contract is
-    completion. write() never waits on it while gathering: it appends
-    and returns, and on crossing buffer_size it only *try-locks*; if a
-    flusher is already active the gathered bytes are left for that
-    flusher or a later writer. A flusher detaches the buffer into a
-    morsel and performs raw I/O on it, so gathering continues while the
-    morsel is written; unwritten leftovers return to the front of the
-    buffer, ahead of anything gathered meanwhile.
+    Locking: gathering is lock-free. write() stages its chunk as a
+    node pushed onto `wstate` with a compare-exchange; the same word
+    carries the direction tag, so a push can only succeed while
+    WRITING, a direction change can only succeed against an empty
+    list, and there is no window between "the buffer emptied" and "the
+    direction changed" for a write to slip through. The DRAIN tag
+    diverts gatherers to io_lock while a drain, seek, truncate or
+    close() must keep the buffer stable, which also means one detach
+    of the staged list covers a whole drain.
 
-    Gathering can run lockless because of two properties that are not
-    locks of this implementation:
+    io_lock serializes everything completion-shaped: raw stream I/O,
+    whole read operations (each read() returns a contiguous span of
+    the stream), flush/seek/truncate, direction changes, and closing
+    or detaching the raw stream. A flusher takes the entire staged
+    list in one exchange and writes it -- gathering continues
+    meanwhile -- keeping unwritten leftovers in `pending`
+    (flusher-owned) to go out first next time. A taken list is never
+    traversed by another thread, so nodes are freed immediately; no
+    deferred reclamation is needed.
 
-    * Ambient method atomicity: every method runs under the clinic
-      @critical_section (the GIL on default builds), which is suspended
-      whenever its holder blocks. Buffer fields are therefore only
-      mutated in runs of plain C code containing no GC-object
-      allocation, no calls into Python, and no signal checks; every
-      such run is atomic and leaves the invariants below intact. Bytes
-      objects and list storage are not GC-allocated, so chunk appends
-      and deletions qualify.
-    * Confinement: the chunk list is only touched inside such runs and
-      never escapes (raw._writev receives a fresh list), so its own
-      internal per-operation locking never contends and list contents
-      always agree with buf.offset/buf.nbytes.
+    Scalars read without the lock (write_pending, buf.nbytes, and the
+    buf.chunks NULL check in IS_CLOSED()) use atomic loads; tell() is
+    therefore approximate while another thread is mid-operation.
+    write_pending is credited before the push and debited as the
+    flusher writes, so it never undercounts staged bytes.
 
     Reentrancy: re-entering an operation that needs io_lock from the
     thread holding it (a signal handler or GC finalizer interrupting
     I/O) raises RuntimeError. A reentrant write() just gathers and
     succeeds -- e.g. print() from a signal handler interrupting a
-    flush buffers its output instead of failing.
+    flush stages its output instead of failing.
 
-    Invariants (between the atomic runs above):
-    * buf.nbytes == sum(len(c) for c in buf.chunks) - buf.offset
-    * 0 <= buf.offset < len(buf.chunks[0]) whenever chunks is
+    Invariants:
+    * For buf, pending and any morsel: nbytes == sum of chunk lengths
+      minus offset; 0 <= offset < len(chunks[0]) whenever chunks is
       non-empty; chunks never contains an empty bytes object.
-    * While writing, buf.nbytes <= buffer_size + bytes gathered by
-      writers that have deferred to an active flusher; a lone writer
-      stays within buffer_size except between gathering and flushing
-      its morsel.
+    * buf holds only read-ahead; pending and the staged list hold only
+      writes. write_pending == staged + pending + in-flight morsel
+      bytes (plus writes accounted just before their push).
+    * A lone writer stays within buffer_size except between gathering
+      and flushing its morsel; concurrent writers deferring to an
+      active flusher can exceed it transiently.
 */
 
 /* Acquire the I/O lock, the single lock of this implementation (see
@@ -458,14 +479,14 @@ buffered_lock_io(buffered *self)
     }
 
 #define IS_CLOSED(self) \
-    (!self->buf.chunks ? 1 : \
+    (FT_ATOMIC_LOAD_PTR_RELAXED(self->buf.chunks) == NULL ? 1 : \
     (self->fast_closed_checks \
      ? _PyFileIO_closed(self->raw) \
      : buffered_closed(self)))
 
 /* Unconsumed read-ahead (0 when the chunks are pending writes). */
 #define READAHEAD(self) \
-    (IS_READING(self) ? self->buf.nbytes : 0)
+    (IS_READING(self) ? FT_ATOMIC_LOAD_SSIZE_RELAXED(self->buf.nbytes) : 0)
 
 #define CHECK_CLOSED(self, error_msg) \
     do { \
@@ -489,9 +510,11 @@ nibbler_init(nibbler *nb)
     PyObject *chunks = PyList_New(0);
     if (chunks == NULL)
         return -1;
-    Py_XSETREF(nb->chunks, chunks);
+    PyObject *old = nb->chunks;
+    FT_ATOMIC_STORE_PTR_RELEASE(nb->chunks, chunks);
     nb->offset = 0;
-    nb->nbytes = 0;
+    FT_ATOMIC_STORE_SSIZE_RELAXED(nb->nbytes, 0);
+    Py_XDECREF(old);
     return 0;
 }
 
@@ -500,9 +523,72 @@ nibbler_init(nibbler *nb)
 static void
 nibbler_fini(nibbler *nb)
 {
-    Py_CLEAR(nb->chunks);
+    PyObject *old = nb->chunks;
+    FT_ATOMIC_STORE_PTR_RELEASE(nb->chunks, NULL);
     nb->offset = 0;
-    nb->nbytes = 0;
+    FT_ATOMIC_STORE_SSIZE_RELAXED(nb->nbytes, 0);
+    Py_XDECREF(old);
+}
+
+/* Free a staged list, dropping the chunk references. */
+static void
+wnode_free_list(wnode *node)
+{
+    while (node != NULL) {
+        wnode *next = node->next;
+        Py_DECREF(node->chunk);
+        PyMem_Free(node);
+        node = next;
+    }
+}
+
+/* Try to stage a node. Returns 1 when pushed (the node's reference is
+   transferred), 0 when the tag forbids gathering and the caller must
+   go through io_lock. With `locked` (io_lock held) a DRAIN tag is
+   also accepted: it can only belong to a close() in its flush window,
+   which drains again afterwards. */
+static int
+buffered_wpush(buffered *self, wnode *node, int locked)
+{
+    uintptr_t w = _Py_atomic_load_uintptr(&self->wstate);
+    for (;;) {
+        int tag = WSTATE_TAG(w);
+        if (tag != WTAG_WRITING && !(locked && tag == WTAG_DRAIN)) {
+            return 0;
+        }
+        node->next = WSTATE_PTR(w);
+        if (_Py_atomic_compare_exchange_uintptr(&self->wstate, &w,
+                                                WSTATE(node, tag))) {
+            return 1;
+        }
+        /* w was reloaded by the failed compare-exchange. */
+    }
+}
+
+/* Detach the entire staged list (newest first), leaving the tag. */
+static wnode *
+buffered_wtake(buffered *self)
+{
+    uintptr_t w = _Py_atomic_load_uintptr(&self->wstate);
+    for (;;) {
+        if (WSTATE_PTR(w) == NULL) {
+            return NULL;
+        }
+        if (_Py_atomic_compare_exchange_uintptr(&self->wstate, &w,
+                                                WSTATE(NULL, WSTATE_TAG(w)))) {
+            return WSTATE_PTR(w);
+        }
+    }
+}
+
+/* Change the tag, carrying the staged list over unchanged. */
+static void
+buffered_wtag_set(buffered *self, int tag)
+{
+    uintptr_t w = _Py_atomic_load_uintptr(&self->wstate);
+    while (!_Py_atomic_compare_exchange_uintptr(
+               &self->wstate, &w, WSTATE(WSTATE_PTR(w), tag))) {
+    }
 }
 
 static int
@@ -512,6 +598,8 @@ buffered_clear(PyObject *op)
     self->state = STATE_UNINITIALIZED;
     Py_CLEAR(self->raw);
     nibbler_fini(&self->buf);
+    nibbler_fini(&self->pending);
+    wnode_free_list(buffered_wtake(self));
     Py_CLEAR(self->raw_writev);
     Py_CLEAR(self->dict);
     return 0;
@@ -534,13 +622,12 @@ buffered_dealloc(PyObject *op)
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.__sizeof__
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered___sizeof___impl(buffered *self)
-/*[clinic end generated code: output=0231ef7f5053134e input=07a32d578073ea64]*/
+/*[clinic end generated code: output=0231ef7f5053134e input=753c782d808d34df]*/
 {
     /* Buffered data lives in separately-tracked bytes objects. */
     return PyLong_FromSize_t(_PyObject_SIZE(Py_TYPE(self)));
@@ -553,6 +640,8 @@ buffered_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(Py_TYPE(self));
     Py_VISIT(self->raw);
     Py_VISIT(self->buf.chunks);
+    Py_VISIT(self->pending.chunks);
+    /* Staged wnode chunks are plain bytes: never part of a cycle. */
     Py_VISIT(self->raw_writev);
     Py_VISIT(self->dict);
     return 0;
@@ -592,13 +681,12 @@ _io__Buffered__dealloc_warn_impl(buffered *self, PyObject *source)
 
 /* Flush and close */
 /*[clinic input]
-@critical_section
 _io._Buffered.flush as _io__Buffered_simple_flush
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_simple_flush_impl(buffered *self)
-/*[clinic end generated code: output=29ebb3820db1bdfd input=5248cb84a65f80bd]*/
+/*[clinic end generated code: output=29ebb3820db1bdfd input=f33ef045e7250767]*/
 {
     CHECK_INITIALIZED(self)
     return PyObject_CallMethodNoArgs(self->raw, &_Py_ID(flush));
@@ -619,29 +707,28 @@ buffered_closed(buffered *self)
 }
 
 /*[clinic input]
-@critical_section
 @getter
 _io._Buffered.closed
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_closed_get_impl(buffered *self)
-/*[clinic end generated code: output=f08ce57290703a1a input=18eddefdfe4a3d2f]*/
+/*[clinic end generated code: output=f08ce57290703a1a input=00b707b2517eaf8c]*/
 {
     CHECK_INITIALIZED(self)
     return PyObject_GetAttr(self->raw, &_Py_ID(closed));
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.close
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_close_impl(buffered *self)
-/*[clinic end generated code: output=7280b7b42033be0c input=56d95935b03fd326]*/
+/*[clinic end generated code: output=7280b7b42033be0c input=d20b83d1ddd7d805]*/
 {
     PyObject *res = NULL;
+    int prev_tag = -1;
     int r;
 
     CHECK_INITIALIZED(self)
@@ -660,7 +747,8 @@ _io__Buffered_close_impl(buffered *self)
     /* Keep write() from gathering until the raw stream is closed, so a
        racing write serializes behind the lock and sees the closed file
        (gh-31976). */
-    self->draining = 1;
+    prev_tag = WTAG(self);
+    buffered_wtag_set(self, WTAG_DRAIN);
 
     if (self->finalizing) {
         PyObject *r = _io__Buffered__dealloc_warn_impl(self, (PyObject *)self);
@@ -673,7 +761,7 @@ _io__Buffered_close_impl(buffered *self)
     _PyRecursiveMutex_Unlock(&self->io_lock);
     r = _PyFile_Flush((PyObject *)self);
     if (!buffered_lock_io(self)) {
-        self->draining = 0;
+        buffered_wtag_set(self, prev_tag);
         return NULL;
     }
     PyObject *exc = NULL;
@@ -683,8 +771,11 @@ _io__Buffered_close_impl(buffered *self)
 
     res = PyObject_CallMethodNoArgs(self->raw, &_Py_ID(close));
 
-    /* Drop the buffer; a NULL chunks also makes IS_CLOSED() true. */
+    /* Drop the buffers; a NULL chunks also makes IS_CLOSED() true. */
     nibbler_fini(&self->buf);
+    nibbler_fini(&self->pending);
+    wnode_free_list(buffered_wtake(self));
+    _Py_atomic_store_ssize(&self->write_pending, 0);
 
     if (exc != NULL) {
         _PyErr_ChainExceptions1(exc);
@@ -692,67 +783,69 @@ _io__Buffered_close_impl(buffered *self)
     }
 
 end:
-    self->draining = 0;
+    if (prev_tag != -1) {
+        buffered_wtag_set(self, prev_tag);
+    }
     _PyRecursiveMutex_Unlock(&self->io_lock);
     return res;
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.detach
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_detach_impl(buffered *self)
-/*[clinic end generated code: output=dd0fc057b8b779f7 input=d4ef1828a678be37]*/
+/*[clinic end generated code: output=dd0fc057b8b779f7 input=482762a345cc9f44]*/
 {
     PyObject *raw;
     CHECK_INITIALIZED(self)
     if (_PyFile_Flush((PyObject *)self) < 0) {
         return NULL;
     }
+    if (!buffered_lock_io(self)) {
+        return NULL;
+    }
     raw = self->raw;
     self->raw = NULL;
     self->state = STATE_DETACHED;
+    _PyRecursiveMutex_Unlock(&self->io_lock);
     return raw;
 }
 
 /* Inquiries */
 
 /*[clinic input]
-@critical_section
 _io._Buffered.seekable
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_seekable_impl(buffered *self)
-/*[clinic end generated code: output=90172abb5ceb6e8f input=e3a4fc1d297b2fd3]*/
+/*[clinic end generated code: output=90172abb5ceb6e8f input=7d35764f5fb5262b]*/
 {
     CHECK_INITIALIZED(self)
     return PyObject_CallMethodNoArgs(self->raw, &_Py_ID(seekable));
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.readable
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_readable_impl(buffered *self)
-/*[clinic end generated code: output=92afa07661ecb698 input=abe54107d59bca9a]*/
+/*[clinic end generated code: output=92afa07661ecb698 input=640619addb513b8b]*/
 {
     CHECK_INITIALIZED(self)
     return PyObject_CallMethodNoArgs(self->raw, &_Py_ID(readable));
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.writable
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_writable_impl(buffered *self)
-/*[clinic end generated code: output=4e3eee8d6f9d8552 input=45eb76bf6a10e6f7]*/
+/*[clinic end generated code: output=4e3eee8d6f9d8552 input=b35ea396b2201554]*/
 {
     CHECK_INITIALIZED(self)
     return PyObject_CallMethodNoArgs(self->raw, &_Py_ID(writable));
@@ -760,28 +853,26 @@ _io__Buffered_writable_impl(buffered *self)
 
 
 /*[clinic input]
-@critical_section
 @getter
 _io._Buffered.name
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_name_get_impl(buffered *self)
-/*[clinic end generated code: output=d2adf384051d3d10 input=6b84a0e6126f545e]*/
+/*[clinic end generated code: output=d2adf384051d3d10 input=5a60eb8d33149f6e]*/
 {
     CHECK_INITIALIZED(self)
     return PyObject_GetAttr(self->raw, &_Py_ID(name));
 }
 
 /*[clinic input]
-@critical_section
 @getter
 _io._Buffered.mode
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_mode_get_impl(buffered *self)
-/*[clinic end generated code: output=0feb205748892fa4 input=0762d5e28542fd8c]*/
+/*[clinic end generated code: output=0feb205748892fa4 input=8d5e4c1fed38e6f0]*/
 {
     CHECK_INITIALIZED(self)
     return PyObject_GetAttr(self->raw, &_Py_ID(mode));
@@ -790,26 +881,24 @@ _io__Buffered_mode_get_impl(buffered *self)
 /* Lower-level APIs */
 
 /*[clinic input]
-@critical_section
 _io._Buffered.fileno
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_fileno_impl(buffered *self)
-/*[clinic end generated code: output=b717648d58a95ee3 input=1c4fead777bae20a]*/
+/*[clinic end generated code: output=b717648d58a95ee3 input=768ea30b3f6314a7]*/
 {
     CHECK_INITIALIZED(self)
     return PyObject_CallMethodNoArgs(self->raw, &_Py_ID(fileno));
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.isatty
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_isatty_impl(buffered *self)
-/*[clinic end generated code: output=c20e55caae67baea input=e53d182d7e490e3a]*/
+/*[clinic end generated code: output=c20e55caae67baea input=9ea007b11559bee4]*/
 {
     CHECK_INITIALIZED(self)
     return PyObject_CallMethodNoArgs(self->raw, &_Py_ID(isatty));
@@ -894,6 +983,13 @@ _buffered_init(buffered *self)
     }
     if (nibbler_init(&self->buf) < 0)
         return -1;
+    if (nibbler_init(&self->pending) < 0)
+        return -1;
+    wnode_free_list(buffered_wtake(self));
+    _Py_atomic_store_uintptr(
+        &self->wstate,
+        WSTATE(NULL, CAN_READ(self) ? WTAG_READING : WTAG_WRITING));
+    _Py_atomic_store_ssize(&self->write_pending, 0);
 
     /* Vectored write support is optional on the raw stream. */
     Py_CLEAR(self->raw_writev);
@@ -904,8 +1000,6 @@ _buffered_init(buffered *self)
     }
 
     self->io_lock = (_PyRecursiveMutex){0};
-    self->io_in_flight = 0;
-    self->draining = 0;
     return 0;
 }
 
@@ -926,7 +1020,7 @@ nibbler_clear(nibbler *nb)
     if (nchunks > 0 && PyList_SetSlice(nb->chunks, 0, nchunks, NULL) < 0)
         return -1;
     nb->offset = 0;
-    nb->nbytes = 0;
+    FT_ATOMIC_STORE_SSIZE_RELAXED(nb->nbytes, 0);
     return 0;
 }
 
@@ -937,7 +1031,8 @@ nibbler_append(nibbler *nb, PyObject *chunk)
     assert(PyBytes_Check(chunk) && PyBytes_GET_SIZE(chunk) > 0);
     if (PyList_Append(nb->chunks, chunk) < 0)
         return -1;
-    nb->nbytes += PyBytes_GET_SIZE(chunk);
+    FT_ATOMIC_STORE_SSIZE_RELAXED(nb->nbytes,
+                                  nb->nbytes + PyBytes_GET_SIZE(chunk));
     return 0;
 }
 
@@ -971,7 +1066,7 @@ nibbler_consume(nibbler *nb, char *dst, Py_ssize_t n)
     if (whole > 0 && PyList_SetSlice(nb->chunks, 0, whole, NULL) < 0)
         return -1;
     nb->offset = offset;
-    nb->nbytes -= n;
+    FT_ATOMIC_STORE_SSIZE_RELAXED(nb->nbytes, nb->nbytes - n);
     return 0;
 }
 
@@ -992,7 +1087,7 @@ nibbler_take_bytes(nibbler *nb, Py_ssize_t n)
                 Py_DECREF(chunk);
                 return NULL;
             }
-            nb->nbytes -= n;
+            FT_ATOMIC_STORE_SSIZE_RELAXED(nb->nbytes, nb->nbytes - n);
             return chunk;
         }
     }
@@ -1040,7 +1135,7 @@ nibbler_drop_tail(nibbler *nb, Py_ssize_t excess)
                 return -1;
             if (i == 0)
                 nb->offset = 0;
-            nb->nbytes -= avail;
+            FT_ATOMIC_STORE_SSIZE_RELAXED(nb->nbytes, nb->nbytes - avail);
             excess -= avail;
         }
         else {
@@ -1051,12 +1146,13 @@ nibbler_drop_tail(nibbler *nb, Py_ssize_t excess)
             PyList_SetItem(nb->chunks, i, head);    /* steals head */
             if (i == 0)
                 nb->offset = 0;
-            nb->nbytes -= excess;
+            FT_ATOMIC_STORE_SSIZE_RELAXED(nb->nbytes, nb->nbytes - excess);
             excess = 0;
         }
     }
     return 0;
 }
+
 
 /* Call raw.readinto() to fill `len` bytes at `start`. Returns bytes
    read (0 on EOF), -1 on error, -2 when the raw stream would block. */
@@ -1231,70 +1327,71 @@ buffered_write_step(buffered *self, nibbler *m)
     return raw_write_result(res, m->nbytes, errnum, "_writev()");
 }
 
-/* Detach the entire buffer into *morsel; the object keeps a fresh
-   empty list, so gathering can continue while the morsel is written. */
+/* Build the morsel: leftovers of an earlier blocked flush first
+   (oldest), then the staged chunks in FIFO order. When the final
+   chunk is `own` -- the calling write()'s chunk -- *own_tail is its
+   length: the only bytes a blocked flush may drop. Caller holds
+   io_lock. */
 static int
-buffered_take_morsel(buffered *self, nibbler *morsel)
+buffered_take_morsel(buffered *self, nibbler *morsel, PyObject *own,
+                     Py_ssize_t *own_tail)
 {
-    nibbler fresh = {0};
-    if (nibbler_init(&fresh) < 0)
+    *own_tail = 0;
+    PyObject *fresh = PyList_New(0);
+    if (fresh == NULL)
         return -1;
-    *morsel = self->buf;
-    self->buf = fresh;
-    self->io_in_flight = morsel->nbytes;
-    return 0;
-}
+    *morsel = self->pending;
+    self->pending.chunks = fresh;
+    self->pending.offset = 0;
+    self->pending.nbytes = 0;
 
-/* Return unwritten morsel bytes to the front of the buffer: they are
-   older than anything gathered while the morsel was being written. */
-static int
-buffered_return_morsel(buffered *self, nibbler *morsel)
-{
-    self->io_in_flight = 0;
-    int ret = 0;
-    if (morsel->nbytes > 0) {
-        assert(self->buf.offset == 0);
-        if (PyList_GET_SIZE(self->buf.chunks) == 0) {
-            /* Nothing was gathered meanwhile: take the list back. */
-            Py_SETREF(self->buf.chunks, morsel->chunks);
-            morsel->chunks = NULL;
-            self->buf.offset = morsel->offset;
-            self->buf.nbytes = morsel->nbytes;
-            return 0;
-        }
-        if (PyList_SetSlice(self->buf.chunks, 0, 0, morsel->chunks) < 0) {
-            ret = -1;       /* the leftover morsel bytes are lost */
-        }
-        else {
-            self->buf.offset = morsel->offset;
-            self->buf.nbytes += morsel->nbytes;
-        }
+    /* Reverse the staged LIFO into FIFO order. */
+    wnode *fifo = NULL;
+    for (wnode *node = buffered_wtake(self); node != NULL; ) {
+        wnode *next = node->next;
+        node->next = fifo;
+        fifo = node;
+        node = next;
     }
-    nibbler_fini(morsel);
-    return ret;
+    int err = 0;
+    while (fifo != NULL) {
+        wnode *next = fifo->next;
+        if (err == 0)
+            err = nibbler_append(morsel, fifo->chunk);
+        if (err != 0) {
+            /* The chunk is dropped; keep the pending count honest. */
+            _Py_atomic_add_ssize(&self->write_pending,
+                                 -PyBytes_GET_SIZE(fifo->chunk));
+        }
+        Py_DECREF(fifo->chunk);
+        PyMem_Free(fifo);
+        fifo = next;
+    }
+    Py_ssize_t nchunks = PyList_GET_SIZE(morsel->chunks);
+    if (own != NULL && nchunks > 0
+        && PyList_GET_ITEM(morsel->chunks, nchunks - 1) == own) {
+        *own_tail = PyBytes_GET_SIZE(own);
+    }
+    return err;
 }
 
-/* Write one morsel: detach everything currently buffered and submit it
-   until done or the raw stream blocks; unwritten leftovers return to
-   the front of the buffer. Bytes gathered concurrently are not
-   written. Caller holds io_lock.
-
-   The morsel's final `own_tail` bytes belong to the calling write();
-   when the raw stream blocks, leftovers beyond buffer_size are dropped
-   from that span only (never from bytes other writers gathered) and
-   reported via *dropped so the caller can raise BlockingIOError.
-
-   Returns 0 when the morsel was fully written, 1 when the raw stream
-   would block (no exception set), -1 on error. */
+/* Write one morsel -- the pending leftovers plus everything staged --
+   until done or the raw stream blocks. Unwritten leftovers stay with
+   the flusher in `pending`, to go out first next time; gathering
+   continues meanwhile and is not written. `own` and *dropped carry
+   the blocked-write accounting (see buffered_take_morsel). Caller
+   holds io_lock. Returns 0 when everything was written, 1 when the
+   raw stream would block (no exception set), -1 on error. */
 static int
-buffered_flush_locked(buffered *self, Py_ssize_t own_tail, Py_ssize_t *dropped)
+buffered_flush_locked(buffered *self, PyObject *own, Py_ssize_t *dropped)
 {
     if (dropped != NULL)
         *dropped = 0;
-    if (self->buf.nbytes == 0)
+    if (_Py_atomic_load_ssize(&self->write_pending) == 0)
         return 0;
     nibbler morsel;
-    if (buffered_take_morsel(self, &morsel) < 0)
+    Py_ssize_t own_tail;
+    if (buffered_take_morsel(self, &morsel, own, &own_tail) < 0)
         return -1;
     int ret = 0;
     while (morsel.nbytes > 0) {
@@ -1307,7 +1404,7 @@ buffered_flush_locked(buffered *self, Py_ssize_t own_tail, Py_ssize_t *dropped)
             ret = -1;
             break;
         }
-        self->io_in_flight = morsel.nbytes;
+        _Py_atomic_add_ssize(&self->write_pending, -n);
         /* Partial writes can return successfully when interrupted by a
            signal (see write(2)). We must run signal handlers before
            blocking another time, possibly indefinitely. */
@@ -1317,60 +1414,75 @@ buffered_flush_locked(buffered *self, Py_ssize_t own_tail, Py_ssize_t *dropped)
         }
     }
     if (ret == 1 && own_tail > 0 && morsel.nbytes > self->buffer_size) {
+        /* Blocked: beyond buffer_size, drop -- but only bytes of the
+           calling write()'s own chunk, never other writers' data. */
         Py_ssize_t excess = Py_MIN(morsel.nbytes - self->buffer_size,
                                    own_tail);
         if (nibbler_drop_tail(&morsel, excess) < 0) {
             ret = -1;
         }
-        else if (dropped != NULL) {
-            *dropped = excess;
+        else {
+            _Py_atomic_add_ssize(&self->write_pending, -excess);
+            if (dropped != NULL)
+                *dropped = excess;
         }
     }
-    if (buffered_return_morsel(self, &morsel) < 0)
-        return -1;
+    if (morsel.nbytes > 0) {
+        assert(self->pending.nbytes == 0);
+        nibbler_fini(&self->pending);
+        self->pending = morsel;
+    }
+    else {
+        nibbler_fini(&morsel);
+    }
     return ret;
 }
 
-/* Flush until the buffer is empty. `draining` diverts concurrent
-   write() calls to wait on io_lock, so new gathering cannot keep this
-   loop running forever. Same returns as buffered_flush_locked(). */
+/* Empty the buffer completely. The DRAIN tag makes gatherers divert
+   to io_lock, so a single take covers everything; leftovers remain
+   only when the raw stream blocked. Caller holds io_lock. Same
+   returns as buffered_flush_locked(). */
 static int
 buffered_drain_locked(buffered *self)
 {
-    int r = 0;
-    char prev_draining = self->draining;
-    self->draining = 1;
-    while (self->buf.nbytes > 0
-           && (r = buffered_flush_locked(self, 0, NULL)) == 0)
-        ;
-    self->draining = prev_draining;
+    int prev = WTAG(self);
+    if (prev == WTAG_READING)
+        return 0;
+    buffered_wtag_set(self, WTAG_DRAIN);
+    int r = buffered_flush_locked(self, NULL, NULL);
+    buffered_wtag_set(self, prev);
     return r;
 }
 
 
 /* Make the nibbler hold read-ahead, draining pending writes first.
-   Caller holds io_lock. A blocked drain raises BlockingIOError and
-   leaves the object writing, with the unwritten data still
-   buffered. */
+   Under DRAIN no gather can land, so a clean drain really leaves the
+   buffer empty and the flip is exact. Caller holds io_lock. A blocked
+   drain raises BlockingIOError and leaves the object writing, with
+   the unwritten data still buffered. */
 static int
 buffered_ensure_reading(buffered *self)
 {
     if (IS_READING(self))
         return 0;
-    int r = buffered_drain_locked(self);
-    if (r < 0)
-        return -1;
+    buffered_wtag_set(self, WTAG_DRAIN);
+    int r = buffered_flush_locked(self, NULL, NULL);
+    if (r == 0) {
+        _Py_atomic_store_uintptr(&self->wstate,
+                                 WSTATE(NULL, WTAG_READING));
+        return 0;
+    }
+    buffered_wtag_set(self, WTAG_WRITING);
     if (r > 0) {
         _set_BlockingIOError("write could not complete without blocking", 0);
-        return -1;
     }
-    self->rw_state = NIBBLER_RANDOM_READING;
-    return 0;
+    return -1;
 }
 
 /* Make the nibbler hold pending writes, rewinding the raw stream
    past unread read-ahead so the next write lands at the logical
-   position. Caller holds io_lock. */
+   position. Caller holds io_lock; gatherers cannot push while the
+   tag is READING, so the store is safe. */
 static int
 buffered_ensure_writing(buffered *self)
 {
@@ -1382,7 +1494,7 @@ buffered_ensure_writing(buffered *self)
         if (nibbler_clear(&self->buf) < 0)
             return -1;
     }
-    self->rw_state = NIBBLER_RANDOM_WRITING;
+    _Py_atomic_store_uintptr(&self->wstate, WSTATE(NULL, WTAG_WRITING));
     return 0;
 }
 
@@ -1558,13 +1670,12 @@ buffered_readline_locked(buffered *self, Py_ssize_t limit)
  */
 
 /*[clinic input]
-@critical_section
 _io._Buffered.flush
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_flush_impl(buffered *self)
-/*[clinic end generated code: output=da2674ef1ce71f3a input=6b30de9f083419c2]*/
+/*[clinic end generated code: output=da2674ef1ce71f3a input=fda63444697c6bf4]*/
 {
     PyObject *res = NULL;
 
@@ -1589,7 +1700,6 @@ end:
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.peek
     size: Py_ssize_t = 0
     /
@@ -1598,7 +1708,7 @@ _io._Buffered.peek
 
 static PyObject *
 _io__Buffered_peek_impl(buffered *self, Py_ssize_t size)
-/*[clinic end generated code: output=ba7a097ca230102b input=56733376f926d982]*/
+/*[clinic end generated code: output=ba7a097ca230102b input=37ffb97d06ff4adb]*/
 {
     PyObject *res = NULL;
 
@@ -1640,7 +1750,6 @@ end:
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.read
     size as n: Py_ssize_t(accept={int, NoneType}) = -1
     /
@@ -1648,7 +1757,7 @@ _io._Buffered.read
 
 static PyObject *
 _io__Buffered_read_impl(buffered *self, Py_ssize_t n)
-/*[clinic end generated code: output=f41c78bb15b9bbe9 input=bdb4b0425b295472]*/
+/*[clinic end generated code: output=f41c78bb15b9bbe9 input=7df81e82e08a68a2]*/
 {
     PyObject *res = NULL;
 
@@ -1702,7 +1811,6 @@ end:
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.read1
     size as n: Py_ssize_t = -1
     /
@@ -1710,7 +1818,7 @@ _io._Buffered.read1
 
 static PyObject *
 _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
-/*[clinic end generated code: output=bcc4fb4e54d103a3 input=3d0ad241aa52b36c]*/
+/*[clinic end generated code: output=bcc4fb4e54d103a3 input=7d22de9630b61774]*/
 {
     CHECK_INITIALIZED(self)
     if (n < 0) {
@@ -1783,7 +1891,6 @@ end:
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.readinto
     buffer: Py_buffer(accept={rwbuffer})
     /
@@ -1791,13 +1898,12 @@ _io._Buffered.readinto
 
 static PyObject *
 _io__Buffered_readinto_impl(buffered *self, Py_buffer *buffer)
-/*[clinic end generated code: output=bcb376580b1d8170 input=777c33e7adaa2bcd]*/
+/*[clinic end generated code: output=bcb376580b1d8170 input=ed6b98b7a20a3008]*/
 {
     return _buffered_readinto_generic(self, buffer, 0);
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.readinto1
     buffer: Py_buffer(accept={rwbuffer})
     /
@@ -1805,7 +1911,7 @@ _io._Buffered.readinto1
 
 static PyObject *
 _io__Buffered_readinto1_impl(buffered *self, Py_buffer *buffer)
-/*[clinic end generated code: output=6e5c6ac5868205d6 input=ef03cc5fc92a6895]*/
+/*[clinic end generated code: output=6e5c6ac5868205d6 input=4455c5d55fdf1687]*/
 {
     return _buffered_readinto_generic(self, buffer, 1);
 }
@@ -1826,7 +1932,6 @@ _buffered_readline(buffered *self, Py_ssize_t limit)
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.readline
     size: Py_ssize_t(accept={int, NoneType}) = -1
     /
@@ -1834,7 +1939,7 @@ _io._Buffered.readline
 
 static PyObject *
 _io__Buffered_readline_impl(buffered *self, Py_ssize_t size)
-/*[clinic end generated code: output=24dd2aa6e33be83c input=e81ca5abd4280776]*/
+/*[clinic end generated code: output=24dd2aa6e33be83c input=673b6240e315ef8a]*/
 {
     CHECK_INITIALIZED(self)
     return _buffered_readline(self, size);
@@ -1842,13 +1947,12 @@ _io__Buffered_readline_impl(buffered *self, Py_ssize_t size)
 
 
 /*[clinic input]
-@critical_section
 _io._Buffered.tell
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_tell_impl(buffered *self)
-/*[clinic end generated code: output=386972ae84716c1e input=ab12e67d8abcb42f]*/
+/*[clinic end generated code: output=386972ae84716c1e input=ad61e04a6b349573]*/
 {
     Py_off_t pos;
 
@@ -1859,11 +1963,11 @@ _io__Buffered_tell_impl(buffered *self)
     if (IS_WRITING(self)) {
         /* Pending writes -- gathered or in a morsel mid-write -- sit
            past the raw position. */
-        pos += self->buf.nbytes + self->io_in_flight;
+        pos += _Py_atomic_load_ssize(&self->write_pending);
     }
     else {
         /* Read-ahead sits between the logical and the raw position. */
-        pos -= self->buf.nbytes;
+        pos -= FT_ATOMIC_LOAD_SSIZE_RELAXED(self->buf.nbytes);
 
         // GH-95782
         if (pos < 0)
@@ -1874,7 +1978,6 @@ _io__Buffered_tell_impl(buffered *self)
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.seek
     target as targetobj: object
     whence: int = 0
@@ -1883,7 +1986,7 @@ _io._Buffered.seek
 
 static PyObject *
 _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
-/*[clinic end generated code: output=7ae0e8dc46efdefb input=b5a12be70e0ad07b]*/
+/*[clinic end generated code: output=7ae0e8dc46efdefb input=a9c4920bfcba6163]*/
 {
     Py_off_t target, n;
     PyObject *res = NULL;
@@ -1920,9 +2023,14 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
     if (!buffered_lock_io(self))
         return NULL;
 
+    int prev_tag = -1;
     if (IS_WRITING(self)) {
         /* The drain moves the raw position up to the logical position,
-           so a SEEK_CUR target needs no adjustment. */
+           so a SEEK_CUR target needs no adjustment. Keep gathering
+           paused until the raw seek is done, so no write lands at the
+           old position after the drain. */
+        prev_tag = WTAG(self);
+        buffered_wtag_set(self, WTAG_DRAIN);
         int r = buffered_drain_locked(self);
         if (r > 0) {
             _set_BlockingIOError("write could not complete without blocking",
@@ -1946,12 +2054,14 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
     res = PyLong_FromOff_t(n);
 
 end:
+    if (prev_tag != -1) {
+        buffered_wtag_set(self, prev_tag);
+    }
     _PyRecursiveMutex_Unlock(&self->io_lock);
     return res;
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.truncate
     cls: defining_class
     pos: object = None
@@ -1960,7 +2070,7 @@ _io._Buffered.truncate
 
 static PyObject *
 _io__Buffered_truncate_impl(buffered *self, PyTypeObject *cls, PyObject *pos)
-/*[clinic end generated code: output=fe3882fbffe79f1a input=e3cbf794575bd794]*/
+/*[clinic end generated code: output=fe3882fbffe79f1a input=f5b737d97d76303f]*/
 {
     PyObject *res = NULL;
 
@@ -1974,9 +2084,11 @@ _io__Buffered_truncate_impl(buffered *self, PyTypeObject *cls, PyObject *pos)
         return NULL;
 
     /* Drain pending writes, or rewind past read-ahead, so that
-       raw.truncate(None) acts at the logical position. */
+       raw.truncate(None) acts at the logical position; keep gathering
+       paused until the raw truncate is done. */
     if (buffered_ensure_writing(self) < 0)
         goto end;
+    buffered_wtag_set(self, WTAG_DRAIN);
     int r = buffered_drain_locked(self);
     if (r > 0) {
         _set_BlockingIOError("write could not complete without blocking", 0);
@@ -1987,6 +2099,9 @@ _io__Buffered_truncate_impl(buffered *self, PyTypeObject *cls, PyObject *pos)
     res = PyObject_CallMethodOneArg(self->raw, &_Py_ID(truncate), pos);
 
 end:
+    if (IS_WRITING(self)) {
+        buffered_wtag_set(self, WTAG_WRITING);
+    }
     _PyRecursiveMutex_Unlock(&self->io_lock);
     return res;
 }
@@ -2006,9 +2121,7 @@ buffered_iternext(PyObject *op)
         tp == state->PyBufferedRandom_Type)
     {
         /* Skip method call overhead for speed */
-        Py_BEGIN_CRITICAL_SECTION(self);
         line = _buffered_readline(self, -1);
-        Py_END_CRITICAL_SECTION();
     }
     else {
         line = PyObject_CallMethodNoArgs((PyObject *)self,
@@ -2095,7 +2208,7 @@ _io_BufferedReader___init___impl(buffered *self, PyObject *raw,
 
     Py_XSETREF(self->raw, Py_NewRef(raw));
     self->buffer_size = buffer_size;
-    self->rw_state = NIBBLER_READER;
+    self->caps = CAPS_READ;
 
     if (_buffered_init(self) < 0)
         return -1;
@@ -2141,7 +2254,7 @@ _io_BufferedWriter___init___impl(buffered *self, PyObject *raw,
 
     Py_INCREF(raw);
     Py_XSETREF(self->raw, raw);
-    self->rw_state = NIBBLER_WRITER;
+    self->caps = CAPS_WRITE;
 
     self->buffer_size = buffer_size;
     if (_buffered_init(self) < 0)
@@ -2156,35 +2269,15 @@ _io_BufferedWriter___init___impl(buffered *self, PyObject *raw,
     return 0;
 }
 
-/* Gather the data of one write(). Immutable bytes are appended
-   without a copy; everything else is copied because the caller may
-   modify the buffer after write() returns. */
-static int
-buffered_gather(buffered *self, Py_buffer *buffer)
-{
-    PyObject *chunk;
-    if (PyBytes_CheckExact(buffer->obj)) {
-        chunk = Py_NewRef(buffer->obj);
-    }
-    else {
-        chunk = PyBytes_FromStringAndSize(buffer->buf, buffer->len);
-        if (chunk == NULL)
-            return -1;
-    }
-    int err = nibbler_append(&self->buf, chunk);
-    Py_DECREF(chunk);
-    return err;
-}
-
 /* The morsel write of a write() that reached buffer_size; the gathered
    bytes are the morsel tail because nothing can gather between append
    and flush (no blocking points). Caller holds io_lock. Returns the
    write() result. */
 static PyObject *
-buffered_write_flush_locked(buffered *self, Py_ssize_t len)
+buffered_write_flush_locked(buffered *self, PyObject *own, Py_ssize_t len)
 {
     Py_ssize_t dropped;
-    if (buffered_flush_locked(self, len, &dropped) < 0)
+    if (buffered_flush_locked(self, own, &dropped) < 0)
         return NULL;
     if (dropped > 0) {
         /* Blocked, and not everything fit within buffer_size: the
@@ -2197,7 +2290,6 @@ buffered_write_flush_locked(buffered *self, Py_ssize_t len)
 }
 
 /*[clinic input]
-@critical_section
 _io.BufferedWriter.write
     buffer: Py_buffer
     /
@@ -2205,7 +2297,7 @@ _io.BufferedWriter.write
 
 static PyObject *
 _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
-/*[clinic end generated code: output=7f8d1365759bfc6b input=6a9c041de0c337be]*/
+/*[clinic end generated code: output=7f8d1365759bfc6b input=dd87dd85fc7f8850]*/
 {
     CHECK_INITIALIZED(self)
 
@@ -2221,49 +2313,82 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
         return PyLong_FromSsize_t(0);
     }
 
-    /* Turning read-ahead around, or waiting out a transition drain,
-       needs the I/O lock up front; plain gathering below does not. */
-    if (!IS_WRITING(self) || self->draining) {
-        if (!buffered_lock_io(self))
+    /* Immutable bytes are gathered without a copy; everything else is
+       copied because the caller may modify it after write() returns. */
+    PyObject *chunk;
+    if (PyBytes_CheckExact(buffer->obj)) {
+        chunk = Py_NewRef(buffer->obj);
+    }
+    else {
+        chunk = PyBytes_FromStringAndSize(buffer->buf, buffer->len);
+        if (chunk == NULL)
             return NULL;
-        PyObject *res = NULL;
-        /* Issue #31976: re-check for a file closed while we waited. */
-        r = IS_CLOSED(self);
-        if (r > 0) {
-            PyErr_SetString(PyExc_ValueError, "write to closed file");
+    }
+    wnode *node = PyMem_Malloc(sizeof(wnode));
+    if (node == NULL) {
+        Py_DECREF(chunk);
+        return PyErr_NoMemory();
+    }
+    assert(((uintptr_t)node & WTAG_MASK) == 0);
+    node->chunk = Py_NewRef(chunk);
+
+    /* Account before pushing: a flusher may take the node the instant
+       it is staged, and it debits as it writes. */
+    Py_ssize_t total = _Py_atomic_add_ssize(&self->write_pending,
+                                            buffer->len) + buffer->len;
+    PyObject *res = NULL;
+    if (buffered_wpush(self, node, 0)) {
+        if (total < self->buffer_size) {
+            Py_DECREF(chunk);
+            return PyLong_FromSsize_t(buffer->len);
         }
-        else if (r == 0
-                 && buffered_ensure_writing(self) == 0
-                 && buffered_gather(self, buffer) == 0) {
-            if (self->buf.nbytes < self->buffer_size)
-                res = PyLong_FromSsize_t(buffer->len);
-            else
-                res = buffered_write_flush_locked(self, buffer->len);
+        /* buffer_size reached: write the morsel out. If a flusher is
+           already active -- possibly this same thread, reentrantly --
+           the staged bytes are left for it or for a later writer. */
+        if (_PyRecursiveMutex_IsLockedByCurrentThread(&self->io_lock)
+            || _PyRecursiveMutex_LockTimed(&self->io_lock, 0, 0)
+               != PY_LOCK_ACQUIRED) {
+            Py_DECREF(chunk);
+            return PyLong_FromSsize_t(buffer->len);
         }
+        res = buffered_write_flush_locked(self, chunk, buffer->len);
         _PyRecursiveMutex_Unlock(&self->io_lock);
+        Py_DECREF(chunk);
         return res;
     }
 
-    if (buffered_gather(self, buffer) < 0)
-        return NULL;
-
-    if (self->buf.nbytes < self->buffer_size) {
-        return PyLong_FromSsize_t(buffer->len);
+    /* Reading direction, or a drain in progress: the lock path. */
+    if (!buffered_lock_io(self)) {
+        goto fail;
     }
-
-    /* buffer_size reached: the gathered chunks form a morsel, write it
-       out. If a flusher is already active -- possibly this same
-       thread, reentrantly -- leave the bytes gathered for it (or for a
-       later writer) rather than waiting. */
-    if (_PyRecursiveMutex_IsLockedByCurrentThread(&self->io_lock)
-        || _PyRecursiveMutex_LockTimed(&self->io_lock, 0, 0)
-           != PY_LOCK_ACQUIRED) {
-        return PyLong_FromSsize_t(buffer->len);
+    /* Issue #31976: re-check for a file closed while we waited. */
+    r = IS_CLOSED(self);
+    if (r > 0) {
+        PyErr_SetString(PyExc_ValueError, "write to closed file");
     }
-    PyObject *res = buffered_write_flush_locked(self, buffer->len);
+    if (r != 0 || buffered_ensure_writing(self) < 0) {
+        _PyRecursiveMutex_Unlock(&self->io_lock);
+        goto fail;
+    }
+    int pushed = buffered_wpush(self, node, 1);
+    assert(pushed);
+    (void)pushed;
+    if (total < self->buffer_size)
+        res = PyLong_FromSsize_t(buffer->len);
+    else
+        res = buffered_write_flush_locked(self, chunk, buffer->len);
     _PyRecursiveMutex_Unlock(&self->io_lock);
+    Py_DECREF(chunk);
     return res;
+
+fail:
+    _Py_atomic_add_ssize(&self->write_pending, -buffer->len);
+    Py_DECREF(node->chunk);
+    PyMem_Free(node);
+    Py_DECREF(chunk);
+    return NULL;
 }
+
 
 
 
@@ -2537,7 +2662,7 @@ _io_BufferedRandom___init___impl(buffered *self, PyObject *raw,
     Py_INCREF(raw);
     Py_XSETREF(self->raw, raw);
     self->buffer_size = buffer_size;
-    self->rw_state = NIBBLER_RANDOM_READING;
+    self->caps = CAPS_READ | CAPS_WRITE;
 
     if (_buffered_init(self) < 0)
         return -1;
