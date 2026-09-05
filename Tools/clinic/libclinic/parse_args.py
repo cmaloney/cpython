@@ -6,7 +6,7 @@ from libclinic import fail, warn, unspecified, Sentinels
 from libclinic.function import (
     Function, Parameter, ParamTuple,
     count_required, group_to_variable_name, permute_optional_groups,
-    GETTER, SETTER, METHOD_INIT,
+    GETTER, SETTER, METHOD_INIT, METHOD_NEW,
     ACCESSORS, SETTERS)
 from libclinic.converter import CConverter
 from libclinic.converters import (
@@ -1287,6 +1287,7 @@ class ParseArgsCodeGen:
         self.parser_definition = '\n'.join([
             self.parser_prototype,
             '{{',
+            *self._new_pre_parse(indent=4),
             '    return {c_basename}_helper({self_name}, '
                 '_PyTuple_CAST(args)->ob_item,',
             '        PyTuple_GET_SIZE(args),',
@@ -1294,6 +1295,32 @@ class ParseArgsCodeGen:
             '        kwargs, NULL);',
             '}}',
         ])
+
+    def _new_pre_parse(self, *, indent: int) -> list[str]:
+        """tp_new call of the @vectorcall pre-parse function, if any.
+
+        Returns from the enclosing tp_new when the function handles the
+        call or fails; otherwise falls through to normal parsing.
+        """
+        fn = self.func.vectorcall_pre_parse
+        if fn is None:
+            return []
+        assert self.func.kind is METHOD_NEW
+        return [libclinic.normalize_snippet(f"""
+            {{{{
+                PyObject *pre_parse_result;
+                int pre_parse_rc = {fn}(type, _PyTuple_CAST(args)->ob_item,
+                    PyTuple_GET_SIZE(args),
+                    kwargs ? PyDict_GET_SIZE(kwargs) : 0,
+                    kwargs, NULL, &pre_parse_result);
+                if (pre_parse_rc < 0) {{{{
+                    return NULL;
+                }}}}
+                if (pre_parse_rc > 0) {{{{
+                    return pre_parse_result;
+                }}}}
+            }}}}
+            """, indent=indent)]
 
     def _new_or_init_parser_body(self) -> None:
         """Rebuild the parser body with the checks tp_new / tp_init need."""
@@ -1310,6 +1337,7 @@ class ParseArgsCodeGen:
 
         if not parses_keywords:
             self.declarations = '{base_type_ptr}'
+            fields = self._new_pre_parse(indent=4) + fields
             self.codegen.add_include('pycore_modsupport.h',
                                      '_PyArg_NoKeywords()')
             fields.insert(0, libclinic.normalize_snippet("""
@@ -1426,6 +1454,27 @@ class ParseArgsCodeGen:
             /* Make sure the type object is immutable: the generated
              * vectorcall doesn't deal e.g. with users reassigning __init__. */
             assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+            """, indent=4)] + self._vectorcall_pre_parse()
+
+    def _vectorcall_pre_parse(self) -> list[str]:
+        """Vectorcall call of the @vectorcall pre-parse function, if any."""
+        fn = self.func.vectorcall_pre_parse
+        if fn is None:
+            return []
+        assert self.func.kind is METHOD_NEW
+        return [libclinic.normalize_snippet(f"""
+            {{{{
+                PyObject *pre_parse_result;
+                int pre_parse_rc = {fn}(_PyType_CAST(type), args, nargs,
+                    kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+                    NULL, kwnames, &pre_parse_result);
+                if (pre_parse_rc < 0) {{{{
+                    return NULL;
+                }}}}
+                if (pre_parse_rc > 0) {{{{
+                    return pre_parse_result;
+                }}}}
+            }}}}
             """, indent=4)]
 
     def _vectorcall_positional(self, *,
@@ -1477,10 +1526,9 @@ class ParseArgsCodeGen:
     def parse_vectorcall_pos_only(self) -> None:
         """All positional sometimes optional arguments."""
         parser_code = self._vectorcall_type_check()
-        self.codegen.add_include('pycore_modsupport.h',
-                                 '_PyArg_NoKwnames()')
         parser_code.append(libclinic.normalize_snippet("""
-            if (!_PyArg_NoKwnames("{name}", kwnames)) {{
+            if (kwnames && PyTuple_GET_SIZE(kwnames)) {{
+                PyErr_SetString(PyExc_TypeError, "{name}() takes no keyword arguments");
                 goto exit;
             }}
             """, indent=4))

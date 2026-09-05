@@ -2919,6 +2919,27 @@ class ClinicParserTest(TestCase):
         """
         self.expect_failure(block, err, lineno=2)
 
+    def test_vectorcall_pre_parse_on_init(self):
+        err = "@vectorcall pre-parse function is only supported for __new__"
+        block = """
+            module m
+            class Foo "FooObject *" "&Foo_Type"
+            @vectorcall foo_pre_parse
+            Foo.__init__
+        """
+        self.expect_failure(block, err, lineno=3)
+
+    def test_vectorcall_too_many_arguments(self):
+        err = "@vectorcall takes at most one argument"
+        block = """
+            module m
+            class Foo "FooObject *" "&Foo_Type"
+            @vectorcall foo_pre_parse extra
+            @classmethod
+            Foo.__new__
+        """
+        self.expect_failure(block, err, lineno=2)
+
     def test_vectorcall_on_init(self):
         block = """
             module m
@@ -2945,16 +2966,6 @@ class ClinicParserTest(TestCase):
         func = self.parse_function(block, signatures_in_block=3,
                                    function_index=2)
         self.assertTrue(func.vectorcall)
-
-    def test_vectorcall_takes_no_arguments(self):
-        err = "at_vectorcall() takes 1 positional argument but 2 were given"
-        block = """
-            module m
-            class Foo "FooObject *" "Foo_Type"
-            @vectorcall bogus=True
-            Foo.__init__
-        """
-        self.expect_failure(block, err, lineno=2)
 
     def test_vectorcall_without_type_object(self):
         err = "@vectorcall requires the type object of 'Foo'"
@@ -5209,6 +5220,27 @@ class VectorcallFunctionalTest(unittest.TestCase):
         obj = ac_tester.VcInitNew.__new__(ac_tester.VcInitNew, 1, 2)
         self.assertEqual(obj.new_nargs, 3)
         self.assertIsNone(obj.__init__(a=5))
+
+    def test_vc_pre_parse(self):
+        # The pre-parse function runs before any parsing from both the
+        # vectorcall and tp_new: a lone bytes argument is handled by it,
+        # anything else falls through to the generated parser.
+        for cls in (ac_tester.VcPreParse, ac_tester.VcPreParsePos):
+            with self.subTest(cls=cls.__name__):
+                self.assertEqual(cls(b'x'), b'x')
+                self.assertEqual(cls.__new__(cls, b'x'), b'x')
+                self.assertIsInstance(cls(), cls)
+                self.assertIsInstance(cls(1), cls)
+                self.assertIsInstance(cls.__new__(cls, 1), cls)
+                with self.assertRaises(TypeError):
+                    cls(b'x', 2)
+                with self.assertRaisesRegex(ValueError, "pre-parse error"):
+                    cls(b'error')
+                with self.assertRaisesRegex(ValueError, "pre-parse error"):
+                    cls.__new__(cls, b'error')
+        # A keyword call is not the special form (nkw != 0).
+        self.assertIsInstance(ac_tester.VcPreParse(a=b'x'),
+                              ac_tester.VcPreParse)
 
     def test_parse_errors_match_slot(self):
         # tp_vectorcall and tp_new/tp_init slot should match in argument parsing

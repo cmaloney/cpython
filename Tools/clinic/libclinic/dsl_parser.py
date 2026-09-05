@@ -308,6 +308,7 @@ class DSLParser:
         self.target_critical_section = []
         self.disable_fastcall = False
         self.vectorcall: bool = False
+        self.vectorcall_pre_parse: str | None = None
         self.permit_long_summary = False
         self.permit_long_docstring_body = False
 
@@ -482,10 +483,32 @@ class DSLParser:
             fail("Can't set @staticmethod, function is not a normal callable")
         self.kind = STATIC_METHOD
 
-    def at_vectorcall(self) -> None:
+    def at_vectorcall(self, *args: str) -> None:
+        """@vectorcall [pre_parse_function]
+
+        Generate a tp_vectorcall for __new__ / __init__.  The optional
+        argument names a C function that both the generated tp_new and the
+        vectorcall call before parsing any arguments:
+
+            static int
+            fn(PyTypeObject *type, PyObject *const *args, Py_ssize_t nargs,
+               Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames,
+               PyObject **result)
+
+        It returns 1 and sets *result if it handled the call, 0 to fall
+        through to normal parsing, or -1 with an exception set.  Exactly one
+        of kwargs (from tp_new) and kwnames (from the vectorcall) is
+        non-NULL when there are keyword arguments; nkw is their count.  This
+        is for constructors that accept a form clinic cannot express, such
+        as the single pickle-state argument of datetime.date.
+        """
         if self.vectorcall:
             fail("Called @vectorcall twice!")
+        if len(args) > 1:
+            fail("@vectorcall takes at most one argument, "
+                 "the pre-parse function")
         self.vectorcall = True
+        self.vectorcall_pre_parse = args[0] if args else None
 
     def at_coexist(self) -> None:
         if self.coexist:
@@ -633,6 +656,10 @@ class DSLParser:
             if not self.kind.new_or_init:
                 fail("@vectorcall can only be used with __init__ and __new__ "
                      "methods currently")
+            if (self.vectorcall_pre_parse is not None
+                    and self.kind is not METHOD_NEW):
+                fail("@vectorcall pre-parse function is only supported "
+                     "for __new__")
             # Guaranteed by the __new__ / __init__ checks above.
             assert cls is not None
             if not cls.type_object:
@@ -768,6 +795,7 @@ class DSLParser:
             forced_text_signature=self.forced_text_signature,
             line_number=self.line_number,
             vectorcall=self.vectorcall,
+            vectorcall_pre_parse=self.vectorcall_pre_parse,
         )
         self.add_function(func)
 

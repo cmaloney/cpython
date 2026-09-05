@@ -447,7 +447,8 @@ list_vectorcall(PyObject *type, PyObject *const *args,
     /* Make sure the type object is immutable: the generated
      * vectorcall doesn't deal e.g. with users reassigning __init__. */
     assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
-    if (!_PyArg_NoKwnames("list", kwnames)) {
+    if (kwnames && PyTuple_GET_SIZE(kwnames)) {
+        PyErr_SetString(PyExc_TypeError, "list() takes no keyword arguments");
         goto exit;
     }
     if (!_PyArg_CheckPositional("list", nargs, 0, 1)) {
@@ -509,4 +510,4 @@ list___reversed__(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
     return list___reversed___impl((PyListObject *)self);
 }
-/*[clinic end generated code: output=65cba47374162ce2 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=ca32dc9e893a4050 input=a9049054013a1b77]*/

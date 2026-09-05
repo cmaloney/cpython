@@ -5312,4 +5312,204 @@ skip_optional:
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=9bd6baa267ae0fc8 input=a9049054013a1b77]*/
+
+static PyObject *
+vc_preparse_new_impl(PyTypeObject *type, PyObject *a);
+
+static PyObject *
+vc_preparse_new_helper(PyTypeObject *type, PyObject *const *args,
+    Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
+
+    #define NUM_KEYWORDS 1
+    static struct {
+        PyGC_Head _this_is_not_used;
+        PyObject_VAR_HEAD
+        Py_hash_t ob_hash;
+        PyObject *ob_item[NUM_KEYWORDS];
+    } _kwtuple = {
+        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
+        .ob_hash = -1,
+        .ob_item = { _Py_LATIN1_CHR('a'), },
+    };
+    #undef NUM_KEYWORDS
+    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
+
+    #else  // !Py_BUILD_CORE
+    #  define KWTUPLE NULL
+    #endif  // !Py_BUILD_CORE
+
+    static const char * const _keywords[] = {"a", NULL};
+    static _PyArg_Parser _parser = {
+        .keywords = _keywords,
+        .fname = "VcPreParse",
+        .kwtuple = KWTUPLE,
+    };
+    #undef KWTUPLE
+    PyObject *argsbuf[1];
+    PyObject * const *fastargs;
+    Py_ssize_t noptargs = nargs + nkw - 0;
+    PyObject *a = Py_None;
+
+    fastargs = _PyArg_UnpackKeywords(args, nargs, kwargs, kwnames, &_parser,
+            /*minpos*/ 0, /*maxpos*/ 1, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
+    if (!fastargs) {
+        goto exit;
+    }
+    if (!noptargs) {
+        goto skip_optional_pos;
+    }
+    a = fastargs[0];
+skip_optional_pos:
+    return_value = vc_preparse_new_impl(type, a);
+
+exit:
+    return return_value;
+}
+
+static PyObject *
+vc_preparse_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    {
+        PyObject *pre_parse_result;
+        int pre_parse_rc = vc_preparse_pre_parse(type, _PyTuple_CAST(args)->ob_item,
+            PyTuple_GET_SIZE(args),
+            kwargs ? PyDict_GET_SIZE(kwargs) : 0,
+            kwargs, NULL, &pre_parse_result);
+        if (pre_parse_rc < 0) {
+            return NULL;
+        }
+        if (pre_parse_rc > 0) {
+            return pre_parse_result;
+        }
+    }
+    return vc_preparse_new_helper(type, _PyTuple_CAST(args)->ob_item,
+        PyTuple_GET_SIZE(args),
+        kwargs ? PyDict_GET_SIZE(kwargs) : 0,
+        kwargs, NULL);
+}
+
+static PyObject *
+vc_preparse_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyObject *a = Py_None;
+
+    assert(Py_Is(_PyType_CAST(type), &VcPreParse_Type));
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    {
+        PyObject *pre_parse_result;
+        int pre_parse_rc = vc_preparse_pre_parse(_PyType_CAST(type), args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames, &pre_parse_result);
+        if (pre_parse_rc < 0) {
+            return NULL;
+        }
+        if (pre_parse_rc > 0) {
+            return pre_parse_result;
+        }
+    }
+    if (kwnames != NULL || nargs > 1) {
+        return vc_preparse_new_helper(_PyType_CAST(type), args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames);
+    }
+    if (nargs < 1) {
+        goto skip_optional;
+    }
+    a = args[0];
+skip_optional:
+    return_value = vc_preparse_new_impl(_PyType_CAST(type), a);
+
+    return return_value;
+}
+
+static PyObject *
+vc_preparsepos_new_impl(PyTypeObject *type, PyObject *a);
+
+static PyObject *
+vc_preparsepos_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    PyObject *return_value = NULL;
+    PyTypeObject *base_tp = &VcPreParsePos_Type;
+    PyObject *a = Py_None;
+
+    if ((type == base_tp || type->tp_init == base_tp->tp_init) &&
+        !_PyArg_NoKeywords("VcPreParsePos", kwargs)) {
+        goto exit;
+    }
+    {
+        PyObject *pre_parse_result;
+        int pre_parse_rc = vc_preparse_pre_parse(type, _PyTuple_CAST(args)->ob_item,
+            PyTuple_GET_SIZE(args),
+            kwargs ? PyDict_GET_SIZE(kwargs) : 0,
+            kwargs, NULL, &pre_parse_result);
+        if (pre_parse_rc < 0) {
+            return NULL;
+        }
+        if (pre_parse_rc > 0) {
+            return pre_parse_result;
+        }
+    }
+    if (!_PyArg_CheckPositional("VcPreParsePos", PyTuple_GET_SIZE(args), 0, 1)) {
+        goto exit;
+    }
+    if (PyTuple_GET_SIZE(args) < 1) {
+        goto skip_optional;
+    }
+    a = PyTuple_GET_ITEM(args, 0);
+skip_optional:
+    return_value = vc_preparsepos_new_impl(type, a);
+
+exit:
+    return return_value;
+}
+
+static PyObject *
+vc_preparsepos_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyObject *a = Py_None;
+
+    assert(Py_Is(_PyType_CAST(type), &VcPreParsePos_Type));
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    {
+        PyObject *pre_parse_result;
+        int pre_parse_rc = vc_preparse_pre_parse(_PyType_CAST(type), args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames, &pre_parse_result);
+        if (pre_parse_rc < 0) {
+            return NULL;
+        }
+        if (pre_parse_rc > 0) {
+            return pre_parse_result;
+        }
+    }
+    if (kwnames && PyTuple_GET_SIZE(kwnames)) {
+        PyErr_SetString(PyExc_TypeError, "VcPreParsePos() takes no keyword arguments");
+        goto exit;
+    }
+    if (!_PyArg_CheckPositional("VcPreParsePos", nargs, 0, 1)) {
+        goto exit;
+    }
+    if (nargs < 1) {
+        goto skip_optional;
+    }
+    a = args[0];
+skip_optional:
+    return_value = vc_preparsepos_new_impl(_PyType_CAST(type), a);
+
+exit:
+    return return_value;
+}
+/*[clinic end generated code: output=b1a9f264229b8332 input=a9049054013a1b77]*/

@@ -28,6 +28,11 @@ static PyTypeObject VcInit_Type;
 static PyTypeObject VcNewBase_Type;
 static PyTypeObject VcKwOnly_Type;
 static PyTypeObject VcInitNew_Type;
+static PyTypeObject VcPreParse_Type;
+static PyTypeObject VcPreParsePos_Type;
+static int vc_preparse_pre_parse(PyTypeObject *, PyObject *const *,
+                                 Py_ssize_t, Py_ssize_t, PyObject *,
+                                 PyObject *, PyObject **);
 
 /* VcInitNew instance: tp_new records what it was called with so tests can
  * see the generated vectorcall went through tp_new. */
@@ -2629,6 +2634,83 @@ static PyTypeObject VcInitNew_Type = {
 };
 
 
+/* VcPreParse / VcPreParsePos: @vectorcall with a pre-parse function.  The
+ * function sees the raw arguments before any parsing, from both tp_new and
+ * the vectorcall, and may construct the result itself.  Here a lone bytes
+ * argument is returned as-is (the shape of the pickle-state form of
+ * datetime.date), b"error" raises, and anything else falls through to
+ * normal parsing.  VcPreParse takes its argument positional-or-keyword
+ * (tp_new wraps the helper); VcPreParsePos takes it positional-only
+ * (tp_new is the tuple parser). */
+
+static int
+vc_preparse_pre_parse(PyTypeObject *type, PyObject *const *args,
+                      Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs,
+                      PyObject *kwnames, PyObject **result)
+{
+    if (nargs != 1 || nkw != 0 || !PyBytes_Check(args[0])) {
+        return 0;
+    }
+    if (PyBytes_GET_SIZE(args[0]) == 5
+        && memcmp(PyBytes_AS_STRING(args[0]), "error", 5) == 0)
+    {
+        PyErr_SetString(PyExc_ValueError, "pre-parse error");
+        return -1;
+    }
+    *result = Py_NewRef(args[0]);
+    return 1;
+}
+
+/*[clinic input]
+class _testclinic.VcPreParse "PyObject *" "&VcPreParse_Type"
+@vectorcall vc_preparse_pre_parse
+@classmethod
+_testclinic.VcPreParse.__new__ as vc_preparse_new
+    a: object = None
+[clinic start generated code]*/
+
+static PyObject *
+vc_preparse_new_impl(PyTypeObject *type, PyObject *a)
+/*[clinic end generated code: output=d4273f023ee2be00 input=822e6b27ba733648]*/
+{
+    return type->tp_alloc(type, 0);
+}
+
+static PyTypeObject VcPreParse_Type = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "_testclinic.VcPreParse",
+    .tp_basicsize = sizeof(PyObject),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_new = vc_preparse_new,
+    .tp_vectorcall = vc_preparse_vectorcall,
+};
+
+/*[clinic input]
+class _testclinic.VcPreParsePos "PyObject *" "&VcPreParsePos_Type"
+@vectorcall vc_preparse_pre_parse
+@classmethod
+_testclinic.VcPreParsePos.__new__ as vc_preparsepos_new
+    a: object = None
+    /
+[clinic start generated code]*/
+
+static PyObject *
+vc_preparsepos_new_impl(PyTypeObject *type, PyObject *a)
+/*[clinic end generated code: output=a892d12a5a95f9c1 input=470981b49c29a174]*/
+{
+    return type->tp_alloc(type, 0);
+}
+
+static PyTypeObject VcPreParsePos_Type = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "_testclinic.VcPreParsePos",
+    .tp_basicsize = sizeof(PyObject),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_new = vc_preparsepos_new,
+    .tp_vectorcall = vc_preparsepos_vectorcall,
+};
+
+
 
 /*[clinic input]
 output push
@@ -2885,6 +2967,12 @@ PyInit__testclinic(void)
         goto error;
     }
     if (PyModule_AddType(m, &VcInitNew_Type) < 0) {
+        goto error;
+    }
+    if (PyModule_AddType(m, &VcPreParse_Type) < 0) {
+        goto error;
+    }
+    if (PyModule_AddType(m, &VcPreParsePos_Type) < 0) {
         goto error;
     }
     return m;

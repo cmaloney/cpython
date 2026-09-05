@@ -123,6 +123,9 @@ class Function:
     # Line on which the docstring starts (`None` if there is no docstring).
     docstring_line_number: int | None = None
     vectorcall: bool = False
+    # C function the generated tp_new and vectorcall call before parsing;
+    # it can construct the result itself (see @vectorcall in the DSL).
+    vectorcall_pre_parse: str | None = None
 
     def __post_init__(self) -> None:
         self.parent = self.cls or self.module

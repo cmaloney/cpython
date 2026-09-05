@@ -350,7 +350,8 @@ cm_vectorcall(PyObject *type, PyObject *const *args,
     /* Make sure the type object is immutable: the generated
      * vectorcall doesn't deal e.g. with users reassigning __init__. */
     assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
-    if (!_PyArg_NoKwnames("classmethod", kwnames)) {
+    if (kwnames && PyTuple_GET_SIZE(kwnames)) {
+        PyErr_SetString(PyExc_TypeError, "classmethod() takes no keyword arguments");
         goto exit;
     }
     if (!_PyArg_CheckPositional("classmethod", nargs, 1, 1)) {
@@ -420,7 +421,8 @@ sm_vectorcall(PyObject *type, PyObject *const *args,
     /* Make sure the type object is immutable: the generated
      * vectorcall doesn't deal e.g. with users reassigning __init__. */
     assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
-    if (!_PyArg_NoKwnames("staticmethod", kwnames)) {
+    if (kwnames && PyTuple_GET_SIZE(kwnames)) {
+        PyErr_SetString(PyExc_TypeError, "staticmethod() takes no keyword arguments");
         goto exit;
     }
     if (!_PyArg_CheckPositional("staticmethod", nargs, 1, 1)) {
@@ -432,4 +434,4 @@ sm_vectorcall(PyObject *type, PyObject *const *args,
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=0176ab4644b54e1e input=a9049054013a1b77]*/
+/*[clinic end generated code: output=b384c662774b6e37 input=a9049054013a1b77]*/

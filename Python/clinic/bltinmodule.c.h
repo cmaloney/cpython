@@ -325,7 +325,8 @@ filter_vectorcall(PyObject *type, PyObject *const *args,
     /* Make sure the type object is immutable: the generated
      * vectorcall doesn't deal e.g. with users reassigning __init__. */
     assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
-    if (!_PyArg_NoKwnames("filter", kwnames)) {
+    if (kwnames && PyTuple_GET_SIZE(kwnames)) {
+        PyErr_SetString(PyExc_TypeError, "filter() takes no keyword arguments");
         goto exit;
     }
     if (!_PyArg_CheckPositional("filter", nargs, 2, 2)) {
@@ -1448,4 +1449,4 @@ builtin_issubclass(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=96a14c19b45c3055 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=df128f8425c71c67 input=a9049054013a1b77]*/

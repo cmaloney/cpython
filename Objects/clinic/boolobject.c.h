@@ -53,7 +53,8 @@ bool_vectorcall(PyObject *type, PyObject *const *args,
     /* Make sure the type object is immutable: the generated
      * vectorcall doesn't deal e.g. with users reassigning __init__. */
     assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
-    if (!_PyArg_NoKwnames("bool", kwnames)) {
+    if (kwnames && PyTuple_GET_SIZE(kwnames)) {
+        PyErr_SetString(PyExc_TypeError, "bool() takes no keyword arguments");
         goto exit;
     }
     if (!_PyArg_CheckPositional("bool", nargs, 0, 1)) {
@@ -69,4 +70,4 @@ skip_optional:
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=f4b59232e9f7264a input=a9049054013a1b77]*/
+/*[clinic end generated code: output=9fbd686288c20826 input=a9049054013a1b77]*/
