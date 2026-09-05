@@ -635,8 +635,9 @@ static PyMemberDef func_memberlist[] = {
 
 /*[clinic input]
 class function "PyFunctionObject *" "&PyFunction_Type"
+class classmethod "PyObject *" "&PyClassMethod_Type"
 [clinic start generated code]*/
-/*[clinic end generated code: output=da39a3ee5e6b4b0d input=70af9c90aa2e71b0]*/
+/*[clinic end generated code: output=da39a3ee5e6b4b0d input=7ff114c1bf7070bc]*/
 
 #include "clinic/funcobject.c.h"
 
@@ -1552,17 +1553,37 @@ cm_set_callable(classmethod *cm, PyObject *callable)
     return functools_wraps((PyObject *)cm, cm->cm_callable);
 }
 
-static PyObject *
-cm_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
-{
-    if (!_PyArg_NoKeywords("classmethod", kwds)) {
-        return NULL;
-    }
-    PyObject *callable;  // borrowed ref
-    if (!PyArg_UnpackTuple(args, "classmethod", 1, 1, &callable)) {
-        return NULL;
-    }
+/*[clinic input]
+@vectorcall
+@classmethod
+classmethod.__new__ as cm_new
+    function as callable: object
+    /
 
+Convert a function to be a class method.
+
+A class method receives the class as implicit first argument,
+just like an instance method receives the instance.
+To declare a class method, use this idiom:
+
+  class C:
+      @classmethod
+      def f(cls, arg1, arg2, argN):
+          ...
+
+It can be called either on the class (e.g. C.f()) or on an instance
+(e.g. C().f()).  The instance is ignored except for its class.
+If a class method is called for a derived class, the derived class
+object is passed as the implied first argument.
+
+Class methods are different than C++ or Java static methods.
+If you want those, see the staticmethod builtin.
+[clinic start generated code]*/
+
+static PyObject *
+cm_new_impl(PyTypeObject *type, PyObject *callable)
+/*[clinic end generated code: output=d09193f7a86a4706 input=01d268780ae3298b]*/
+{
     classmethod *cm = (classmethod *)PyType_GenericAlloc(type, 0);
     if (cm == NULL) {
         return NULL;
@@ -1657,29 +1678,6 @@ cm_repr(PyObject *self)
     return PyUnicode_FromFormat("<classmethod(%R)>", cm->cm_callable);
 }
 
-PyDoc_STRVAR(classmethod_doc,
-"classmethod(function, /)\n\
---\n\
-\n\
-Convert a function to be a class method.\n\
-\n\
-A class method receives the class as implicit first argument,\n\
-just like an instance method receives the instance.\n\
-To declare a class method, use this idiom:\n\
-\n\
-  class C:\n\
-      @classmethod\n\
-      def f(cls, arg1, arg2, argN):\n\
-          ...\n\
-\n\
-It can be called either on the class (e.g. C.f()) or on an instance\n\
-(e.g. C().f()).  The instance is ignored except for its class.\n\
-If a class method is called for a derived class, the derived class\n\
-object is passed as the implied first argument.\n\
-\n\
-Class methods are different than C++ or Java static methods.\n\
-If you want those, see the staticmethod builtin.");
-
 PyTypeObject PyClassMethod_Type = {
     PyVarObject_HEAD_INIT(&PyType_Type, 0)
     "classmethod",
@@ -1701,7 +1699,7 @@ PyTypeObject PyClassMethod_Type = {
     0,                                          /* tp_setattro */
     0,                                          /* tp_as_buffer */
     Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC,
-    classmethod_doc,                            /* tp_doc */
+    cm_new__doc__,                              /* tp_doc */
     cm_traverse,                                /* tp_traverse */
     cm_clear,                                   /* tp_clear */
     0,                                          /* tp_richcompare */
@@ -1720,6 +1718,7 @@ PyTypeObject PyClassMethod_Type = {
     PyType_GenericAlloc,                        /* tp_alloc */
     cm_new,                                     /* tp_new */
     PyObject_GC_Del,                            /* tp_free */
+    .tp_vectorcall = cm_vectorcall,
 };
 
 PyObject *

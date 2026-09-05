@@ -290,4 +290,76 @@ skip_optional_pos:
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=12cb900088d41bdb input=a9049054013a1b77]*/
+
+PyDoc_STRVAR(cm_new__doc__,
+"classmethod(function, /)\n"
+"--\n"
+"\n"
+"Convert a function to be a class method.\n"
+"\n"
+"A class method receives the class as implicit first argument,\n"
+"just like an instance method receives the instance.\n"
+"To declare a class method, use this idiom:\n"
+"\n"
+"  class C:\n"
+"      @classmethod\n"
+"      def f(cls, arg1, arg2, argN):\n"
+"          ...\n"
+"\n"
+"It can be called either on the class (e.g. C.f()) or on an instance\n"
+"(e.g. C().f()).  The instance is ignored except for its class.\n"
+"If a class method is called for a derived class, the derived class\n"
+"object is passed as the implied first argument.\n"
+"\n"
+"Class methods are different than C++ or Java static methods.\n"
+"If you want those, see the staticmethod builtin.");
+
+static PyObject *
+cm_new_impl(PyTypeObject *type, PyObject *callable);
+
+static PyObject *
+cm_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    PyObject *return_value = NULL;
+    PyTypeObject *base_tp = &PyClassMethod_Type;
+    PyObject *callable;
+
+    if ((type == base_tp || type->tp_init == base_tp->tp_init) &&
+        !_PyArg_NoKeywords("classmethod", kwargs)) {
+        goto exit;
+    }
+    if (!_PyArg_CheckPositional("classmethod", PyTuple_GET_SIZE(args), 1, 1)) {
+        goto exit;
+    }
+    callable = PyTuple_GET_ITEM(args, 0);
+    return_value = cm_new_impl(type, callable);
+
+exit:
+    return return_value;
+}
+
+static PyObject *
+cm_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyObject *callable;
+
+    assert(Py_Is(_PyType_CAST(type), &PyClassMethod_Type));
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    if (!_PyArg_NoKwnames("classmethod", kwnames)) {
+        goto exit;
+    }
+    if (!_PyArg_CheckPositional("classmethod", nargs, 1, 1)) {
+        goto exit;
+    }
+    callable = args[0];
+    return_value = cm_new_impl(_PyType_CAST(type), callable);
+
+exit:
+    return return_value;
+}
+/*[clinic end generated code: output=f95a230ff7ba37c9 input=a9049054013a1b77]*/
