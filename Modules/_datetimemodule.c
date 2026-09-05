@@ -348,6 +348,8 @@ class datetime.timezone "PyDateTime_TimeZone *" "&PyDateTime_TimeZoneType"
 
 static int date_pre_parse(PyTypeObject *, PyObject *const *, Py_ssize_t,
                           Py_ssize_t, PyObject *, PyObject *, PyObject **);
+static int time_pre_parse(PyTypeObject *, PyObject *const *, Py_ssize_t,
+                          Py_ssize_t, PyObject *, PyObject *, PyObject **);
 #include "clinic/_datetimemodule.c.h"
 
 
@@ -4717,21 +4719,26 @@ time_from_pickle(PyTypeObject *type, PyObject *state, PyObject *tzinfo)
     return (PyObject *)me;
 }
 
-static PyObject *
-time_new(PyTypeObject *type, PyObject *args, PyObject *kw)
+/* @vectorcall pre-parse function: construct from the pickle state form,
+ * a single bytes/str positional argument (plus optional tzinfo). */
+static int
+time_pre_parse(PyTypeObject *type, PyObject *const *args, Py_ssize_t nargs,
+                Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames,
+                PyObject **result)
 {
     /* Check for invocation from pickle with __getstate__ state */
-    if (PyTuple_GET_SIZE(args) >= 1 && PyTuple_GET_SIZE(args) <= 2) {
-        PyObject *state = PyTuple_GET_ITEM(args, 0);
+    if (nargs >= 1 && nargs <= 2) {
+        PyObject *state = args[0];
         PyObject *tzinfo = Py_None;
-        if (PyTuple_GET_SIZE(args) == 2) {
-            tzinfo = PyTuple_GET_ITEM(args, 1);
+        if (nargs == 2) {
+            tzinfo = args[1];
         }
         if (PyBytes_Check(state)) {
             if (PyBytes_GET_SIZE(state) == _PyDateTime_TIME_DATASIZE &&
                 (0x7F & ((unsigned char) (PyBytes_AS_STRING(state)[0]))) < 24)
             {
-                return time_from_pickle(type, state, tzinfo);
+                *result = time_from_pickle(type, state, tzinfo);
+                return *result == NULL ? -1 : 1;
             }
         }
         else if (PyUnicode_Check(state)) {
@@ -4747,19 +4754,20 @@ time_new(PyTypeObject *type, PyObject *args, PyObject *kw)
                             "a time object. "
                             "pickle.load(data, encoding='latin1') is assumed.");
                     }
-                    return NULL;
+                    return -1;
                 }
-                PyObject *self = time_from_pickle(type, state, tzinfo);
+                *result = time_from_pickle(type, state, tzinfo);
                 Py_DECREF(state);
-                return self;
+                return *result == NULL ? -1 : 1;
             }
         }
     }
 
-    return datetime_time(type, args, kw);
+    return 0;
 }
 
 /*[clinic input]
+@vectorcall time_pre_parse
 @classmethod
 datetime.time.__new__
 
@@ -4780,7 +4788,7 @@ a tzinfo subclass. The remaining arguments may be ints.
 static PyObject *
 datetime_time_impl(PyTypeObject *type, int hour, int minute, int second,
                    int microsecond, PyObject *tzinfo, int fold)
-/*[clinic end generated code: output=f06bb4315225e7f6 input=0148df5e8138fe7b]*/
+/*[clinic end generated code: output=f06bb4315225e7f6 input=623e173f3dc6f80f]*/
 {
     return new_time_ex2(hour, minute, second, microsecond, tzinfo, fold, type);
 }
@@ -5393,8 +5401,9 @@ static PyTypeObject PyDateTime_TimeType = {
     0,                                          /* tp_dictoffset */
     0,                                          /* tp_init */
     time_alloc,                                 /* tp_alloc */
-    time_new,                                   /* tp_new */
+    datetime_time,                                   /* tp_new */
     0,                                          /* tp_free */
+    .tp_vectorcall = datetime_time_vectorcall,
 };
 
 /*
