@@ -2809,6 +2809,7 @@ accum(const char* tag, PyObject *sofar, PyObject *num, PyObject *factor,
 }
 
 /*[clinic input]
+@vectorcall
 @classmethod
 datetime.timedelta.__new__ as delta_new
 
@@ -2830,7 +2831,7 @@ static PyObject *
 delta_new_impl(PyTypeObject *type, PyObject *days, PyObject *seconds,
                PyObject *microseconds, PyObject *milliseconds,
                PyObject *minutes, PyObject *hours, PyObject *weeks)
-/*[clinic end generated code: output=61d7e02a92a97700 input=e8cd54819295d34b]*/
+/*[clinic end generated code: output=61d7e02a92a97700 input=8aebc4cdef360d1f]*/
 {
     PyObject *self = NULL;
 
@@ -3158,6 +3159,7 @@ static PyTypeObject PyDateTime_DeltaType = {
     0,                                                  /* tp_alloc */
     delta_new,                                          /* tp_new */
     0,                                                  /* tp_free */
+    .tp_vectorcall = delta_vectorcall,
 };
 
 // XXX Can we make this const?
