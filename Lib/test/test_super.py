@@ -339,7 +339,7 @@ class TestSuper(unittest.TestCase):
             super(int, int, int)
 
     def test_super_argtype(self):
-        with self.assertRaisesRegex(TypeError, "argument 1 must be a type"):
+        with self.assertRaisesRegex(TypeError, "argument 1 must be type"):
             super(1, int)
 
     def test_shadowed_global(self):
@@ -407,7 +407,7 @@ class TestSuper(unittest.TestCase):
             def method(self):
                 return super(1, self).method()
 
-        with self.assertRaisesRegex(TypeError, "argument 1 must be a type"):
+        with self.assertRaisesRegex(TypeError, "argument 1 must be type"):
             C().method()
 
     def test_supercheck_fail(self):

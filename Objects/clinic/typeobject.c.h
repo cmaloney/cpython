@@ -3,6 +3,7 @@ preserve
 [clinic start generated code]*/
 
 #include "pycore_modsupport.h"    // _PyArg_BadArgument()
+#include "pycore_runtime.h"       // _Py_SINGLETON()
 
 PyDoc_STRVAR(type___instancecheck____doc__,
 "__instancecheck__($self, instance, /)\n"
@@ -262,4 +263,92 @@ object___dir__(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
     return object___dir___impl(self);
 }
-/*[clinic end generated code: output=b55c0d257e2518d2 input=a9049054013a1b77]*/
+
+static int
+super___init___impl(PyObject *self, PyObject *tp, PyObject *obj);
+
+static int
+super___init__(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    int return_value = -1;
+    PyTypeObject *base_tp = &PySuper_Type;
+    PyObject *tp = NULL;
+    PyObject *obj = NULL;
+
+    if ((Py_IS_TYPE(self, base_tp) ||
+         Py_TYPE(self)->tp_new == base_tp->tp_new) &&
+        !_PyArg_NoKeywords("super", kwargs)) {
+        goto exit;
+    }
+    if (!_PyArg_CheckPositional("super", PyTuple_GET_SIZE(args), 0, 2)) {
+        goto exit;
+    }
+    if (PyTuple_GET_SIZE(args) < 1) {
+        goto skip_optional;
+    }
+    if (!PyObject_TypeCheck(PyTuple_GET_ITEM(args, 0), &PyType_Type)) {
+        _PyArg_BadArgument("super", "argument 1", (&PyType_Type)->tp_name, PyTuple_GET_ITEM(args, 0));
+        goto exit;
+    }
+    tp = PyTuple_GET_ITEM(args, 0);
+    if (PyTuple_GET_SIZE(args) < 2) {
+        goto skip_optional;
+    }
+    obj = PyTuple_GET_ITEM(args, 1);
+skip_optional:
+    return_value = super___init___impl(self, tp, obj);
+
+exit:
+    return return_value;
+}
+
+static PyObject *
+super_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyObject *self;
+    int _result;
+    PyObject *tp = NULL;
+    PyObject *obj = NULL;
+
+    assert(Py_Is(_PyType_CAST(type), &PySuper_Type));
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    if (!_PyArg_NoKwnames("super", kwnames)) {
+        goto exit;
+    }
+    if (!_PyArg_CheckPositional("super", nargs, 0, 2)) {
+        goto exit;
+    }
+    if (nargs < 1) {
+        goto skip_optional;
+    }
+    if (!PyObject_TypeCheck(args[0], &PyType_Type)) {
+        _PyArg_BadArgument("super", "argument 1", (&PyType_Type)->tp_name, args[0]);
+        goto exit;
+    }
+    tp = args[0];
+    if (nargs < 2) {
+        goto skip_optional;
+    }
+    obj = args[1];
+skip_optional:
+    self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
+        (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
+    if (self == NULL) {
+        goto exit;
+    }
+    _result = super___init___impl((PyObject *)self, tp, obj);
+    if (_result != 0) {
+        Py_DECREF(self);
+        goto exit;
+    }
+    return_value = self;
+
+exit:
+    return return_value;
+}
+/*[clinic end generated code: output=d7ab6c817d94e89b input=a9049054013a1b77]*/
