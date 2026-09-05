@@ -4,6 +4,7 @@ preserve
 
 #include "pycore_critical_section.h"// Py_BEGIN_CRITICAL_SECTION()
 #include "pycore_modsupport.h"    // _PyArg_CheckPositional()
+#include "pycore_runtime.h"       // _Py_SINGLETON()
 
 PyDoc_STRVAR(set_pop__doc__,
 "pop($self, /)\n"
@@ -616,4 +617,80 @@ set___sizeof__(PyObject *so, PyObject *Py_UNUSED(ignored))
 
     return return_value;
 }
-/*[clinic end generated code: output=434974eb84d4b4c2 input=a9049054013a1b77]*/
+
+PyDoc_STRVAR(set___init____doc__,
+"set(iterable=(), /)\n"
+"--\n"
+"\n"
+"Build an unordered collection of unique elements.");
+
+static int
+set___init___impl(PySetObject *self, PyObject *iterable);
+
+static int
+set___init__(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    int return_value = -1;
+    PyTypeObject *base_tp = &PySet_Type;
+    PyObject *iterable = NULL;
+
+    if ((Py_IS_TYPE(self, base_tp) ||
+         Py_TYPE(self)->tp_new == base_tp->tp_new) &&
+        !_PyArg_NoKeywords("set", kwargs)) {
+        goto exit;
+    }
+    if (!_PyArg_CheckPositional("set", PyTuple_GET_SIZE(args), 0, 1)) {
+        goto exit;
+    }
+    if (PyTuple_GET_SIZE(args) < 1) {
+        goto skip_optional;
+    }
+    iterable = PyTuple_GET_ITEM(args, 0);
+skip_optional:
+    return_value = set___init___impl((PySetObject *)self, iterable);
+
+exit:
+    return return_value;
+}
+
+static PyObject *
+set_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyObject *self;
+    int _result;
+    PyObject *iterable = NULL;
+
+    assert(Py_Is(_PyType_CAST(type), &PySet_Type));
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    if (!_PyArg_NoKwnames("set", kwnames)) {
+        goto exit;
+    }
+    if (!_PyArg_CheckPositional("set", nargs, 0, 1)) {
+        goto exit;
+    }
+    if (nargs < 1) {
+        goto skip_optional;
+    }
+    iterable = args[0];
+skip_optional:
+    self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
+        (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
+    if (self == NULL) {
+        goto exit;
+    }
+    _result = set___init___impl((PySetObject *)self, iterable);
+    if (_result != 0) {
+        Py_DECREF(self);
+        goto exit;
+    }
+    return_value = self;
+
+exit:
+    return return_value;
+}
+/*[clinic end generated code: output=ef271cee09c0f01c input=a9049054013a1b77]*/

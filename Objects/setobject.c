@@ -2741,17 +2741,19 @@ set___sizeof___impl(PySetObject *so)
     return PyLong_FromSize_t(res);
 }
 
+/*[clinic input]
+@vectorcall
+set.__init__
+    iterable: object(c_default="NULL") = ()
+    /
+
+Build an unordered collection of unique elements.
+[clinic start generated code]*/
+
 static int
-set_init(PyObject *so, PyObject *args, PyObject *kwds)
+set___init___impl(PySetObject *self, PyObject *iterable)
+/*[clinic end generated code: output=2a7285e5c0eca37c input=5478082ac5c065c9]*/
 {
-    PySetObject *self = _PySet_CAST(so);
-    PyObject *iterable = NULL;
-
-    if (!_PyArg_NoKeywords("set", kwds))
-        return -1;
-    if (!PyArg_UnpackTuple(args, Py_TYPE(self)->tp_name, 0, 1, &iterable))
-        return -1;
-
     if (_PyObject_IsUniquelyReferenced((PyObject *)self) && self->fill == 0) {
         self->hash = -1;
         if (iterable == NULL) {
@@ -2768,28 +2770,6 @@ set_init(PyObject *so, PyObject *args, PyObject *kwds)
     if (iterable == NULL)
         return 0;
     return set_update_internal(self, iterable);
-}
-
-static PyObject*
-set_vectorcall(PyObject *type, PyObject * const*args,
-               size_t nargsf, PyObject *kwnames)
-{
-    assert(PyType_Check(type));
-
-    if (!_PyArg_NoKwnames("set", kwnames)) {
-        return NULL;
-    }
-
-    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
-    if (!_PyArg_CheckPositional("set", nargs, 0, 1)) {
-        return NULL;
-    }
-
-    if (nargs) {
-        return make_new_set(_PyType_CAST(type), args[0]);
-    }
-
-    return make_new_set(_PyType_CAST(type), NULL);
 }
 
 static PySequenceMethods set_as_sequence = {
@@ -2863,12 +2843,6 @@ static PyNumberMethods set_as_number = {
     set_ior,                            /*nb_inplace_or*/
 };
 
-PyDoc_STRVAR(set_doc,
-"set(iterable=(), /)\n\
---\n\
-\n\
-Build an unordered collection of unique elements.");
-
 PyTypeObject PySet_Type = {
     PyVarObject_HEAD_INIT(&PyType_Type, 0)
     "set",                              /* tp_name */
@@ -2893,7 +2867,7 @@ PyTypeObject PySet_Type = {
     Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC |
         Py_TPFLAGS_BASETYPE |
         _Py_TPFLAGS_MATCH_SELF,         /* tp_flags */
-    set_doc,                            /* tp_doc */
+    set___init____doc__,                /* tp_doc */
     set_traverse,                       /* tp_traverse */
     set_clear_internal,                 /* tp_clear */
     set_richcompare,                    /* tp_richcompare */
@@ -2908,7 +2882,7 @@ PyTypeObject PySet_Type = {
     0,                                  /* tp_descr_get */
     0,                                  /* tp_descr_set */
     0,                                  /* tp_dictoffset */
-    set_init,                           /* tp_init */
+    set___init__,                       /* tp_init */
     _PyType_AllocNoTrack,               /* tp_alloc */
     set_new,                            /* tp_new */
     PyObject_GC_Del,                    /* tp_free */
