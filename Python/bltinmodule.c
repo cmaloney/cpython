@@ -565,22 +565,30 @@ typedef struct {
 
 #define _filterobject_CAST(op)      ((filterobject *)(op))
 
+/*[clinic input]
+class filter "filterobject *" "&PyFilter_Type"
+@permit_long_summary
+@vectorcall
+@classmethod
+filter.__new__ as filter_new
+    function: object
+    iterable: object
+    /
+
+Return an iterator yielding those items of iterable for which function(item) is true.
+
+If function is None, return the items that are true.
+[clinic start generated code]*/
+
 static PyObject *
-filter_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+filter_new_impl(PyTypeObject *type, PyObject *function, PyObject *iterable)
+/*[clinic end generated code: output=7927e0b941faa64b input=a226f27a55b7d8b4]*/
 {
-    PyObject *func, *seq;
     PyObject *it;
     filterobject *lz;
 
-    if ((type == &PyFilter_Type || type->tp_init == PyFilter_Type.tp_init) &&
-        !_PyArg_NoKeywords("filter", kwds))
-        return NULL;
-
-    if (!PyArg_UnpackTuple(args, "filter", 2, 2, &func, &seq))
-        return NULL;
-
     /* Get iterator. */
-    it = PyObject_GetIter(seq);
+    it = PyObject_GetIter(iterable);
     if (it == NULL)
         return NULL;
 
@@ -591,39 +599,7 @@ filter_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
         return NULL;
     }
 
-    lz->func = Py_NewRef(func);
-    lz->it = it;
-
-    return (PyObject *)lz;
-}
-
-static PyObject *
-filter_vectorcall(PyObject *type, PyObject * const*args,
-                size_t nargsf, PyObject *kwnames)
-{
-    PyTypeObject *tp = _PyType_CAST(type);
-    if (tp == &PyFilter_Type && !_PyArg_NoKwnames("filter", kwnames)) {
-        return NULL;
-    }
-
-    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
-    if (!_PyArg_CheckPositional("filter", nargs, 2, 2)) {
-        return NULL;
-    }
-
-    PyObject *it = PyObject_GetIter(args[1]);
-    if (it == NULL) {
-        return NULL;
-    }
-
-    filterobject *lz = (filterobject *)tp->tp_alloc(tp, 0);
-
-    if (lz == NULL) {
-        Py_DECREF(it);
-        return NULL;
-    }
-
-    lz->func = Py_NewRef(args[0]);
+    lz->func = Py_NewRef(function);
     lz->it = it;
 
     return (PyObject *)lz;
@@ -698,14 +674,6 @@ static PyMethodDef filter_methods[] = {
     {NULL,           NULL}           /* sentinel */
 };
 
-PyDoc_STRVAR(filter_doc,
-"filter(function, iterable, /)\n\
---\n\
-\n\
-Return an iterator yielding those items of iterable for which\n\
-function(item) is true.  If function is None, return the items that\n\
-are true.");
-
 PyTypeObject PyFilter_Type = {
     PyVarObject_HEAD_INIT(&PyType_Type, 0)
     "filter",                           /* tp_name */
@@ -729,7 +697,7 @@ PyTypeObject PyFilter_Type = {
     0,                                  /* tp_as_buffer */
     Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC |
         Py_TPFLAGS_BASETYPE,            /* tp_flags */
-    filter_doc,                         /* tp_doc */
+    filter_new__doc__,                  /* tp_doc */
     filter_traverse,                    /* tp_traverse */
     0,                                  /* tp_clear */
     0,                                  /* tp_richcompare */
