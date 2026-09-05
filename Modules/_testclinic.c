@@ -27,6 +27,15 @@ static PyTypeObject VcNew_Type;
 static PyTypeObject VcInit_Type;
 static PyTypeObject VcNewBase_Type;
 static PyTypeObject VcKwOnly_Type;
+static PyTypeObject VcInitNew_Type;
+
+/* VcInitNew instance: tp_new records what it was called with so tests can
+ * see the generated vectorcall went through tp_new. */
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t new_nargs;
+    int new_has_kwds;
+} VcInitNewObject;
 #include "clinic/_testclinic.c.h"
 
 
@@ -2561,6 +2570,65 @@ static PyTypeObject VcKwOnly_Type = {
 };
 
 
+/* VcInitNew: @vectorcall __init__ on a type whose tp_new is not
+ * PyType_GenericNew.  The generated vectorcall must create the instance via
+ * tp_new (with the empty tuple and NULL kwds) so that tp_new's setup is not
+ * skipped; __init__ fails if it was. */
+
+static PyObject *
+vc_initnew_tp_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    PyObject *op = PyType_GenericNew(type, args, kwds);
+    if (op == NULL) {
+        return NULL;
+    }
+    VcInitNewObject *self = (VcInitNewObject *)op;
+    /* 1 + nargs: PyType_GenericAlloc zero-fills, so a nonzero value proves
+     * tp_new ran even when called with the empty tuple. */
+    self->new_nargs = 1 + PyTuple_GET_SIZE(args);
+    self->new_has_kwds = (kwds != NULL);
+    return op;
+}
+
+/*[clinic input]
+class _testclinic.VcInitNew "VcInitNewObject *" "&VcInitNew_Type"
+@vectorcall
+_testclinic.VcInitNew.__init__ as vc_initnew_init
+    a: object = None
+[clinic start generated code]*/
+
+static int
+vc_initnew_init_impl(VcInitNewObject *self, PyObject *a)
+/*[clinic end generated code: output=acb483a6fda1432e input=a50a393e395a7881]*/
+{
+    if (self->new_nargs == 0) {
+        PyErr_SetString(PyExc_AssertionError,
+                        "VcInitNew.__init__ called without tp_new");
+        return -1;
+    }
+    return 0;
+}
+
+static PyMemberDef vc_initnew_members[] = {
+    {"new_nargs", Py_T_PYSSIZET, offsetof(VcInitNewObject, new_nargs),
+     Py_READONLY, "1 + number of positional args tp_new received"},
+    {"new_has_kwds", Py_T_INT, offsetof(VcInitNewObject, new_has_kwds),
+     Py_READONLY, "whether tp_new received a kwds dict"},
+    {NULL}
+};
+
+static PyTypeObject VcInitNew_Type = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "_testclinic.VcInitNew",
+    .tp_basicsize = sizeof(VcInitNewObject),
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_members = vc_initnew_members,
+    .tp_new = vc_initnew_tp_new,
+    .tp_init = vc_initnew_init,
+    .tp_vectorcall = vc_initnew_vectorcall,
+};
+
+
 
 /*[clinic input]
 output push
@@ -2814,6 +2882,9 @@ PyInit__testclinic(void)
         goto error;
     }
     if (PyModule_AddType(m, &VcKwOnly_Type) < 0) {
+        goto error;
+    }
+    if (PyModule_AddType(m, &VcInitNew_Type) < 0) {
         goto error;
     }
     return m;

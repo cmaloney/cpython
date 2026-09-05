@@ -5188,6 +5188,28 @@ class VectorcallFunctionalTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             ac_tester.VcKwOnly()
 
+    def test_vc_init_goes_through_tp_new(self):
+        # The generated __init__ vectorcall must create the instance with
+        # tp_new (given the empty tuple and NULL kwds), not tp_alloc, so a
+        # tp_new that sets up the instance is not skipped.  VcInitNew's
+        # tp_new records 1 + len(args) and whether kwds was passed; its
+        # __init__ raises if tp_new never ran.
+        for obj in (ac_tester.VcInitNew(),      # fast path
+                    ac_tester.VcInitNew(1),     # fast path
+                    ac_tester.VcInitNew(a=1)):  # helper path
+            self.assertIsInstance(obj, ac_tester.VcInitNew)
+            self.assertEqual(obj.new_nargs, 1)
+            self.assertEqual(obj.new_has_kwds, 0)
+        with self.assertRaises(TypeError):
+            ac_tester.VcInitNew(1, 2)
+
+    def test_vc_init_explicit_new_and_init(self):
+        # Explicit __new__ goes through type_call-free tp_new with the real
+        # arguments; __init__ on the result still works.
+        obj = ac_tester.VcInitNew.__new__(ac_tester.VcInitNew, 1, 2)
+        self.assertEqual(obj.new_nargs, 3)
+        self.assertIsNone(obj.__init__(a=5))
+
     def test_parse_errors_match_slot(self):
         # tp_vectorcall and tp_new/tp_init slot should match in argument parsing
         # error messages. Explicit calls to __new__ and __init__, as well as
