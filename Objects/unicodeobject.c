@@ -14210,6 +14210,7 @@ static PyObject *
 unicode_subtype_new(PyTypeObject *type, PyObject *unicode);
 
 /*[clinic input]
+@vectorcall
 @classmethod
 str.__new__ as unicode_new
 
@@ -14222,7 +14223,7 @@ str.__new__ as unicode_new
 static PyObject *
 unicode_new_impl(PyTypeObject *type, PyObject *x, const char *encoding,
                  const char *errors)
-/*[clinic end generated code: output=fc72d4878b0b57e9 input=e81255e5676d174e]*/
+/*[clinic end generated code: output=fc72d4878b0b57e9 input=3b5b809255af80c3]*/
 {
     PyObject *unicode;
     if (x == NULL) {
@@ -14239,65 +14240,6 @@ unicode_new_impl(PyTypeObject *type, PyObject *x, const char *encoding,
         Py_SETREF(unicode, unicode_subtype_new(type, unicode));
     }
     return unicode;
-}
-
-static const char *
-arg_as_utf8(PyObject *obj, const char *name)
-{
-    if (!PyUnicode_Check(obj)) {
-        PyErr_Format(PyExc_TypeError,
-                     "str() argument '%s' must be str, not %T",
-                     name, obj);
-        return NULL;
-    }
-    return _PyUnicode_AsUTF8NoNUL(obj);
-}
-
-static PyObject *
-unicode_vectorcall(PyObject *type, PyObject *const *args,
-                   size_t nargsf, PyObject *kwnames)
-{
-    assert(Py_Is(_PyType_CAST(type), &PyUnicode_Type));
-
-    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
-    if (kwnames != NULL && PyTuple_GET_SIZE(kwnames) != 0) {
-        // Fallback to unicode_new()
-        PyObject *tuple = PyTuple_FromArray(args, nargs);
-        if (tuple == NULL) {
-            return NULL;
-        }
-        PyObject *dict = _PyStack_AsDict(args + nargs, kwnames);
-        if (dict == NULL) {
-            Py_DECREF(tuple);
-            return NULL;
-        }
-        PyObject *ret = unicode_new(_PyType_CAST(type), tuple, dict);
-        Py_DECREF(tuple);
-        Py_DECREF(dict);
-        return ret;
-    }
-    if (!_PyArg_CheckPositional("str", nargs, 0, 3)) {
-        return NULL;
-    }
-    if (nargs == 0) {
-        return _PyUnicode_GetEmpty();
-    }
-    PyObject *object = args[0];
-    if (nargs == 1) {
-        return PyObject_Str(object);
-    }
-    const char *encoding = arg_as_utf8(args[1], "encoding");
-    if (encoding == NULL) {
-        return NULL;
-    }
-    const char *errors = NULL;
-    if (nargs == 3) {
-        errors = arg_as_utf8(args[2], "errors");
-        if (errors == NULL) {
-            return NULL;
-        }
-    }
-    return PyUnicode_FromEncodedObject(object, encoding, errors);
 }
 
 static PyObject *

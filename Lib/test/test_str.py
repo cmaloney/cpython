@@ -2715,9 +2715,9 @@ class StrTest(string_tests.StringLikeTest,
 
     def test_str_invalid_call(self):
         # too many args
-        with self.assertRaisesRegex(TypeError, r"str expected at most 3 arguments, got 4"):
+        with self.assertRaisesRegex(TypeError, r"str\(\) takes at most 3 arguments \(4 given\)"):
             str("too", "many", "argu", "ments")
-        with self.assertRaisesRegex(TypeError, r"str expected at most 3 arguments, got 4"):
+        with self.assertRaisesRegex(TypeError, r"str\(\) takes at most 3 arguments \(4 given\)"):
             str(1, "", "", 1)
 
         # no such kw arg
