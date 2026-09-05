@@ -362,4 +362,74 @@ cm_vectorcall(PyObject *type, PyObject *const *args,
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=f95a230ff7ba37c9 input=a9049054013a1b77]*/
+
+PyDoc_STRVAR(sm_new__doc__,
+"staticmethod(function, /)\n"
+"--\n"
+"\n"
+"Convert a function to be a static method.\n"
+"\n"
+"A static method does not receive an implicit first argument.\n"
+"To declare a static method, use this idiom:\n"
+"\n"
+"     class C:\n"
+"         @staticmethod\n"
+"         def f(arg1, arg2, argN):\n"
+"             ...\n"
+"\n"
+"It can be called either on the class (e.g. C.f()) or on an instance\n"
+"(e.g. C().f()). Both the class and the instance are ignored, and\n"
+"neither is passed implicitly as the first argument to the method.\n"
+"\n"
+"Static methods in Python are similar to those found in Java or C++.\n"
+"For a more advanced concept, see the classmethod builtin.");
+
+static PyObject *
+sm_new_impl(PyTypeObject *type, PyObject *callable);
+
+static PyObject *
+sm_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    PyObject *return_value = NULL;
+    PyTypeObject *base_tp = &PyStaticMethod_Type;
+    PyObject *callable;
+
+    if ((type == base_tp || type->tp_init == base_tp->tp_init) &&
+        !_PyArg_NoKeywords("staticmethod", kwargs)) {
+        goto exit;
+    }
+    if (!_PyArg_CheckPositional("staticmethod", PyTuple_GET_SIZE(args), 1, 1)) {
+        goto exit;
+    }
+    callable = PyTuple_GET_ITEM(args, 0);
+    return_value = sm_new_impl(type, callable);
+
+exit:
+    return return_value;
+}
+
+static PyObject *
+sm_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyObject *callable;
+
+    assert(Py_Is(_PyType_CAST(type), &PyStaticMethod_Type));
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    if (!_PyArg_NoKwnames("staticmethod", kwnames)) {
+        goto exit;
+    }
+    if (!_PyArg_CheckPositional("staticmethod", nargs, 1, 1)) {
+        goto exit;
+    }
+    callable = args[0];
+    return_value = sm_new_impl(_PyType_CAST(type), callable);
+
+exit:
+    return return_value;
+}
+/*[clinic end generated code: output=0176ab4644b54e1e input=a9049054013a1b77]*/

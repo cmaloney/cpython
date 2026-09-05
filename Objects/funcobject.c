@@ -636,8 +636,9 @@ static PyMemberDef func_memberlist[] = {
 /*[clinic input]
 class function "PyFunctionObject *" "&PyFunction_Type"
 class classmethod "PyObject *" "&PyClassMethod_Type"
+class staticmethod "PyObject *" "&PyStaticMethod_Type"
 [clinic start generated code]*/
-/*[clinic end generated code: output=da39a3ee5e6b4b0d input=7ff114c1bf7070bc]*/
+/*[clinic end generated code: output=da39a3ee5e6b4b0d input=f01cefb28b075755]*/
 
 #include "clinic/funcobject.c.h"
 
@@ -1813,17 +1814,35 @@ sm_set_callable(staticmethod *sm, PyObject *callable)
     return functools_wraps((PyObject *)sm, sm->sm_callable);
 }
 
-static PyObject *
-sm_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
-{
-    if (!_PyArg_NoKeywords("staticmethod", kwds)) {
-        return NULL;
-    }
-    PyObject *callable;  // borrowed ref
-    if (!PyArg_UnpackTuple(args, "staticmethod", 1, 1, &callable)) {
-        return NULL;
-    }
+/*[clinic input]
+@vectorcall
+@classmethod
+staticmethod.__new__ as sm_new
+    function as callable: object
+    /
 
+Convert a function to be a static method.
+
+A static method does not receive an implicit first argument.
+To declare a static method, use this idiom:
+
+     class C:
+         @staticmethod
+         def f(arg1, arg2, argN):
+             ...
+
+It can be called either on the class (e.g. C.f()) or on an instance
+(e.g. C().f()). Both the class and the instance are ignored, and
+neither is passed implicitly as the first argument to the method.
+
+Static methods in Python are similar to those found in Java or C++.
+For a more advanced concept, see the classmethod builtin.
+[clinic start generated code]*/
+
+static PyObject *
+sm_new_impl(PyTypeObject *type, PyObject *callable)
+/*[clinic end generated code: output=c0b74dda34679979 input=fb0d189fb0de7649]*/
+{
     staticmethod *sm = (staticmethod *)PyType_GenericAlloc(type, 0);
     if (sm == NULL) {
         return NULL;
@@ -1924,27 +1943,6 @@ sm_repr(PyObject *self)
     return PyUnicode_FromFormat("<staticmethod(%R)>", sm->sm_callable);
 }
 
-PyDoc_STRVAR(staticmethod_doc,
-"staticmethod(function, /)\n\
---\n\
-\n\
-Convert a function to be a static method.\n\
-\n\
-A static method does not receive an implicit first argument.\n\
-To declare a static method, use this idiom:\n\
-\n\
-     class C:\n\
-         @staticmethod\n\
-         def f(arg1, arg2, argN):\n\
-             ...\n\
-\n\
-It can be called either on the class (e.g. C.f()) or on an instance\n\
-(e.g. C().f()). Both the class and the instance are ignored, and\n\
-neither is passed implicitly as the first argument to the method.\n\
-\n\
-Static methods in Python are similar to those found in Java or C++.\n\
-For a more advanced concept, see the classmethod builtin.");
-
 PyTypeObject PyStaticMethod_Type = {
     PyVarObject_HEAD_INIT(&PyType_Type, 0)
     "staticmethod",
@@ -1966,7 +1964,7 @@ PyTypeObject PyStaticMethod_Type = {
     0,                                          /* tp_setattro */
     0,                                          /* tp_as_buffer */
     Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC,
-    staticmethod_doc,                           /* tp_doc */
+    sm_new__doc__,                              /* tp_doc */
     sm_traverse,                                /* tp_traverse */
     sm_clear,                                   /* tp_clear */
     0,                                          /* tp_richcompare */
@@ -1985,6 +1983,7 @@ PyTypeObject PyStaticMethod_Type = {
     PyType_GenericAlloc,                        /* tp_alloc */
     sm_new,                                     /* tp_new */
     PyObject_GC_Del,                            /* tp_free */
+    .tp_vectorcall = sm_vectorcall,
 };
 
 PyObject *
