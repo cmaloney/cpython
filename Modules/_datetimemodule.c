@@ -337,14 +337,14 @@ static int check_tzinfo_subclass(PyObject *p);
 
 /*[clinic input]
 module datetime
-class datetime.datetime "PyDateTime_DateTime *" "get_datetime_state()->datetime_type"
-class datetime.date "PyDateTime_Date *" "get_datetime_state()->date_type"
-class datetime.time "PyDateTime_Time *" "get_datetime_state()->time_type"
+class datetime.datetime "PyDateTime_DateTime *" "&PyDateTime_DateTimeType"
+class datetime.date "PyDateTime_Date *" "&PyDateTime_DateType"
+class datetime.time "PyDateTime_Time *" "&PyDateTime_TimeType"
 class datetime.IsoCalendarDate "PyDateTime_IsoCalendarDate *" "get_datetime_state()->isocalendar_date_type"
 class datetime.timedelta "PyDateTime_Delta *" "&PyDateTime_DeltaType"
 class datetime.timezone "PyDateTime_TimeZone *" "&PyDateTime_TimeZoneType"
 [clinic start generated code]*/
-/*[clinic end generated code: output=da39a3ee5e6b4b0d input=c54b9adf60082f0d]*/
+/*[clinic end generated code: output=da39a3ee5e6b4b0d input=b62a18968ed282f0]*/
 
 #include "clinic/_datetimemodule.c.h"
 
