@@ -1512,7 +1512,8 @@ datetime_datetime_impl(PyTypeObject *type, int year, int month, int day,
                        PyObject *tzinfo, int fold);
 
 static PyObject *
-datetime_datetime(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+datetime_datetime_helper(PyTypeObject *type, PyObject *const *args,
+    Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames)
 {
     PyObject *return_value = NULL;
     #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
@@ -1544,8 +1545,7 @@ datetime_datetime(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     #undef KWTUPLE
     PyObject *argsbuf[9];
     PyObject * const *fastargs;
-    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
-    Py_ssize_t noptargs = nargs + (kwargs ? PyDict_GET_SIZE(kwargs) : 0) - 3;
+    Py_ssize_t noptargs = nargs + nkw - 3;
     int year;
     int month;
     int day;
@@ -1556,7 +1556,7 @@ datetime_datetime(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     PyObject *tzinfo = Py_None;
     int fold = 0;
 
-    fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser,
+    fastargs = _PyArg_UnpackKeywords(args, nargs, kwargs, kwnames, &_parser,
             /*minpos*/ 3, /*maxpos*/ 8, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
     if (!fastargs) {
         goto exit;
@@ -1631,6 +1631,55 @@ skip_optional_kwonly:
 
 exit:
     return return_value;
+}
+
+static PyObject *
+datetime_datetime(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    {
+        PyObject *pre_parse_result;
+        int pre_parse_rc = datetime_pre_parse(type, _PyTuple_CAST(args)->ob_item,
+            PyTuple_GET_SIZE(args),
+            kwargs ? PyDict_GET_SIZE(kwargs) : 0,
+            kwargs, NULL, &pre_parse_result);
+        if (pre_parse_rc < 0) {
+            return NULL;
+        }
+        if (pre_parse_rc > 0) {
+            return pre_parse_result;
+        }
+    }
+    return datetime_datetime_helper(type, _PyTuple_CAST(args)->ob_item,
+        PyTuple_GET_SIZE(args),
+        kwargs ? PyDict_GET_SIZE(kwargs) : 0,
+        kwargs, NULL);
+}
+
+static PyObject *
+datetime_datetime_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+
+    assert(Py_Is(_PyType_CAST(type), &PyDateTime_DateTimeType));
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    {
+        PyObject *pre_parse_result;
+        int pre_parse_rc = datetime_pre_parse(_PyType_CAST(type), args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames, &pre_parse_result);
+        if (pre_parse_rc < 0) {
+            return NULL;
+        }
+        if (pre_parse_rc > 0) {
+            return pre_parse_result;
+        }
+    }
+    return datetime_datetime_helper(_PyType_CAST(type), args, nargs,
+        kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+        NULL, kwnames);
 }
 
 PyDoc_STRVAR(datetime_datetime_now__doc__,
@@ -2324,4 +2373,4 @@ datetime_datetime___reduce__(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
     return datetime_datetime___reduce___impl((PyDateTime_DateTime *)self);
 }
-/*[clinic end generated code: output=797be3aa53c649cc input=a9049054013a1b77]*/
+/*[clinic end generated code: output=32c4cfa527b4e26b input=a9049054013a1b77]*/
