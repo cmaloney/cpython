@@ -1445,39 +1445,21 @@ make_new_frozenset(PyTypeObject *type, PyObject *iterable)
     return obj;
 }
 
+/*[clinic input]
+@vectorcall
+@classmethod
+frozenset.__new__ as frozenset_new
+    iterable: object(c_default="NULL") = ()
+    /
+
+Build an immutable unordered collection of unique elements.
+[clinic start generated code]*/
+
 static PyObject *
-frozenset_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+frozenset_new_impl(PyTypeObject *type, PyObject *iterable)
+/*[clinic end generated code: output=6c67ccce4915eb26 input=edf707b44d805362]*/
 {
-    PyObject *iterable = NULL;
-
-    if ((type == &PyFrozenSet_Type ||
-         type->tp_init == PyFrozenSet_Type.tp_init) &&
-        !_PyArg_NoKeywords("frozenset", kwds)) {
-        return NULL;
-    }
-
-    if (!PyArg_UnpackTuple(args, type->tp_name, 0, 1, &iterable)) {
-        return NULL;
-    }
-
     return make_new_frozenset(type, iterable);
-}
-
-static PyObject *
-frozenset_vectorcall(PyObject *type, PyObject * const*args,
-                     size_t nargsf, PyObject *kwnames)
-{
-    if (!_PyArg_NoKwnames("frozenset", kwnames)) {
-        return NULL;
-    }
-
-    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
-    if (!_PyArg_CheckPositional("frozenset", nargs, 0, 1)) {
-        return NULL;
-    }
-
-    PyObject *iterable = (nargs ? args[0] : NULL);
-    return make_new_frozenset(_PyType_CAST(type), iterable);
 }
 
 static PyObject *
@@ -2973,12 +2955,6 @@ static PyNumberMethods frozenset_as_number = {
     set_or,                             /*nb_or*/
 };
 
-PyDoc_STRVAR(frozenset_doc,
-"frozenset(iterable=(), /)\n\
---\n\
-\n\
-Build an immutable unordered collection of unique elements.");
-
 PyTypeObject PyFrozenSet_Type = {
     PyVarObject_HEAD_INIT(&PyType_Type, 0)
     "frozenset",                        /* tp_name */
@@ -3003,7 +2979,7 @@ PyTypeObject PyFrozenSet_Type = {
     Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC |
         Py_TPFLAGS_BASETYPE |
         _Py_TPFLAGS_MATCH_SELF,         /* tp_flags */
-    frozenset_doc,                      /* tp_doc */
+    frozenset_new__doc__,               /* tp_doc */
     set_traverse,                       /* tp_traverse */
     set_clear_internal,                 /* tp_clear */
     set_richcompare,                    /* tp_richcompare */
