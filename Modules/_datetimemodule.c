@@ -346,6 +346,8 @@ class datetime.timezone "PyDateTime_TimeZone *" "&PyDateTime_TimeZoneType"
 [clinic start generated code]*/
 /*[clinic end generated code: output=da39a3ee5e6b4b0d input=b62a18968ed282f0]*/
 
+static int date_pre_parse(PyTypeObject *, PyObject *const *, Py_ssize_t,
+                          Py_ssize_t, PyObject *, PyObject *, PyObject **);
 #include "clinic/_datetimemodule.c.h"
 
 
@@ -3231,17 +3233,22 @@ date_from_pickle(PyTypeObject *type, PyObject *state)
     return (PyObject *)me;
 }
 
-static PyObject *
-date_new(PyTypeObject *type, PyObject *args, PyObject *kw)
+/* @vectorcall pre-parse function: construct from the pickle state form,
+ * a single bytes/str positional argument. */
+static int
+date_pre_parse(PyTypeObject *type, PyObject *const *args, Py_ssize_t nargs,
+                Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames,
+                PyObject **result)
 {
     /* Check for invocation from pickle with __getstate__ state */
-    if (PyTuple_GET_SIZE(args) == 1) {
-        PyObject *state = PyTuple_GET_ITEM(args, 0);
+    if (nargs == 1) {
+        PyObject *state = args[0];
         if (PyBytes_Check(state)) {
             if (PyBytes_GET_SIZE(state) == _PyDateTime_DATE_DATASIZE &&
                 MONTH_IS_SANE(PyBytes_AS_STRING(state)[2]))
             {
-                return date_from_pickle(type, state);
+                *result = date_from_pickle(type, state);
+                return *result == NULL ? -1 : 1;
             }
         }
         else if (PyUnicode_Check(state)) {
@@ -3257,19 +3264,20 @@ date_new(PyTypeObject *type, PyObject *args, PyObject *kw)
                             "a date object. "
                             "pickle.load(data, encoding='latin1') is assumed.");
                     }
-                    return NULL;
+                    return -1;
                 }
-                PyObject *self = date_from_pickle(type, state);
+                *result = date_from_pickle(type, state);
                 Py_DECREF(state);
-                return self;
+                return *result == NULL ? -1 : 1;
             }
         }
     }
 
-    return datetime_date(type, args, kw);
+    return 0;
 }
 
 /*[clinic input]
+@vectorcall date_pre_parse
 @classmethod
 datetime.date.__new__
 
@@ -3282,7 +3290,7 @@ Concrete date type.
 
 static PyObject *
 datetime_date_impl(PyTypeObject *type, int year, int month, int day)
-/*[clinic end generated code: output=6654caa3dea7d518 input=fd1bac0658690455]*/
+/*[clinic end generated code: output=6654caa3dea7d518 input=4d243e274c114ce8]*/
 {
     return new_date_ex(year, month, day, type);
 }
@@ -4118,8 +4126,9 @@ static PyTypeObject PyDateTime_DateType = {
     0,                                                  /* tp_dictoffset */
     0,                                                  /* tp_init */
     0,                                                  /* tp_alloc */
-    date_new,                                           /* tp_new */
+    datetime_date,                                           /* tp_new */
     0,                                                  /* tp_free */
+    .tp_vectorcall = datetime_date_vectorcall,
 };
 
 /*

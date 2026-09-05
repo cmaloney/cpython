@@ -194,7 +194,8 @@ static PyObject *
 datetime_date_impl(PyTypeObject *type, int year, int month, int day);
 
 static PyObject *
-datetime_date(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+datetime_date_helper(PyTypeObject *type, PyObject *const *args,
+    Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames)
 {
     PyObject *return_value = NULL;
     #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
@@ -226,12 +227,11 @@ datetime_date(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     #undef KWTUPLE
     PyObject *argsbuf[3];
     PyObject * const *fastargs;
-    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
     int year;
     int month;
     int day;
 
-    fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser,
+    fastargs = _PyArg_UnpackKeywords(args, nargs, kwargs, kwnames, &_parser,
             /*minpos*/ 3, /*maxpos*/ 3, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
     if (!fastargs) {
         goto exit;
@@ -249,6 +249,77 @@ datetime_date(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         goto exit;
     }
     return_value = datetime_date_impl(type, year, month, day);
+
+exit:
+    return return_value;
+}
+
+static PyObject *
+datetime_date(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    {
+        PyObject *pre_parse_result;
+        int pre_parse_rc = date_pre_parse(type, _PyTuple_CAST(args)->ob_item,
+            PyTuple_GET_SIZE(args),
+            kwargs ? PyDict_GET_SIZE(kwargs) : 0,
+            kwargs, NULL, &pre_parse_result);
+        if (pre_parse_rc < 0) {
+            return NULL;
+        }
+        if (pre_parse_rc > 0) {
+            return pre_parse_result;
+        }
+    }
+    return datetime_date_helper(type, _PyTuple_CAST(args)->ob_item,
+        PyTuple_GET_SIZE(args),
+        kwargs ? PyDict_GET_SIZE(kwargs) : 0,
+        kwargs, NULL);
+}
+
+static PyObject *
+datetime_date_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    int year;
+    int month;
+    int day;
+
+    assert(Py_Is(_PyType_CAST(type), &PyDateTime_DateType));
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    {
+        PyObject *pre_parse_result;
+        int pre_parse_rc = date_pre_parse(_PyType_CAST(type), args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames, &pre_parse_result);
+        if (pre_parse_rc < 0) {
+            return NULL;
+        }
+        if (pre_parse_rc > 0) {
+            return pre_parse_result;
+        }
+    }
+    if (kwnames != NULL || nargs < 3 || nargs > 3) {
+        return datetime_date_helper(_PyType_CAST(type), args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames);
+    }
+    year = PyLong_AsInt(args[0]);
+    if (year == -1 && PyErr_Occurred()) {
+        goto exit;
+    }
+    month = PyLong_AsInt(args[1]);
+    if (month == -1 && PyErr_Occurred()) {
+        goto exit;
+    }
+    day = PyLong_AsInt(args[2]);
+    if (day == -1 && PyErr_Occurred()) {
+        goto exit;
+    }
+    return_value = datetime_date_impl(_PyType_CAST(type), year, month, day);
 
 exit:
     return return_value;
@@ -2204,4 +2275,4 @@ datetime_datetime___reduce__(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
     return datetime_datetime___reduce___impl((PyDateTime_DateTime *)self);
 }
-/*[clinic end generated code: output=506af1a328c7d890 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=6716188ca0f56580 input=a9049054013a1b77]*/
