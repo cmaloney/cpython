@@ -2864,6 +2864,7 @@ static PyObject *
 bytes_subtype_new(PyTypeObject *, PyObject *);
 
 /*[clinic input]
+@vectorcall
 @classmethod
 bytes.__new__ as bytes_new
 
@@ -2876,7 +2877,7 @@ bytes.__new__ as bytes_new
 static PyObject *
 bytes_new_impl(PyTypeObject *type, PyObject *x, const char *encoding,
                const char *errors)
-/*[clinic end generated code: output=1e0c471be311a425 input=f0a966d19b7262b4]*/
+/*[clinic end generated code: output=1e0c471be311a425 input=b0248d22e221a095]*/
 {
     PyObject *bytes;
     PyObject *func;
@@ -3268,6 +3269,7 @@ PyTypeObject PyBytes_Type = {
     bytes_new,                                  /* tp_new */
     PyObject_Free,                              /* tp_free */
     .tp_version_tag = _Py_TYPE_VERSION_BYTES,
+    .tp_vectorcall = bytes_vectorcall,
     ._tp_iteritem = bytes_iteritem,
 };
 

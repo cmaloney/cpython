@@ -931,6 +931,7 @@ bytearray_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 }
 
 /*[clinic input]
+@vectorcall
 bytearray.__init__
 
     source as arg: object = NULL
@@ -942,7 +943,7 @@ bytearray.__init__
 static int
 bytearray___init___impl(PyByteArrayObject *self, PyObject *arg,
                         const char *encoding, const char *errors)
-/*[clinic end generated code: output=4ce1304649c2f8b3 input=1141a7122eefd7b9]*/
+/*[clinic end generated code: output=4ce1304649c2f8b3 input=24ddb84055f432dd]*/
 {
     Py_ssize_t count;
     PyObject *it;
@@ -2969,6 +2970,7 @@ PyTypeObject PyByteArray_Type = {
     bytearray_new,                      /* tp_new */
     PyObject_Free,                      /* tp_free */
     .tp_version_tag = _Py_TYPE_VERSION_BYTEARRAY,
+    .tp_vectorcall = bytearray_vectorcall,
 };
 
 /*********************** Bytearray Iterator ****************************/
