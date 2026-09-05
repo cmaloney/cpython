@@ -733,7 +733,8 @@ static PyObject *
 timezone_new_impl(PyTypeObject *type, PyObject *offset, PyObject *name);
 
 static PyObject *
-timezone_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+timezone_new_helper(PyTypeObject *type, PyObject *const *args,
+    Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames)
 {
     PyObject *return_value = NULL;
     #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
@@ -765,12 +766,11 @@ timezone_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     #undef KWTUPLE
     PyObject *argsbuf[2];
     PyObject * const *fastargs;
-    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
-    Py_ssize_t noptargs = nargs + (kwargs ? PyDict_GET_SIZE(kwargs) : 0) - 1;
+    Py_ssize_t noptargs = nargs + nkw - 1;
     PyObject *offset;
     PyObject *name = NULL;
 
-    fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser,
+    fastargs = _PyArg_UnpackKeywords(args, nargs, kwargs, kwnames, &_parser,
             /*minpos*/ 1, /*maxpos*/ 2, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
     if (!fastargs) {
         goto exit;
@@ -790,6 +790,53 @@ timezone_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     name = fastargs[1];
 skip_optional_pos:
     return_value = timezone_new_impl(type, offset, name);
+
+exit:
+    return return_value;
+}
+
+static PyObject *
+timezone_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    return timezone_new_helper(type, _PyTuple_CAST(args)->ob_item,
+        PyTuple_GET_SIZE(args),
+        kwargs ? PyDict_GET_SIZE(kwargs) : 0,
+        kwargs, NULL);
+}
+
+static PyObject *
+timezone_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyObject *offset;
+    PyObject *name = NULL;
+
+    assert(Py_Is(_PyType_CAST(type), &PyDateTime_TimeZoneType));
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    if (kwnames != NULL || nargs < 1 || nargs > 2) {
+        return timezone_new_helper(_PyType_CAST(type), args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames);
+    }
+    if (!PyObject_TypeCheck(args[0], DELTA_TYPE(NO_STATE))) {
+        _PyArg_BadArgument("timezone", "argument 'offset'", (DELTA_TYPE(NO_STATE))->tp_name, args[0]);
+        goto exit;
+    }
+    offset = args[0];
+    if (nargs < 2) {
+        goto skip_optional;
+    }
+    if (!PyUnicode_Check(args[1])) {
+        _PyArg_BadArgument("timezone", "argument 'name'", "str", args[1]);
+        goto exit;
+    }
+    name = args[1];
+skip_optional:
+    return_value = timezone_new_impl(_PyType_CAST(type), offset, name);
 
 exit:
     return return_value;
@@ -2157,4 +2204,4 @@ datetime_datetime___reduce__(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
     return datetime_datetime___reduce___impl((PyDateTime_DateTime *)self);
 }
-/*[clinic end generated code: output=a09c806c9171f2b2 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=506af1a328c7d890 input=a9049054013a1b77]*/

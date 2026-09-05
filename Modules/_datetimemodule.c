@@ -4350,6 +4350,7 @@ static PyTypeObject PyDateTime_TZInfoType = {
 };
 
 /*[clinic input]
+@vectorcall
 @classmethod
 datetime.timezone.__new__ as timezone_new
 
@@ -4361,7 +4362,7 @@ Fixed offset from UTC implementation of tzinfo.
 
 static PyObject *
 timezone_new_impl(PyTypeObject *type, PyObject *offset, PyObject *name)
-/*[clinic end generated code: output=41a2dda500424187 input=d51255afe60382cd]*/
+/*[clinic end generated code: output=41a2dda500424187 input=8901a8befbc52561]*/
 {
     return new_timezone(offset, name);
 }
@@ -4590,6 +4591,7 @@ static PyTypeObject PyDateTime_TimeZoneType = {
     0,                                /* tp_init */
     0,                                /* tp_alloc */
     timezone_new,                     /* tp_new */
+    .tp_vectorcall = timezone_vectorcall,
 };
 
 // XXX Can we make this const?
