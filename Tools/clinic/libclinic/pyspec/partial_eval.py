@@ -2,8 +2,12 @@
 
 Given facts a call site knows -- which arguments are NULL, and optionally
 the exact type of an argument -- fold the branches those facts decide and
-inline tail calls to other spec functions.  The result is a list of ast
-statements in the same Python subset the C emitter accepts.
+inline tail calls to other spec functions (or call a shared
+specialization, below).  After an if whose one branch exits, the facts
+of the other hold.  The result is a list of ast statements in the same
+Python subset the C emitter accepts.  Facts about builtin types come
+from the spec and from BUILTIN_TYPES, never from the Python running
+Argument Clinic.
 
 Loops.  ``for item in it:`` iterates an iterator ``it = iter(x)``.  When
 the exact type of x is known (from the call site, or from a
@@ -14,15 +18,21 @@ the exact type of x is known (from the call site, or from a
   clause;
 * a list or a tuple is iterated by index, without an iterator object
   (``for item in x:``, lowered by emit.py; ``it = iter(x)`` is then
-  dead and removed), with the same semantics as its iterator: the size is
-  read again for every item;
+  dead and removed), with the same semantics as its iterator: the size of
+  a list is read again for every item (except in a snapshot, below);
 * the exact type of the items, when all have the same, is known in the
   loop body.
 
 When the exact type of x is not known where ``it = iter(x)`` is
 evaluated, the rest of the block is versioned: specialized for an exact
 list and an exact tuple when that gives an index loop, and kept generic
-for other types (VERSIONED_ITERABLES).
+for other types (VERSIONED_ITERABLES).  ``C.lookup_special(x, name)`` is
+versioned the same way for the spec types on which the special method it
+finds is pure (bytes.__bytes__ on exactly bytes: ``return x``).
+
+Arity functions.  Where the rest of a __new__ body has the facts of one
+of its NAME_nargsN() functions (emit.py) and is that whole function, it
+calls the function (Evaluator.arity_call()).
 
 In a loop body, a statement that passes the item to an escape with a
 fast path (Escape.fast, e.g. PyNumber_AsSsize_t() of a compact exact
@@ -192,8 +202,8 @@ class TypeFacts:
         """Whether tp itself defines special method *name* (in SPECIALS)."""
         if self.spec_class(tp) is not None:
             full = f'{tp.__name__}.{name}'
-            return (full in self.spec.functions or full in self.spec.clones
-                    or full in self.spec.shared)
+            return (full in self.spec.functions
+                    or full in getattr(self.spec, 'shared', {}))
         return name in BUILTIN_TYPES[tp][1]
 
     def owner(self, tp, name):
@@ -224,11 +234,12 @@ class Bound:
     evaluates to *value* (an ast node) without side effects.
 
     ``(func := C.lookup_special(x, "__bytes__")) is not NULL`` binds func
-    when the exact type of x is a static type whose __bytes__ is a spec
-    method, and that method, partially evaluated for x, is just
-    ``return self`` (or a constant): ``result = func()`` then becomes
-    ``result`` is x.  A static type cannot change, so the lookup is
-    decided by the type alone; a heap type (e.g. a subclass) is not.
+    when the exact type of x is a type TypeFacts knows (a static type)
+    whose __bytes__ is a spec method, and that method, partially evaluated
+    for x, is just ``return self`` (or a constant): ``result = func()``
+    then becomes ``result`` is x.  A static type cannot change, so the
+    lookup is decided by the type alone; a heap type (e.g. a subclass) is
+    not.
     """
 
     def __init__(self, name, value):

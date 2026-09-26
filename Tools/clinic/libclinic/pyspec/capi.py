@@ -196,7 +196,7 @@ def load_catalog(spec_path):
         if not is_capi_name(name):
             continue
         func = functions[name]
-        if getattr(func, '__pyspec_helper__', False):
+        if isinstance(getattr(runtime.C, name, None), runtime.Escape):
             continue            # an escape's C function, not our C API
         where = f'{spec_path}:{node.lineno}: {name}()'
         try:

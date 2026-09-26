@@ -6,13 +6,14 @@ gives the reference behavior; Argument Clinic reads the same file with the
 ast module and lowers it to C (see emit.py).  Three kinds of names appear
 in a spec:
 
-* functions defined in the spec itself (lowered to static C functions,
-  or inlined by the partial evaluator);
+* functions defined in the spec itself (lowered to C functions, inlined
+  or specialized by the partial evaluator);
 * the builtins below, which have fixed C meanings;
 * escapes, ``C.<name>(...)``: C functions called directly.  Each carries
-  its C call template, result type and error convention for the emitter;
+  its C call template, result type and error convention for the emitter,
+  and its cheaper lowerings (see Escape);
 * the C API facts vocabulary (New[object], Steals[...], OnError[...], ...):
-  annotations of top-level stubs, read by the C API catalog (capi.py).
+  annotations of top-level stubs.
 """
 
 import ast
@@ -27,7 +28,7 @@ __all__ = [
     # C API facts vocabulary
     'char_p', 'void_p', 'const_void_p', 'Py_ssize_t', 'va_list', 'pointer',
     'Out', 'InOut', 'New', 'Borrowed', 'Steals', 'OnError', 'NoError',
-    'NullIn', 'RunsPython', 'helper',
+    'NullIn', 'RunsPython',
 ]
 
 
@@ -336,8 +337,9 @@ class C:
 # C API facts vocabulary
 #
 # Annotations of the top-level functions of a spec, which describe C
-# functions (the C API catalog, checked by capi.py).  Plain Python values:
-# the spec is executed to evaluate them.
+# functions (the C API catalog).  Plain Python values: the catalog check
+# executes the spec to evaluate them; Argument Clinic reads them from the
+# AST (stub_facts()).
 #
 # C types (parameter and return annotations)
 #     object          PyObject *
@@ -387,13 +389,12 @@ class C:
 #
 # Escapes
 #     The facts of an escape ``C.<name>(...)`` are the annotations of the
-#     top-level stub named <name> in the spec (read by call_table.py and
-#     capi.py from the AST: clinic never executes the spec).  A stub for a
-#     C function that is not part of the C API of the spec's C file (static,
-#     or defined in another file) is decorated with @helper: the C API
-#     catalog skips it.  Escapes without a stub are assumed to run Python
-#     code and to return an object of any type.  ``raise C.<name>()`` and
-#     ``with C.<name>(x):`` escapes never run Python code.
+#     top-level stub named <name> in the spec (read by call_table.py from
+#     the AST: Argument Clinic never executes the spec).  Escapes without a
+#     stub are assumed to run Python code and to return an object of any
+#     type.  The fast path, exact type and unchecked lowerings of an escape
+#     (Escape) run no Python code and cannot fail.  ``raise C.<name>()``
+#     and ``with C.<name>(x):`` escapes never run Python code.
 
 
 class CType:
@@ -453,13 +454,6 @@ OnError = _Wrapper('OnError', 'Return: OnError[T, value, ...]: value with '
                               'an exception set on error.')
 NoError = _Wrapper('NoError', 'Return: cannot fail.')
 RunsPython = _Wrapper('RunsPython', 'Return: may run arbitrary Python code.')
-
-
-def helper(func):
-    """Decorator of a stub: a C function outside the C API of the spec's C
-    file, described only for the escapes that call it."""
-    func.__pyspec_helper__ = True
-    return func
 
 
 class NullIn:

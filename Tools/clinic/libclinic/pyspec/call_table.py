@@ -1,24 +1,30 @@
 """Generate the call table of a spec'd type for the tier-2 optimizer.
 
 For a clinic __new__ implemented by a spec (``def __new__(cls, ...)`` in
-``class bytes:``, used by the clinic block ``bytes.__new__ as bytes_new``),
-emit.py generates NAME_nargsN(): the spec partially evaluated for exactly
-that type and N positional arguments.  emit.py then calls generate() here,
-which adds to the same generated file (Argument Clinic writes it; there is
-no separate command):
+``class bytes:``, the clinic function bytes.__new__, C basename
+bytes_new), emit.py generates NAME_nargsN(): the spec partially evaluated
+for exactly that type and N positional arguments.  emit.py then calls
+generate() here, which adds to the same generated file (Argument Clinic
+writes it; there is no separate command):
 
 * NAME_nargs1_T(): NAME_nargs1 partially evaluated for an argument of
-  exact type T, for T from a fixed list of builtin types.  No annotation
-  chooses them: a variant is kept only when its residual code is much
-  smaller than the generic one (KEEP_RATIO); variants with identical code
-  share one C function.
+  exact type T, for T from a fixed list of common builtin types
+  (CANDIDATE_TYPES).  No annotation chooses them: a variant is kept only
+  when its residual code is much smaller than the generic one
+  (KEEP_RATIO); variants with identical code share one C function, and a
+  variant that would only call a shared specialization
+  (partial_eval.Specialization, e.g. bytes_from_iterator_list()) is that
+  function.
 
 * ``const _PySpecCallTable _PySpec_<type>_calls`` (declared in
   Include/internal/pycore_pyspec.h): per arity with object-only arguments
   and per argument type, the C function and facts about its result, all
   derived from the residual code; and the same facts for the other
   methods the spec implements (bytes.__bytes__, bytes.fromhex), per exact
-  type of their first argument, keyed by their ml_meth:
+  type of their first argument, keyed by their ml_meth.  The generic
+  entry of a class method holds for any class (a subclass shares the
+  ml_meth), the others only for the type itself
+  (_PySpec_FindMethod()):
 
     - result_const: the residual is just ``return <constant>``: no side
       effects, and the constant is immortal;
@@ -33,9 +39,10 @@ no separate command):
     - _PySpec_ALWAYS_RAISES: no ``return`` is left;
     - _PySpec_MAY_RUN_PYTHON: some call on a path may run Python code:
       an escape whose stub says RunsPython (for RunsPython[T, 'p'], only
-      when the exact type of p is not known to be a static type), a call
-      of an object (e.g. a method found by lookup_special) or a spec
-      function that may.
+      when the exact type of p is not known to be a static type) unless
+      it is lowered by a fast path, an exact type or unchecked lowering,
+      a call of an object (e.g. a method found by lookup_special), or a
+      spec function or specialization that may.
 
 The facts of the escapes come from the stubs of the same name in the spec
 (runtime.stub_facts()): there is no second table here.  All facts hold

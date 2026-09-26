@@ -8,12 +8,13 @@ Every implemented spec function becomes a C function:
   * a method of a spec class implements the clinic function of that name.
     For a method or class method (``bytes.__bytes__``) it becomes the
     NAME_impl() that clinic's parsing code calls; the first parameter is
-    clinic's self (or class) parameter.  For ``bytes.__new__ as bytes_new`` it
-    becomes bytes_new_impl() (Argument Clinic declares it and no longer
-    expects a hand-written body), plus bytes_new_nargsN() for each
-    positional argument count N -- the function partially evaluated for
-    exactly the class and N arguments, called by the clinic generated
-    vectorcall;
+    clinic's self (or class) parameter.  ``bytes.__new__`` (C basename
+    bytes_new) becomes bytes_new_impl() (Argument Clinic declares it and
+    no longer expects a hand-written body), plus bytes_new_nargsN() for
+    each positional argument count N -- the function partially evaluated
+    for exactly the class and N arguments, called by the clinic generated
+    vectorcall; bytes_new_impl() calls one where the rest of its body is
+    that function;
   * a top-level function becomes the C function of the same name: names
     starting with Py or _Py are defined non-static (their public or
     internal header declares them); everything else is static.
@@ -23,7 +24,9 @@ Functions whose body is only a docstring and/or ``...`` are stubs
 
 For a __new__ implemented by the spec, call_table.py then adds
 type-specialized variants of NAME_nargs1() and the call table the tier-2
-optimizer reads (Include/internal/pycore_pyspec.h).
+optimizer reads (Include/internal/pycore_pyspec.h).  Last come the
+shared specializations the code calls (partial_eval.Specialization),
+e.g. bytes_from_iterator_list().
 
 The accepted Python subset is small on purpose; anything else is an error.
 
@@ -1013,9 +1016,8 @@ def describe_method(spec, name, self_ctype):
     parameter is clinic's implicit self (or class) parameter, of C type
     *self_ctype* (from the clinic class, e.g. "PyBytesObject *").
 
-    The other parameters follow the rules of frontend.Spec.describe().
-    (Kept here while frontend.py is being changed by another workstream;
-    it belongs in Spec.describe().)
+    The other parameters follow the rules of frontend.Spec.describe(),
+    which describes __new__ and top-level functions only.
     """
     node = spec.functions[name]
     where = f"{spec.where(node)}: {name}()"
