@@ -1,0 +1,7 @@
+# Known disconnects: Doc/c-api/typeobj.rst slot tables vs slotdefs[]
+# (Objects/typeobject.c).
+# Checked by Lib/test/test_pyspec_catalog.py: this list may only shrink.
+# Fixed one?  Delete its line.  Keep the lines sorted.
+nb_floor_divide: __rfloordiv__ is in slotdefs[], not in Doc/c-api/typeobj.rst
+nb_true_divide: __rtruediv__ is in slotdefs[], not in Doc/c-api/typeobj.rst
+sq_repeat: __rmul__ is in slotdefs[], not in Doc/c-api/typeobj.rst

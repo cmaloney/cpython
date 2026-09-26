@@ -1,0 +1,6 @@
+# Known disconnects: typeshed stdlib/builtins.pyi vs the spec (or runtime)
+# signatures.  Only checked with PYSPEC_TYPESHED=<typeshed checkout>; made with
+# typeshed 249fa03490c26bf2aa83c8d94136ff33635588c0.
+# Checked by Lib/test/test_pyspec_catalog.py: this list may only shrink.
+# Fixed one?  Delete its line.  Keep the lines sorted.
+bytes.__new__: typeshed (string=?, /, encoding=?, errors='strict') != spec (source=?, encoding=?, errors=?)
