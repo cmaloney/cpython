@@ -4893,7 +4893,10 @@ dummy_func(
 
         /* The same, for a table entry that runs no Python code
          * (_PySpec_MAY_RUN_PYTHON is not set: derived from the spec) of a
-         * class that is immortal: the call does not escape. */
+         * class that is immortal.  The call still escapes: running no
+         * Python code does not mean not escaping (a critical section may
+         * detach the thread, releasing a buffer may decref another
+         * object).  Debug builds check that it runs no Python code. */
         tier2 op(_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON, (func/4, callable, self_or_null, arg -- callable, self_or_null, arg)) {
             assert(sizeof(_PySpecFunc1) == sizeof(uintptr_t));
             assert(_Py_IsImmortal(PyStackRef_AsPyObjectBorrow(callable)));

@@ -685,8 +685,6 @@ NON_ESCAPING_FUNCTIONS = (
     "_PyObject_ManagedDictPointer",
     # Only calls a function when the assertion fails, which never returns.
     "_PyObject_ASSERT_WITH_MSG",
-    # Only called for pyspec call table entries that run no Python code.
-    "_PySpec_CallNoPython1",
     "_PyThreadState_HasStackSpace",
     "_PyTuple_FromStackRefStealOnSuccess",
     "_PyTuple_ITEMS",

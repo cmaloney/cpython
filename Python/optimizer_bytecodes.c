@@ -1843,7 +1843,7 @@ dummy_func(void) {
             else if ((call->flags & _PySpec_MAY_RUN_PYTHON) == 0 &&
                      _Py_IsImmortal(callable_o))
             {
-                /* Runs no Python code: a call that does not escape. */
+                /* Runs no Python code (checked in debug builds). */
                 ADD_OP(_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON, oparg, (uintptr_t)call->func.f1);
             }
             else {
