@@ -12,7 +12,7 @@ from libclinic.block_parser import Block, BlockParser
 from libclinic.codegen import BlockPrinter, Destination, CodeGen
 from libclinic.parser import Parser, PythonParser
 from libclinic.dsl_parser import DSLParser
-from libclinic.pyspec import emit, frontend
+from libclinic.pyspec import emit, frontend, typeobj
 if TYPE_CHECKING:
     from libclinic.clanguage import CLanguage
     from libclinic.function import (
@@ -259,6 +259,7 @@ impl_definition block
                     continue
 
         self.write_pyspec_output()
+        self.write_type_objects()
         return printer.f.getvalue()
 
     @property
@@ -293,10 +294,23 @@ impl_definition block
             if cls.name not in spec.classes:
                 continue
             declared = {f.name for f in cls.functions}
-            for meth in spec.methods(cls.name):
-                if meth not in declared:
-                    self._parse_spec_method(parser, spec, cls.name, path,
-                                            meth)
+            try:
+                methods = spec.methods(cls.name)
+            except frontend.SpecError as exc:
+                fail(str(exc))
+            for meth in methods:
+                # A clone needs its target first: the order of the spec
+                # is that of the method table, not of clinic.
+                todo = [meth]
+                while (clone := spec.clones.get(f'{cls.name}.{todo[-1]}')) \
+                        and clone.target not in declared \
+                        and clone.target not in todo:
+                    todo.append(clone.target)
+                for name in reversed(todo):
+                    if name not in declared:
+                        self._parse_spec_method(parser, spec, cls.name,
+                                                path, name)
+                        declared.add(name)
 
     def _clinic_classes(self, parent: Any, prefix: str
                         ) -> list[tuple[str, Class]]:
@@ -347,6 +361,35 @@ impl_definition block
         except (emit.SpecError, frontend.SpecError) as exc:
             fail(f"{spec.filename}: {exc}")
         output = frontend.output_path(self.filename)
+        try:
+            self.writer.makedirs(os.path.dirname(output))
+        except FileExistsError:
+            pass
+        self.writer.write(output, text + "\n")
+
+    def write_type_objects(self) -> None:
+        """Write the static types of the spec (see pyspec/typeobj.py)."""
+        spec = self.pyspec
+        if spec is None:
+            return
+        dirname, basename = os.path.split(os.path.abspath(self.filename))
+        stem = os.path.splitext(basename)[0]
+        spec_name = f"{os.path.basename(dirname)}/pyspec/{stem}.py"
+        clinic_classes = self._clinic_classes(self, '')
+        classes = {path: (cls.typedef, cls.type_object)
+                   for path, cls in clinic_classes}
+        functions = {
+            f'{path}.{f.name}': (
+                f.c_basename,
+                f.c_basename_vectorcall if f.vectorcall else None)
+            for path, cls in clinic_classes for f in cls.functions}
+        try:
+            text = typeobj.generate(spec, spec_name, classes, functions)
+        except (emit.SpecError, frontend.SpecError) as exc:
+            fail(str(exc))
+        if text is None:
+            return
+        output = typeobj.output_path(self.filename)
         try:
             self.writer.makedirs(os.path.dirname(output))
         except FileExistsError:

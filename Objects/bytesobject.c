@@ -1808,31 +1808,6 @@ bytes_buffer_getbuffer(PyObject *op, Py_buffer *view, int flags)
                              1, flags);
 }
 
-static PySequenceMethods bytes_as_sequence = {
-    bytes_length,       /*sq_length*/
-    _PyBytes_Concat,       /*sq_concat*/
-    _PyBytes_Repeat,    /*sq_repeat*/
-    bytes_item,         /*sq_item*/
-    0,                  /*sq_slice*/
-    0,                  /*sq_ass_item*/
-    0,                  /*sq_ass_slice*/
-    bytes_contains      /*sq_contains*/
-};
-
-static PyMappingMethods bytes_as_mapping = {
-    bytes_length,
-    bytes_subscript,
-    0,
-};
-
-static PyBufferProcs bytes_as_buffer = {
-    bytes_buffer_getbuffer,
-    NULL,
-};
-
-
-
-
 #define LEFTSTRIP 0
 #define RIGHTSTRIP 1
 #define BOTHSTRIP 2
@@ -2409,65 +2384,6 @@ bytes_getnewargs(PyObject *op, PyObject *Py_UNUSED(dummy))
 }
 
 
-static PyMethodDef
-bytes_methods[] = {
-    {"__getnewargs__", bytes_getnewargs,  METH_NOARGS},
-    BYTES___BYTES___METHODDEF
-    {"capitalize", stringlib_capitalize, METH_NOARGS,
-     _Py_capitalize__doc__},
-    STRINGLIB_CENTER_METHODDEF
-    BYTES_COUNT_METHODDEF
-    BYTES_DECODE_METHODDEF
-    BYTES_ENDSWITH_METHODDEF
-    STRINGLIB_EXPANDTABS_METHODDEF
-    BYTES_FIND_METHODDEF
-    BYTES_FROMHEX_METHODDEF
-    BYTES_HEX_METHODDEF
-    BYTES_INDEX_METHODDEF
-    {"isalnum", stringlib_isalnum, METH_NOARGS,
-     _Py_isalnum__doc__},
-    {"isalpha", stringlib_isalpha, METH_NOARGS,
-     _Py_isalpha__doc__},
-    {"isascii", stringlib_isascii, METH_NOARGS,
-     _Py_isascii__doc__},
-    {"isdigit", stringlib_isdigit, METH_NOARGS,
-     _Py_isdigit__doc__},
-    {"islower", stringlib_islower, METH_NOARGS,
-     _Py_islower__doc__},
-    {"isspace", stringlib_isspace, METH_NOARGS,
-     _Py_isspace__doc__},
-    {"istitle", stringlib_istitle, METH_NOARGS,
-     _Py_istitle__doc__},
-    {"isupper", stringlib_isupper, METH_NOARGS,
-     _Py_isupper__doc__},
-    BYTES_JOIN_METHODDEF
-    STRINGLIB_LJUST_METHODDEF
-    {"lower", stringlib_lower, METH_NOARGS, _Py_lower__doc__},
-    BYTES_LSTRIP_METHODDEF
-    BYTES_MAKETRANS_METHODDEF
-    BYTES_PARTITION_METHODDEF
-    BYTES_REPLACE_METHODDEF
-    BYTES_REMOVEPREFIX_METHODDEF
-    BYTES_REMOVESUFFIX_METHODDEF
-    BYTES_RFIND_METHODDEF
-    BYTES_RINDEX_METHODDEF
-    STRINGLIB_RJUST_METHODDEF
-    BYTES_RPARTITION_METHODDEF
-    BYTES_RSPLIT_METHODDEF
-    BYTES_RSTRIP_METHODDEF
-    BYTES_SPLIT_METHODDEF
-    BYTES_SPLITLINES_METHODDEF
-    BYTES_STARTSWITH_METHODDEF
-    BYTES_STRIP_METHODDEF
-    {"swapcase", stringlib_swapcase, METH_NOARGS,
-     _Py_swapcase__doc__},
-    {"title", stringlib_title, METH_NOARGS, _Py_title__doc__},
-    BYTES_TRANSLATE_METHODDEF
-    {"upper", stringlib_upper, METH_NOARGS, _Py_upper__doc__},
-    STRINGLIB_ZFILL_METHODDEF
-    {NULL,     NULL}                         /* sentinel */
-};
-
 static PyObject *
 bytes_mod(PyObject *self, PyObject *arg)
 {
@@ -2477,13 +2393,6 @@ bytes_mod(PyObject *self, PyObject *arg)
     return _PyBytes_FormatEx(PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
                              arg, 0);
 }
-
-static PyNumberMethods bytes_as_number = {
-    0,              /*nb_add*/
-    0,              /*nb_subtract*/
-    0,              /*nb_multiply*/
-    bytes_mod,      /*nb_remainder*/
-};
 
 static PyObject *
 bytes_subtype_new(PyTypeObject *, PyObject *);
@@ -2651,22 +2560,6 @@ bytes_subtype_new(PyTypeObject *type, PyObject *tmp)
     return pnew;
 }
 
-PyDoc_STRVAR(bytes_doc,
-"bytes(iterable_of_ints) -> bytes\n\
-bytes(string, encoding[, errors]) -> bytes\n\
-bytes(bytes_or_buffer) -> immutable copy of bytes_or_buffer\n\
-bytes(int) -> bytes object of size given by the parameter initialized with null bytes\n\
-bytes() -> empty bytes object\n\
-\n\
-Construct an immutable array of bytes from:\n\
-  - an iterable yielding integers in range(256)\n\
-  - a text string encoded using the specified encoding\n\
-  - any object implementing the buffer API.\n\
-  - an integer");
-
-static PyObject *bytes_iter(PyObject *seq);
-
-
 static _PyObjectIndexPair
 bytes_iteritem(PyObject *obj, Py_ssize_t index)
 {
@@ -2701,59 +2594,11 @@ bytes_dealloc(PyObject *op)
     _PyBytes_CheckOverflow(op, op, "bytes");
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
-#endif
-
-
-PyTypeObject PyBytes_Type = {
-    PyVarObject_HEAD_INIT(&PyType_Type, 0)
-    "bytes",
-    PyBytesObject_SIZE,
-    sizeof(char),
-#ifdef Py_DEBUG
-    bytes_dealloc,                              /* tp_dealloc */
 #else
-    0,                                          /* tp_dealloc */
+/* Release builds inherit the tp_dealloc of object. */
+#  define bytes_dealloc NULL
 #endif
-    0,                                          /* tp_vectorcall_offset */
-    0,                                          /* tp_getattr */
-    0,                                          /* tp_setattr */
-    0,                                          /* tp_as_async */
-    bytes_repr,                                 /* tp_repr */
-    &bytes_as_number,                           /* tp_as_number */
-    &bytes_as_sequence,                         /* tp_as_sequence */
-    &bytes_as_mapping,                          /* tp_as_mapping */
-    bytes_hash,                                 /* tp_hash */
-    0,                                          /* tp_call */
-    bytes_str,                                  /* tp_str */
-    PyObject_GenericGetAttr,                    /* tp_getattro */
-    0,                                          /* tp_setattro */
-    &bytes_as_buffer,                           /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE |
-        Py_TPFLAGS_BYTES_SUBCLASS |
-        _Py_TPFLAGS_MATCH_SELF,               /* tp_flags */
-    bytes_doc,                                  /* tp_doc */
-    0,                                          /* tp_traverse */
-    0,                                          /* tp_clear */
-    bytes_richcompare,                          /* tp_richcompare */
-    0,                                          /* tp_weaklistoffset */
-    bytes_iter,                                 /* tp_iter */
-    0,                                          /* tp_iternext */
-    bytes_methods,                              /* tp_methods */
-    0,                                          /* tp_members */
-    0,                                          /* tp_getset */
-    0,                                          /* tp_base */
-    0,                                          /* tp_dict */
-    0,                                          /* tp_descr_get */
-    0,                                          /* tp_descr_set */
-    0,                                          /* tp_dictoffset */
-    0,                                          /* tp_init */
-    bytes_alloc,                                /* tp_alloc */
-    bytes_new,                                  /* tp_new */
-    PyObject_Free,                              /* tp_free */
-    .tp_vectorcall = bytes_vectorcall,
-    .tp_version_tag = _Py_TYPE_VERSION_BYTES,
-    ._tp_iteritem = bytes_iteritem,
-};
+
 
 void
 PyBytes_Concat(PyObject **pv, PyObject *w)
@@ -2960,6 +2805,11 @@ typedef struct {
     PyBytesObject *it_seq; /* Set to NULL when iterator is exhausted */
 } striterobject;
 
+/*[clinic input]
+class bytes_iterator "striterobject *" "&PyBytesIter_Type"
+[clinic start generated code]*/
+/*[clinic end generated code: output=da39a3ee5e6b4b0d input=69924e510f28861b]*/
+
 #define _striterobject_CAST(op)  ((striterobject *)(op))
 
 static void
@@ -3011,9 +2861,6 @@ striter_len(PyObject *op, PyObject *Py_UNUSED(ignored))
     return PyLong_FromSsize_t(len);
 }
 
-PyDoc_STRVAR(length_hint_doc,
-             "Private method returning an estimate of len(list(it)).");
-
 static PyObject *
 striter_reduce(PyObject *op, PyObject *Py_UNUSED(ignored))
 {
@@ -3029,8 +2876,6 @@ striter_reduce(PyObject *op, PyObject *Py_UNUSED(ignored))
         return Py_BuildValue("N(())", iter);
     }
 }
-
-PyDoc_STRVAR(reduce_doc, "Return state information for pickling.");
 
 static PyObject *
 striter_setstate(PyObject *op, PyObject *state)
@@ -3048,48 +2893,6 @@ striter_setstate(PyObject *op, PyObject *state)
     }
     Py_RETURN_NONE;
 }
-
-PyDoc_STRVAR(setstate_doc, "Set state information for unpickling.");
-
-static PyMethodDef striter_methods[] = {
-    {"__length_hint__", striter_len, METH_NOARGS, length_hint_doc},
-    {"__reduce__",      striter_reduce, METH_NOARGS, reduce_doc},
-    {"__setstate__",    striter_setstate, METH_O, setstate_doc},
-    {NULL,              NULL}           /* sentinel */
-};
-
-PyTypeObject PyBytesIter_Type = {
-    PyVarObject_HEAD_INIT(&PyType_Type, 0)
-    "bytes_iterator",                           /* tp_name */
-    sizeof(striterobject),                      /* tp_basicsize */
-    0,                                          /* tp_itemsize */
-    /* methods */
-    striter_dealloc,                            /* tp_dealloc */
-    0,                                          /* tp_vectorcall_offset */
-    0,                                          /* tp_getattr */
-    0,                                          /* tp_setattr */
-    0,                                          /* tp_as_async */
-    0,                                          /* tp_repr */
-    0,                                          /* tp_as_number */
-    0,                                          /* tp_as_sequence */
-    0,                                          /* tp_as_mapping */
-    0,                                          /* tp_hash */
-    0,                                          /* tp_call */
-    0,                                          /* tp_str */
-    PyObject_GenericGetAttr,                    /* tp_getattro */
-    0,                                          /* tp_setattro */
-    0,                                          /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,/* tp_flags */
-    0,                                          /* tp_doc */
-    striter_traverse,                           /* tp_traverse */
-    0,                                          /* tp_clear */
-    0,                                          /* tp_richcompare */
-    0,                                          /* tp_weaklistoffset */
-    PyObject_SelfIter,                          /* tp_iter */
-    striter_next,                               /* tp_iternext */
-    striter_methods,                            /* tp_methods */
-    0,
-};
 
 static PyObject *
 bytes_iter(PyObject *seq)
@@ -3649,3 +3452,8 @@ _PyBytesWriter_ResizeToAllocated(PyBytesWriter *writer)
     assert(byteswriter_check_consistency(writer));
     return allocated;
 }
+
+
+/* PyBytes_Type and PyBytesIter_Type, with their method and slot tables,
+   are generated from Objects/pyspec/bytesobject.py by Argument Clinic. */
+#include "clinic/bytesobject_types.c.h"

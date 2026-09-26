@@ -12,17 +12,53 @@ evaluated for exactly bytes and N positional arguments -- into
 Objects/clinic/bytesobject_pyspec.c.h.  Top-level functions are C
 functions of the same name.
 
+The classes are the whole types: ``@static_type`` makes clinic generate
+PyBytes_Type and PyBytesIter_Type, their method tables and slot tables,
+into Objects/clinic/bytesobject_types.c.h.  Dunders are slots (C functions
+with the slot's signature), ``@c_name(METH_NOARGS=...)`` methods are
+hand-written PyCFunctions, and ``center = transmogrify.B.center`` shares
+a method with bytearray (see libclinic/pyspec/frontend.py).
+
 Lib/test/test_clinic.py runs this file as Python and compares it with the
 interpreter's bytes().
 """
+
+from typing import final
 
 from libclinic.pyspec.runtime import NULL, C, isinstance, fqname, tp_name
 
 # Argument Clinic decorators (no-ops in Python).
 from libclinic.pyspec.runtime import permit_long_summary, text_signature
+from libclinic.pyspec.runtime import c_name, static_type
+
+# Methods shared with bytearray (Objects/stringlib/pyspec/).
+from stringlib.pyspec import ctype, transmogrify
 
 
+@static_type(
+    tp_basicsize="PyBytesObject_SIZE",
+    tp_itemsize="sizeof(char)",
+    tp_flags="Py_TPFLAGS_BYTES_SUBCLASS | _Py_TPFLAGS_MATCH_SELF",
+    tp_dealloc="bytes_dealloc",
+    tp_alloc="bytes_alloc",
+    tp_free="PyObject_Free",
+    tp_version_tag="_Py_TYPE_VERSION_BYTES",
+    _tp_iteritem="bytes_iteritem",
+)
 class bytes:
+    """bytes(iterable_of_ints) -> bytes
+    bytes(string, encoding[, errors]) -> bytes
+    bytes(bytes_or_buffer) -> immutable copy of bytes_or_buffer
+    bytes(int) -> bytes object of size given by the parameter initialized with null bytes
+    bytes() -> empty bytes object
+
+    Construct an immutable array of bytes from:
+      - an iterable yielding integers in range(256)
+      - a text string encoded using the specified encoding
+      - any object implementing the buffer API.
+      - an integer
+    """
+
     def __new__(
         cls,
         source: object(c_name='x') = NULL,
@@ -68,68 +104,19 @@ class bytes:
             return C._PyBytes_FromSize(size, True)
         return PyBytes_FromObject(source)
 
+    @c_name(METH_NOARGS="bytes_getnewargs")
+    def __getnewargs__(self, /):
+        ...
+
     def __bytes__(self):
         """Convert this value to exact type bytes."""
         if type(self) is bytes:
             return self
         return C.bytes_copy(self)
 
-    @permit_long_summary
-    def split(self, sep: object = None, maxsplit: Py_ssize_t = -1):
-        """Return a list of the sections in the bytes, using sep as the delimiter.
+    capitalize = ctype.B.capitalize
 
-          sep
-            The delimiter according which to split the bytes.
-            None (the default value) means split on ASCII whitespace
-            characters (space, tab, return, newline, formfeed, vertical tab).
-          maxsplit
-            Maximum number of splits to do.
-            -1 (the default value) means no limit.
-        """
-        ...
-
-    def partition(self, sep: Py_buffer, /):
-        """Partition the bytes into three parts using the given separator.
-
-        This will search for the separator sep in the bytes.  If the
-        separator is found, returns a 3-tuple containing the part before the
-        separator, the separator itself, and the part after it.
-
-        If the separator is not found, returns a 3-tuple containing the
-        original bytes object and two empty bytes objects.
-        """
-        ...
-
-    def rpartition(self, sep: Py_buffer, /):
-        """Partition the bytes into three parts using the given separator.
-
-        This will search for the separator sep in the bytes, starting at the
-        end.  If the separator is found, returns a 3-tuple containing the
-        part before the separator, the separator itself, and the part after
-        it.
-
-        If the separator is not found, returns a 3-tuple containing two
-        empty bytes objects and the original bytes object.
-        """
-        ...
-
-    rsplit = permit_long_summary(split)
-    """Return a list of the sections in the bytes, using sep as the delimiter.
-
-    Splitting is done starting at the end of the bytes and working to
-    the front.
-    """
-
-    def join(self, iterable_of_bytes: object, /):
-        """Concatenate any number of bytes objects.
-
-        The bytes whose method is called is inserted in between each pair.
-
-        The result is returned as a new bytes object.
-
-        Example: b'.'.join([b'ab', b'pq', b'rs']) -> b'ab.pq.rs'.
-        """
-        ...
+    center = transmogrify.B.center
 
     @permit_long_summary
     @text_signature("($self, sub[, start[, end]], /)")
@@ -151,64 +138,124 @@ class bytes:
         """
         ...
 
+    count = permit_long_summary(find)
+    """Return the number of non-overlapping occurrences of subsection 'sub' in bytes B[start:end]."""
+
+    def decode(
+        self,
+        encoding: str(c_default="NULL") = 'utf-8',
+        errors: str(c_default="NULL") = 'strict',
+    ):
+        """Decode the bytes using the codec registered for encoding.
+
+          encoding
+            The encoding with which to decode the bytes.
+          errors
+            The error handling scheme to use for the handling of decoding
+            errors.  The default is 'strict' meaning that decoding errors
+            raise a UnicodeDecodeError.  Other possible values are 'ignore'
+            and 'replace' as well as any other name registered with
+            codecs.register_error that can handle UnicodeDecodeErrors.
+        """
+        ...
+
+    @permit_long_summary
+    @text_signature("($self, suffix[, start[, end]], /)")
+    def endswith(
+        self,
+        suffix: object(c_name='subobj'),
+        start: slice_index(accept={int, NoneType}, c_default='0') = None,
+        end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
+        /,
+    ):
+        """Return True if the bytes ends with the specified suffix, False otherwise.
+
+          suffix
+            A bytes or a tuple of bytes to try.
+          start
+            Optional start position. Default: start of the bytes.
+          end
+            Optional stop position. Default: end of the bytes.
+        """
+        ...
+
+    expandtabs = transmogrify.B.expandtabs
+
+    @classmethod
+    def fromhex(cls, string: object, /):
+        r"""Create a bytes object from a string of hexadecimal numbers.
+
+        Spaces between two numbers are accepted.
+        Example: bytes.fromhex('B9 01EF') -> b'\\xb9\\x01\\xef'.
+        """
+        result = C.bytes_from_hex(string)
+        if cls is not bytes:
+            return cls(result)
+        return result
+
+    def hex(self, sep: object = NULL, bytes_per_sep: Py_ssize_t = 1):
+        r"""Create a string of hexadecimal numbers from a bytes object.
+
+          sep
+            An optional single character or byte to separate hex bytes.
+          bytes_per_sep
+            How many bytes between separators.  Positive values count from
+            the right, negative values count from the left.
+
+        Example:
+        >>> value = b'\xb9\x01\xef'
+        >>> value.hex()
+        'b901ef'
+        >>> value.hex(':')
+        'b9:01:ef'
+        >>> value.hex(':', 2)
+        'b9:01ef'
+        >>> value.hex(':', -2)
+        'b901:ef'
+        """
+        ...
+
     index = permit_long_summary(find)
     """Return the lowest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
 
     Raise ValueError if the subsection is not found.
     """
 
-    rfind = permit_long_summary(find)
-    """Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+    isalnum = ctype.B.isalnum
 
-    Return -1 on failure.
-    """
+    isalpha = ctype.B.isalpha
 
-    rindex = permit_long_summary(find)
-    """Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+    isascii = ctype.B.isascii
 
-    Raise ValueError if the subsection is not found.
-    """
+    isdigit = ctype.B.isdigit
 
-    def strip(self, bytes: object = None, /):
-        """Strip leading and trailing bytes contained in the argument.
+    islower = ctype.B.islower
 
-        If the argument is omitted or None, strip leading and trailing ASCII
-        whitespace.
+    isspace = ctype.B.isspace
+
+    istitle = ctype.B.istitle
+
+    isupper = ctype.B.isupper
+
+    def join(self, iterable_of_bytes: object, /):
+        """Concatenate any number of bytes objects.
+
+        The bytes whose method is called is inserted in between each pair.
+
+        The result is returned as a new bytes object.
+
+        Example: b'.'.join([b'ab', b'pq', b'rs']) -> b'ab.pq.rs'.
         """
         ...
+
+    ljust = transmogrify.B.ljust
+
+    lower = ctype.B.lower
 
     def lstrip(self, bytes: object = None, /):
         """Strip leading bytes contained in the argument.
 
         If the argument is omitted or None, strip leading  ASCII whitespace.
-        """
-        ...
-
-    def rstrip(self, bytes: object = None, /):
-        """Strip trailing bytes contained in the argument.
-
-        If the argument is omitted or None, strip trailing ASCII whitespace.
-        """
-        ...
-
-    count = permit_long_summary(find)
-    """Return the number of non-overlapping occurrences of subsection 'sub' in bytes B[start:end]."""
-
-    @permit_long_summary
-    def translate(
-        self,
-        table: object,
-        /,
-        delete: object(c_name='deletechars', c_default="NULL") = b'',
-    ):
-        """Return a copy with each character mapped by the given translation table.
-
-          table
-            Translation table, which must be a bytes object of length 256.
-
-        All characters occurring in the optional argument delete are
-        removed.  The remaining characters are mapped through the given
-        translation table.
         """
         ...
 
@@ -221,6 +268,18 @@ class bytes:
         the byte at the same position in to.
 
         The bytes objects frm and to must be of the same length.
+        """
+        ...
+
+    def partition(self, sep: Py_buffer, /):
+        """Partition the bytes into three parts using the given separator.
+
+        This will search for the separator sep in the bytes.  If the
+        separator is found, returns a 3-tuple containing the part before the
+        separator, the separator itself, and the part after it.
+
+        If the separator is not found, returns a 3-tuple containing the
+        original bytes object and two empty bytes objects.
         """
         ...
 
@@ -257,6 +316,70 @@ class bytes:
         """
         ...
 
+    rfind = permit_long_summary(find)
+    """Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+
+    Return -1 on failure.
+    """
+
+    rindex = permit_long_summary(find)
+    """Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+
+    Raise ValueError if the subsection is not found.
+    """
+
+    rjust = transmogrify.B.rjust
+
+    def rpartition(self, sep: Py_buffer, /):
+        """Partition the bytes into three parts using the given separator.
+
+        This will search for the separator sep in the bytes, starting at the
+        end.  If the separator is found, returns a 3-tuple containing the
+        part before the separator, the separator itself, and the part after
+        it.
+
+        If the separator is not found, returns a 3-tuple containing two
+        empty bytes objects and the original bytes object.
+        """
+        ...
+
+    @permit_long_summary
+    def split(self, sep: object = None, maxsplit: Py_ssize_t = -1):
+        """Return a list of the sections in the bytes, using sep as the delimiter.
+
+          sep
+            The delimiter according which to split the bytes.
+            None (the default value) means split on ASCII whitespace
+            characters (space, tab, return, newline, formfeed, vertical tab).
+          maxsplit
+            Maximum number of splits to do.
+            -1 (the default value) means no limit.
+        """
+        ...
+
+    rsplit = permit_long_summary(split)
+    """Return a list of the sections in the bytes, using sep as the delimiter.
+
+    Splitting is done starting at the end of the bytes and working to
+    the front.
+    """
+
+    def rstrip(self, bytes: object = None, /):
+        """Strip trailing bytes contained in the argument.
+
+        If the argument is omitted or None, strip trailing ASCII whitespace.
+        """
+        ...
+
+    @permit_long_summary
+    def splitlines(self, keepends: bool = False):
+        """Return a list of the lines in the bytes, breaking at line boundaries.
+
+        Line breaks are not included in the resulting list unless keepends
+        is given and true.
+        """
+        ...
+
     @permit_long_summary
     @text_signature("($self, prefix[, start[, end]], /)")
     def startswith(
@@ -277,85 +400,109 @@ class bytes:
         """
         ...
 
+    def strip(self, bytes: object = None, /):
+        """Strip leading and trailing bytes contained in the argument.
+
+        If the argument is omitted or None, strip leading and trailing ASCII
+        whitespace.
+        """
+        ...
+
+    swapcase = ctype.B.swapcase
+
+    title = ctype.B.title
+
     @permit_long_summary
-    @text_signature("($self, suffix[, start[, end]], /)")
-    def endswith(
+    def translate(
         self,
-        suffix: object(c_name='subobj'),
-        start: slice_index(accept={int, NoneType}, c_default='0') = None,
-        end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
+        table: object,
         /,
+        delete: object(c_name='deletechars', c_default="NULL") = b'',
     ):
-        """Return True if the bytes ends with the specified suffix, False otherwise.
+        """Return a copy with each character mapped by the given translation table.
 
-          suffix
-            A bytes or a tuple of bytes to try.
-          start
-            Optional start position. Default: start of the bytes.
-          end
-            Optional stop position. Default: end of the bytes.
+          table
+            Translation table, which must be a bytes object of length 256.
+
+        All characters occurring in the optional argument delete are
+        removed.  The remaining characters are mapped through the given
+        translation table.
         """
         ...
 
-    def decode(
-        self,
-        encoding: str(c_default="NULL") = 'utf-8',
-        errors: str(c_default="NULL") = 'strict',
-    ):
-        """Decode the bytes using the codec registered for encoding.
+    upper = ctype.B.upper
 
-          encoding
-            The encoding with which to decode the bytes.
-          errors
-            The error handling scheme to use for the handling of decoding
-            errors.  The default is 'strict' meaning that decoding errors
-            raise a UnicodeDecodeError.  Other possible values are 'ignore'
-            and 'replace' as well as any other name registered with
-            codecs.register_error that can handle UnicodeDecodeErrors.
-        """
+    zfill = transmogrify.B.zfill
+
+    # -- Slots: C functions with the signature of their slot (see "Methods
+    # that are not clinic functions" in libclinic/pyspec/frontend.py).  The
+    # C name is bytes_<slot> unless @c_name gives it.
+
+    def __repr__(self, /): ...
+    def __hash__(self, /): ...
+    def __str__(self, /): ...
+
+    # tp_richcompare: one C function, bytes_richcompare(), for all six.
+    def __lt__(self, value, /): ...
+    def __le__(self, value, /): ...
+    def __eq__(self, value, /): ...
+    def __ne__(self, value, /): ...
+    def __gt__(self, value, /): ...
+    def __ge__(self, value, /): ...
+
+    def __iter__(self, /) -> New[bytes_iterator]: ...
+
+    @c_name("bytes_buffer_getbuffer")
+    def __buffer__(self, flags, /): ...
+
+    # nb_remainder: bytes_mod() for both.
+    @c_name("bytes_mod")
+    def __mod__(self, value, /): ...
+    def __rmod__(self, value, /): ...
+
+    @c_name(mp_length="bytes_length", sq_length="bytes_length")
+    def __len__(self, /) -> NoError[Py_ssize_t]: ...
+
+    @c_name(mp_subscript="bytes_subscript", sq_item="bytes_item")
+    def __getitem__(self, key, /): ...
+
+    @c_name(sq_concat="_PyBytes_Concat")
+    def __add__(self, value, /): ...
+
+    # sq_repeat: _PyBytes_Repeat() for both.
+    @c_name(sq_repeat="_PyBytes_Repeat")
+    def __mul__(self, value, /): ...
+    def __rmul__(self, value, /): ...
+
+    def __contains__(self, key, /): ...
+
+
+# iter(bytes).  No docstring: tp_doc is NULL.  The struct (striterobject),
+# its dealloc and traverse are C.
+@final
+@static_type(tp_dealloc="striter_dealloc", tp_traverse="striter_traverse")
+class bytes_iterator:
+    @c_name("PyObject_SelfIter")
+    def __iter__(self, /): ...
+
+    # Exact ints in range(256) (immortal small ints); never runs Python
+    # code; NULL without an exception when exhausted (tp_iternext).
+    @c_name("striter_next")
+    def __next__(self, /) -> New[int]: ...
+
+    @c_name(METH_NOARGS="striter_len")
+    def __length_hint__(self, /):
+        """Private method returning an estimate of len(list(it))."""
         ...
 
-    @permit_long_summary
-    def splitlines(self, keepends: bool = False):
-        """Return a list of the lines in the bytes, breaking at line boundaries.
-
-        Line breaks are not included in the resulting list unless keepends
-        is given and true.
-        """
+    @c_name(METH_NOARGS="striter_reduce")
+    def __reduce__(self, /):
+        """Return state information for pickling."""
         ...
 
-    @classmethod
-    def fromhex(cls, string: object, /):
-        r"""Create a bytes object from a string of hexadecimal numbers.
-
-        Spaces between two numbers are accepted.
-        Example: bytes.fromhex('B9 01EF') -> b'\\xb9\\x01\\xef'.
-        """
-        result = C.bytes_from_hex(string)
-        if cls is not bytes:
-            return cls(result)
-        return result
-
-    def hex(self, sep: object = NULL, bytes_per_sep: Py_ssize_t = 1):
-        r"""Create a string of hexadecimal numbers from a bytes object.
-
-          sep
-            An optional single character or byte to separate hex bytes.
-          bytes_per_sep
-            How many bytes between separators.  Positive values count from
-            the right, negative values count from the left.
-
-        Example:
-        >>> value = b'\xb9\x01\xef'
-        >>> value.hex()
-        'b901ef'
-        >>> value.hex(':')
-        'b9:01:ef'
-        >>> value.hex(':', 2)
-        'b9:01ef'
-        >>> value.hex(':', -2)
-        'b901:ef'
-        """
+    @c_name(METH_O="striter_setstate")
+    def __setstate__(self, state, /):
+        """Set state information for unpickling."""
         ...
 
 

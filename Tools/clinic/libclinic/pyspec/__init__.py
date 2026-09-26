@@ -14,7 +14,12 @@ For Objects/foo.c, Objects/pyspec/foo.py is its spec:
   capi          the C API catalog: checks the facts of the top-level
                 functions against headers, docs and ABI data (run by
                 Lib/test/test_capi/test_pyspec_catalog.py)
+  slots         the dunder <-> slot table, read from slotdefs[] in
+                Objects/typeobject.c
+  typeobj       generates the static type objects of the @static_type
+                classes, with their method and slot tables
+                (Objects/clinic/foo_types.c.h)
 
 Argument Clinic uses all of this while processing foo.c: `make clinic`
-regenerates Objects/clinic/foo_pyspec.c.h too.
+regenerates Objects/clinic/foo_pyspec.c.h and foo_types.c.h too.
 """
