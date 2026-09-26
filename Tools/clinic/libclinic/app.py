@@ -272,9 +272,8 @@ impl_definition block
                 try:
                     self._pyspec = frontend.Spec.load(path)
                 except SyntaxError as exc:
-                    fail(f"{path}: {exc}")
-                except frontend.SpecError as exc:
-                    fail(str(exc))
+                    raise frontend.SpecError(exc.msg, filename=path,
+                                             lineno=exc.lineno) from None
         return self._pyspec
 
     def check_spec_blocks(self) -> None:
@@ -288,18 +287,14 @@ impl_definition block
             if cls.name not in spec.classes:
                 continue
             declared = {f.name for f in cls.functions}
-            try:
-                methods = spec.methods(cls.name)
-            except frontend.SpecError as exc:
-                fail(str(exc))
-            for meth in methods:
+            for meth in spec.methods(cls.name):
                 if meth not in declared:
-                    node = spec.functions[f'{cls.name}.{meth}']
-                    fail(f"{path}.{meth} has no clinic block in "
-                         f"{self.filename}; put this block above its "
-                         f"impl:\n/*[clinic input]\n{path}.{meth}\n"
-                         "[clinic start generated code]*/",
-                         filename=spec.filename, line_number=node.lineno)
+                    raise spec.error(
+                        spec.functions[f'{cls.name}.{meth}'],
+                        f"{path}.{meth} has no clinic block in "
+                        f"{self.filename}; put this block above its "
+                        f"impl:\n/*[clinic input]\n{path}.{meth}\n"
+                        "[clinic start generated code]*/")
 
     def _clinic_classes(self, parent: Any, prefix: str
                         ) -> list[tuple[str, Class]]:
@@ -324,8 +319,9 @@ impl_definition block
         try:
             text = emit.generate(spec, spec_name, self.pyspec_c_basenames,
                                  self.pyspec_self_ctypes)
-        except (emit.SpecError, frontend.SpecError) as exc:
-            fail(f"{spec.filename}: {exc}")
+        except emit.SpecError as exc:
+            raise frontend.SpecError(exc.message, filename=spec.filename,
+                                     lineno=exc.lineno) from None
         output = frontend.output_path(self.filename)
         try:
             self.writer.makedirs(os.path.dirname(output))
@@ -349,10 +345,7 @@ impl_definition block
                 f.c_basename,
                 f.c_basename_vectorcall if f.vectorcall else None)
             for path, cls in clinic_classes for f in cls.functions}
-        try:
-            text = typeobj.generate(spec, spec_name, classes, functions)
-        except (emit.SpecError, frontend.SpecError) as exc:
-            fail(str(exc))
+        text = typeobj.generate(spec, spec_name, classes, functions)
         if text is None:
             return
         output = typeobj.output_path(self.filename)

@@ -3405,12 +3405,8 @@ class ClinicParserTest(TestCase):
             self.parse(block)
         # The line numbers are off; this is a known limitation.
         expected = dedent("""\
-            Warning:
-            Non-ascii characters are not allowed in docstrings: 'á'
-
-            Warning:
-            Non-ascii characters are not allowed in docstrings: 'ü', 'á', 'ß'
-
+            warning: Non-ascii characters are not allowed in docstrings: 'á'
+            warning: Non-ascii characters are not allowed in docstrings: 'ü', 'á', 'ß'
         """)
         self.assertEqual(stdout.getvalue(), expected)
 
@@ -5549,6 +5545,15 @@ class PyspecTestBase(TestCase):
         with self.assertRaisesRegex(ClinicError, re.escape(errmsg)):
             self.generate(spec, block)
 
+    def expect_located_failure(self, spec, block, errmsg, lineno):
+        """An error *errmsg* at line *lineno* of the spec."""
+        with self.assertRaises(ClinicError) as cm:
+            self.generate(spec, block)
+        exc = cm.exception
+        self.assertEqual((exc.filename, exc.lineno, exc.message),
+                         (self.spec_path, lineno, errmsg))
+        return exc
+
 
 class PyspecTest(PyspecTestBase):
     """A spec method with a body implements a clinic __new__."""
@@ -6145,12 +6150,12 @@ class PyspecStubTest(PyspecTestBase):
                 "[clinic start generated code]*/\n"
                 "/*[clinic input]\n"
                 "bytes.other\n"))
-        self.assertIn(f"Warning in file {self.spec_path!r} on line 3:\n"
-                      "Remove the @permit_long_summary decorator from "
-                      "'bytes.meth'!", stdout.getvalue())
-        self.assertIn(f"Warning in file {self.spec_path!r} on line 8:\n"
-                      "Remove the @permit_long_summary decorator from "
-                      "'bytes.other'!", stdout.getvalue())
+        self.assertIn(f"{self.spec_path}:3: warning: Remove the "
+                      "@permit_long_summary decorator from 'bytes.meth'!",
+                      stdout.getvalue())
+        self.assertIn(f"{self.spec_path}:8: warning: Remove the "
+                      "@permit_long_summary decorator from 'bytes.other'!",
+                      stdout.getvalue())
 
     def test_unknown_clinic_decorator(self):
         spec = """
@@ -6159,10 +6164,11 @@ class PyspecStubTest(PyspecTestBase):
                 def meth(self, a: object):
                     ...
         """
-        self.expect_failure(spec, self.block("bytes.meth\n"),
-                            "'bytes.meth': unknown clinic decorator "
-                            "@nosuchdecorator\n(in the clinic input taken "
-                            f"from bytes.meth in {self.spec_path}:4)")
+        # Errors in the input taken from the spec are reported at the line
+        # of the spec it comes from.
+        self.expect_located_failure(spec, self.block("bytes.meth\n"),
+                                    "'bytes.meth': unknown clinic decorator "
+                                    "@nosuchdecorator", 3)
 
     def test_clinic_decorator_non_constant_argument(self):
         spec = """
@@ -6248,13 +6254,33 @@ class PyspecStubTest(PyspecTestBase):
     def test_clinic_error_names_spec(self):
         spec = """
             class bytes:
-                def meth(self, a: nosuchconverter):
+                def meth(self,
+                         a: nosuchconverter):
+                    '''Doc.'''
                     ...
         """
-        self.expect_failure(spec, self.block("bytes.meth\n"),
-                            "'nosuchconverter' is not a valid converter\n"
-                            "(in the clinic input taken from bytes.meth in "
-                            f"{self.spec_path}:3)")
+        exc = self.expect_located_failure(
+            spec, self.block("bytes.meth\n"),
+            "'nosuchconverter' is not a valid converter", 4)
+        self.assertEqual(exc.report(),
+                         f"{self.spec_path}:4: error: 'nosuchconverter' is "
+                         "not a valid converter\n")
+        # A check of the whole function is reported at its def.
+        spec = """
+            class bytes:
+                @critical_section
+                def meth(self, a: object, /):
+                    return a
+        """
+        self.expect_located_failure(
+            spec, self.block("bytes.meth\n"), f"bytes.meth() in "
+            f"{self.spec_path}: a spec cannot be used with @critical_section",
+            4)
+        # So is a syntax error.
+        self.expect_located_failure("class bytes:\n  def f(self):\n"
+                                    "    return (\n",
+                                    self.block("bytes.meth\n"),
+                                    "'(' was never closed", 3)
 
 
 class PyspecTypeTest(PyspecTestBase):
@@ -6470,6 +6496,93 @@ class PyspecTypeTest(PyspecTestBase):
                 def meth(self, /): ...
         """, "@c_name with a keyword names a slot")
 
+    def test_decorators_of_c_methods(self):
+        # A slot or a hand-written PyCFunction takes only @c_name (and a
+        # PyCFunction @classmethod): nothing is silently ignored.
+        self.check_error("""
+            @static_type()
+            class bytes:
+                @cname("bytes_r")
+                def __repr__(self, /): ...
+        """, "bytes.__repr__: a slot takes only @c_name, not "
+             "@cname('bytes_r')")
+        self.check_error("""
+            @static_type()
+            class bytes:
+                @permit_long_summary
+                @c_name(METH_NOARGS="f")
+                def meth(self, /): ...
+        """, "bytes.meth: a PyCFunction takes only @c_name and "
+             "@classmethod, not @permit_long_summary")
+        self.check_error("""
+            @static_type()
+            class bytes:
+                @staticmethod
+                @c_name(METH_O="f")
+                def meth(x, /): ...
+        """, "not @staticmethod")
+        # @classmethod is METH_CLASS.
+        header = self.types_header("""
+            @static_type()
+            class bytes:
+                @classmethod
+                @c_name(METH_O="Py_GenericAlias")
+                def __class_getitem__(cls, item, /):
+                    '''See PEP 585'''
+                    ...
+        """)
+        self.assertIn('    {"__class_getitem__", Py_GenericAlias, '
+                      'METH_O | METH_CLASS, bytes___class_getitem____doc__},',
+                      header)
+
+    def test_accessors(self):
+        # tp_getset is not generated yet.
+        self.check_error("""
+            @static_type()
+            class bytes:
+                @getter
+                def nbytes(self): ...
+        """, "bytes.nbytes: accessors (@getter, @setter) of a @static_type "
+             "class are not supported yet")
+        self.check_error("""
+            class bytes:
+                @getter
+                def nbytes(self): ...
+                @setter
+                def nbytes(self): ...
+        """, "bytes.nbytes is defined twice (accessors are not supported "
+             "yet")
+
+    def test_class_body(self):
+        # A spec class holds a docstring, defs, shared methods and pass:
+        # anything else is an error, not ignored.
+        for stmt in ("x = 1", "if True: pass", "center: int",
+                     "center = tm.B.center"):
+            with self.subTest(stmt=stmt):
+                self.check_error(f"""
+                    @static_type()
+                    class bytes:
+                        {stmt}
+                """, "unsupported statement in spec class bytes: "
+                     if not stmt.startswith("center =") else
+                     "tm is not a spec imported with 'from <package> "
+                     "import tm'")
+        self.check_error("""
+            import transmogrify as tm
+        """, "import a spec as 'from stringlib.pyspec import "
+             "transmogrify'")
+        self.check_error("""
+            class bytes:
+                def meth(self, /):
+                    pass
+        """, "bytes.meth: use ... as the body of a function implemented "
+             "in C, not pass")
+        self.check_error("""
+            class bytes:
+                def meth(self, /): ...
+                def meth(self, /): ...
+        """, "bytes.meth is defined twice")
+
     def test_static_type_members(self):
         self.check_error("""
             @static_type(tp_nosuch="x")
@@ -6555,6 +6668,23 @@ class PyspecTypeTest(PyspecTestBase):
                       '    {"lower", stringlib_lower, METH_NOARGS, '
                       'bytes_lower__doc__},\n', header)
         self.assertIn('"B.lower() -> copy of B"', header)
+        # A typo names the method that is missing.
+        self.check_error("""
+            from shared import m
+
+            class bytes:
+                center = m.B.centre
+        """, "m.B has no method 'centre'")
+        self.check_error("""
+            from shared import m
+
+            class bytes:
+                centre = m.B.center
+        """, "a shared method keeps its name: write "
+             "center = m.B.center")
+        self.check_error("""
+            from shared import nosuchmodule
+        """, "nosuchmodule.py not found")
 
 
 BYTES_SPEC =os.path.join(test_tools.basepath, 'Objects', 'pyspec',
@@ -6989,8 +7119,7 @@ class BytesSpecTypeTest(TestCase):
         node = spec.classes[cls_name]
         doc = ast.get_docstring(node, clean=False)
         if doc is not None:
-            doc = '\n'.join(spec._clean_docstring(doc,
-                                                  node.body[0].col_offset))
+            doc = '\n'.join(spec._clean_docstring(node.body[0], doc))
         self.assertEqual(tp.__doc__, doc)
 
     def test_bytes(self):

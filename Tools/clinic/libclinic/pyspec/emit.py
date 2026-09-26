@@ -110,8 +110,9 @@ def c_not(expr):
 
 class SpecError(Exception):
     def __init__(self, node, message):
-        line = getattr(node, 'lineno', '?')
-        super().__init__(f'line {line}: {message}')
+        self.lineno = getattr(node, 'lineno', None)
+        self.message = message
+        super().__init__(f'line {self.lineno or "?"}: {message}')
 
 
 def c_string(text):
@@ -893,7 +894,7 @@ def describe_method(spec, name, self_ctype):
     it belongs in Spec.describe().)
     """
     node = spec.functions[name]
-    where = f"{spec.where(node)}: {name}()"
+    where = f"{name}()"     # the caller adds the location
     args = node.args
     for other in (args.vararg, *args.kwonlyargs, args.kwarg):
         if other is not None:
