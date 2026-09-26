@@ -523,7 +523,8 @@ def PyBytes_FromObject(x: object):
     if hasattr(type(x), "__buffer__"):
         return C._PyBytes_FromBuffer(x)
     # Argument Clinic specializes the iteration for an exact list or
-    # tuple: an index loop, without an iterator (see partial_eval.py).
+    # tuple: an index loop, without an iterator; a list of compact ints
+    # is copied atomically, in its critical section (see partial_eval.py).
     if not isinstance(x, str):
         try:
             it = iter(x)
