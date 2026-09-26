@@ -19,6 +19,7 @@ them.  These tests check them without the JIT:
 
 import ast
 import codecs
+import gc
 import os
 import sys
 import textwrap
@@ -48,8 +49,10 @@ def outcome(func, *args):
 
 
 def python_calls(func, *args):
-    """Call func(*args) (a C function); return (outcome, result, names of
-    the Python functions that ran, as seen by sys.setprofile)."""
+    """Call func(*args) (a C function); return (outcome, result, the Python
+    functions that ran during the call: their names as seen by
+    sys.setprofile, and the recording special methods below that were
+    called)."""
     ran = []
 
     def profile(frame, event, arg):
@@ -57,7 +60,11 @@ def python_calls(func, *args):
             ran.append(frame.f_code.co_qualname)
 
     old = sys.getprofile()
+    # No cyclic GC: finalizers of unrelated garbage must not count.
+    gc_enabled = gc.isenabled()
+    gc.disable()
     exc = result = None
+    RECORDED.clear()
     sys.setprofile(profile)
     try:
         result = func(*args)
@@ -65,6 +72,9 @@ def python_calls(func, *args):
         exc = e
     finally:
         sys.setprofile(old)
+        ran += [f'recorded {name}' for name in RECORDED]
+        if gc_enabled:
+            gc.enable()
     if exc is not None:
         return ('raises', type(exc), str(exc)), None, ran
     return ('returns', type(result), result), result, ran
@@ -144,7 +154,7 @@ class DirectCallTest(unittest.TestCase):
     def setUpClass(cls):
         cls.calls, cls.methods = _testinternalcapi.pyspec_table(bytes)
 
-    def check_facts(self, entry, args, out, result, ran, recorded):
+    def check_facts(self, entry, args, out, result, ran):
         kind = out[0]
         if entry['always_raises']:
             self.assertEqual(kind, 'raises', 'claims: always raises')
@@ -160,7 +170,6 @@ class DirectCallTest(unittest.TestCase):
                               'claims: constant result')
         if not entry['may_run_python']:
             self.assertEqual(ran, [], 'claims: runs no Python code')
-            self.assertEqual(recorded, [], 'claims: runs no Python code')
 
     def guard_accepts(self, entry, args, nargs=None):
         if entry['nargs'] != (len(args) if nargs is None else nargs):
@@ -181,12 +190,10 @@ class DirectCallTest(unittest.TestCase):
                 with self.subTest(args=args, entry=index,
                                   arg_type=entry['arg_type']):
                     args, _ = make_case()
-                    RECORDED.clear()
                     out, result, ran = python_calls(
                         _testinternalcapi.pyspec_call, bytes, index, args)
-                    recorded = list(RECORDED)
                     self.assertEqual(out, expected)
-                    self.check_facts(entry, args, out, result, ran, recorded)
+                    self.check_facts(entry, args, out, result, ran)
                     checked[index] += 1
                     if not entry['may_run_python'] and not ran:
                         # The way the JIT calls it: in debug builds, running
@@ -252,14 +259,11 @@ class DirectCallTest(unittest.TestCase):
                     expected, _ = outcome(getattr(bytes, name),
                                           *(() if is_class else
                                             (self_or_cls,)), *args)
-                    RECORDED.clear()
                     out, result, ran = python_calls(
                         _testinternalcapi.pyspec_call_method, bytes, index,
                         self_or_cls, args)
-                    recorded = list(RECORDED)
                     self.assertEqual(out, expected)
-                    self.check_facts(entry, inputs, out, result, ran,
-                                     recorded)
+                    self.check_facts(entry, inputs, out, result, ran)
                     checked[index] += 1
                     if not entry['may_run_python'] and not ran:
                         out, _ = outcome(
