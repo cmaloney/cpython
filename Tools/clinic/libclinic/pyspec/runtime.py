@@ -11,8 +11,8 @@ in a spec:
 * the builtins below, which have fixed C meanings;
 * escapes, ``C.<name>(...)``: C functions called directly.  Each carries
   its C call template, result type and error convention for the emitter;
-* the C API facts vocabulary (New[object], Steals[...], OnError[...], ...):
-  annotations of top-level stubs, read by the C API catalog (capi.py).
+* the facts vocabulary (New[object], OnError[...], RunsPython[...], ...):
+  annotations of the top-level stubs of the escapes (see stub_facts()).
 """
 
 import ast
@@ -24,10 +24,9 @@ import types
 
 __all__ = [
     'NULL', 'C', 'cstr', 'isinstance', 'iter', 'tp_name', 'fqname',
-    # C API facts vocabulary
-    'char_p', 'void_p', 'const_void_p', 'Py_ssize_t', 'va_list', 'pointer',
-    'Out', 'InOut', 'New', 'Borrowed', 'Steals', 'OnError', 'NoError',
-    'NullIn', 'RunsPython', 'helper',
+    # Facts vocabulary
+    'Py_ssize_t', 'pointer', 'New', 'Borrowed', 'OnError', 'NoError',
+    'RunsPython', 'helper',
 ]
 
 
@@ -302,46 +301,32 @@ class C:
 
 
 # ---------------------------------------------------------------------------
-# C API facts vocabulary
+# Facts vocabulary
 #
-# Annotations of the top-level functions of a spec, which describe C
-# functions (the C API catalog, checked by capi.py).  Plain Python values:
-# the spec is executed to evaluate them.
+# Annotations of the top-level stubs of a spec, which describe the C
+# functions its bodies call as escapes.  Plain Python values: the spec is
+# executed to evaluate them.
 #
 # C types (parameter and return annotations)
 #     object          PyObject *
 #     cstr            const char *        (defined above)
-#     char_p          char *
-#     void_p          void *
-#     const_void_p    const void *
 #     Py_ssize_t      Py_ssize_t
 #     int             int
-#     va_list         va_list
-#     pointer('T')    T *                 (e.g. pointer('PyBytesWriter'))
+#     pointer('T')    T *                 (e.g. pointer('bytes_appender'))
 #     None            void                (return only)
-#     *args: ...      C varargs ``...``
-#     Out[T]          T *: the callee stores a T in it (Out[object] stores a
-#                     new reference)
-#     InOut[object]   PyObject **: a reference owned by the caller, which the
-#                     callee may replace (releasing the old one)
 #
-# Ownership
-#     New[object]     return: a new (strong) reference
-#     New[bytes]      return: a new reference to an object of exactly that
-#                     builtin type (never a subclass instance)
-#     Borrowed[object] return: a borrowed reference
-#     Steals[T]       parameter: the callee takes over the caller's reference
-#                     (or, for a non-object such as a PyBytesWriter *,
-#                     consumes it); other object parameters are borrowed
+# Ownership (return annotation; object parameters are borrowed)
+#     New[object]     a new (strong) reference
+#     New[bytes]      a new reference to an object of exactly that builtin
+#                     type (never a subclass instance)
+#     Borrowed[object] a borrowed reference
 #
 # Error convention (return annotation)
 #     New[...] / Borrowed[...]   NULL with an exception set on error
 #     None                       cannot fail (unless OnError says otherwise)
-#     OnError[T, v, ...]         returns v (NULL or -1) with an exception
-#                                set on error; NullIn('p') means that on
-#                                error *p is released and set to NULL
+#     OnError[T, v]              returns v (NULL or -1) with an exception set
+#                                on error
 #     NoError[T]                 cannot fail (any value is a valid result)
-#     Any other return type must say OnError or NoError.
 #
 # Side effects
 #     RunsPython[T]   (return) may run arbitrary Python code (__index__,
@@ -352,17 +337,16 @@ class C:
 #                     of parameter p: never when p's exact type is a static
 #                     (builtin) type.
 #
-# For a function with a real body, these facts are derived, not declared.
-#
 # Escapes
 #     The facts of an escape ``C.<name>(...)`` are the annotations of the
-#     top-level stub named <name> in the spec (read by call_table.py and
-#     capi.py from the AST: clinic never executes the spec).  A stub for a
+#     top-level stub named <name> in the spec (read by call_table.py from
+#     the AST: clinic never executes the spec).  @helper marks a stub for a
 #     C function that is not part of the C API of the spec's C file (static,
-#     or defined in another file) is decorated with @helper: the C API
-#     catalog skips it.  Escapes without a stub are assumed to run Python
-#     code and to return an object of any type.  ``raise C.<name>()`` and
-#     ``with C.<name>(x):`` escapes never run Python code.
+#     or defined in another file).  Escapes without a stub are assumed to
+#     run Python code and to return an object of any type.  ``raise
+#     C.<name>()`` and ``with C.<name>(x):`` escapes never run Python code.
+#     The facts of the C API itself are in Objects/pyspec/capi/ (see
+#     disconnects.py).
 
 
 class CType:
@@ -375,11 +359,7 @@ class CType:
         return f'CType({self.c!r})'
 
 
-char_p = CType('char *')
-void_p = CType('void *')
-const_void_p = CType('const void *')
 Py_ssize_t = CType('Py_ssize_t')
-va_list = CType('va_list')
 
 
 def pointer(name):
@@ -414,10 +394,6 @@ class _Wrapper:
 
 New = _Wrapper('New', 'Return: a new reference; NULL on error.')
 Borrowed = _Wrapper('Borrowed', 'Return: a borrowed reference; NULL on error.')
-Steals = _Wrapper('Steals', 'Parameter: the callee takes the reference.')
-Out = _Wrapper('Out', 'Parameter: T *, the callee stores a T.')
-InOut = _Wrapper('InOut', 'Parameter: PyObject **, the callee may replace '
-                          'the caller-owned reference.')
 OnError = _Wrapper('OnError', 'Return: OnError[T, value, ...]: value with '
                               'an exception set on error.')
 NoError = _Wrapper('NoError', 'Return: cannot fail.')
@@ -431,22 +407,6 @@ def helper(func):
     return func
 
 
-class NullIn:
-    """Error convention: on error, *param is released and set to NULL."""
-
-    def __init__(self, param):
-        self.param = param
-
-    def __repr__(self):
-        return f'NullIn({self.param!r})'
-
-    def __eq__(self, other):
-        return isinstance(other, NullIn) and other.param == self.param
-
-    def __hash__(self):
-        return hash(('NullIn', self.param))
-
-
 class StubFacts:
     """Facts of a stub read from its AST, for the escape of the same name.
 
@@ -454,7 +414,7 @@ class StubFacts:
         None.
     runs_python: False, True, or the name of the parameter through whose
         type slots it may run Python code (RunsPython[T, 'p']).
-    errors: the error values, as in capi.Function.errors ('NULL', -1, ...).
+    errors: the error values ('NULL', -1, ...); () if it cannot fail.
     params: the parameter names.
     """
 
