@@ -7340,6 +7340,44 @@ class BytesSpecFactsTest(TestCase):
         self.assertIsNone(facts.result_type)
         self.assertTrue(facts.runs_python)
 
+    def test_builtin_type_facts(self):
+        # The evaluator's facts about builtin types (partial_eval.py
+        # BUILTIN_TYPES, and the spec class for bytes) agree with the
+        # builtins of the Python being built.
+        pe = pyspec_partial_eval
+        facts = pe.TypeFacts(self.spec)
+        for tp in [*pe.BUILTIN_TYPES, bytes]:
+            for name in pe.SPECIALS:
+                with self.subTest(tp=tp, name=name):
+                    self.assertEqual(facts.defines(tp, name),
+                                     name in tp.__dict__)
+                    self.assertEqual(facts.has(tp, name), hasattr(tp, name))
+            with self.subTest(tp=tp):
+                self.assertEqual(facts.mro(tp), list(tp.__mro__))
+        # Types it knows nothing about: nothing is decided.
+        self.assertIsNone(facts.has(BytesSubclass, '__bytes__'))
+        self.assertIsNone(facts.has(bytes, '__len__'))
+
+    def test_independent_of_host(self):
+        # The generated code does not depend on the builtins of the Python
+        # running Argument Clinic (PYTHON_FOR_REGEN may be as old as 3.10,
+        # where no builtin type has __buffer__, and bytes had no
+        # __bytes__).
+        from unittest import mock
+        real_hasattr = hasattr
+
+        def old_hasattr(obj, name):
+            if name in ('__buffer__', '__bytes__') and isinstance(obj, type):
+                return False
+            return real_hasattr(obj, name)
+
+        filename = os.path.join(test_tools.basepath, 'Objects',
+                                'bytesobject.c')
+        writer = libclinic.FileWriter(dry_run=True)
+        with mock.patch('builtins.hasattr', old_hasattr):
+            parse_file(filename, limited_capi=False, writer=writer)
+        self.assertEqual([change.filename for change in writer.changes], [])
+
     def test_escape_stubs(self):
         # Every escape a body calls has a stub in the spec giving its
         # facts, and its error convention agrees with the one runtime.py

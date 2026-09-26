@@ -93,6 +93,98 @@ SEQUENCES = (list, tuple)
 # An iterable of unknown type is versioned for these exact types.
 VERSIONED_ITERABLES = SEQUENCES
 
+# The special methods a spec may test, with hasattr(type(x), name) or
+# C.lookup_special(x, name).
+SPECIALS = ('__buffer__', '__bytes__', '__index__')
+
+# The builtin types without a spec class that the evaluator may know as
+# exact types: (base, the SPECIALS the type itself defines).  Written out
+# instead of read from the builtins of the Python running Argument Clinic
+# (PYTHON_FOR_REGEN may be older than the Python being built: before 3.12
+# no type has __buffer__).  A spec class decorated with @static_type (the
+# whole type, e.g. bytes) is described by its own methods instead.
+# test_clinic checks this table against the Python being built.
+BUILTIN_TYPES = {
+    object: (None, ()),
+    int: (object, ('__index__',)),
+    bool: (int, ()),
+    float: (object, ()),
+    str: (object, ()),
+    bytearray: (object, ('__buffer__',)),
+    memoryview: (object, ('__buffer__',)),
+    list: (object, ()),
+    tuple: (object, ()),
+    dict: (object, ()),
+    set: (object, ()),
+    frozenset: (object, ()),
+    range: (object, ()),
+}
+
+
+class TypeFacts:
+    """What the evaluator knows about builtin types: from the spec for its
+    @static_type classes, else from BUILTIN_TYPES; nothing about other
+    types.  Never from the Python running Argument Clinic."""
+
+    def __init__(self, spec):
+        self.spec = spec
+
+    def spec_class(self, tp):
+        """The complete spec class (@static_type) of builtin tp, or None."""
+        node = self.spec.classes.get(tp.__name__)
+        if node is None or getattr(builtins, tp.__name__, None) is not tp:
+            return None
+        for decorator in node.decorator_list:
+            if (isinstance(decorator, ast.Call)
+                    and isinstance(decorator.func, ast.Name)
+                    and decorator.func.id == 'static_type'):
+                return node
+        return None
+
+    def mro(self, tp):
+        """The MRO of tp, or None when tp is not known."""
+        out = []
+        while tp is not None:
+            if self.spec_class(tp) is not None:
+                out.append(tp)
+                tp = object
+            elif tp in BUILTIN_TYPES:
+                out.append(tp)
+                tp = BUILTIN_TYPES[tp][0]
+            else:
+                return None
+        return out
+
+    def defines(self, tp, name):
+        """Whether tp itself defines special method *name* (in SPECIALS)."""
+        if self.spec_class(tp) is not None:
+            full = f'{tp.__name__}.{name}'
+            return (full in self.spec.functions or full in self.spec.clones
+                    or full in self.spec.shared)
+        return name in BUILTIN_TYPES[tp][1]
+
+    def owner(self, tp, name):
+        """The class of the MRO of tp that defines *name*: False when none
+        does, None when not known."""
+        mro = self.mro(tp)
+        if mro is None or name not in SPECIALS:
+            return None
+        for klass in mro:
+            if self.defines(klass, name):
+                return klass
+        return False
+
+    def has(self, tp, name):
+        """hasattr(tp, name) for a special method; None when not known."""
+        owner = self.owner(tp, name)
+        return None if owner is None else owner is not False
+
+    def is_subclass(self, tp, klass):
+        mro = self.mro(tp)
+        if mro is None:
+            return None
+        return klass in mro
+
 
 class Bound:
     """The name refers to a spec method bound to an argument, whose call
@@ -135,18 +227,15 @@ def _known_type(env, node):
     return None
 
 
-def _has_special(tp, name):
-    return any(name in klass.__dict__ for klass in tp.__mro__)
-
-
-def evaluate(expr, env):
-    """Return True, False, or None when *expr* is not decided by *env*."""
+def evaluate(expr, env, facts):
+    """Return True, False, or None when *expr* is not decided by *env*.
+    *facts*: the TypeFacts of the spec."""
     match expr:
         case ast.UnaryOp(op=ast.Not(), operand=operand):
-            value = evaluate(operand, env)
+            value = evaluate(operand, env, facts)
             return None if value is None else not value
         case ast.BoolOp(op=op, values=values):
-            results = [evaluate(v, env) for v in values]
+            results = [evaluate(v, env, facts) for v in values]
             if isinstance(op, ast.And):
                 if False in results:
                     return False
@@ -160,7 +249,7 @@ def evaluate(expr, env):
             return None
         case ast.Compare(left=left, ops=[ast.Is() | ast.IsNot() as op],
                          comparators=[right]):
-            value = _evaluate_is(left, right, env)
+            value = _evaluate_is(left, right, env, facts)
             if value is None:
                 return None
             return value != isinstance(op, ast.IsNot)
@@ -168,16 +257,16 @@ def evaluate(expr, env):
             tp, klass = _known_type(env, obj), _builtin_type(cls)
             if tp is None or klass is None:
                 return None
-            return issubclass(tp, klass)
+            return facts.is_subclass(tp, klass)
         case ast.Call(func=ast.Name('hasattr'),
                       args=[type_call, ast.Constant(str() as name)]) \
                 if _is_type_call(type_call):
             tp = _known_type(env, type_call.args[0])
-            return None if tp is None else hasattr(tp, name)
+            return None if tp is None else facts.has(tp, name)
     return None
 
 
-def _evaluate_is(left, right, env):
+def _evaluate_is(left, right, env, facts):
     right_is_null = isinstance(right, ast.Name) and right.id == 'NULL'
     if right_is_null and isinstance(left, ast.Name):
         value = env.get(left.id)
@@ -197,7 +286,7 @@ def _evaluate_is(left, right, env):
             case ast.Call(func=ast.Attribute(ast.Name('C'), 'lookup_special'),
                           args=[obj, ast.Constant(str() as name)]):
                 tp = _known_type(env, obj)
-                if tp is not None and not _has_special(tp, name):
+                if tp is not None and facts.has(tp, name) is False:
                     return True
         return None
     if _is_type_call(left):
@@ -377,10 +466,6 @@ class _Rename(ast.NodeTransformer):
         return ast.copy_location(new, node)
 
 
-def _is_static_type(tp):
-    return isinstance(tp, type) and not tp.__flags__ & (1 << 9)
-
-
 def _pure_value(residual, param):
     """The value of a residual that is just ``return <param or constant>``
     (the parameter as ast.Name), or None."""
@@ -395,22 +480,21 @@ def _pure_value(residual, param):
 class Evaluator:
     def __init__(self, spec):
         self.spec = spec
+        self.facts = TypeFacts(spec)
         self._suffix = itertools.count(1)
 
     def special_method(self, tp, name):
         """The spec method (name) that C.lookup_special(x, name) finds for
-        an object x of exact type tp, or None when not known statically."""
-        if not _is_static_type(tp):
+        an object x of exact type tp, or None when not known statically.
+        The types TypeFacts knows are static types: their methods cannot
+        change."""
+        owner = self.facts.owner(tp, name)
+        if not owner:
             return None
-        for klass in tp.__mro__:
-            if name in klass.__dict__:
-                spec_name = f'{klass.__name__}.{name}'
-                node = self.spec.functions.get(spec_name)
-                if (klass is getattr(builtins, klass.__name__, None)
-                        and self.spec.implemented(spec_name)
-                        and not node.decorator_list):
-                    return spec_name
-                return None
+        spec_name = f'{owner.__name__}.{name}'
+        node = self.spec.functions.get(spec_name)
+        if self.spec.implemented(spec_name) and not node.decorator_list:
+            return spec_name
         return None
 
     def bind_special(self, test, env, depth):
@@ -510,7 +594,7 @@ class Evaluator:
                 out += self.block(stmt.body if value else stmt.orelse, env,
                                   depth, inline)
             elif isinstance(stmt, ast.If):
-                value = evaluate(stmt.test, env)
+                value = evaluate(stmt.test, env, self.facts)
                 if value is True:
                     left = getattr(stmt.test, 'left', None)
                     if isinstance(left, ast.NamedExpr):
