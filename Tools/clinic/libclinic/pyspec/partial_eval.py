@@ -2,8 +2,12 @@
 
 Given facts a call site knows -- which arguments are NULL, and optionally
 the exact type of an argument -- fold the branches those facts decide and
-inline tail calls to other spec functions.  The result is a list of ast
-statements in the same Python subset the C emitter accepts.
+inline tail calls to other spec functions (or call a shared
+specialization, below).  After an if whose one branch exits, the facts
+of the other hold.  The result is a list of ast statements in the same
+Python subset the C emitter accepts.  Facts about builtin types come
+from the spec and from BUILTIN_TYPES, never from the Python running
+Argument Clinic.
 
 Loops.  ``for item in it:`` iterates an iterator ``it = iter(x)``.  When
 the exact type of x is known (from the call site, or from a
@@ -14,28 +18,60 @@ the exact type of x is known (from the call site, or from a
   clause;
 * a list or a tuple is iterated by index, without an iterator object
   (``for item in x:``, lowered by emit.py; ``it = iter(x)`` is then
-  dead and removed), with the same semantics as its iterator: the size is
-  read again for every item;
+  dead and removed), with the same semantics as its iterator: the size of
+  a list is read again for every item (except in a snapshot, below);
 * the exact type of the items, when all have the same, is known in the
   loop body.
 
 When the exact type of x is not known where ``it = iter(x)`` is
 evaluated, the rest of the block is versioned: specialized for an exact
 list and an exact tuple when that gives an index loop, and kept generic
-for other types (VERSIONED_ITERABLES).
+for other types (VERSIONED_ITERABLES).  ``C.lookup_special(x, name)`` is
+versioned the same way for the spec types on which the special method it
+finds is pure (bytes.__bytes__ on exactly bytes: ``return x``).
 
-In a loop body where the type of the items is not known, a statement
-that passes the item to an escape with a cheaper lowering for an exact
-type (Escape.exact, e.g. PyNumber_AsSsize_t() of an exact int) is split:
-``if type(item) is int: <statement> else: <statement>``, the first one
-with the call marked with the type (``call.pyspec_exact``) for the
-emitter.  The rest of the body is shared.
+Arity functions.  Where the rest of a __new__ body has the facts of one
+of its NAME_nargsN() functions (emit.py) and is that whole function, it
+calls the function (Evaluator.arity_call()).
+
+In a loop body, a statement that passes the item to an escape with a
+fast path (Escape.fast, e.g. PyNumber_AsSsize_t() of a compact exact
+int) is split: ``if C.<escape>.fast(item): <statement> else:
+<statement>``, the first one with the call marked ``call.pyspec_fast``
+for the emitter.  The rest of the body is shared.  Outside loops, only
+a statement whose argument has a known exact type is split.
+
+Shared specializations.  A tail call of a spec function whose residual
+for the facts of the call has a loop is not inlined: the residual becomes
+a C function of its own (a Specialization), emitted once and called by
+every call with the same facts.  A loop costs far more than a call, and
+the loop code is not duplicated.  A residual that does not iterate by
+index is not worth its own code: the call stays a call of the generic
+function, and only its facts come from the residual.
+
+Snapshots.  The residual of a list loop is split in two, as the
+hand-written _PyBytes_FromSequence_lock_held() was: every statement that
+may run Python code (per the facts of call_table.Analyzer) is replaced by
+``return FALLBACK``, and the rest, which runs no Python code, is called
+with the list locked (a critical section; nothing without free
+threading): nothing can change the list meanwhile, so it iterates a
+consistent snapshot, borrows its items, and reads its size once.  On
+FALLBACK the call restarts through the generic, unspecialized function.
+As the snapshot ran no Python code, the restart cannot be observed.
+
+Capacity.  A buffer created with the length of a sequence (Escape.length,
+Escape.capacity) that a loop over the sequence appends to at most once
+per iteration needs no capacity check in that loop
+(Escape.unchecked), when the loop runs a fixed number of iterations: a
+tuple, or a list in a snapshot.
 """
 
 import ast
 import builtins
 import copy
 import itertools
+import types
+import weakref
 
 from . import runtime
 
@@ -45,6 +81,10 @@ from . import runtime
 # these exact types.
 NULL = 'NULL'
 NOTNULL = 'NOTNULL'
+
+# ``return FALLBACK`` in a snapshot (see the module docstring): restart
+# through the generic function.
+FALLBACK = 'FALLBACK'
 
 
 class Value:
@@ -93,17 +133,113 @@ SEQUENCES = (list, tuple)
 # An iterable of unknown type is versioned for these exact types.
 VERSIONED_ITERABLES = SEQUENCES
 
+# The special methods a spec may test, with hasattr(type(x), name) or
+# C.lookup_special(x, name).
+SPECIALS = ('__buffer__', '__bytes__', '__index__')
+
+# The builtin types without a spec class that the evaluator may know as
+# exact types: (base, the SPECIALS the type itself defines).  Written out
+# instead of read from the builtins of the Python running Argument Clinic
+# (PYTHON_FOR_REGEN may be older than the Python being built: before 3.12
+# no type has __buffer__).  A spec class decorated with @static_type (the
+# whole type, e.g. bytes) is described by its own methods instead.
+# test_clinic checks this table against the Python being built.
+BUILTIN_TYPES = {
+    object: (None, ()),
+    int: (object, ('__index__',)),
+    bool: (int, ()),
+    float: (object, ()),
+    str: (object, ()),
+    bytearray: (object, ('__buffer__',)),
+    memoryview: (object, ('__buffer__',)),
+    list: (object, ()),
+    tuple: (object, ()),
+    dict: (object, ()),
+    set: (object, ()),
+    frozenset: (object, ()),
+    range: (object, ()),
+    types.GeneratorType: (object, ()),
+    type(iter([])): (object, ()),       # list_iterator
+    types.NoneType: (object, ()),
+}
+
+
+class TypeFacts:
+    """What the evaluator knows about builtin types: from the spec for its
+    @static_type classes, else from BUILTIN_TYPES; nothing about other
+    types.  Never from the Python running Argument Clinic."""
+
+    def __init__(self, spec):
+        self.spec = spec
+
+    def spec_class(self, tp):
+        """The complete spec class (@static_type) of builtin tp, or None."""
+        node = self.spec.classes.get(tp.__name__)
+        if node is None or getattr(builtins, tp.__name__, None) is not tp:
+            return None
+        for decorator in node.decorator_list:
+            if (isinstance(decorator, ast.Call)
+                    and isinstance(decorator.func, ast.Name)
+                    and decorator.func.id == 'static_type'):
+                return node
+        return None
+
+    def mro(self, tp):
+        """The MRO of tp, or None when tp is not known."""
+        out = []
+        while tp is not None:
+            if self.spec_class(tp) is not None:
+                out.append(tp)
+                tp = object
+            elif tp in BUILTIN_TYPES:
+                out.append(tp)
+                tp = BUILTIN_TYPES[tp][0]
+            else:
+                return None
+        return out
+
+    def defines(self, tp, name):
+        """Whether tp itself defines special method *name* (in SPECIALS)."""
+        if self.spec_class(tp) is not None:
+            full = f'{tp.__name__}.{name}'
+            return (full in self.spec.functions
+                    or full in getattr(self.spec, 'shared', {}))
+        return name in BUILTIN_TYPES[tp][1]
+
+    def owner(self, tp, name):
+        """The class of the MRO of tp that defines *name*: False when none
+        does, None when not known."""
+        mro = self.mro(tp)
+        if mro is None or name not in SPECIALS:
+            return None
+        for klass in mro:
+            if self.defines(klass, name):
+                return klass
+        return False
+
+    def has(self, tp, name):
+        """hasattr(tp, name) for a special method; None when not known."""
+        owner = self.owner(tp, name)
+        return None if owner is None else owner is not False
+
+    def is_subclass(self, tp, klass):
+        mro = self.mro(tp)
+        if mro is None:
+            return None
+        return klass in mro
+
 
 class Bound:
     """The name refers to a spec method bound to an argument, whose call
     evaluates to *value* (an ast node) without side effects.
 
     ``(func := C.lookup_special(x, "__bytes__")) is not NULL`` binds func
-    when the exact type of x is a static type whose __bytes__ is a spec
-    method, and that method, partially evaluated for x, is just
-    ``return self`` (or a constant): ``result = func()`` then becomes
-    ``result`` is x.  A static type cannot change, so the lookup is
-    decided by the type alone; a heap type (e.g. a subclass) is not.
+    when the exact type of x is a type TypeFacts knows (a static type)
+    whose __bytes__ is a spec method, and that method, partially evaluated
+    for x, is just ``return self`` (or a constant): ``result = func()``
+    then becomes ``result`` is x.  A static type cannot change, so the
+    lookup is decided by the type alone; a heap type (e.g. a subclass) is
+    not.
     """
 
     def __init__(self, name, value):
@@ -135,18 +271,15 @@ def _known_type(env, node):
     return None
 
 
-def _has_special(tp, name):
-    return any(name in klass.__dict__ for klass in tp.__mro__)
-
-
-def evaluate(expr, env):
-    """Return True, False, or None when *expr* is not decided by *env*."""
+def evaluate(expr, env, facts):
+    """Return True, False, or None when *expr* is not decided by *env*.
+    *facts*: the TypeFacts of the spec."""
     match expr:
         case ast.UnaryOp(op=ast.Not(), operand=operand):
-            value = evaluate(operand, env)
+            value = evaluate(operand, env, facts)
             return None if value is None else not value
         case ast.BoolOp(op=op, values=values):
-            results = [evaluate(v, env) for v in values]
+            results = [evaluate(v, env, facts) for v in values]
             if isinstance(op, ast.And):
                 if False in results:
                     return False
@@ -160,7 +293,7 @@ def evaluate(expr, env):
             return None
         case ast.Compare(left=left, ops=[ast.Is() | ast.IsNot() as op],
                          comparators=[right]):
-            value = _evaluate_is(left, right, env)
+            value = _evaluate_is(left, right, env, facts)
             if value is None:
                 return None
             return value != isinstance(op, ast.IsNot)
@@ -168,16 +301,16 @@ def evaluate(expr, env):
             tp, klass = _known_type(env, obj), _builtin_type(cls)
             if tp is None or klass is None:
                 return None
-            return issubclass(tp, klass)
+            return facts.is_subclass(tp, klass)
         case ast.Call(func=ast.Name('hasattr'),
                       args=[type_call, ast.Constant(str() as name)]) \
                 if _is_type_call(type_call):
             tp = _known_type(env, type_call.args[0])
-            return None if tp is None else hasattr(tp, name)
+            return None if tp is None else facts.has(tp, name)
     return None
 
 
-def _evaluate_is(left, right, env):
+def _evaluate_is(left, right, env, facts):
     right_is_null = isinstance(right, ast.Name) and right.id == 'NULL'
     if right_is_null and isinstance(left, ast.Name):
         value = env.get(left.id)
@@ -197,7 +330,7 @@ def _evaluate_is(left, right, env):
             case ast.Call(func=ast.Attribute(ast.Name('C'), 'lookup_special'),
                           args=[obj, ast.Constant(str() as name)]):
                 tp = _known_type(env, obj)
-                if tp is not None and not _has_special(tp, name):
+                if tp is not None and facts.has(tp, name) is False:
                     return True
         return None
     if _is_type_call(left):
@@ -218,8 +351,21 @@ def refine(test, env):
     """The environments of the body and of the else clause of
     ``if test`` that is not decided by *env*: ``type(x) is K`` gives x
     the exact type K in the body (and in the else clause for ``is
-    not``)."""
+    not``), ``x is NULL`` and ``x is K`` (x is the type K) are decided."""
     match test:
+        case ast.Compare(left=ast.Name(name),
+                         ops=[ast.Is() | ast.IsNot() as op],
+                         comparators=[right]) if env.get(name) is None:
+            klass = _builtin_type(right)
+            if isinstance(right, ast.Name) and right.id == 'NULL':
+                known, other = env | {name: NULL}, env | {name: NOTNULL}
+            elif klass is not None:
+                known, other = env | {name: Value(klass)}, env
+            else:
+                return env, env
+            if isinstance(op, ast.IsNot):
+                return other, known
+            return known, other
         case ast.Compare(left=ast.Call(func=ast.Name('type'),
                                        args=[ast.Name(name)]),
                          ops=[ast.Is() | ast.IsNot() as op],
@@ -288,17 +434,29 @@ def _names_loaded(stmts):
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
 
 
-def _has_index_loop(stmts, name):
-    return any(isinstance(node, ast.For)
-               and getattr(node, 'pyspec_sequence', False)
-               and isinstance(node.iter, ast.Name) and node.iter.id == name
-               for stmt in stmts for node in ast.walk(stmt))
+def _index_loops(spec, stmts):
+    """The names iterated by index in *stmts*, directly or by the
+    specializations called."""
+    names = set()
+    for stmt in stmts:
+        for node in ast.walk(stmt):
+            if (isinstance(node, ast.For)
+                    and getattr(node, 'pyspec_sequence', False)
+                    and isinstance(node.iter, ast.Name)):
+                names.add(node.iter.id)
+            called = specialization_of(spec, node)
+            if called is not None:
+                names.update(arg.id for param, arg in zip(called.params,
+                                                          node.args)
+                             if param in called.index_params
+                             and isinstance(arg, ast.Name))
+    return names
 
 
 def annotate_exact(stmt, env):
     """A copy of *stmt* (an assignment, an expression statement or a
     return) with the escape calls whose first argument has a known exact
-    type that the escape lowers more cheaply marked with it
+    type that the escape lowers more cheaply (Escape.exact) marked with it
     (``call.pyspec_exact``); None when there is none."""
     marked = False
     stmt = copy.deepcopy(stmt)
@@ -313,33 +471,62 @@ def annotate_exact(stmt, env):
     return stmt if marked else None
 
 
-def _split_on_item_type(stmt, item):
-    """[stmt], or, if *stmt* (an assignment or an expression statement)
-    passes *item* to an escape with a cheaper lowering for its exact type
-    (Escape.exact), ``if type(item) is K: <stmt, marked> else: <stmt>``
-    for each such type K."""
-    if not isinstance(stmt, (ast.Assign, ast.Expr)):
-        return [stmt]
-    out = [stmt]
-    for tp in reversed(_exact_types_for([stmt], item)):
-        marked = annotate_exact(stmt, {item: tp})
-        out = [ast.If(_type_test(item, tp), [marked], out)]
-    return out
+def fast_guard(node):
+    """(escape name, item name) for ``C.<escape>.fast(item)``, else None."""
+    match node:
+        case ast.Call(func=ast.Attribute(
+                          ast.Attribute(ast.Name('C'), name), 'fast'),
+                      args=[ast.Name(item)]):
+            return name, item
+    return None
 
 
-def _exact_types_for(stmts, name):
-    """The types for which an escape called on *name* in *stmts* has a
-    cheaper lowering (Escape.exact)."""
-    types = []
-    for stmt in stmts:
-        for node in ast.walk(stmt):
-            if isinstance(node, ast.Call) and node.args:
-                escape = _escape(node.func)
-                first = node.args[0]
-                if (escape is not None and isinstance(first, ast.Name)
-                        and first.id == name):
-                    types += [tp for tp in escape.exact if tp not in types]
-    return types
+def _split_fast(stmt, item, item_type):
+    """[stmt], or, if *stmt* (an assignment, an expression statement, or
+    a try around an assignment) passes *item* (of exact type item_type,
+    None if unknown) as the first argument of an escape with a fast path
+    (Escape.fast) for that type, ``if C.<escape>.fast(item): <the
+    assignment or statement, marked> else: <stmt>``.  The guard is marked
+    with item_type (``pyspec_item_type``): the emitter only tests the type
+    when it is not known."""
+    match stmt:
+        case ast.Assign() | ast.Expr():
+            marked = copy.deepcopy(stmt)
+        case ast.Try(body=[ast.Assign() as assign]):
+            marked = copy.deepcopy(assign)
+        case _:
+            return [stmt]
+    for node in ast.walk(marked):
+        if not (isinstance(node, ast.Call) and node.args
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == item):
+            continue
+        escape = _escape(node.func)
+        fast = getattr(escape, 'fast', None)
+        if fast is None or (item_type is not None
+                            and item_type not in fast.types):
+            continue
+        node.pyspec_fast = True
+        guard = ast.Call(
+            ast.Attribute(ast.Attribute(ast.Name('C', ast.Load()),
+                                        node.func.attr, ast.Load()),
+                          'fast', ast.Load()),
+            [ast.Name(item, ast.Load())], [])
+        guard.pyspec_item_type = item_type
+        return [ast.If(guard, [marked], [stmt])]
+    return [stmt]
+
+
+def _split_known(stmt, env):
+    """_split_fast() for an argument whose exact type is known."""
+    for node in ast.walk(stmt):
+        if (isinstance(node, ast.Call) and node.args
+                and isinstance(node.args[0], ast.Name)):
+            fast = getattr(_escape(node.func), 'fast', None)
+            tp = env.get(node.args[0].id)
+            if fast is not None and tp in fast.types:
+                return _split_fast(stmt, node.args[0].id, tp)
+    return [stmt]
 
 
 def terminates(stmts):
@@ -377,10 +564,6 @@ class _Rename(ast.NodeTransformer):
         return ast.copy_location(new, node)
 
 
-def _is_static_type(tp):
-    return isinstance(tp, type) and not tp.__flags__ & (1 << 9)
-
-
 def _pure_value(residual, param):
     """The value of a residual that is just ``return <param or constant>``
     (the parameter as ast.Name), or None."""
@@ -393,24 +576,42 @@ def _pure_value(residual, param):
 
 
 class Evaluator:
-    def __init__(self, spec):
+    def __init__(self, spec, arities=()):
         self.spec = spec
+        self.facts = TypeFacts(spec)
         self._suffix = itertools.count(1)
+        # (facts, C function, arguments): see arity_call().
+        self.arities = arities
+
+    def arity_call(self, stmts, i, env):
+        """``[return F(args)]`` when the rest of a function body,
+        stmts[i:], under *env*, is the whole body under the facts of the
+        arity function F (NAME_nargsN(), emit.py): the facts about the
+        parameters are the same, and stmts[:i] do nothing under them."""
+        for facts, c_name, args in self.arities:
+            if any(_fact_key(env.get(p)) != _fact_key(fact)
+                   for p, fact in facts.items()):
+                continue
+            if Evaluator(self.spec).block(copy.deepcopy(stmts[:i]), facts):
+                continue
+            call = ast.Call(ast.Name(c_name, ast.Load()),
+                            [ast.Name(a, ast.Load()) for a in args], [])
+            call.pyspec_c_function = c_name
+            return [ast.Return(call, lineno=0)]
+        return None
 
     def special_method(self, tp, name):
         """The spec method (name) that C.lookup_special(x, name) finds for
-        an object x of exact type tp, or None when not known statically."""
-        if not _is_static_type(tp):
+        an object x of exact type tp, or None when not known statically.
+        The types TypeFacts knows are static types: their methods cannot
+        change."""
+        owner = self.facts.owner(tp, name)
+        if not owner:
             return None
-        for klass in tp.__mro__:
-            if name in klass.__dict__:
-                spec_name = f'{klass.__name__}.{name}'
-                node = self.spec.functions.get(spec_name)
-                if (klass is getattr(builtins, klass.__name__, None)
-                        and self.spec.implemented(spec_name)
-                        and not node.decorator_list):
-                    return spec_name
-                return None
+        spec_name = f'{owner.__name__}.{name}'
+        node = self.spec.functions.get(spec_name)
+        if self.spec.implemented(spec_name) and not node.decorator_list:
+            return spec_name
         return None
 
     def bind_special(self, test, env, depth):
@@ -452,6 +653,9 @@ class Evaluator:
                 and self.spec.call_target(node.func) is not None)
 
     def inline(self, call, env, depth):
+        outlined = self.outline(call, env, depth)
+        if outlined is not None:
+            return outlined
         name = self.spec.call_target(call.func)
         params = self.spec.params(name)
         body = self.spec.body(name)
@@ -462,11 +666,17 @@ class Evaluator:
         body = [_Rename(mapping).visit(copy.deepcopy(s)) for s in body]
         return self.block(body, env, depth + 1)
 
-    def block(self, stmts, env, depth=0, inline=True):
+    def block(self, stmts, env, depth=0, inline=True, top=False):
+        """*top*: *stmts* is a whole function body (see arity_call())."""
         out = []
         stmts = list(stmts)
         i = 0
         while i < len(stmts):
+            if top and i and self.arities:
+                call = self.arity_call(stmts, i, env)
+                if call is not None:
+                    out += call
+                    break
             stmt = stmts[i]
             i += 1
             match stmt:
@@ -504,13 +714,25 @@ class Evaluator:
                         break
             bound = (self.bind_special(stmt.test, env, depth)
                      if isinstance(stmt, ast.If) else None)
+            specials = (self.pure_specials(stmt.test)
+                        if isinstance(stmt, ast.If) and bound is None
+                        else None)
+            if specials and specials[1] and self.can_version(env,
+                                                             specials[0]):
+                # The lookup and the call are known for these exact types:
+                # versioned, as for iteration.
+                versioned = self.version(specials[0], [stmt, *stmts[i:]],
+                                         env, depth, inline, specials[1])
+                if versioned is not None:
+                    out += versioned
+                    break
             if bound is not None:
                 target, method, value = bound
                 env = env | {target: method}
                 out += self.block(stmt.body if value else stmt.orelse, env,
                                   depth, inline)
             elif isinstance(stmt, ast.If):
-                value = evaluate(stmt.test, env)
+                value = evaluate(stmt.test, env, self.facts)
                 if value is True:
                     left = getattr(stmt.test, 'left', None)
                     if isinstance(left, ast.NamedExpr):
@@ -528,18 +750,25 @@ class Evaluator:
                     stmt.orelse = self.block(stmt.orelse, else_env, depth,
                                              inline)
                     out.append(stmt)
+                    # After an if whose one branch exits, the facts of
+                    # the other hold.
+                    if terminates(stmt.body):
+                        env = else_env
+                    elif terminates(stmt.orelse):
+                        env = body_env
             elif (inline and isinstance(stmt, ast.Return)
                     and self._is_spec_call(stmt.value)
                     and depth < MAX_INLINE_DEPTH):
                 out += self.inline(stmt.value, env, depth)
             elif isinstance(stmt, ast.Try):
                 stmt = copy.deepcopy(stmt)
-                stmt.body = self.block(stmt.body, env, depth, inline)
+                # The body is one assignment (see emit.py), split below.
+                stmt.body = [annotate_exact(s, env) or s for s in stmt.body]
                 # Handlers and else clauses are cold: keep calls as calls.
                 for handler in stmt.handlers:
                     handler.body = self.block(handler.body, env, depth, False)
                 stmt.orelse = self.block(stmt.orelse, env, depth, False)
-                out.append(stmt)
+                out += _split_known(stmt, env)
             elif isinstance(stmt, ast.With):
                 stmt = copy.deepcopy(stmt)
                 stmt.body = self.block(stmt.body, env, depth, False)
@@ -547,39 +776,95 @@ class Evaluator:
             elif isinstance(stmt, ast.For):
                 out.append(self.loop(stmt, env, depth, inline))
             elif isinstance(stmt, (ast.Assign, ast.Expr, ast.Return)):
-                out.append(annotate_exact(stmt, env) or stmt)
+                out += _split_known(annotate_exact(stmt, env) or stmt, env)
             else:
                 out.append(stmt)
             if terminates(out):
                 break
         return out
 
+    def outline(self, call, env, depth):
+        """``[return <call of a Specialization>]`` for a tail call of a
+        spec function whose residual for the facts of the call has a
+        loop, else None."""
+        name = self.spec.call_target(call.func)
+        params = self.spec.params(name)
+        if ('.' in name or len(call.args) != len(params)
+                or not all(isinstance(a, ast.Name) for a in call.args)):
+            return None
+        args = [a.id for a in call.args]
+        callee_env = {}
+        for param, arg in zip(params, args):
+            fact = env.get(arg)
+            if isinstance(fact, IterOf):
+                fact = (IterOf(params[args.index(fact.source)], fact.tp)
+                        if fact.source in args else NOTNULL)
+            if fact is not None and not isinstance(fact, Bound):
+                callee_env[param] = fact
+        special = specialize_call(self.spec, name, callee_env, depth + 1)
+        if special is None:
+            return None
+        if not special.index_params:
+            # Not worth its own code: the generic function, with the
+            # facts of the specialization.
+            call = copy.copy(call)
+            call.pyspec_facts = special.name
+            return [ast.Return(call, lineno=0)]
+        return [ast.Return(special.call([call.args[params.index(p)]
+                                         for p in special.params]),
+                           lineno=0)]
+
     # -- loops ---------------------------------------------------------------
 
     @staticmethod
     def can_version(env, name):
         value = env.get(name)
-        return not (value == NULL or isinstance(value, (type, Value, IterOf,
-                                                        Other)))
+        return not (value == NULL or isinstance(value, (type, Value, IterOf)))
 
-    def version(self, name, tail, env, depth, inline):
+    def version(self, name, tail, env, depth, inline, types=None):
         """*tail*, which starts iterating *name* (of unknown type),
         specialized for each exact type of VERSIONED_ITERABLES that gives
-        an index loop, and kept generic for the other types, as a chain of
-        ``if type(name) is K:``; None if no type gives an index loop."""
+        an index loop (or for each of *types*), and kept generic for the
+        other types, as a chain of ``if type(name) is K:``; None if no
+        type gives an index loop."""
+        known = env.get(name)
+        excluded = known.types if isinstance(known, Other) else ()
         branches = []
-        for tp in VERSIONED_ITERABLES:
+        for tp in types or VERSIONED_ITERABLES:
+            if tp in excluded:
+                continue
             residual = self.block(copy.deepcopy(tail), env | {name: tp},
                                   depth, True)
-            if _has_index_loop(residual, name):
+            if types or name in _index_loops(self.spec, residual):
                 branches.append((tp, residual))
         if not branches:
             return None
-        other = Other(tp for tp, _ in branches)
+        other = Other([*excluded, *(tp for tp, _ in branches)])
         out = self.block(tail, env | {name: other}, depth, inline)
         for tp, residual in reversed(branches):
             out = [ast.If(_type_test(name, tp), residual, out)]
         return out
+
+    def pure_specials(self, test):
+        """(x, the types whose special method the test looks up is pure
+        on x: see bind_special()) for ``if (v := C.lookup_special(x,
+        "name")) is [not] NULL``; else None."""
+        match test:
+            case ast.Compare(
+                    left=ast.NamedExpr(value=ast.Call(
+                        func=ast.Attribute(ast.Name('C'), 'lookup_special'),
+                        args=[ast.Name(obj), ast.Constant(str())])),
+                    comparators=[ast.Name('NULL')]):
+                pass
+            case _:
+                return None
+        types = []
+        for cls_name in self.spec.classes:
+            tp = getattr(builtins, cls_name, None)
+            if (isinstance(tp, type) and self.facts.spec_class(tp)
+                    and self.bind_special(test, {obj: tp}, 0) is not None):
+                types.append(tp)
+        return obj, types
 
     def loop(self, stmt, env, depth, inline):
         """``for item in it:``, specialized: see the module docstring.
@@ -605,13 +890,280 @@ class Evaluator:
         item_type = ITERATION.get(iterable)
         body = self.block(stmt.body, env | {item: item_type or NOTNULL},
                           depth, inline)
-        if item_type is None:
-            body = [split for part in body
-                    for split in _split_on_item_type(part, item)]
-        new.body = body
+        new.body = [split for part in body
+                    for split in _split_fast(part, item, item_type)]
         new.pyspec_iterable = iterable
         new.pyspec_sequence = sequence
         return new
+
+
+# -- shared specializations (see the module docstring) -----------------------
+
+# spec -> {(callee, facts): Specialization or None, and name: Specialization}
+_SPECIALIZATIONS = weakref.WeakKeyDictionary()
+
+
+class Specialization:
+    """Spec function *callee* partially evaluated for the facts *env*
+    about its parameters: the C function *name*(*params*) whose body is
+    *body*.  *params* are the parameters the body uses, in order.
+
+    *index_params*: the parameters iterated by index.  *lock*: for a
+    snapshot (the body may return FALLBACK), the parameter whose critical
+    section the caller holds."""
+
+    def __init__(self, name, callee, params, env, body, lock=None):
+        self.name = name
+        self.callee = callee
+        self.params = params
+        self.env = env
+        self.body = body
+        self.lock = lock
+        self.index_params = set()
+
+    def call(self, args):
+        node = ast.Call(ast.Name(self.name, ast.Load()),
+                        [copy.copy(a) for a in args], [])
+        node.pyspec_specialization = self.name
+        return node
+
+    def types(self):
+        """The exact types of the parameters."""
+        return {p: v for p, v in self.env.items() if isinstance(v, type)}
+
+
+def _registry(spec):
+    try:
+        return _SPECIALIZATIONS[spec]
+    except KeyError:
+        return _SPECIALIZATIONS.setdefault(spec, {})
+
+
+def specialization(spec, name):
+    """The Specialization called *name*."""
+    return _registry(spec)[name]
+
+
+def specialization_of(spec, node, facts=False):
+    """The Specialization a call node calls, or None.  With *facts*, also
+    the one whose facts a call of the generic function has
+    (``pyspec_facts``)."""
+    name = getattr(node, 'pyspec_specialization', None)
+    if name is None and facts:
+        name = getattr(node, 'pyspec_facts', None)
+    return None if name is None else specialization(spec, name)
+
+
+def _fact_key(fact):
+    match fact:
+        case type():
+            return fact.__name__
+        case Value():
+            return ('value', repr(fact.obj))
+        case IterOf():
+            return ('iter', fact.source, fact.tp.__name__)
+        case Other():
+            return ('other', tuple(tp.__name__ for tp in fact.types))
+    return fact
+
+
+def _has_loop(stmts):
+    return any(isinstance(node, ast.For)
+               for stmt in stmts for node in ast.walk(stmt))
+
+
+def _unique_name(taken, base):
+    name, suffix = base, itertools.count(2)
+    while name in taken:
+        name = f'{base}_{next(suffix)}'
+    return name
+
+
+def specialize_call(spec, callee, env, depth=0):
+    """The Specialization of spec function *callee* for the facts *env*
+    about its parameters, or None when its residual has no loop (the
+    call is inlined instead).  Made once per (callee, facts)."""
+    registry = _registry(spec)
+    params = spec.params(callee)
+    key = (callee, tuple((p, _fact_key(env.get(p))) for p in params))
+    if key in registry:
+        return registry[key]
+    registry[key] = None            # while evaluating: recursion inlines
+    body = Evaluator(spec).block(spec.body(callee), env, depth)
+    # A private copy: the residual shares nodes with the spec, and the
+    # snapshot and mark_presized() mark them.
+    body = copy.deepcopy(remove_dead_iterators(body))
+    if not _has_loop(body):
+        return None
+    type_names = [env[p].__name__ for p in params
+                  if isinstance(env.get(p), type)]
+    name = _unique_name(registry, '_'.join([callee, *type_names]))
+    special = _snapshot(spec, callee, name, params, env, body)
+    if special is None:
+        mark_presized(body)
+        loaded = _names_loaded(body)
+        special = Specialization(name, callee,
+                                 [p for p in params if p in loaded], env,
+                                 body)
+        special.index_params = (_index_loops(spec, body)
+                                & set(special.params))
+    registry[key] = registry[name] = special
+    return special
+
+
+def _snapshot(spec, callee, name, params, env, body):
+    """For a *body* iterating one list parameter by index: the
+    Specialization *name* that calls NAME_lock_held(), the snapshot of
+    *body*, in the critical section of the list, and on FALLBACK restarts
+    with the generic callee.  None when the body is not a list loop or has
+    no path without Python code."""
+    loops = [node for stmt in body for node in ast.walk(stmt)
+             if isinstance(node, ast.For)]
+    match loops:
+        case [ast.For(iter=ast.Name(seq)) as loop] if (
+                loop.pyspec_sequence and loop.pyspec_iterable is list
+                and seq in params):
+            pass
+        case _:
+            return None
+    from .call_table import Analyzer
+    snapshot = _Snapshot(Analyzer(spec), loop)
+    free = snapshot.block(body, {p: v for p, v in env.items()
+                                 if isinstance(v, type)})
+    if free is None or not snapshot.returns:
+        return None
+    mark_presized(free)
+    loaded = _names_loaded(free)
+    held = Specialization(f'{name}_lock_held', callee,
+                          [p for p in params if p in loaded], env, free,
+                          lock=seq)
+    held.index_params = {seq}
+    _registry(spec)[held.name] = held
+
+    # The arguments of the restart: an iterator iter(p) of a parameter p
+    # is made again.
+    rebuilt = {p: env[p].source for p in params
+               if isinstance(env.get(p), IterOf) and p not in held.params
+               and env[p].source in params}
+    result = _unique_name(set(params), 'result')
+
+    def load(n):
+        return ast.Name(n, ast.Load())
+
+    def store(n):
+        return ast.Name(n, ast.Store())
+
+    lock = ast.Call(ast.Attribute(load('C'), 'critical_section', ast.Load()),
+                    [load(seq)], [])
+    glue = [
+        ast.With([ast.withitem(lock)],
+                 [ast.Assign([store(result)],
+                             held.call([load(p) for p in held.params]),
+                             lineno=0)],
+                 lineno=0),
+        ast.If(ast.Compare(load(result), [ast.IsNot()], [load(FALLBACK)]),
+               [ast.Return(load(result))], []),
+        *[ast.Assign([store(p)], ast.Call(load('iter'), [load(source)], []),
+                     lineno=0)
+          for p, source in rebuilt.items()],
+        ast.Return(ast.Call(load(callee), [load(p) for p in params], [])),
+    ]
+    special = Specialization(name, callee,
+                             [p for p in params if p not in rebuilt], env,
+                             glue)
+    special.index_params = {seq}
+    return special
+
+
+class _Snapshot:
+    """The snapshot of a list loop: see _snapshot()."""
+
+    def __init__(self, analyzer, loop):
+        self.analyzer = analyzer
+        self.loop = loop
+        self.returns = False        # some path returns a result
+
+    def runs_python(self, stmts, types):
+        return self.analyzer.facts(stmts, types).runs_python
+
+    def block(self, stmts, types, in_loop=False):
+        """*stmts* with the statements that may run Python code replaced
+        by ``return FALLBACK``; None if one is outside the loop."""
+        out = []
+        for stmt in stmts:
+            if isinstance(stmt, ast.If) and not self.runs_python(
+                    [ast.If(stmt.test, [ast.Pass()], [])], types):
+                body_types, else_types = self.analyzer.refine(stmt.test)
+                new = copy.copy(stmt)
+                new.body = self.block(stmt.body, types | body_types, in_loop)
+                new.orelse = self.block(stmt.orelse, types | else_types,
+                                        in_loop)
+                if new.body is None or new.orelse is None:
+                    return None
+                new.body = new.body or [ast.Pass()]
+                stmt = new
+            elif stmt is self.loop:
+                new = copy.copy(stmt)
+                new.body = self.block(stmt.body, types, True)
+                if new.body is None:
+                    return None
+                new.pyspec_python_free = True
+                stmt = new
+            elif self.runs_python([stmt], types):
+                if not in_loop:
+                    return None
+                out.append(ast.Return(ast.Name(FALLBACK, ast.Load())))
+                break
+            elif isinstance(stmt, ast.Return):
+                self.returns = True
+            out.append(stmt)
+            if terminates(out):
+                break
+        return out
+
+
+def mark_presized(stmts):
+    """Mark ``call.pyspec_unchecked`` the appends to a buffer that has
+    room for all of them: see Capacity in the module docstring.  Only the
+    top level of *stmts* (a function body) is scanned."""
+    lengths = {}            # local -> the sequence it is the length of
+    capacity = {}           # buffer local -> the sequence it has room for
+    for stmt in stmts:
+        match stmt:
+            case ast.Assign(targets=[ast.Name(target)],
+                            value=ast.Call(func=func,
+                                           args=[ast.Name(arg), *_]) as call):
+                escape = _escape(func)
+                if (getattr(escape, 'length', False)
+                        and getattr(call, 'pyspec_exact', None)):
+                    lengths[target] = arg
+                    continue
+                if getattr(escape, 'capacity', False) and arg in lengths:
+                    capacity[target] = lengths[arg]
+                    continue
+            case ast.For(iter=ast.Name(seq)) if (
+                    stmt.pyspec_sequence
+                    and (stmt.pyspec_iterable is tuple
+                         or getattr(stmt, 'pyspec_python_free', False))):
+                inner = [node for part in stmt.body
+                         for node in ast.walk(part)]
+                if not any(isinstance(node, ast.For) for node in inner):
+                    for buffer, sequence in capacity.items():
+                        appends = [node for node in inner
+                                   if _appends_to(node, buffer)]
+                        if sequence == seq and len(appends) <= 1:
+                            for node in appends:
+                                node.pyspec_unchecked = True
+        # Any other use of a buffer: it is no longer known to have room.
+        loaded = _names_loaded([stmt])
+        capacity = {b: q for b, q in capacity.items() if b not in loaded}
+
+
+def _appends_to(node, buffer):
+    return (isinstance(node, ast.Call)
+            and getattr(_escape(node.func), 'unchecked', None) is not None
+            and node.args and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == buffer)
 
 
 def remove_dead_iterators(stmts, live=frozenset()):
@@ -635,17 +1187,23 @@ def remove_dead_iterators(stmts, live=frozenset()):
                 setattr(stmt, field, block)
         for handler in getattr(stmt, 'handlers', ()):
             handler.body = remove_dead_iterators(handler.body, after)
+        if isinstance(stmt, ast.Assign):
+            live -= {target.id for target in stmt.targets
+                     if isinstance(target, ast.Name)}
         live |= _names_loaded([stmt])
         out.append(stmt)
     out.reverse()
     return out
 
 
-def specialize(spec, name, env, inline=True):
+def specialize(spec, name, env, inline=True, arities=()):
     """Residual statements of spec function *name* under facts *env*.
 
     *spec* is a frontend.Spec.  With *inline* false, tail calls of other
     spec functions stay calls, except where the block is versioned.
+    *arities*: (facts, C function, arguments) of the arity functions of
+    a __new__ (see Evaluator.arity_call()).
     """
-    residual = Evaluator(spec).block(spec.body(name), env, inline=inline)
+    residual = Evaluator(spec, arities).block(spec.body(name), env,
+                                              inline=inline, top=True)
     return remove_dead_iterators(residual)

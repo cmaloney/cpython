@@ -8,12 +8,13 @@ Every implemented spec function becomes a C function:
   * a method of a spec class implements the clinic function of that name.
     For a method or class method (``bytes.__bytes__``) it becomes the
     NAME_impl() that clinic's parsing code calls; the first parameter is
-    clinic's self (or class) parameter.  For ``bytes.__new__ as bytes_new`` it
-    becomes bytes_new_impl() (Argument Clinic declares it and no longer
-    expects a hand-written body), plus bytes_new_nargsN() for each
-    positional argument count N -- the function partially evaluated for
-    exactly the class and N arguments, called by the clinic generated
-    vectorcall;
+    clinic's self (or class) parameter.  ``bytes.__new__`` (C basename
+    bytes_new) becomes bytes_new_impl() (Argument Clinic declares it and
+    no longer expects a hand-written body), plus bytes_new_nargsN() for
+    each positional argument count N -- the function partially evaluated
+    for exactly the class and N arguments, called by the clinic generated
+    vectorcall; bytes_new_impl() calls one where the rest of its body is
+    that function;
   * a top-level function becomes the C function of the same name: names
     starting with Py or _Py are defined non-static (their public or
     internal header declares them); everything else is static.
@@ -23,7 +24,9 @@ Functions whose body is only a docstring and/or ``...`` are stubs
 
 For a __new__ implemented by the spec, call_table.py then adds
 type-specialized variants of NAME_nargs1() and the call table the tier-2
-optimizer reads (Include/internal/pycore_pyspec.h).
+optimizer reads (Include/internal/pycore_pyspec.h).  Last come the
+shared specializations the code calls (partial_eval.Specialization),
+e.g. bytes_from_iterator_list().
 
 The accepted Python subset is small on purpose; anything else is an error.
 
@@ -45,14 +48,24 @@ Calls (result is a new reference or a Py_ssize_t):
   object or type variable f (e.g. cls(result)),
   <spec function>(...), T.<spec method>(...)
 
+The partial evaluator adds (see partial_eval.py): calls of shared
+specializations, fast path guards ``C.<escape>.fast(x)``, the marks of
+escape calls with a cheaper lowering (pyspec_fast, pyspec_exact,
+pyspec_unchecked: they cannot fail), and for snapshots, ``return
+FALLBACK`` (Py_None, never a result: the caller restarts),
+``x is [not] FALLBACK`` and ``with C.critical_section(x):``.
+
 Reference ownership: parameters are borrowed; every object local is a new
 reference, declared NULL at the top and released with Py_XDECREF at every
 exit except the one returning it; it may be assigned again only where it
 holds no reference (e.g. in the other branch of an if).  A loop variable
-is a new reference (a borrowed one for a tuple item), released right
-after its last use in the loop body.  A C local initialized by an escape
-(e.g. a bytes_appender) is released like an object, with the release
-statement of its escape, unless an escape that steals it was called.
+is a new reference, released right after its last use in the loop body;
+it is borrowed for a tuple item (the tuple keeps it alive) and in a
+snapshot, where no Python code runs (the list, locked, keeps it alive):
+"borrowed until Python code may run".  A C local initialized by an
+escape (e.g. a bytes_appender) is released like an object, with the
+release statement of its escape, unless an escape that steals it was
+called.
 """
 
 import ast
@@ -265,6 +278,15 @@ class FunctionEmitter:
 
         *target*: the local assigned, for an escape that initializes it in
         place (then the expression is an int status)."""
+        special = partial_eval.specialization_of(self.spec, call)
+        if special is not None:
+            self.generator.use(special.name)
+            args = ', '.join(self.lower_value(a) for a in call.args)
+            return f'{special.name}({args})', OBJECT, ERR_NULL
+        c_function = getattr(call, 'pyspec_c_function', None)
+        if c_function is not None:
+            args = ', '.join(self.lower_value(a) for a in call.args)
+            return f'{c_function}({args})', OBJECT, ERR_NULL
         escape = escape_of(call.func)
         if isinstance(escape, Escape):
             fields = {}
@@ -280,16 +302,20 @@ class FunctionEmitter:
                                     f'{ast.unparse(call.func)} must be '
                                     'assigned to a local')
                 fields['target'] = target
-            template = escape.template
+            # The marks of the partial evaluator: cheaper lowerings that
+            # cannot fail (None: no error convention).
+            template, error = escape.template, escape.error
             exact = getattr(call, 'pyspec_exact', None)
             if exact is not None:
-                # The partial evaluator proved the exact type of the
-                # first argument.
-                template = escape.exact[exact]
+                template, error = escape.exact[exact], None
+            elif getattr(call, 'pyspec_fast', False):
+                template, error = escape.fast.template, None
+            elif getattr(call, 'pyspec_unchecked', False):
+                template, error = escape.unchecked, None
             expr = template.format(
                 *[fields[str(i)] for i in range(len(call.args))],
                 **{k: v for k, v in fields.items() if not k.isdigit()})
-            return expr, self.escape_ctype(escape), escape.error
+            return expr, self.escape_ctype(escape), error
         target = self.spec.call_target(call.func)
         if target is not None:
             args = ', '.join(self.lower_value(a) for a in call.args)
@@ -359,6 +385,23 @@ class FunctionEmitter:
                 if isinstance(left, ast.NamedExpr):
                     left = left.target
                 return f'{self.lower_value(left)} {equal} NULL'
+            case ast.Compare(left=ast.Name(name),
+                             ops=[ast.Is() | ast.IsNot() as op],
+                             comparators=[ast.Name(partial_eval.FALLBACK)]):
+                equal = '!=' if isinstance(op, ast.IsNot) else '=='
+                return f'{name} {equal} Py_None'
+            case ast.Call() if partial_eval.fast_guard(node):
+                name, item = partial_eval.fast_guard(node)
+                fast = getattr(runtime.C, name).fast
+                obj = self.lower_value(ast.Name(item))
+                guard = fast.guard.format(obj)
+                if getattr(node, 'pyspec_item_type', None) is not None:
+                    return guard
+                checks = ' || '.join(f'{TYPE_CHECK_EXACT[tp.__name__]}({obj})'
+                                     for tp in fast.types)
+                if len(fast.types) > 1:
+                    checks = f'({checks})'
+                return f'{checks} && {guard}'
             case ast.Compare(left=ast.Call(func=ast.Name('type'), args=[obj]),
                              ops=[ast.Is() | ast.IsNot() as op],
                              comparators=[ast.Name(cls)]) \
@@ -427,7 +470,7 @@ class FunctionEmitter:
             self.live.add(name)
         if later is not None:
             self.release_dead(later)
-        if check:
+        if check and convention is not None:
             self.error_check(name, ctype, convention)
         return name, ctype, convention
 
@@ -438,13 +481,16 @@ class FunctionEmitter:
             raise SpecError(node, 'only an escape returning an int status '
                             'can be called as a statement')
         expr, _, convention = self.lower_call(call)
-        if convention != ERR_NEGATIVE:
+        if convention is None:
+            self.emit(f'{expr};')
+        elif convention != ERR_NEGATIVE:
             raise SpecError(node, 'a status must be negative on error')
-        self.emit(f'if ({expr} < 0) {{')
-        self.indent += 1
-        self.error_exit()
-        self.indent -= 1
-        self.emit('}')
+        else:
+            self.emit(f'if ({expr} < 0) {{')
+            self.indent += 1
+            self.error_exit()
+            self.indent -= 1
+            self.emit('}')
         self.release_dead(later)
 
     def statements(self, stmts, later=frozenset()):
@@ -536,7 +582,8 @@ class FunctionEmitter:
         """Names known NULL in the (body, else) of ``if test``."""
         match test:
             case ast.Compare(left=left, ops=[ast.Is() | ast.IsNot() as op],
-                             comparators=[ast.Name('NULL')]):
+                             comparators=[ast.Name('NULL' | 'FALLBACK')]):
+                # Py_None as FALLBACK is not a reference either.
                 if isinstance(left, ast.NamedExpr):
                     left = left.target
                 if isinstance(left, ast.Name):
@@ -547,6 +594,9 @@ class FunctionEmitter:
 
     def return_(self, value, node):
         match value:
+            case ast.Name(partial_eval.FALLBACK):
+                self.cleanup()
+                self.emit('return Py_None;')
             case ast.Name(id) if id in self.params:
                 self.cleanup()
                 self.emit(f'return Py_NewRef({id});')
@@ -619,6 +669,8 @@ class FunctionEmitter:
 
     def try_(self, target, value, handlers, orelse, node):
         name, ctype, convention = self.assign(target, value, node, check=False)
+        if convention is None:
+            raise SpecError(node, 'try around a call that cannot fail')
         matches = []
         for handler in handlers:
             if handler.name is not None:
@@ -667,13 +719,29 @@ class FunctionEmitter:
         if getattr(stmt, 'pyspec_sequence', False):
             index = f'{item}_index'
             tp = stmt.pyspec_iterable
+            count = f'{item}_count'
             if tp is tuple:
                 # The tuple holds a reference to every item: borrowed.
+                # Its size cannot change.
                 owned = False
-                self.emit(f'for (Py_ssize_t {index} = 0; '
-                          f'{index} < PyTuple_GET_SIZE({seq}); {index}++) {{')
+                self.emit(f'for (Py_ssize_t {index} = 0, {count} = '
+                          f'PyTuple_GET_SIZE({seq}); {index} < {count}; '
+                          f'{index}++) {{')
                 self.indent += 1
                 self.emit(f'{item} = PyTuple_GET_ITEM({seq}, {index});')
+            elif tp is list and getattr(stmt, 'pyspec_python_free', False):
+                # A snapshot (partial_eval.py): the list is locked and no
+                # Python code runs, so the list cannot change and keeps
+                # its items alive: borrowed, and the size and the items
+                # are read once.
+                owned = False
+                items = f'{item}_items'
+                self.emit(f'PyObject **{items} = _PyList_ITEMS({seq});')
+                self.emit(f'for (Py_ssize_t {index} = 0, {count} = '
+                          f'PyList_GET_SIZE({seq}); {index} < {count}; '
+                          f'{index}++) {{')
+                self.indent += 1
+                self.emit(f'{item} = {items}[{index}];')
             elif tp is list:
                 # What the list iterator does: the size is read again for
                 # every item, since the loop body may change the list.
@@ -735,7 +803,8 @@ class FunctionEmitter:
                                       check=False))
         self.emit(context.end)
         for name, ctype, convention in checks:
-            self.error_check(name, ctype, convention)
+            if convention is not None:
+                self.error_check(name, ctype, convention)
 
     # -- whole function ----------------------------------------------------
 
@@ -789,6 +858,13 @@ class Generator:
         self.spec = spec
         self.c_basenames = c_basenames
         self.self_ctypes = self_ctypes or {}
+        # The shared specializations the generated code calls, in order.
+        self.specializations = []
+
+    def use(self, name):
+        """Emit specialization *name* (partial_eval.Specialization)."""
+        if name not in self.specializations:
+            self.specializations.append(name)
 
     def describe(self, name):
         try:
@@ -832,14 +908,18 @@ class Generator:
             name = self.c_name(description.name)
             if not exported(name):
                 out.append(prototype(name, c_params(description)))
+        prototypes = len(out)
         out.append('')
 
         for description in descriptions:
             # Nothing is known about the arguments; the evaluator still
             # specializes loops (see partial_eval.py), but keeps calls
-            # of other spec functions as calls.
-            body = partial_eval.specialize(self.spec, description.name, {},
-                                           inline=False)
+            # of other spec functions as calls.  Where the rest of a
+            # __new__ is an arity function, it is called.
+            body = partial_eval.specialize(
+                self.spec, description.name, {}, inline=False,
+                arities=[(env, name, [p.name for p in given])
+                         for env, name, given, _ in self.arities(description)])
             emitter = FunctionEmitter(self, c_params(description))
             out += emitter.function(self.c_name(description.name), body)
             out.append('')
@@ -849,13 +929,49 @@ class Generator:
                 out += self.generate_arities(description)
         # The call table of the tier-2 optimizer: see call_table.py.
         out += call_table.generate(self, descriptions)
+        # The specializations, which may use others.
+        done = 0
+        while done < len(self.specializations):
+            special = partial_eval.specialization(
+                self.spec, self.specializations[done])
+            done += 1
+            params = self.specialization_params(special)
+            out[prototypes:prototypes] = [prototype(special.name, params)]
+            prototypes += 1
+            out += self.generate_specialization(special, params)
         return '\n'.join(out)
 
-    def generate_arities(self, description):
-        """NAME_nargsN() for each allowed N: the __new__ spec partially
-        evaluated for exactly its class and a call with N positional
-        arguments; the rest are NULL.  Argument Clinic declares them and
-        calls them from the vectorcall with converted values."""
+    def specialization_params(self, special):
+        ctypes = dict(c_params(self.describe(special.callee)))
+        return [(p, ctypes[p]) for p in special.params]
+
+    def generate_specialization(self, special, params):
+        facts = ', '.join(
+            f'{p} of exact type {fact.__name__}' if isinstance(fact, type)
+            else f'{p} = iter({fact.source})'
+            for p, fact in special.env.items()
+            if isinstance(fact, (type, partial_eval.IterOf)))
+        what = f'{special.callee}() for {facts}'
+        if special.lock is not None:
+            what += (f', the snapshot: called in the critical section of '
+                     f'{special.lock}, runs no Python code; FALLBACK '
+                     '(Py_None) when that could run Python code')
+        code = ast.unparse(ast.Module(special.body, []))
+        emitter = FunctionEmitter(self, params)
+        return [
+            f'/* {what}:',
+            *[' * ' + line if line else ' *'
+              for line in code.replace('*/', '* /').splitlines()],
+            ' */',
+            *emitter.function(special.name, special.body),
+            '',
+        ]
+
+    def arities(self, description):
+        """(facts, C name, given, missing parameters) of the NAME_nargsN()
+        functions of a __new__ (none for other functions)."""
+        if description.new_type is None:
+            return []
         cls, *params = description.parameters
         required = sum(not p.optional for p in params)
         type_value = getattr(builtins, description.new_type)
@@ -866,6 +982,18 @@ class Generator:
             env = {cls.name: Value(type_value)}
             env |= {p.name: NOTNULL for p in given}
             env |= {p.name: NULL for p in missing}
+            out.append((env, f'{basename}_nargs{nargs}', given, missing))
+        return out
+
+    def generate_arities(self, description):
+        """NAME_nargsN() for each allowed N: the __new__ spec partially
+        evaluated for exactly its class and a call with N positional
+        arguments; the rest are NULL.  Argument Clinic declares them and
+        calls them from the vectorcall with converted values."""
+        basename = self.c_basename(description.name)
+        out = []
+        for env, name, given, missing in self.arities(description):
+            nargs = len(given)
             residual = partial_eval.specialize(self.spec, description.name,
                                                env)
             emitter = FunctionEmitter(self,
@@ -889,9 +1017,8 @@ def describe_method(spec, name, self_ctype):
     parameter is clinic's implicit self (or class) parameter, of C type
     *self_ctype* (from the clinic class, e.g. "PyBytesObject *").
 
-    The other parameters follow the rules of frontend.Spec.describe().
-    (Kept here while frontend.py is being changed by another workstream;
-    it belongs in Spec.describe().)
+    The other parameters follow the rules of frontend.Spec.describe(),
+    which describes __new__ and top-level functions only.
     """
     node = spec.functions[name]
     where = f"{name}()"     # the caller adds the location

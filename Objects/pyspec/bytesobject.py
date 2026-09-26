@@ -32,7 +32,7 @@ from libclinic.pyspec.runtime import c_name, static_type
 
 # Facts of C functions (see the escapes at the end).
 from libclinic.pyspec.runtime import (
-    New, NoError, OnError, Py_ssize_t, RunsPython, cstr, helper, pointer)
+    New, NoError, OnError, Py_ssize_t, RunsPython, cstr, pointer)
 
 # Methods shared with bytearray (Objects/stringlib/pyspec/).
 from stringlib.pyspec import ctype, transmogrify
@@ -593,7 +593,8 @@ def PyBytes_FromObject(x: object):
     if hasattr(type(x), "__buffer__"):
         return C._PyBytes_FromBuffer(x)
     # Argument Clinic specializes the iteration for an exact list or
-    # tuple: an index loop, without an iterator (see partial_eval.py).
+    # tuple: an index loop, without an iterator; a list of compact ints
+    # is copied atomically, in its critical section (see partial_eval.py).
     if not isinstance(x, str):
         try:
             it = iter(x)
@@ -624,10 +625,10 @@ def bytes_from_iterator(it: object, x: object):
 # call templates are in Tools/clinic/libclinic/pyspec/runtime.py): one stub
 # per escape, named like it, with its facts in the vocabulary of runtime.py.
 # Argument Clinic derives the facts of the bodies from them (the call table
-# of the tier-2 optimizer, see call_table.py).  @helper marks a C function
-# outside the C API of bytesobject.c (static, or defined in another file).
-# New[bytes] means a new reference to an exact bytes object.  The facts of
-# the C API of bytesobject.c are in Objects/pyspec/capi/bytesobject.py.
+# of the tier-2 optimizer, see call_table.py).  They are not part of the C
+# API of bytesobject.c.  New[bytes] means a new reference to an exact bytes
+# object.  The facts of the C API of bytesobject.c are in
+# Objects/pyspec/capi/bytesobject.py.
 
 
 def lookup_special(obj: object, name: object
@@ -637,30 +638,25 @@ def lookup_special(obj: object, name: object
     ...
 
 
-@helper
 def PyUnicode_AsEncodedString(unicode: object, encoding: cstr, errors: cstr
                               ) -> RunsPython[New[object]]:
     """Runs the codec, which may return an instance of a bytes subclass."""
     ...
 
 
-@helper
 def PyNumber_AsSsize_t(o: object, exc: object
                        ) -> RunsPython[OnError[Py_ssize_t, -1], 'o']:
     ...
 
 
-@helper
 def _PyBytes_FromSize(size: Py_ssize_t, use_calloc: int) -> New[bytes]:
     ...
 
 
-@helper
 def _PyBytes_FromBuffer(x: object) -> RunsPython[New[bytes], 'x']:
     ...
 
 
-@helper
 def PyObject_LengthHint(o: object, defaultvalue: Py_ssize_t
                         ) -> RunsPython[OnError[Py_ssize_t, -1], 'o']:
     ...
@@ -673,11 +669,13 @@ def bytes_appender(size: Py_ssize_t) -> OnError[int, -1]:
 
 def bytes_appender_append(appender: pointer('bytes_appender'), value: int
                           ) -> OnError[int, -1]:
+    """Append a byte, growing the buffer when it is full (never, and
+    then it cannot fail, where the buffer is known to have room)."""
     ...
 
 
 def bytes_appender_finish(appender: pointer('bytes_appender')) -> New[bytes]:
-    """PyBytesWriter_FinishWithPointer(): takes over the appender."""
+    """PyBytesWriter_FinishWithPointer(): takes over (steals) the appender."""
     ...
 
 

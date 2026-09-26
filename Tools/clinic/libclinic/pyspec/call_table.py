@@ -1,24 +1,30 @@
 """Generate the call table of a spec'd type for the tier-2 optimizer.
 
 For a clinic __new__ implemented by a spec (``def __new__(cls, ...)`` in
-``class bytes:``, used by the clinic block ``bytes.__new__ as bytes_new``),
-emit.py generates NAME_nargsN(): the spec partially evaluated for exactly
-that type and N positional arguments.  emit.py then calls generate() here,
-which adds to the same generated file (Argument Clinic writes it; there is
-no separate command):
+``class bytes:``, the clinic function bytes.__new__, C basename
+bytes_new), emit.py generates NAME_nargsN(): the spec partially evaluated
+for exactly that type and N positional arguments.  emit.py then calls
+generate() here, which adds to the same generated file (Argument Clinic
+writes it; there is no separate command):
 
 * NAME_nargs1_T(): NAME_nargs1 partially evaluated for an argument of
-  exact type T, for T from a fixed list of builtin types.  No annotation
-  chooses them: a variant is kept only when its residual code is much
-  smaller than the generic one (KEEP_RATIO); variants with identical code
-  share one C function.
+  exact type T, for T from a fixed list of common builtin types
+  (CANDIDATE_TYPES).  No annotation chooses them: a variant is kept only
+  when its residual code is much smaller than the generic one
+  (KEEP_RATIO); variants with identical code share one C function, and a
+  variant that would only call a shared specialization
+  (partial_eval.Specialization, e.g. bytes_from_iterator_list()) is that
+  function.
 
 * ``const _PySpecCallTable _PySpec_<type>_calls`` (declared in
   Include/internal/pycore_pyspec.h): per arity with object-only arguments
   and per argument type, the C function and facts about its result, all
   derived from the residual code; and the same facts for the other
   methods the spec implements (bytes.__bytes__, bytes.fromhex), per exact
-  type of their first argument, keyed by their ml_meth:
+  type of their first argument, keyed by their ml_meth.  The generic
+  entry of a class method holds for any class (a subclass shares the
+  ml_meth), the others only for the type itself
+  (_PySpec_FindMethod()):
 
     - result_const: the residual is just ``return <constant>``: no side
       effects, and the constant is immortal;
@@ -33,9 +39,10 @@ no separate command):
     - _PySpec_ALWAYS_RAISES: no ``return`` is left;
     - _PySpec_MAY_RUN_PYTHON: some call on a path may run Python code:
       an escape whose stub says RunsPython (for RunsPython[T, 'p'], only
-      when the exact type of p is not known to be a static type), a call
-      of an object (e.g. a method found by lookup_special) or a spec
-      function that may.
+      when the exact type of p is not known to be a static type) unless
+      it is lowered by a fast path, an exact type or unchecked lowering,
+      a call of an object (e.g. a method found by lookup_special), or a
+      spec function or specialization that may.
 
 The facts of the escapes come from the stubs of the same name in the spec
 (runtime.stub_facts()): there is no second table here.  All facts hold
@@ -49,9 +56,9 @@ import builtins
 from . import emit, partial_eval, runtime
 from .partial_eval import NOTNULL, NULL, Value
 
-# Exact argument types tried for one-argument calls.
+# Exact argument types tried for one-argument calls: the common ones.
 CANDIDATE_TYPES = [bytes, bytearray, memoryview, list, tuple, int, str,
-                   range, dict, float]
+                   range]
 
 # C type objects of the candidates and of result types.
 TYPE_OBJECTS = {
@@ -63,8 +70,6 @@ TYPE_OBJECTS = {
     'int': '&PyLong_Type',
     'str': '&PyUnicode_Type',
     'range': '&PyRange_Type',
-    'dict': '&PyDict_Type',
-    'float': '&PyFloat_Type',
 }
 
 # Keep a type-specialized variant when its residual has at most this
@@ -128,16 +133,22 @@ class Analyzer:
 
     # -- whole functions ----------------------------------------------------
 
-    def function_facts(self, name):
-        """Facts of spec function *name* for any arguments."""
-        if name not in self._function_facts:
+    def function_facts(self, name, special=None):
+        """Facts of spec function *name* for any arguments, or of the
+        partial_eval.Specialization *special* for its facts."""
+        key = name if special is None else ('specialization', special.name)
+        if key not in self._function_facts:
             # Recursion: assume the worst while analyzing.
             unknown = Facts()
             unknown.returns.append((None, None))
             unknown.runs_python = True
-            self._function_facts[name] = unknown
-            self._function_facts[name] = self.facts(self.spec.body(name), {})
-        return self._function_facts[name]
+            self._function_facts[key] = unknown
+            if special is None:
+                facts = self.facts(self.spec.body(name), {})
+            else:
+                facts = self.facts(special.body, special.types())
+            self._function_facts[key] = facts
+        return self._function_facts[key]
 
     def escape_facts(self, name):
         """runtime.StubFacts of escape C.<name>, from the stub of that name
@@ -181,6 +192,9 @@ class Analyzer:
             case ast.Assign(targets=[ast.Name(name)], value=value):
                 local_types[name] = self.call(value, types, local_types,
                                               facts)
+            case ast.Return(value=ast.Name(partial_eval.FALLBACK)):
+                # A snapshot restarts: the caller returns another result.
+                pass
             case ast.Return(value=value):
                 facts.returns.append(self.value(value, types, local_types,
                                                 facts))
@@ -211,11 +225,18 @@ class Analyzer:
                 facts.returns.append((None, None))
 
     def expression(self, node, types, local_types, facts):
-        """Account for the calls a condition makes (walrus operands)."""
+        """Account for the calls a condition makes: walrus operands and
+        escapes.  (A fast path guard, C.<escape>.fast(x), only reads x.)"""
         for child in ast.walk(node):
             if isinstance(child, ast.NamedExpr):
                 local_types[child.target.id] = self.call(
                     child.value, types, local_types, facts)
+            elif (isinstance(child, ast.Call)
+                    and partial_eval._escape(child.func) is not None
+                    and not any(child is named.value
+                                for named in ast.walk(node)
+                                if isinstance(named, ast.NamedExpr))):
+                self.call(child, types, local_types, facts)
 
     @staticmethod
     def refine(test):
@@ -269,6 +290,12 @@ class Analyzer:
             facts.runs_python = True
             return None
         func = node.func
+        special = partial_eval.specialization_of(self.spec, node,
+                                                 facts=True)
+        if special is not None:
+            callee = self.function_facts(special.callee, special)
+            facts.runs_python |= callee.runs_python
+            return callee.result_type
         if (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
                 and func.value.id == 'C'):
             stub = self.escape_facts(func.attr)
@@ -276,8 +303,12 @@ class Analyzer:
                 # No stub: assume the worst.
                 facts.runs_python = True
                 return None
-            arg_types = [self.arg_type(a, types) for a in node.args]
-            facts.runs_python |= stub.runs_python_for(arg_types)
+            # The fast path, exact type and unchecked lowerings run no
+            # Python code (runtime.Escape).
+            if not any(getattr(node, mark, None) for mark in (
+                    'pyspec_fast', 'pyspec_exact', 'pyspec_unchecked')):
+                arg_types = [self.arg_type(a, types) for a in node.args]
+                facts.runs_python |= stub.runs_python_for(arg_types)
             return stub.result_type
         callee_name = self.spec.call_target(func)
         if callee_name is not None:
@@ -441,7 +472,12 @@ def generate_calls(generator, description):
                 facts = analyzer.facts(residual, _type_env(typed_env),
                                        arg_names)
                 const = _const_name(residual)
-                if key not in functions:
+                special = _just_calls(spec, residual, given)
+                if special is not None:
+                    # The variant would only call it.
+                    generator.use(special.name)
+                    functions[key] = special.name
+                elif key not in functions:
                     functions[key] = c_name = (
                         f'{basename}_nargs1_{tp.__name__}')
                     out += _variant(generator, description, c_name,
@@ -475,7 +511,8 @@ def generate_calls(generator, description):
 def generate_methods(generator, type_name, descriptions):
     """The facts of the methods and class methods of a type implemented by
     the spec: per method, a generic entry, and an entry per exact type of
-    the first argument whose facts differ from it.
+    the first argument whose facts differ from it (for a class method,
+    called on exactly the type).
 
     The arguments are those the C function sees besides the class: for a
     method, self and the others; for a class method, the others (the class
@@ -496,14 +533,21 @@ def generate_methods(generator, type_name, descriptions):
         if any(p.optional or p.ctype != emit.OBJECT for p in params):
             continue
         env = {p.name: NOTNULL for p in params}
+        env[first.name] = NOTNULL
         if 'classmethod' in decorators:
-            env[first.name] = Value(type_value)
+            # The generic entry holds for any class (a subclass shares
+            # the ml_meth); the others only when the class is the type
+            # (_PySpec_FindMethod() checks the class the method is bound
+            # to).
+            typed_base = env | {first.name: Value(type_value)}
             args = params
             candidates = CANDIDATE_TYPES
+            on = f', on exactly {type_name}'
         else:
-            env[first.name] = NOTNULL
+            typed_base = env
             args = [first, *params]
             candidates = [type_value]
+            on = ''
         if not args:
             continue
         arg_names = [a.name for a in args]
@@ -511,15 +555,15 @@ def generate_methods(generator, type_name, descriptions):
         generic = partial_eval.specialize(spec, name, env)
         generic_facts = analyzer.facts(generic, _type_env(env), arg_names)
         for tp in candidates:
-            typed_env = env | {args[0].name: tp}
+            typed_env = typed_base | {args[0].name: tp}
             residual = partial_eval.specialize(spec, name, typed_env)
             facts = analyzer.facts(residual, _type_env(typed_env),
                                    arg_names)
             if facts.key() != generic_facts.key():
                 entries.append((name, len(args), tp.__name__, facts,
-                                arg_names, meth))
+                                arg_names, meth, on))
         entries.append((name, len(args), None, generic_facts, arg_names,
-                        meth))
+                        meth, ''))
 
     table = f'{type_name}_spec_methods'
     out = [
@@ -529,13 +573,25 @@ def generate_methods(generator, type_name, descriptions):
         'Include/internal/pycore_pyspec.h). */',
         f'static const _PySpecCall {table}[] = {{',
     ]
-    for name, nargs, arg_type, facts, arg_names, meth in entries:
+    for name, nargs, arg_type, facts, arg_names, meth, on in entries:
         shown = [arg_type or 'x'] + ['_'] * (nargs - 1)
-        comment = f'{name}({", ".join(shown)})'
+        comment = f'{name}({", ".join(shown)}){on}'
         out += _entry(comment, nargs, facts, None, arg_type,
                       ('meth', meth), arg_names)
     out += ['};', '']
     return out, table
+
+
+def _just_calls(spec, residual, given):
+    """The Specialization a residual only calls with the given arguments
+    (the same C signature), or None."""
+    match residual:
+        case [ast.Return(value=ast.Call(args=args) as call)]:
+            special = partial_eval.specialization_of(spec, call)
+            if special is not None and [ast.unparse(a) for a in args] == [
+                    p.name for p in given]:
+                return special
+    return None
 
 
 def _variant(generator, description, c_name, residual, given, missing, tp,

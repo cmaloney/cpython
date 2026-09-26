@@ -6,6 +6,7 @@
 #include "pycore_bytesobject.h"   // _PyBytes_Find(), _PyBytes_RepeatBuffer()
 #include "pycore_call.h"          // _PyObject_CallNoArgs()
 #include "pycore_ceval.h"         // _PyEval_GetBuiltin()
+#include "pycore_critical_section.h" // Py_BEGIN_CRITICAL_SECTION()
 #include "pycore_format.h"        // F_LJUST
 #include "pycore_freelist.h"      // _Py_FREELIST_FREE()
 #include "pycore_global_objects.h"// _Py_GET_GLOBAL_OBJECT()
@@ -2529,49 +2530,62 @@ static void* _PyBytesWriter_ResizeAndUpdatePointer(PyBytesWriter *writer,
 /* A PyBytesWriter written one byte at a time: the C.bytes_appender
    escape of Objects/pyspec/bytesobject.py.  The generated code keeps it
    in a local variable and only passes its address to the always inlined
-   functions below; the rare paths take it by value.  Its address never
-   escapes, so that the compiler keeps the cursor in registers. */
+   functions below, so that the compiler keeps the cursor in registers.
+   The out of line helpers never take or return the whole struct: a
+   struct of three pointers is passed through memory, which would force
+   the cursor onto the stack in the loops; two pointers are returned in
+   registers. */
 typedef struct {
     PyBytesWriter *writer;
     char *str;      /* where the next byte goes */
     char *end;      /* end of the buffer */
 } bytes_appender;
 
-/* A writer of at least size bytes; writer is NULL on error. */
-static Py_NO_INLINE bytes_appender
-bytes_appender_create(Py_ssize_t size)
+typedef struct {
+    char *str;
+    char *end;
+} bytes_appender_cursor;
+
+/* The whole buffer of a new writer. */
+static Py_NO_INLINE bytes_appender_cursor
+bytes_appender_start(PyBytesWriter *writer)
 {
-    bytes_appender appender = {PyBytesWriter_Create(size), NULL, NULL};
-    if (appender.writer != NULL) {
-        size = _PyBytesWriter_ResizeToAllocated(appender.writer);
-        appender.str = PyBytesWriter_GetData(appender.writer);
-        appender.end = appender.str + size;
-    }
-    return appender;
+    bytes_appender_cursor c = {NULL, NULL};
+    Py_ssize_t size = _PyBytesWriter_ResizeToAllocated(writer);
+    c.str = PyBytesWriter_GetData(writer);
+    c.end = c.str + size;
+    return c;
 }
 
 /* Return 0, or -1 with an exception set. */
 static inline Py_ALWAYS_INLINE int
 bytes_appender_init(bytes_appender *appender, Py_ssize_t size)
 {
-    *appender = bytes_appender_create(size);
-    return appender->writer == NULL ? -1 : 0;
+    PyBytesWriter *writer = PyBytesWriter_Create(size);
+    appender->writer = writer;
+    if (writer == NULL) {
+        return -1;
+    }
+    bytes_appender_cursor c = bytes_appender_start(writer);
+    appender->str = c.str;
+    appender->end = c.end;
+    return 0;
 }
 
 /* The buffer is full: grow it by at least one byte.  str is NULL on
    error. */
-static Py_NO_INLINE bytes_appender
-bytes_appender_grow(bytes_appender appender)
+static Py_NO_INLINE bytes_appender_cursor
+bytes_appender_grow(PyBytesWriter *writer, char *str, char *end)
 {
-    PyBytesWriter *writer = appender.writer;
+    bytes_appender_cursor c;
     char *data = PyBytesWriter_GetData(writer);
-    appender.str = _PyBytesWriter_ResizeAndUpdatePointer(
-        writer, appender.end - data + 1, appender.str);
-    if (appender.str != NULL) {
+    c.str = _PyBytesWriter_ResizeAndUpdatePointer(writer, end - data + 1, str);
+    c.end = NULL;
+    if (c.str != NULL) {
         Py_ssize_t size = _PyBytesWriter_ResizeToAllocated(writer);
-        appender.end = (char *)PyBytesWriter_GetData(writer) + size;
+        c.end = (char *)PyBytesWriter_GetData(writer) + size;
     }
-    return appender;
+    return c;
 }
 
 /* Return 0, or -1 with an exception set. */
@@ -2579,13 +2593,24 @@ static inline Py_ALWAYS_INLINE int
 bytes_appender_append(bytes_appender *appender, unsigned char value)
 {
     if (appender->str == appender->end) {
-        *appender = bytes_appender_grow(*appender);
+        bytes_appender_cursor c = bytes_appender_grow(
+            appender->writer, appender->str, appender->end);
+        appender->str = c.str;
+        appender->end = c.end;
         if (appender->str == NULL) {
             return -1;
         }
     }
     *appender->str++ = (char)value;
     return 0;
+}
+
+/* Append a byte where the buffer is known to have room for it. */
+static inline Py_ALWAYS_INLINE void
+bytes_appender_append_unchecked(bytes_appender *appender, unsigned char value)
+{
+    assert(appender->str < appender->end);
+    *appender->str++ = (char)value;
 }
 
 static PyObject*
@@ -3546,6 +3571,7 @@ _PyBytesWriter_ResizeToAllocated(PyBytesWriter *writer)
 /* Generated from Objects/pyspec/bytesobject.py by Argument Clinic:
    bytes_new_impl(), the bytes_new_nargsN() functions called by
    bytes_vectorcall(), PyBytes_FromObject() and bytes_from_iterator()
-   (with its list and tuple variants), then PyBytes_Type and
+   (with its specializations for a list, copied in the critical section
+   of the list, a tuple and a range), then PyBytes_Type and
    PyBytesIter_Type with their method and slot tables. */
 #include "clinic/bytesobject_pyspec.c.h"

@@ -220,6 +220,7 @@ SOURCES = [
     lambda: call(b'ab'),
     lambda: call(BytesSubclass(b'x')),
     lambda: call(BytesOverridingDunderBytes(b'x')),
+    lambda: call(BytesOverridingDunderBytes()),
     lambda: call(bytearray(b'x')),
     lambda: call(memoryview(b'xy')),
     lambda: call(memoryview(b'abcd')[::2]),
@@ -321,6 +322,27 @@ SOURCES = [
     lambda: call(LengthHint(2**70)),
     lambda: call(LengthHint(NotImplemented)),
     lambda: call(LenLies()),
+    # A list is first copied in a snapshot that only takes compact
+    # exact ints and bools; any other item restarts with the iterator.
+    lambda: call([1, 2, IndexOnly(3)]),
+    lambda: call([True, IndexOnly(1), False]),
+    lambda: call([1, 2**40, 3]),
+    lambda: call([1, 2**40, 'a']),
+    lambda: call([1, IntSubclass(2), 3]),
+    lambda: call([300, IndexOnly(3)]),
+    lambda: call([IndexOnly(300), 5]),
+    lambda: call([5, IndexRaisesTypeError(), 300]),
+    lambda: call([0, 255, 256]),
+    lambda: call([-1, IndexOnly(1)]),
+    lambda: call(list(range(256)) * 40),
+    lambda: call(list(range(256)) * 40 + [IndexOnly(7)]),
+    lambda: call([IndexOnly(i) for i in range(300)]),
+    lambda: call(list_mutated_by_index(lambda l: l.extend(range(100)))),
+    # A tuple is copied in one pass; its size cannot change.
+    lambda: call((IndexOnly(1),) * 300),
+    lambda: call(tuple(range(256)) * 40 + (IndexOnly(7), 2**40)),
+    lambda: call((1, 2**40, 3)),
+    lambda: call((True, False, IntSubclass(9))),
     # Argument count and converter errors come from the clinic parser,
     # which the spec does not model.
 ]

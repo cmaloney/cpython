@@ -6,11 +6,12 @@ gives the reference behavior; Argument Clinic reads the same file with the
 ast module and lowers it to C (see emit.py).  Three kinds of names appear
 in a spec:
 
-* functions defined in the spec itself (lowered to static C functions,
-  or inlined by the partial evaluator);
+* functions defined in the spec itself (lowered to C functions, inlined
+  or specialized by the partial evaluator);
 * the builtins below, which have fixed C meanings;
 * escapes, ``C.<name>(...)``: C functions called directly.  Each carries
-  its C call template, result type and error convention for the emitter;
+  its C call template, result type and error convention for the emitter,
+  and its cheaper lowerings (see Escape);
 * the facts vocabulary (New[object], OnError[...], RunsPython[...], ...):
   annotations of the top-level stubs of the escapes (see stub_facts()).
 """
@@ -26,7 +27,7 @@ __all__ = [
     'NULL', 'C', 'cstr', 'isinstance', 'iter', 'tp_name', 'fqname',
     # Facts vocabulary
     'Py_ssize_t', 'pointer', 'New', 'Borrowed', 'OnError', 'NoError',
-    'RunsPython', 'helper',
+    'RunsPython',
 ]
 
 
@@ -142,13 +143,23 @@ class Escape:
         the function exits before passing it to an escape that steals it.
     steals: the indexes of the arguments the escape takes over (the
         caller no longer releases them).
-    exact: {builtin type: template} cheaper lowerings used when the exact
-        type of the first argument is known (after ``type(x) is int``,
-        for example): same result and error convention.
+    exact: {builtin type: template}: the lowering when the exact type of
+        the first argument is known (``type(x) is list``, for example):
+        same result, but it cannot fail and runs no Python code.
+    fast: a FastPath: a guard on the first argument under which the call
+        has a lowering that cannot fail and runs no Python code.
+    length: with an exact lowering, the result is the length of the first
+        argument (a list or a tuple).
+    capacity: the escape initializes a buffer with room for at least as
+        many units as its first argument.
+    unchecked: for an escape appending one unit to the buffer of its first
+        argument, the lowering when the buffer is known to have room: it
+        cannot fail.
     """
 
     def __init__(self, func, template, returns, error, release=None,
-                 steals=(), exact=None):
+                 steals=(), exact=None, fast=None, length=False,
+                 capacity=False, unchecked=None):
         self.func = func
         self.template = template
         self.returns = returns
@@ -156,6 +167,10 @@ class Escape:
         self.release = release
         self.steals = tuple(steals)
         self.exact = dict(exact or {})
+        self.fast = fast
+        self.length = length
+        self.capacity = capacity
+        self.unchecked = unchecked
 
     @property
     def initializes(self):
@@ -163,6 +178,19 @@ class Escape:
 
     def __call__(self, *args):
         return self.func(*args)
+
+
+class FastPath:
+    """The fast path of an escape (Escape.fast): when the first argument
+    is exactly of one of *types* and *guard* (a C condition on the first
+    argument, ``{0}``) holds, the call is *template*, which cannot fail
+    and runs no Python code.  The partial evaluator splits a statement
+    making the call (see partial_eval.py)."""
+
+    def __init__(self, types, guard, template):
+        self.types = tuple(types)
+        self.guard = guard
+        self.template = template
 
 
 class ContextEscape:
@@ -225,11 +253,11 @@ def _as_ssize_t(o, exc):
     raise exc(f"cannot fit '{tp_name(type(o))}' into an index-sized integer")
 
 
-# PyNumber_AsSsize_t() of an exact int or bool: a compact one is read
-# inline, without a call.
-_AS_SSIZE_T_INT = ('(_PyLong_IsCompact((PyLongObject *){0}) '
-                   '? _PyLong_CompactValue((PyLongObject *){0}) '
-                   ': PyNumber_AsSsize_t({0}, {1}))')
+# PyNumber_AsSsize_t() of an exact int or bool (a bool is a compact int)
+# needs no __index__: a compact one is read inline, without a call.
+_COMPACT_INT = FastPath(
+    (int, bool), '_PyLong_IsCompact((PyLongObject *){0})',
+    '_PyLong_CompactValue((PyLongObject *){0})')
 
 
 class C:
@@ -242,15 +270,17 @@ class C:
         lambda s, encoding, errors: str.encode(
             s, encoding, 'strict' if errors is NULL else errors))
 
-    # An exact int (or bool) needs no __index__: see _AS_SSIZE_T_INT.
     PyNumber_AsSsize_t = escape(
         'PyNumber_AsSsize_t({0}, {1})',
         returns='Py_ssize_t', error=ERR_MINUS1,
-        exact={int: _AS_SSIZE_T_INT, bool: _AS_SSIZE_T_INT})(_as_ssize_t)
+        fast=_COMPACT_INT)(_as_ssize_t)
 
+    # The length of an exact list or tuple.
     PyObject_LengthHint = escape(
         'PyObject_LengthHint({0}, {1})',
-        returns='Py_ssize_t', error=ERR_MINUS1)(operator.length_hint)
+        returns='Py_ssize_t', error=ERR_MINUS1,
+        exact={list: 'PyList_GET_SIZE({0})', tuple: 'PyTuple_GET_SIZE({0})'},
+        length=True)(operator.length_hint)
 
     _PyBytes_FromSize = escape('_PyBytes_FromSize({0}, {1})')(
         lambda size, zero: b'\0' * size)
@@ -264,13 +294,15 @@ class C:
     bytes_appender = escape(
         'bytes_appender_init(&{target}, {0})',
         returns='bytes_appender', error=ERR_NEGATIVE,
-        release='PyBytesWriter_Discard({0}.writer);')(
+        release='PyBytesWriter_Discard({0}.writer);', capacity=True)(
         lambda size: bytearray())
 
     # Append the byte value (in range(256)).
     bytes_appender_append = escape(
         'bytes_appender_append(&{0}, (unsigned char){1})',
-        returns='int', error=ERR_NEGATIVE)(
+        returns='int', error=ERR_NEGATIVE,
+        unchecked='bytes_appender_append_unchecked(&{0}, '
+                  '(unsigned char){1})')(
         lambda appender, value: appender.append(value))
 
     # The bytes written; takes over the appender.
@@ -295,9 +327,9 @@ class C:
         'PyErr_BadInternalCall();',
         lambda: SystemError('bad argument to internal function'))
 
-    critical_section_sequence_fast = ContextEscape(
-        'Py_BEGIN_CRITICAL_SECTION_SEQUENCE_FAST({0});',
-        'Py_END_CRITICAL_SECTION_SEQUENCE_FAST();')
+    # The critical section of an object (nothing without free threading).
+    critical_section = ContextEscape(
+        'Py_BEGIN_CRITICAL_SECTION({0});', 'Py_END_CRITICAL_SECTION();')
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +337,8 @@ class C:
 #
 # Annotations of the top-level stubs of a spec, which describe the C
 # functions its bodies call as escapes.  Plain Python values: the spec is
-# executed to evaluate them.
+# executed to evaluate them; Argument Clinic reads them from the AST
+# (stub_facts()).
 #
 # C types (parameter and return annotations)
 #     object          PyObject *
@@ -340,11 +373,11 @@ class C:
 # Escapes
 #     The facts of an escape ``C.<name>(...)`` are the annotations of the
 #     top-level stub named <name> in the spec (read by call_table.py from
-#     the AST: clinic never executes the spec).  @helper marks a stub for a
-#     C function that is not part of the C API of the spec's C file (static,
-#     or defined in another file).  Escapes without a stub are assumed to
-#     run Python code and to return an object of any type.  ``raise
-#     C.<name>()`` and ``with C.<name>(x):`` escapes never run Python code.
+#     the AST: Argument Clinic never executes the spec).  Escapes without a
+#     stub are assumed to run Python code and to return an object of any
+#     type.  The fast path, exact type and unchecked lowerings of an escape
+#     (Escape) run no Python code and cannot fail.  ``raise C.<name>()``
+#     and ``with C.<name>(x):`` escapes never run Python code.
 #     The facts of the C API itself are in Objects/pyspec/capi/ (see
 #     disconnects.py).
 
@@ -400,11 +433,6 @@ NoError = _Wrapper('NoError', 'Return: cannot fail.')
 RunsPython = _Wrapper('RunsPython', 'Return: may run arbitrary Python code.')
 
 
-def helper(func):
-    """Decorator of a stub: a C function outside the C API of the spec's C
-    file, described only for the escapes that call it."""
-    func.__pyspec_helper__ = True
-    return func
 
 
 class StubFacts:
