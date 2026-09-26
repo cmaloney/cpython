@@ -7131,60 +7131,6 @@ class PyspecSlotdefsTest(TestCase):
                     seen += 1
         self.assertGreater(seen, 100)
 
-    # typeobj.rst's slot tables and slotdefs disagree on these (slot,
-    # dunder) pairs.
-    ONLY_IN_RST = {
-        # Attributes, not slots.
-        ('tp_name', '__name__'), ('tp_doc', '__doc__'),
-        ('tp_base', '__base__'), ('tp_dict', '__dict__'),
-        ('tp_bases', '__bases__'), ('tp_mro', '__mro__'),
-        ('tp_subclasses', '__subclasses__'),
-        # Deprecated slots: no wrapper.
-        ('tp_getattr', '__getattribute__'), ('tp_getattr', '__getattr__'),
-        ('tp_setattr', '__setattr__'), ('tp_setattr', '__delattr__'),
-        # Defining __getattr__ fills tp_getattro, but tp_getattro never
-        # creates a __getattr__ wrapper.
-        ('tp_getattro', '__getattr__'),
-        # tp_new has its own wrapper (tp_new_wrapper), not a slotdef one.
-        ('tp_new', '__new__'),
-    }
-    ONLY_IN_SLOTDEFS = {
-        # Reflected operators missing from the tables.
-        ('nb_floor_divide', '__rfloordiv__'),
-        ('nb_true_divide', '__rtruediv__'),
-        ('sq_repeat', '__rmul__'),
-    }
-
-    def test_typeobj_rst(self):
-        path = os.path.join(test_tools.basepath, 'Doc', 'c-api',
-                            'typeobj.rst')
-        with open(path, encoding='utf-8') as f:
-            rst = f.read()
-        cells = {}
-        slot = None
-        for line in rst.splitlines():
-            line = line.strip()
-            if not line.startswith('|'):
-                if not line.startswith('+'):
-                    slot = None
-                continue
-            row = [c.strip() for c in line.strip('|').split('|')]
-            m = re.search(r':c:member:`~Py\w+\.(\w+)`', row[0])
-            if m:
-                slot = m.group(1)
-            elif row[0]:
-                slot = None
-            if slot and len(row) > 2:
-                cells[slot] = cells.get(slot, '') + row[2]
-        in_rst = set()
-        for slot, text in cells.items():
-            text = text.replace('\\ ', '').replace('\\', '')
-            for name in re.findall(r'__\w+?__', text):
-                in_rst.add((slot, name))
-        in_slotdefs = {(s.slot, s.name) for s in pyspec_slots.slotdefs()}
-        self.assertEqual(in_rst - in_slotdefs, self.ONLY_IN_RST)
-        self.assertEqual(in_slotdefs - in_rst, self.ONLY_IN_SLOTDEFS)
-
 
 class BytesOverridingDunderBytes(bytes):
     def __bytes__(self):

@@ -1,0 +1,33 @@
+# Known disconnects: C API: headers, C definitions, Doc/c-api, refcounts.dat,
+# stable_abi.toml, threadsafety.dat and Objects/pyspec/capi/.
+# Checked by Lib/test/test_pyspec_catalog.py: this list may only shrink.
+# Fixed one?  Delete its line.  Keep the lines sorted.
+PyByteArray_AsString: no "runs Python" fact in Objects/pyspec/capi/bytearrayobject.py
+PyByteArray_Check: documented but has no entry in Doc/data/threadsafety.dat
+PyByteArray_CheckExact: documented but has no entry in Doc/data/threadsafety.dat
+PyByteArray_Concat: no "runs Python" fact in Objects/pyspec/capi/bytearrayobject.py
+PyByteArray_FromObject: no "runs Python" fact in Objects/pyspec/capi/bytearrayobject.py
+PyByteArray_FromStringAndSize: no "runs Python" fact in Objects/pyspec/capi/bytearrayobject.py
+PyByteArray_Resize: documented but has no entry in Doc/data/threadsafety.dat
+PyByteArray_Resize: no "runs Python" fact in Objects/pyspec/capi/bytearrayobject.py
+PyByteArray_Size: no "runs Python" fact in Objects/pyspec/capi/bytearrayobject.py
+PyBytesWriter_Create: documented but has no entry in Doc/data/threadsafety.dat
+PyBytesWriter_Discard: documented but has no entry in Doc/data/threadsafety.dat
+PyBytesWriter_Finish: documented but has no entry in Doc/data/threadsafety.dat
+PyBytesWriter_Finish: returns PyObject * but has no entry in Doc/data/refcounts.dat
+PyBytesWriter_FinishWithPointer: documented but has no entry in Doc/data/threadsafety.dat
+PyBytesWriter_FinishWithPointer: returns PyObject * but has no entry in Doc/data/refcounts.dat
+PyBytesWriter_FinishWithSize: documented but has no entry in Doc/data/threadsafety.dat
+PyBytesWriter_FinishWithSize: returns PyObject * but has no entry in Doc/data/refcounts.dat
+PyBytesWriter_Format: documented but has no entry in Doc/data/threadsafety.dat
+PyBytesWriter_GetData: documented but has no entry in Doc/data/threadsafety.dat
+PyBytesWriter_GetSize: documented but has no entry in Doc/data/threadsafety.dat
+PyBytesWriter_Grow: documented but has no entry in Doc/data/threadsafety.dat
+PyBytesWriter_GrowAndUpdatePointer: documented but has no entry in Doc/data/threadsafety.dat
+PyBytesWriter_Resize: documented but has no entry in Doc/data/threadsafety.dat
+PyBytesWriter_WriteBytes: documented but has no entry in Doc/data/threadsafety.dat
+PyBytes_Check: documented but has no entry in Doc/data/threadsafety.dat
+PyBytes_CheckExact: documented but has no entry in Doc/data/threadsafety.dat
+PyBytes_DecodeEscape: returns PyObject * but has no entry in Doc/data/refcounts.dat
+PyBytes_Join: returns PyObject * but has no entry in Doc/data/refcounts.dat
+PyBytes_Repr: returns PyObject * but has no entry in Doc/data/refcounts.dat
