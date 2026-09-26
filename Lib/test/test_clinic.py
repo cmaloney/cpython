@@ -6855,9 +6855,85 @@ class BytesSpecTest(TestCase):
         parse_file(filename, limited_capi=False, writer=writer)
         written = {os.path.basename(name) for name, _ in writer.files}
         self.assertEqual(written, {'bytesobject.c', 'bytesobject.c.h',
-                                   'bytesobject_pyspec.c.h'})
+                                   'bytesobject_pyspec.c.h',
+                                   'bytesobject_types.c.h'})
         self.assertEqual([change.filename for change in writer.changes], [],
                          'run "make clinic"')
+
+    def test_transmogrify_up_to_date(self):
+        # The clinic functions of Objects/stringlib/transmogrify.h come
+        # from Objects/stringlib/pyspec/transmogrify.py.
+        filename = os.path.join(test_tools.basepath, 'Objects', 'stringlib',
+                                'transmogrify.h')
+        writer = libclinic.FileWriter(dry_run=True)
+        parse_file(filename, limited_capi=False, writer=writer)
+        self.assertEqual([change.filename for change in writer.changes], [],
+                         'run "make clinic"')
+
+
+@unittest.skipUnless(os.path.exists(BYTES_SPEC), 'needs the source tree')
+class BytesSpecTypeTest(TestCase):
+    """The classes of the bytes spec are the types bytes and
+    bytes_iterator: clinic generates their type objects
+    (Objects/clinic/bytesobject_types.c.h)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.spec = pyspec_frontend.Spec.load(BYTES_SPEC)
+
+    def check_type(self, cls_name, tp):
+        spec = self.spec
+        methods, slots, docs = [], set(), {}
+        for meth in spec.entries(cls_name):
+            name = f'{cls_name}.{meth}'
+            kind = spec.method_kind(name)
+            if kind == pyspec_frontend.SLOT:
+                slots.add(meth)
+                continue
+            if meth == '__new__':
+                continue
+            methods.append(meth)
+            if kind == pyspec_frontend.SHARED:
+                shared = spec.shared[name]
+                other = spec.imported(shared.module)
+                other_name = f'{shared.cls}.{meth}'
+                if other.method_kind(other_name) == pyspec_frontend.PYCFUNCTION:
+                    docs[meth] = other.docstring(other_name)
+            elif kind == pyspec_frontend.PYCFUNCTION:
+                docs[meth] = spec.docstring(name)
+        wrappers = {name for name, value in vars(tp).items()
+                    if isinstance(value, types.WrapperDescriptorType)}
+        others = [name for name, value in vars(tp).items()
+                  if name not in wrappers and name not in ('__doc__',
+                                                           '__new__')]
+        # The method table is in the order of the spec.
+        self.assertEqual(others, methods)
+        # The slots of the spec are the wrappers of the type.
+        self.assertEqual(wrappers, slots)
+        # Hand-written PyCFunctions: the docstring as is.
+        for meth, doc in docs.items():
+            with self.subTest(meth=meth):
+                self.assertEqual(getattr(tp, meth).__doc__, doc)
+        # tp_doc is the class docstring.
+        node = spec.classes[cls_name]
+        doc = ast.get_docstring(node, clean=False)
+        if doc is not None:
+            doc = '\n'.join(spec._clean_docstring(doc,
+                                                  node.body[0].col_offset))
+        self.assertEqual(tp.__doc__, doc)
+
+    def test_bytes(self):
+        self.check_type('bytes', bytes)
+        self.assertIsNone(bytes.__text_signature__)
+        self.assertTrue(bytes.__flags__ & (1 << 10))   # Py_TPFLAGS_BASETYPE
+
+    def test_bytes_iterator(self):
+        tp = type(iter(b''))
+        self.assertEqual(tp.__name__, 'bytes_iterator')
+        self.check_type('bytes_iterator', tp)
+        self.assertIsNone(tp.__doc__)
+        self.assertFalse(tp.__flags__ & (1 << 10))  # @final
+        self.assertTrue(tp.__flags__ & (1 << 14))   # Py_TPFLAGS_HAVE_GC
 
 
 class PyspecSlotdefsTest(TestCase):
