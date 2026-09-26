@@ -23,18 +23,22 @@ Lib/test/test_clinic.py runs this file as Python and compares it with the
 interpreter on the cases of bytesobject_cases.py.
 """
 
+import types
 from typing import final
 
 from libclinic.pyspec.runtime import (
-    NULL, C, isinstance, iter, fqname, tp_name)
+    NULL, PY_SSIZE_T_MAX, c_implemented, calls, exact, fqname, isinstance,
+    iter, tp_name, unknown)
 
 # Argument Clinic decorators (no-ops in Python).
 from libclinic.pyspec.runtime import permit_long_summary, text_signature
 from libclinic.pyspec.runtime import c_name, static_type
 
-# Facts of C functions (see the escapes at the end).
-from libclinic.pyspec.runtime import (
-    New, NoError, OnError, Py_ssize_t, RunsPython, cstr, pointer)
+# The C functions of other files the bodies call.
+from pyspec.abstract import PyNumber_AsSsize_t, PyObject_LengthHint
+from pyspec.typeobject import _PyObject_LookupSpecial
+from pyspec.unicodeobject import PyUnicode_AsEncodedString
+from Python.pyspec.errors import PyErr_BadInternalCall
 
 # Methods shared with bytearray (Objects/stringlib/pyspec/).
 from stringlib.pyspec import ctype, transmogrify
@@ -73,7 +77,7 @@ class bytes:
     ):
         if cls is not bytes:
             value = bytes.__new__(bytes, source, encoding, errors)
-            return C.bytes_subtype_new(cls, value)
+            return bytes_subtype_new(cls, value)
         if source is NULL:
             if encoding is not NULL:
                 raise TypeError("encoding without a string argument")
@@ -83,7 +87,7 @@ class bytes:
         if encoding is not NULL:
             if not isinstance(source, str):
                 raise TypeError("encoding without a string argument")
-            return C.PyUnicode_AsEncodedString(source, encoding, errors)
+            return PyUnicode_AsEncodedString(source, encoding, errors)
         if errors is not NULL:
             if isinstance(source, str):
                 raise TypeError("string argument without an encoding")
@@ -91,7 +95,7 @@ class bytes:
         # We'd like to call PyObject_Bytes here, but we need to check for an
         # integer argument before deferring to PyBytes_FromObject, something
         # PyObject_Bytes doesn't do.
-        if (func := C.lookup_special(source, "__bytes__")) is not NULL:
+        if (func := _PyObject_LookupSpecial(source, "__bytes__")) is not NULL:
             result = func()
             if not isinstance(result, bytes):
                 raise TypeError(f"{fqname(type(source))}.__bytes__() must return "
@@ -102,12 +106,12 @@ class bytes:
         # Is it an integer?
         if hasattr(type(source), "__index__"):
             try:
-                size = C.PyNumber_AsSsize_t(source, OverflowError)
+                size = PyNumber_AsSsize_t(source, OverflowError)
             except TypeError:
                 return PyBytes_FromObject(source)
             if size < 0:
                 raise ValueError("negative count")
-            return C._PyBytes_FromSize(size, True)
+            return _PyBytes_FromSize(size, True)
         return PyBytes_FromObject(source)
 
     @c_name(METH_NOARGS="bytes_getnewargs")
@@ -118,7 +122,7 @@ class bytes:
         """Convert this value to exact type bytes."""
         if type(self) is bytes:
             return self
-        return C.bytes_copy(self)
+        return bytes_copy(self)
 
     capitalize = ctype.B.capitalize
 
@@ -209,7 +213,7 @@ class bytes:
         Spaces between two numbers are accepted.
         Example: bytes.fromhex('B9 01EF') -> b'\\xb9\\x01\\xef'.
         """
-        result = C.bytes_from_hex(string)
+        result = _PyBytes_FromHex(string, False)
         if cls is not bytes:
             return cls(result)
         return result
@@ -524,10 +528,12 @@ class bytes:
     def __gt__(self, value, /): ...
     def __ge__(self, value, /): ...
 
-    def __iter__(self, /) -> New[bytes_iterator]: ...
+    def __iter__(self, /): ...
 
     @c_name("bytes_buffer_getbuffer")
-    def __buffer__(self, flags, /): ...
+    @c_implemented
+    def __buffer__(self, flags, /):
+        return exact(memoryview, memoryview(self))
 
     # nb_remainder: bytes_mod() for both.
     @c_name("bytes_mod")
@@ -535,7 +541,7 @@ class bytes:
     def __rmod__(self, value, /): ...
 
     @c_name(mp_length="bytes_length", sq_length="bytes_length")
-    def __len__(self, /) -> NoError[Py_ssize_t]: ...
+    def __len__(self, /): ...
 
     @c_name(mp_subscript="bytes_subscript", sq_item="bytes_item")
     def __getitem__(self, key, /): ...
@@ -559,10 +565,12 @@ class bytes_iterator:
     @c_name("PyObject_SelfIter")
     def __iter__(self, /): ...
 
-    # Exact ints in range(256) (immortal small ints); never runs Python
-    # code; NULL without an exception when exhausted (tp_iternext).
+    # Exact ints in range(256) (immortal small ints); NULL without an
+    # exception when exhausted (tp_iternext).
     @c_name("striter_next")
-    def __next__(self, /) -> New[int]: ...
+    @c_implemented
+    def __next__(self, /):
+        return exact(int)
 
     @c_name(METH_NOARGS="striter_len")
     def __length_hint__(self, /):
@@ -589,12 +597,12 @@ def PyBytes_FromObject(x: object):
        must not be mutated while the bytes object is being created.
     """
     if x is NULL:
-        raise C.PyErr_BadInternalCall()
+        raise PyErr_BadInternalCall()
     if type(x) is bytes:
         return x
     # Use the modern buffer interface
     if hasattr(type(x), "__buffer__"):
-        return C._PyBytes_FromBuffer(x)
+        return _PyBytes_FromBuffer(x)
     # Argument Clinic specializes the iteration for an exact list or
     # tuple: an index loop, without an iterator; a list of compact ints
     # is copied atomically, in its critical section (see partial_eval.py).
@@ -611,88 +619,105 @@ def PyBytes_FromObject(x: object):
 def bytes_from_iterator(it: object, x: object):
     """The bytes of the ints (or objects with __index__) of iterator it,
     iter(x)."""
-    size = C.PyObject_LengthHint(x, 64)
-    writer = C.bytes_appender(size)
-    for item in it:
-        value = C.PyNumber_AsSsize_t(item, NULL)
-        if value < 0 or value >= 256:
-            raise ValueError("bytes must be in range(0, 256)")
-        C.bytes_appender_append(writer, value)
-    return C.bytes_appender_finish(writer)
+    size = PyObject_LengthHint(x, 64)
+    writer = bytes_appender_init(size)
+    try:
+        for item in it:
+            value = PyNumber_AsSsize_t(item, NULL)
+            if value < 0 or value >= 256:
+                raise ValueError("bytes must be in range(0, 256)")
+            bytes_appender_append(writer, value)
+        return bytes_appender_finish(writer)
+    finally:
+        bytes_appender_discard(writer)
 
 
 # ---------------------------------------------------------------------------
-# Escapes
-#
-# The C functions the bodies above call directly, as C.<name>(...) (their C
-# call templates are in Tools/clinic/libclinic/pyspec/runtime.py): one stub
-# per escape, named like it, with its facts in the vocabulary of runtime.py.
-# Argument Clinic derives the facts of the bodies from them (the call table
-# of the tier-2 optimizer, see call_table.py).  They are not part of the C
-# API of bytesobject.c.  New[bytes] means a new reference to an exact bytes
-# object.  The facts of the C API of bytesobject.c are in
-# Objects/pyspec/capi/bytesobject.py.
+# The C functions of bytesobject.c the bodies above call.  Each is
+# @c_implemented: its C is the authority; the body is its Python
+# reference, run when the spec runs as Python and read for the facts of
+# the calls (see Objects/pyspec/README.rst).  The facts of the C API of
+# bytesobject.c are in Objects/pyspec/capi/bytesobject.py.
 
 
-def lookup_special(obj: object, name: object
-                   ) -> RunsPython[New[object], 'obj']:
-    """_PyObject_LookupSpecial(): NULL without an exception if the type of
-    obj has no such attribute; calls the __get__ of the attribute found."""
-    ...
+@c_implemented
+def _PyBytes_FromSize(size: Py_ssize_t, use_calloc: int):
+    """size bytes: null bytes with use_calloc, else not initialized."""
+    return exact(bytes, bytes(size))
 
 
-def PyUnicode_AsEncodedString(unicode: object, encoding: cstr, errors: cstr
-                              ) -> RunsPython[New[object]]:
-    """Runs the codec, which may return an instance of a bytes subclass."""
-    ...
+@c_implemented
+def _PyBytes_FromBuffer(x: object):
+    """A copy of the buffer of x (in C order)."""
+    calls(x, "__buffer__")
+    calls(x, "__release_buffer__")
+    return exact(bytes, memoryview(x).tobytes())
 
 
-def PyNumber_AsSsize_t(o: object, exc: object
-                       ) -> RunsPython[OnError[Py_ssize_t, -1], 'o']:
-    ...
+@c_implemented
+def _PyBytes_FromHex(string: object, use_bytearray: int):
+    """The bytes (a bytearray with use_bytearray) of the hexadecimal
+    numbers in str or buffer string."""
+    if not isinstance(string, str):
+        calls(string, "__buffer__")
+        calls(string, "__release_buffer__")
+    if use_bytearray:
+        return exact(bytearray, bytearray.fromhex(string))
+    return exact(bytes, bytes.fromhex(string))
 
 
-def _PyBytes_FromSize(size: Py_ssize_t, use_calloc: int) -> New[bytes]:
-    ...
+@c_implemented
+def bytes_copy(b: object):
+    """An exact bytes copy of b, a bytes (or bytes subclass) instance."""
+    return exact(bytes, bytes(memoryview(b)))
 
 
-def _PyBytes_FromBuffer(x: object) -> RunsPython[New[bytes], 'x']:
-    ...
+@c_implemented
+def bytes_subtype_new(type: 'PyTypeObject *', tmp: object):
+    """An instance of type, a subtype of bytes, with the bytes of tmp."""
+    return unknown(bytes.__new__(type, tmp))
 
 
-def PyObject_LengthHint(o: object, defaultvalue: Py_ssize_t
-                        ) -> RunsPython[OnError[Py_ssize_t, -1], 'o']:
-    ...
+# A bytes_appender is a PyBytesWriter written one byte at a time: a C
+# struct.  A function returning one initializes the local it is assigned
+# to, in place (bytes_appender_init(&writer, size): 0, or -1 with an
+# exception), and the local is passed by address.  Here, a namespace with
+# the bytes written and the room left models it.
+
+@c_implemented
+def bytes_appender_init(size: Py_ssize_t) -> 'bytes_appender':
+    """An appender with room for size bytes."""
+    return unknown(types.SimpleNamespace(data=bytearray(), room=size))
 
 
-def bytes_appender(size: Py_ssize_t) -> OnError[int, -1]:
-    """bytes_appender_init(): a PyBytesWriter written byte by byte."""
-    ...
+@c_implemented
+def bytes_appender_append(appender: 'bytes_appender *',
+                          value: 'unsigned char') -> int:
+    """Append a byte, growing the buffer first when it is full."""
+    if appender.room:
+        return bytes_appender_append_unchecked(appender, value)
+    if len(appender.data) == PY_SSIZE_T_MAX:
+        raise MemoryError()
+    appender.room = len(appender.data) + 1
+    return bytes_appender_append_unchecked(appender, value)
 
 
-def bytes_appender_append(appender: pointer('bytes_appender'), value: int
-                          ) -> OnError[int, -1]:
-    """Append a byte, growing the buffer when it is full (never, and
-    then it cannot fail, where the buffer is known to have room)."""
-    ...
+@c_implemented
+def bytes_appender_append_unchecked(appender: 'bytes_appender *',
+                                    value: 'unsigned char') -> None:
+    """Append a byte to a buffer that has room for it."""
+    appender.data.append(value)
+    appender.room -= 1
 
 
-def bytes_appender_finish(appender: pointer('bytes_appender')) -> New[bytes]:
-    """PyBytesWriter_FinishWithPointer(): takes over (steals) the appender."""
-    ...
+@c_implemented
+def bytes_appender_finish(appender: 'bytes_appender *'):
+    """The bytes written.  The appender is left empty."""
+    data, appender.data = appender.data, None
+    return exact(bytes, bytes(data))
 
 
-def bytes_subtype_new(type: pointer('PyTypeObject'), tmp: object
-                      ) -> RunsPython[New[object]]:
-    """An instance of the subtype."""
-    ...
-
-
-def bytes_copy(b: object) -> New[bytes]:
-    """An exact bytes copy of a bytes (or bytes subclass) instance."""
-    ...
-
-
-def bytes_from_hex(string: object) -> RunsPython[New[bytes], 'string']:
-    """_PyBytes_FromHex(string, 0): a str, or the buffer of string."""
-    ...
+@c_implemented
+def bytes_appender_discard(appender: 'bytes_appender *') -> None:
+    """Release the buffer of the appender, if it has one."""
+    appender.data = None

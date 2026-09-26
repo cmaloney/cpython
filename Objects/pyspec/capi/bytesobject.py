@@ -5,9 +5,10 @@ Everything else about them is read from where it is already written: the
 C types from the headers and the C definitions, the documented signatures
 from Doc/c-api/bytes.rst, ownership from Doc/data/refcounts.dat,
 stable ABI membership from Misc/stable_abi.toml and thread safety from
-Doc/data/threadsafety.dat.  A function implemented in the spec
-(PyBytes_FromObject in Objects/pyspec/bytesobject.py) has its facts
-derived from its body and is not listed here.
+Doc/data/threadsafety.dat.  A function whose body is in the spec
+(PyBytes_FromObject, and @c_implemented _PyBytes_FromHex, in
+Objects/pyspec/bytesobject.py) has its facts derived from its body and is
+not listed here.
 
 Lib/test/test_pyspec_catalog.py checks that every other non-static
 Py*/_Py* function defined in bytesobject.c is in exactly one of the sets
@@ -23,7 +24,6 @@ RUNS_PYTHON = {
     'PyBytes_Join',
     '_PyBytes_Concat',
     '_PyBytes_FormatEx',
-    '_PyBytes_FromHex',
 }
 
 # Never runs Python code.

@@ -330,7 +330,8 @@ def capi(srcdir):
             # Facts only Objects/pyspec/capi/ has.
             if cdef is None:
                 continue
-            if spec is not None and spec.implemented(name):
+            if spec is not None and (spec.implemented(name) or name in
+                                     spec.c_implemented_functions()):
                 if facts and name in facts:
                     add(name, f'implemented in the spec: remove it from '
                               f'{facts_path}')

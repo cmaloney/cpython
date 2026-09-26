@@ -31,29 +31,41 @@ e.g. bytes_from_iterator_list().
 The accepted Python subset is small on purpose; anything else is an error.
 
 Statements:
-  if/else, return, raise E("...") / raise E(f"..."), raise C.<escape>(),
-  pass,
-  x = <call>, C.<escape>(...) (an escape returning an int status),
+  if/else, return, raise E("...") / raise E(f"..."), raise f() (f a C
+  function that sets the exception), pass,
+  x = <call>, f(...) (a C function returning void or an int status),
   try: x = <call> / except E: ... / else: ...,
-  with C.<context escape>(x): x = <call>,
+  try: ... / finally: <calls> (the finally calls run at every exit),
   for item in it: ... (it = iter(x); lowered to PyIter_Next() calls, or
   to an index loop over x when the partial evaluator knows x is an exact
   list or tuple, see partial_eval.py)
 Conditions:
   x is [not] NULL, type(x) is K, cls is [not] K, isinstance(x, K),
-  hasattr(type(x), "__dunder__"), (v := C.<escape>(...)) is [not] NULL,
-  integer comparisons, and/or/not
-Calls (result is a new reference or a Py_ssize_t):
-  C.<escape>(...), iter(x), f() for an object variable f, f(x) for an
-  object or type variable f (e.g. cls(result)),
+  hasattr(type(x), "__dunder__"), (v := f(...)) is [not] NULL,
+  f(...) (a C function that cannot fail), integer comparisons,
+  and/or/not
+Calls (result is a new reference, or the C type of a C function):
+  f(...) for a hand-written C function f (@c_implemented, or ``...``),
+  iter(x), len(x) of an exact list or tuple, f() for an object
+  variable f, f(x) for an object or type variable f (e.g. cls(result)),
   <spec function>(...), T.<spec method>(...)
 
+A call of a hand-written C function f is f(args) in C.  The C types of
+its parameters and result are its annotations (frontend.c_signature()):
+a str constant is ``&_Py_ID(...)`` for an object parameter and a C
+string for a ``str`` one, and a pointer of another C type is cast.  Its
+error check comes from its facts for the call (facts.py, marked on the
+call by the partial evaluator): none if it cannot raise; else NULL for an
+object (NULL and an exception set when it may return NULL, an absent
+result), -1 and an exception set for a Py_ssize_t, a negative value for
+an int.  A function whose result is a C struct initializes the local
+assigned in place, ``f(&x, args)``, which returns 0 or -1 with an
+exception set; that local is passed by address.
+
 The partial evaluator adds (see partial_eval.py): calls of shared
-specializations, fast path guards ``C.<escape>.fast(x)``, the marks of
-escape calls with a cheaper lowering (pyspec_fast, pyspec_exact,
-pyspec_unchecked: they cannot fail), and for snapshots, ``return
+specializations, the marks of the calls, and for snapshots, ``return
 FALLBACK`` (Py_None, never a result: the caller restarts),
-``x is [not] FALLBACK`` and ``with C.critical_section(x):``.
+``x is [not] FALLBACK`` and ``with critical_section(x):``.
 
 Reference ownership: parameters are borrowed; every object local is a new
 reference, declared NULL at the top and released with Py_XDECREF at every
@@ -62,50 +74,40 @@ holds no reference (e.g. in the other branch of an if).  A loop variable
 is a new reference, released right after its last use in the loop body;
 it is borrowed for a tuple item (the tuple keeps it alive) and in a
 snapshot, where no Python code runs (the list, locked, keeps it alive):
-"borrowed until Python code may run".  A C local initialized by an
-escape (e.g. a bytes_appender) is released like an object, with the
-release statement of its escape, unless an escape that steals it was
-called.
+"borrowed until Python code may run".  A C struct local (a buffer) is
+released by the ``finally`` clause the spec writes around its use.
 """
 
 import ast
 import builtins
 
-from . import call_table, frontend, partial_eval, runtime
+from . import builtin_types, call_table, facts, frontend, partial_eval
 from .partial_eval import NOTNULL, NULL, Value
-from .runtime import (ContextEscape, Escape, ERR_MINUS1, ERR_NEGATIVE,
-                      ERR_NULL, ERR_NULL_OR_MISSING, RaiseEscape)
 
 OBJECT = 'PyObject *'
 SSIZE = 'Py_ssize_t'
 TYPE = frontend.TYPE_CTYPE
 TYPE_OBJECTS = frontend.TYPE_OBJECTS
 
-TYPE_CHECK = {
-    'bytes': 'PyBytes_Check',
-    'str': 'PyUnicode_Check',
-    'int': 'PyLong_Check',
-    'list': 'PyList_Check',
-    'tuple': 'PyTuple_Check',
-}
-
-TYPE_CHECK_EXACT = {name: check + 'Exact'
-                    for name, check in TYPE_CHECK.items()}
-TYPE_CHECK_EXACT['bool'] = 'PyBool_Check'   # bool has no subclasses
+# Error conventions of calls.
+ERR_NULL = 'NULL'                # NULL means an exception is set
+ERR_NULL_OR_MISSING = 'MISSING'  # NULL without an exception means "absent"
+ERR_MINUS1 = 'MINUS1'            # -1 with an exception set
+ERR_NEGATIVE = 'NEGATIVE'        # a negative int: an exception is set
 
 SLOT_CHECK = {
     '__index__': '_PyIndex_Check({0})',
     '__buffer__': 'PyObject_CheckBuffer({0})',
 }
 
-CONSTANT_OBJECTS = {
-    repr(b''): 'Py_CONSTANT_EMPTY_BYTES',
-    repr(''): 'Py_CONSTANT_EMPTY_STR',
-    repr(()): 'Py_CONSTANT_EMPTY_TUPLE',
-    repr(None): 'Py_CONSTANT_NONE',
-    repr(0): 'Py_CONSTANT_ZERO',
-    repr(1): 'Py_CONSTANT_ONE',
-}
+
+def type_check(name, exact):
+    """The C check of builtin type *name* (exactly with *exact*), or
+    None."""
+    row = builtin_types.TABLE.get(builtin_types.by_name(name))
+    if row is None:
+        return None
+    return row.check_exact if exact else row.check
 
 COMPARE_OPS = {ast.Lt: '<', ast.LtE: '<=', ast.Gt: '>', ast.GtE: '>=',
                ast.Eq: '==', ast.NotEq: '!='}
@@ -115,10 +117,21 @@ def c_decl(ctype, name):
     return f'{ctype}{name}' if ctype.endswith('*') else f'{ctype} {name}'
 
 
+def _atomic(expr):
+    """Whether C expression *expr* is a name or a call: f(...)."""
+    head, paren, rest = expr.partition('(')
+    if not paren:
+        return head.replace('_', '').isalnum()
+    depth = 1
+    for i, ch in enumerate(rest):
+        depth += {'(': 1, ')': -1}.get(ch, 0)
+        if depth == 0:
+            return i == len(rest) - 1 and head.replace('_', '').isalnum()
+    return False
+
+
 def c_not(expr):
-    if expr.replace('_', '').replace('(', '').replace(')', '').isalnum():
-        return f'!{expr}'
-    return f'!({expr})'
+    return f'!{expr}' if _atomic(expr) else f'!({expr})'
 
 
 class SpecError(Exception):
@@ -143,33 +156,23 @@ def c_string(text):
     return ''.join(out)
 
 
-def escape_of(node):
-    """Return the escape for a ``C.<name>`` node."""
-    if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
-            and node.value.id == 'C'):
-        value = getattr(runtime.C, node.attr, None)
-        if isinstance(value, (Escape, ContextEscape, RaiseEscape)):
-            return value
-        raise SpecError(node, f'unknown escape C.{node.attr}')
-    return None
-
-
 class FunctionEmitter:
     """Lower one list of spec statements to the body of a C function."""
 
     def __init__(self, generator, params, known_null=()):
         self.generator = generator
         self.spec = generator.spec
+        self.analyzer = facts.analyzer(generator.spec)
         # name -> C type; parameters are borrowed references
         self.params = dict(params)
         self.known_null = set(known_null)
         self.locals = {}            # name -> C type
-        # Object locals and C locals with a release statement, in
-        # declaration order.
+        # Object locals, in declaration order.
         self.owned = []
-        self.releases = {}          # C local -> its release statement
         self.live = set()           # owned locals that may hold a value
         self.loop_vars = []         # owned variables of enclosing loops
+        # The finally clauses around the statement emitted, innermost last.
+        self.finally_blocks = []
         self.lines = []
         self.indent = 1
 
@@ -179,12 +182,22 @@ class FunctionEmitter:
         self.lines.append('    ' * self.indent + line if line else '')
 
     def cleanup(self, keep=None, null=()):
+        """Release what an exit releases: the finally clauses, then the
+        object locals."""
+        for block in reversed(self.finally_blocks):
+            for stmt in block:
+                if not (isinstance(stmt, ast.Expr)
+                        and isinstance(stmt.value, ast.Call)):
+                    raise SpecError(stmt, 'a finally clause only calls C '
+                                    'functions that cannot fail')
+                expr, _, convention = self.lower_call(stmt.value)
+                if convention is not None:
+                    raise SpecError(stmt, 'a finally clause only calls C '
+                                    'functions that cannot fail')
+                self.emit(f'{expr};')
         for name in self.owned:
             if name in self.live and name != keep and name not in null:
-                if name in self.releases:
-                    self.emit(self.releases[name].format(name))
-                else:
-                    self.emit(f'Py_XDECREF({name});')
+                self.emit(f'Py_XDECREF({name});')
 
     def release_dead(self, used):
         """Release the loop variables not in *used* (the names used from
@@ -214,7 +227,7 @@ class FunctionEmitter:
             return self.locals[name]
         return None
 
-    def declare(self, target, ctype, node, release=None):
+    def declare(self, target, ctype, node):
         name = target.id
         if name in self.params:
             raise SpecError(node, f'{name!r} is a parameter')
@@ -225,20 +238,16 @@ class FunctionEmitter:
                 raise SpecError(node, f'{name!r} changes type')
             return
         self.locals[name] = ctype
-        if ctype == OBJECT or release is not None:
+        if ctype == OBJECT:
             self.owned.append(name)
-        if release is not None:
-            self.releases[name] = release
 
     def collect_locals(self, stmts):
         """Declare every local up front so exits can release all of them."""
         for stmt in stmts:
             for node in ast.walk(stmt):
                 if isinstance(node, ast.Assign):
-                    escape = escape_of(node.value.func) if isinstance(
-                        node.value, ast.Call) else None
                     self.declare(node.targets[0], self.call_ctype(node.value),
-                                 node, getattr(escape, 'release', None))
+                                 node)
                 elif isinstance(node, ast.NamedExpr):
                     self.declare(node.target, self.call_ctype(node.value),
                                  node)
@@ -257,27 +266,73 @@ class FunctionEmitter:
                 out.append(f'    {c_decl(ctype, name)};')
         return out
 
-    @staticmethod
-    def escape_ctype(escape):
-        if escape.returns == 'object':
-            return OBJECT
-        return escape.returns
-
     # -- calls -------------------------------------------------------------
+
+    def c_function(self, call):
+        """(C name, parameter C types, return C type) of the hand-written
+        C function *call* calls, or None."""
+        found = self.spec.c_function(call)
+        if found is None:
+            return None
+        spec, node = found
+        if frontend.is_c_implemented(node):
+            params, returns = frontend.c_signature(node)
+            return node.name, [ctype for _, ctype in params], returns
+        # A stub: objects in, an object out.
+        return node.name, [OBJECT] * len(call.args), OBJECT
 
     def call_ctype(self, call):
         if not isinstance(call, ast.Call):
             raise SpecError(call, 'only call results can be assigned')
-        escape = escape_of(call.func)
-        if isinstance(escape, Escape):
-            return self.escape_ctype(escape)
+        function = self.c_function(call)
+        if function is not None:
+            return function[2]
+        if getattr(call, 'pyspec_exact', None) is not None:
+            return SSIZE        # len()
         return OBJECT
+
+    def convention(self, call, returns):
+        """The error convention of a call of a hand-written C function
+        (see the module docstring)."""
+        raises = getattr(call, 'pyspec_raises', None)
+        null = getattr(call, 'pyspec_null', None)
+        if raises is None:
+            # Not marked by the partial evaluator: the facts for any
+            # arguments.
+            callee = self.analyzer.call_facts(call, {})
+            raises, null = bool(callee.raises), callee.returns_null
+        if frontend.is_struct(returns):
+            return ERR_NEGATIVE
+        if not raises or returns == 'void':
+            return None
+        if returns == OBJECT:
+            return ERR_NULL_OR_MISSING if null else ERR_NULL
+        if returns == 'int':
+            return ERR_NEGATIVE
+        return ERR_MINUS1
+
+    def lower_arg(self, arg, ctype):
+        """Argument *arg* of a C function parameter of type *ctype*."""
+        match arg:
+            case ast.Constant(str() as text) if ctype == OBJECT:
+                return f'&_Py_ID({text})'
+            case ast.Constant(str() as text):
+                return c_string(text)
+            case ast.Name(name) if frontend.is_struct(
+                    self.ctype_of(name) or '*'):
+                return f'&{name}'
+        value = self.lower_value(arg)
+        actual = self.ctype_of(arg.id) if isinstance(arg, ast.Name) else None
+        if (actual and actual != ctype and actual.endswith('*')
+                and ctype.endswith('*')):
+            return f'({ctype}){value}'
+        return value
 
     def lower_call(self, call, target=None):
         """Return (C expression, C type, error convention).
 
-        *target*: the local assigned, for an escape that initializes it in
-        place (then the expression is an int status)."""
+        *target*: the local assigned, for a C function that initializes
+        it in place (then the expression is an int status)."""
         special = partial_eval.specialization_of(self.spec, call)
         if special is not None:
             self.generator.use(special.name)
@@ -287,35 +342,25 @@ class FunctionEmitter:
         if c_function is not None:
             args = ', '.join(self.lower_value(a) for a in call.args)
             return f'{c_function}({args})', OBJECT, ERR_NULL
-        escape = escape_of(call.func)
-        if isinstance(escape, Escape):
-            fields = {}
-            for i, arg in enumerate(call.args):
-                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                    fields[f'id{i}'] = arg.value
-                    fields[str(i)] = c_string(arg.value)
-                else:
-                    fields[str(i)] = self.lower_value(arg)
-            if escape.initializes:
+        function = self.c_function(call)
+        if function is not None:
+            name, params, returns = function
+            if len(params) != len(call.args):
+                raise SpecError(call, f'{name}() takes {len(params)} '
+                                'arguments')
+            args = [self.lower_arg(a, t) for a, t in zip(call.args, params)]
+            if frontend.is_struct(returns):
                 if target is None:
-                    raise SpecError(call, f'the result of '
-                                    f'{ast.unparse(call.func)} must be '
-                                    'assigned to a local')
-                fields['target'] = target
-            # The marks of the partial evaluator: cheaper lowerings that
-            # cannot fail (None: no error convention).
-            template, error = escape.template, escape.error
-            exact = getattr(call, 'pyspec_exact', None)
-            if exact is not None:
-                template, error = escape.exact[exact], None
-            elif getattr(call, 'pyspec_fast', False):
-                template, error = escape.fast.template, None
-            elif getattr(call, 'pyspec_unchecked', False):
-                template, error = escape.unchecked, None
-            expr = template.format(
-                *[fields[str(i)] for i in range(len(call.args))],
-                **{k: v for k, v in fields.items() if not k.isdigit()})
-            return expr, self.escape_ctype(escape), error
+                    raise SpecError(call, f'the result of {name}() must '
+                                    'be assigned to a local')
+                args.insert(0, f'&{target}')
+            return (f'{name}({", ".join(args)})', returns,
+                    self.convention(call, returns))
+        exact = getattr(call, 'pyspec_exact', None)
+        if exact is not None:
+            # len() of an exact list or tuple.
+            size = builtin_types.TABLE[exact].size
+            return f'{size}({self.lower_value(call.args[0])})', SSIZE, None
         target = self.spec.call_target(call.func)
         if target is not None:
             args = ', '.join(self.lower_value(a) for a in call.args)
@@ -390,23 +435,17 @@ class FunctionEmitter:
                              comparators=[ast.Name(partial_eval.FALLBACK)]):
                 equal = '!=' if isinstance(op, ast.IsNot) else '=='
                 return f'{name} {equal} Py_None'
-            case ast.Call() if partial_eval.fast_guard(node):
-                name, item = partial_eval.fast_guard(node)
-                fast = getattr(runtime.C, name).fast
-                obj = self.lower_value(ast.Name(item))
-                guard = fast.guard.format(obj)
-                if getattr(node, 'pyspec_item_type', None) is not None:
-                    return guard
-                checks = ' || '.join(f'{TYPE_CHECK_EXACT[tp.__name__]}({obj})'
-                                     for tp in fast.types)
-                if len(fast.types) > 1:
-                    checks = f'({checks})'
-                return f'{checks} && {guard}'
+            case ast.Call() if self.c_function(node) is not None:
+                expr, _, convention = self.lower_call(node)
+                if convention is not None:
+                    raise SpecError(node, 'a call in a condition cannot '
+                                    f'fail: {ast.unparse(node)}')
+                return expr
             case ast.Compare(left=ast.Call(func=ast.Name('type'), args=[obj]),
                              ops=[ast.Is() | ast.IsNot() as op],
                              comparators=[ast.Name(cls)]) \
-                    if cls in TYPE_CHECK_EXACT:
-                check = f'{TYPE_CHECK_EXACT[cls]}({self.lower_value(obj)})'
+                    if type_check(cls, True):
+                check = f'{type_check(cls, True)}({self.lower_value(obj)})'
                 return f'!{check}' if isinstance(op, ast.IsNot) else check
             case ast.Compare(left=ast.Name(name),
                              ops=[ast.Is() | ast.IsNot() as op],
@@ -415,8 +454,8 @@ class FunctionEmitter:
                 equal = '!=' if isinstance(op, ast.IsNot) else '=='
                 return f'{name} {equal} {TYPE_OBJECTS[cls]}'
             case ast.Call(func=ast.Name('isinstance'),
-                          args=[obj, ast.Name(cls)]) if cls in TYPE_CHECK:
-                return f'{TYPE_CHECK[cls]}({self.lower_value(obj)})'
+                          args=[obj, ast.Name(cls)]) if type_check(cls, False):
+                return f'{type_check(cls, False)}({self.lower_value(obj)})'
             case ast.Call(func=ast.Name('hasattr'),
                           args=[ast.Call(func=ast.Name('type'), args=[obj]),
                                 ast.Constant(str() as name)]) \
@@ -453,8 +492,7 @@ class FunctionEmitter:
         expr, ctype, convention = self.lower_call(value, target=name)
         if self.locals.get(name) != ctype:
             raise SpecError(node, f'{name!r} changes type')
-        escape = escape_of(value.func)
-        if isinstance(escape, Escape) and escape.initializes:
+        if frontend.is_struct(ctype):
             if not check:
                 raise SpecError(node, 'cannot initialize a C local here')
             self.emit(f'if ({expr} < 0) {{')
@@ -462,8 +500,6 @@ class FunctionEmitter:
             self.error_exit()
             self.indent -= 1
             self.emit('}')
-            if name in self.releases:
-                self.live.add(name)
             return name, ctype, convention
         self.emit(f'{name} = {expr};')
         if ctype == OBJECT:
@@ -475,11 +511,12 @@ class FunctionEmitter:
         return name, ctype, convention
 
     def call_statement(self, call, node, later):
-        """``C.<escape>(...)`` as a statement: an int status."""
-        escape = escape_of(call.func)
-        if not isinstance(escape, Escape) or escape.returns != 'int':
-            raise SpecError(node, 'only an escape returning an int status '
-                            'can be called as a statement')
+        """``f(...)`` as a statement: a C function returning void or an
+        int status."""
+        function = self.c_function(call)
+        if function is None or function[2] not in ('void', 'int'):
+            raise SpecError(node, 'only a C function returning void or an '
+                            'int status can be called as a statement')
         expr, _, convention = self.lower_call(call)
         if convention is None:
             self.emit(f'{expr};')
@@ -538,12 +575,11 @@ class FunctionEmitter:
             case ast.Return(value=value):
                 self.return_(value, stmt)
                 self.live = set()
-            case ast.Raise(exc=ast.Call(func=ast.Attribute() as func,
-                                        args=[])):
-                escape = escape_of(func)
-                if not isinstance(escape, RaiseEscape):
-                    raise SpecError(stmt, 'raise needs a C raise escape')
-                self.emit(escape.template)
+            case ast.Raise(exc=ast.Call() as call) \
+                    if self.c_function(call) is not None:
+                # A C function that sets the exception.
+                expr, _, _ = self.lower_call(call)
+                self.emit(f'{expr};')
                 self.error_exit()
                 self.live = set()
             case ast.Raise(exc=ast.Call(func=ast.Name(exc), args=[message])):
@@ -551,12 +587,21 @@ class FunctionEmitter:
                 self.live = set()
             case ast.Try(body=[ast.Assign(targets=[ast.Name() as target],
                                           value=value)],
-                         handlers=handlers, orelse=orelse, finalbody=[]):
+                         handlers=[_, *_] as handlers, orelse=orelse,
+                         finalbody=[]):
                 self.try_(target, value, handlers, orelse, stmt)
+            case ast.Try(body=body, handlers=[], orelse=[],
+                         finalbody=[_, *_] as finalbody):
+                self.finally_blocks.append(finalbody)
+                self.statements(body, later)
+                self.finally_blocks.pop()
+                if not partial_eval.terminates(body):
+                    self.statements(finalbody, later)
             case ast.With(items=[ast.withitem(
-                    context_expr=ast.Call(func=func, args=[obj]),
+                    context_expr=ast.Call(func=ast.Name('critical_section'),
+                                          args=[obj]),
                     optional_vars=None)], body=body):
-                self.with_(func, obj, body, stmt)
+                self.with_(obj, body, stmt)
             case _:
                 raise SpecError(stmt,
                                 f'unsupported statement {ast.unparse(stmt)}')
@@ -604,20 +649,18 @@ class FunctionEmitter:
                 self.cleanup(keep=id)
                 self.emit(f'return {id};')
             case ast.Constant() | ast.Tuple():
-                key = repr(ast.literal_eval(value))
-                if key not in CONSTANT_OBJECTS:
-                    raise SpecError(node, f'no Py_GetConstant() for {key}')
+                constant = ast.literal_eval(value)
+                name = builtin_types.constant(constant)
+                if name is None:
+                    raise SpecError(node, 'no Py_GetConstant() for '
+                                    f'{constant!r}')
                 self.cleanup()
-                self.emit(f'return Py_GetConstant({CONSTANT_OBJECTS[key]});')
+                self.emit(f'return Py_GetConstant({name});')
             case ast.Call():
                 expr, ctype, convention = self.lower_call(value)
-                if ctype != OBJECT or convention != ERR_NULL:
+                if ctype != OBJECT or convention not in (ERR_NULL, None):
                     raise SpecError(node, 'can only return a new reference')
-                escape = escape_of(value.func)
-                for index in getattr(escape, 'steals', ()):
-                    # Taken over by the escape.
-                    self.live.discard(value.args[index].id)
-                if not self.live:
+                if not self.live and not self.finally_blocks:
                     self.emit(f'return {expr};')
                     return
                 self.emit('{')
@@ -787,12 +830,11 @@ class FunctionEmitter:
         self.indent -= 1
         self.emit('}')
 
-    def with_(self, func, obj, body, node):
-        context = escape_of(func)
-        if not isinstance(context, ContextEscape):
-            raise SpecError(node, 'with needs a C context escape')
+    def with_(self, obj, body, node):
+        """``with critical_section(x):``: the critical section of x (the
+        partial evaluator writes it for snapshots)."""
         checks = []
-        self.emit(context.begin.format(self.lower_value(obj)))
+        self.emit(f'Py_BEGIN_CRITICAL_SECTION({self.lower_value(obj)});')
         for stmt in body:
             # Errors are checked after the end of the block, so the
             # block is always closed.
@@ -801,7 +843,7 @@ class FunctionEmitter:
                 raise SpecError(stmt, 'with bodies may only assign calls')
             checks.append(self.assign(stmt.targets[0], stmt.value, stmt,
                                       check=False))
-        self.emit(context.end)
+        self.emit('Py_END_CRITICAL_SECTION();')
         for name, ctype, convention in checks:
             if convention is not None:
                 self.error_check(name, ctype, convention)

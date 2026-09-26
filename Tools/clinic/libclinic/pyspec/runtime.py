@@ -1,38 +1,49 @@
-"""Names a pyspec file may use, with Python reference implementations.
+"""Names a pyspec file may use, with their meaning as Python.
 
 A pyspec file is ordinary Python: it imports these names with
 ``from libclinic.pyspec.runtime import ...``.  Running it (see load())
 gives the reference behavior; Argument Clinic reads the same file with the
-ast module and lowers it to C (see emit.py).  Three kinds of names appear
-in a spec:
+ast module (frontend.py), derives facts from it (call_table.py) and lowers
+it to C (emit.py).  Besides the functions of the specs themselves, a spec
+uses:
 
-* functions defined in the spec itself (lowered to C functions, inlined
-  or specialized by the partial evaluator);
-* the builtins below, which have fixed C meanings;
-* escapes, ``C.<name>(...)``: C functions called directly.  Each carries
-  its C call template, result type and error convention for the emitter,
-  and its cheaper lowerings (see Escape);
-* the facts vocabulary (New[object], OnError[...], RunsPython[...], ...):
-  annotations of the top-level stubs of the escapes (see stub_facts()).
+* builtins with a fixed C meaning: ``NULL``, ``isinstance`` (the real
+  type), ``iter`` (PyObject_GetIter()), ``tp_name`` and ``fqname`` (type
+  names in error messages);
+* the Argument Clinic decorators, and ``@c_name`` and ``@static_type``
+  (frontend.py, typeobj.py): identity decorators for Python;
+* ``@c_implemented`` and a few primitives that say what plain Python
+  cannot, placed where the effect happens, so that the control flow
+  around them gives their conditions (see Objects/pyspec/README.rst):
+
+  exact(T, value)       value is a new object of exactly type T
+  unknown(value)        value is a new object of a type not known exactly
+  calls(x, "__name__")  here the C invokes the special method of type(x):
+                        Python code runs only if that method is Python code
+  runs_python()         here the C may run any Python code
+  NULL                  returned: absent (not an error)
+
+  exact() and unknown() may fail (MemoryError); calls() and runs_python()
+  may raise anything.  When the spec runs as Python they only return
+  their value (exact() checks its type): the code around them models what
+  the C computes.
 """
 
 import ast
 import builtins
-import operator
 import os
 import sys
 import types
 
 __all__ = [
-    'NULL', 'C', 'cstr', 'isinstance', 'iter', 'tp_name', 'fqname',
-    # Facts vocabulary
-    'Py_ssize_t', 'pointer', 'New', 'Borrowed', 'OnError', 'NoError',
-    'RunsPython',
+    'NULL', 'PY_SSIZE_T_MAX', 'isinstance', 'iter', 'tp_name', 'fqname',
+    'c_implemented', 'exact', 'unknown', 'calls', 'runs_python',
 ]
 
 
 class _Null:
-    """C NULL: an argument that was not passed, or a lookup that failed."""
+    """C NULL: an argument that was not passed, or a result that is
+    absent."""
 
     def __repr__(self):
         return 'NULL'
@@ -43,8 +54,7 @@ class _Null:
 
 NULL = _Null()
 
-# Annotation for a ``const char *`` parameter (NULL when not given).
-cstr = str
+PY_SSIZE_T_MAX = sys.maxsize
 
 
 def _clinic_decorator(*args):
@@ -73,6 +83,35 @@ def static_type(**members):
     the static PyTypeObject of the class (see typeobj.py).  An identity
     decorator for Python."""
     return lambda cls: cls
+
+
+def c_implemented(func):
+    """The C function of the same name is written by hand and is the
+    authority; the body is its Python reference: run when the spec runs
+    as Python, and read for the facts of its calls.  It is never lowered
+    to C."""
+    return func
+
+
+def exact(tp, value=None):
+    """*value*, a new object of exactly type *tp*."""
+    if value is not None and type(value) is not tp:
+        raise AssertionError(f'exact({tp.__name__}, ...) is a '
+                             f'{type(value).__name__}')
+    return value
+
+
+def unknown(value=None):
+    """*value*, a new object whose exact type is not known."""
+    return value
+
+
+def calls(obj, name):
+    """The C invokes the special method *name* of type(obj) here."""
+
+
+def runs_python():
+    """The C may run any Python code here."""
 
 
 def isinstance(obj, cls):
@@ -119,395 +158,6 @@ def fqname(tp):
     return f'{tp.__module__}.{tp.__qualname__}'
 
 
-# Error conventions of escapes.
-ERR_NULL = 'NULL'                # NULL means an exception is set
-ERR_NULL_OR_MISSING = 'MISSING'  # NULL without an exception means "absent"
-ERR_MINUS1 = 'MINUS1'            # -1 with an exception set
-ERR_NEGATIVE = 'NEGATIVE'        # a negative int: an exception is set
-
-
-class Escape:
-    """A C function with a Python reference implementation.
-
-    template: C expression; ``{0}``, ``{1}`` are the lowered arguments and
-        ``{id0}``, ``{id1}`` are string-constant arguments used as C
-        identifiers (e.g. ``&_Py_ID({id1})``).  A template that names
-        ``{target}`` initializes the local it is assigned to in place
-        (``x = C.f(...)`` becomes ``f(&x, ...)``) and returns an int
-        status, checked with *error*.
-    returns: 'object' (new reference), 'Py_ssize_t', 'int' (a status: the
-        escape is only called as a statement), or the C type of the local
-        a ``{target}`` template initializes.
-    release: for a C local (not an object) that owns a resource, the C
-        statement releasing it (``{0}`` is the local) on the paths where
-        the function exits before passing it to an escape that steals it.
-    steals: the indexes of the arguments the escape takes over (the
-        caller no longer releases them).
-    exact: {builtin type: template}: the lowering when the exact type of
-        the first argument is known (``type(x) is list``, for example):
-        same result, but it cannot fail and runs no Python code.
-    fast: a FastPath: a guard on the first argument under which the call
-        has a lowering that cannot fail and runs no Python code.
-    length: with an exact lowering, the result is the length of the first
-        argument (a list or a tuple).
-    capacity: the escape initializes a buffer with room for at least as
-        many units as its first argument.
-    unchecked: for an escape appending one unit to the buffer of its first
-        argument, the lowering when the buffer is known to have room: it
-        cannot fail.
-    """
-
-    def __init__(self, func, template, returns, error, release=None,
-                 steals=(), exact=None, fast=None, length=False,
-                 capacity=False, unchecked=None):
-        self.func = func
-        self.template = template
-        self.returns = returns
-        self.error = error
-        self.release = release
-        self.steals = tuple(steals)
-        self.exact = dict(exact or {})
-        self.fast = fast
-        self.length = length
-        self.capacity = capacity
-        self.unchecked = unchecked
-
-    @property
-    def initializes(self):
-        return '{target}' in self.template
-
-    def __call__(self, *args):
-        return self.func(*args)
-
-
-class FastPath:
-    """The fast path of an escape (Escape.fast): when the first argument
-    is exactly of one of *types* and *guard* (a C condition on the first
-    argument, ``{0}``) holds, the call is *template*, which cannot fail
-    and runs no Python code.  The partial evaluator splits a statement
-    making the call (see partial_eval.py)."""
-
-    def __init__(self, types, guard, template):
-        self.types = tuple(types)
-        self.guard = guard
-        self.template = template
-
-
-class ContextEscape:
-    """A ``with C.<name>(x):`` block lowered to begin/end macros."""
-
-    def __init__(self, begin, end):
-        self.begin = begin
-        self.end = end
-
-    def __call__(self, obj):
-        return self
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-class RaiseEscape:
-    """``raise C.<name>()``: a C statement that sets an exception.
-
-    Called from Python it returns the exception to raise.
-    """
-
-    def __init__(self, template, func):
-        self.template = template
-        self.func = func
-
-    def __call__(self):
-        return self.func()
-
-
-def escape(template, *, returns='object', error=ERR_NULL, **kwargs):
-    def decorator(func):
-        return Escape(func, template, returns, error, **kwargs)
-    return decorator
-
-
-PY_SSIZE_T_MAX = sys.maxsize
-
-
-def _lookup_special(obj, name):
-    for klass in type(obj).__mro__:
-        if name in klass.__dict__:
-            attr = klass.__dict__[name]
-            get = getattr(type(attr), '__get__', None)
-            if get is None:
-                return attr
-            return get(attr, obj, type(obj))
-    return NULL
-
-
-def _as_ssize_t(o, exc):
-    i = operator.index(o)
-    if -PY_SSIZE_T_MAX - 1 <= i <= PY_SSIZE_T_MAX:
-        return i
-    if exc is NULL:
-        return PY_SSIZE_T_MAX if i > 0 else -PY_SSIZE_T_MAX - 1
-    raise exc(f"cannot fit '{tp_name(type(o))}' into an index-sized integer")
-
-
-# PyNumber_AsSsize_t() of an exact int or bool (a bool is a compact int)
-# needs no __index__: a compact one is read inline, without a call.
-_COMPACT_INT = FastPath(
-    (int, bool), '_PyLong_IsCompact((PyLongObject *){0})',
-    '_PyLong_CompactValue((PyLongObject *){0})')
-
-
-class C:
-    lookup_special = escape(
-        '_PyObject_LookupSpecial({0}, &_Py_ID({id1}))',
-        error=ERR_NULL_OR_MISSING)(_lookup_special)
-
-    PyUnicode_AsEncodedString = escape(
-        'PyUnicode_AsEncodedString({0}, {1}, {2})')(
-        lambda s, encoding, errors: str.encode(
-            s, encoding, 'strict' if errors is NULL else errors))
-
-    PyNumber_AsSsize_t = escape(
-        'PyNumber_AsSsize_t({0}, {1})',
-        returns='Py_ssize_t', error=ERR_MINUS1,
-        fast=_COMPACT_INT)(_as_ssize_t)
-
-    # The length of an exact list or tuple.
-    PyObject_LengthHint = escape(
-        'PyObject_LengthHint({0}, {1})',
-        returns='Py_ssize_t', error=ERR_MINUS1,
-        exact={list: 'PyList_GET_SIZE({0})', tuple: 'PyTuple_GET_SIZE({0})'},
-        length=True)(operator.length_hint)
-
-    _PyBytes_FromSize = escape('_PyBytes_FromSize({0}, {1})')(
-        lambda size, zero: b'\0' * size)
-
-    _PyBytes_FromBuffer = escape('_PyBytes_FromBuffer({0})')(
-        lambda x: memoryview(x).tobytes())
-
-    # A bytes_appender (Objects/bytesobject.c): a PyBytesWriter of at
-    # least size bytes, written one byte at a time by a cursor kept in a
-    # local variable.
-    bytes_appender = escape(
-        'bytes_appender_init(&{target}, {0})',
-        returns='bytes_appender', error=ERR_NEGATIVE,
-        release='PyBytesWriter_Discard({0}.writer);', capacity=True)(
-        lambda size: bytearray())
-
-    # Append the byte value (in range(256)).
-    bytes_appender_append = escape(
-        'bytes_appender_append(&{0}, (unsigned char){1})',
-        returns='int', error=ERR_NEGATIVE,
-        unchecked='bytes_appender_append_unchecked(&{0}, '
-                  '(unsigned char){1})')(
-        lambda appender, value: appender.append(value))
-
-    # The bytes written; takes over the appender.
-    bytes_appender_finish = escape(
-        'PyBytesWriter_FinishWithPointer({0}.writer, {0}.str)',
-        steals=(0,))(bytes)
-
-    # Borrows its second argument.
-    bytes_subtype_new = escape('bytes_subtype_new({0}, {1})')(
-        lambda cls, value: bytes.__new__(cls, value))
-
-    # An exact bytes copy of a bytes (or subclass) instance.
-    bytes_copy = escape(
-        'PyBytes_FromStringAndSize(PyBytes_AS_STRING({0}), '
-        'PyBytes_GET_SIZE({0}))')(
-        lambda b: bytes(memoryview(b)))
-
-    bytes_from_hex = escape('_PyBytes_FromHex({0}, 0)')(
-        lambda string: bytes.fromhex(string))
-
-    PyErr_BadInternalCall = RaiseEscape(
-        'PyErr_BadInternalCall();',
-        lambda: SystemError('bad argument to internal function'))
-
-    # The critical section of an object (nothing without free threading).
-    critical_section = ContextEscape(
-        'Py_BEGIN_CRITICAL_SECTION({0});', 'Py_END_CRITICAL_SECTION();')
-
-
-# ---------------------------------------------------------------------------
-# Facts vocabulary
-#
-# Annotations of the top-level stubs of a spec, which describe the C
-# functions its bodies call as escapes.  Plain Python values: the spec is
-# executed to evaluate them; Argument Clinic reads them from the AST
-# (stub_facts()).
-#
-# C types (parameter and return annotations)
-#     object          PyObject *
-#     cstr            const char *        (defined above)
-#     Py_ssize_t      Py_ssize_t
-#     int             int
-#     pointer('T')    T *                 (e.g. pointer('bytes_appender'))
-#     None            void                (return only)
-#
-# Ownership (return annotation; object parameters are borrowed)
-#     New[object]     a new (strong) reference
-#     New[bytes]      a new reference to an object of exactly that builtin
-#                     type (never a subclass instance)
-#     Borrowed[object] a borrowed reference
-#
-# Error convention (return annotation)
-#     New[...] / Borrowed[...]   NULL with an exception set on error
-#     None                       cannot fail (unless OnError says otherwise)
-#     OnError[T, v]              returns v (NULL or -1) with an exception set
-#                                on error
-#     NoError[T]                 cannot fail (any value is a valid result)
-#
-# Side effects
-#     RunsPython[T]   (return) may run arbitrary Python code (__index__,
-#                     __buffer__, __iter__, warnings, ...).  A stub without it
-#                     claims the function never runs Python code.
-#     RunsPython[T, 'p']
-#                     may run Python code only through the slots of the type
-#                     of parameter p: never when p's exact type is a static
-#                     (builtin) type.
-#
-# Escapes
-#     The facts of an escape ``C.<name>(...)`` are the annotations of the
-#     top-level stub named <name> in the spec (read by call_table.py from
-#     the AST: Argument Clinic never executes the spec).  Escapes without a
-#     stub are assumed to run Python code and to return an object of any
-#     type.  The fast path, exact type and unchecked lowerings of an escape
-#     (Escape) run no Python code and cannot fail.  ``raise C.<name>()``
-#     and ``with C.<name>(x):`` escapes never run Python code.
-#     The facts of the C API itself are in Objects/pyspec/capi/ (see
-#     disconnects.py).
-
-
-class CType:
-    """A C type that has no Python spelling."""
-
-    def __init__(self, c):
-        self.c = c
-
-    def __repr__(self):
-        return f'CType({self.c!r})'
-
-
-Py_ssize_t = CType('Py_ssize_t')
-
-
-def pointer(name):
-    """``name *``: pointer to a C struct, e.g. pointer('PyBytesWriter')."""
-    return CType(f'{name} *')
-
-
-class Fact:
-    """``Name[args]``: an annotation wrapper."""
-
-    def __init__(self, kind, args):
-        self.kind = kind
-        self.args = args
-
-    def __repr__(self):
-        return f'{self.kind}[{", ".join(map(repr, self.args))}]'
-
-
-class _Wrapper:
-    def __init__(self, kind, doc):
-        self.kind = kind
-        self.__doc__ = doc
-
-    def __getitem__(self, args):
-        if not isinstance(args, tuple):
-            args = (args,)
-        return Fact(self.kind, args)
-
-    def __repr__(self):
-        return self.kind
-
-
-New = _Wrapper('New', 'Return: a new reference; NULL on error.')
-Borrowed = _Wrapper('Borrowed', 'Return: a borrowed reference; NULL on error.')
-OnError = _Wrapper('OnError', 'Return: OnError[T, value, ...]: value with '
-                              'an exception set on error.')
-NoError = _Wrapper('NoError', 'Return: cannot fail.')
-RunsPython = _Wrapper('RunsPython', 'Return: may run arbitrary Python code.')
-
-
-
-
-class StubFacts:
-    """Facts of a stub read from its AST, for the escape of the same name.
-
-    result_type: the builtin type every result has exactly (New[bytes]), or
-        None.
-    runs_python: False, True, or the name of the parameter through whose
-        type slots it may run Python code (RunsPython[T, 'p']).
-    errors: the error values ('NULL', -1, ...); () if it cannot fail.
-    params: the parameter names.
-    """
-
-    def __init__(self, params, result_type, runs_python, errors):
-        self.params = params
-        self.result_type = result_type
-        self.runs_python = runs_python
-        self.errors = errors
-
-    def runs_python_for(self, arg_types):
-        """Whether a call may run Python code, given the exact types of its
-        arguments (None when unknown), in parameter order."""
-        if self.runs_python in (True, False):
-            return self.runs_python
-        index = self.params.index(self.runs_python)
-        tp = arg_types[index] if index < len(arg_types) else None
-        return not (isinstance(tp, type) and is_static_type(tp))
-
-
-HEAPTYPE = 1 << 9
-
-
-def is_static_type(tp):
-    """A builtin (static) type: its slots never run Python code."""
-    return not tp.__flags__ & HEAPTYPE
-
-
-def stub_facts(node):
-    """StubFacts of the stub *node* (an ast.FunctionDef), from the facts
-    vocabulary of its return annotation."""
-    args = node.args
-    params = [a.arg for a in args.posonlyargs + args.args]
-    annotation = node.returns
-    result_type = None
-    runs_python = False
-    errors = None
-    while isinstance(annotation, ast.Subscript):
-        kind = annotation.value
-        items = annotation.slice
-        items = items.elts if isinstance(items, ast.Tuple) else [items]
-        match kind:
-            case ast.Name('RunsPython'):
-                runs_python = True
-                if len(items) == 2:
-                    runs_python = ast.literal_eval(items[1])
-            case ast.Name('OnError'):
-                errors = tuple('NULL' if isinstance(v, ast.Name)
-                               and v.id == 'NULL' else ast.literal_eval(v)
-                               for v in items[1:])
-            case ast.Name('NoError'):
-                errors = ()
-            case ast.Name('New' | 'Borrowed'):
-                if errors is None:
-                    errors = ('NULL',)
-                match items[0]:
-                    case ast.Name(name) if name != 'object':
-                        value = getattr(builtins, name, None)
-                        if isinstance(value, type):
-                            result_type = value
-        annotation = items[0]
-    if errors is None:
-        errors = ()
-    return StubFacts(params, result_type, runs_python, errors)
-
-
 def load(path):
     """Execute the spec at *path*; return its functions and methods.
 
@@ -515,17 +165,27 @@ def load(path):
     function.  ``class T:`` in a spec describes the builtin type T, so once
     the spec has run, the global T is the builtin again: bodies compare
     with the real type.  Calls ``T.m(...)`` of spec methods call the spec
-    method, as in the generated C.
+    method, as in the generated C (except in the Python reference of a
+    @c_implemented function, which uses the builtin).  The specs it imports (``from
+    pyspec.abstract import PyNumber_AsSsize_t``) are found relative to the
+    directory of the C file, or to the source root (frontend.py).
     """
     with open(path, encoding='utf-8') as f:
         tree = ast.parse(f.read(), path)
     classes = {node.name for node in tree.body
                if isinstance(node, ast.ClassDef)}
-    # Specs imported by this one (``from stringlib.pyspec import ctype``)
-    # are found relative to the directory of the C file.
     base = os.path.dirname(os.path.dirname(os.path.abspath(path)))
+    bases = [base, os.path.dirname(base)]
 
     class SpecCalls(ast.NodeTransformer):
+        def visit_FunctionDef(self, node):
+            # The Python reference of a C function models it with the
+            # builtins.
+            if any(isinstance(d, ast.Name) and d.id == 'c_implemented'
+                   for d in node.decorator_list):
+                return node
+            return self.generic_visit(node)
+
         def visit_Attribute(self, node):
             self.generic_visit(node)
             if (isinstance(node.value, ast.Name)
@@ -540,11 +200,12 @@ def load(path):
     stem = os.path.splitext(os.path.basename(path))[0]
     module = types.ModuleType(f'_pyspec_{stem}')
     module.__file__ = path
-    sys.path.insert(0, base)
+    sys.path[:0] = bases
     try:
         exec(compile(tree, path, 'exec'), module.__dict__)
     finally:
-        sys.path.remove(base)
+        for entry in bases:
+            sys.path.remove(entry)
     functions = {}
     for node in tree.body:
         if isinstance(node, ast.FunctionDef):

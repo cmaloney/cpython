@@ -41,9 +41,15 @@ The C basename of a spec method is clinic's default (``T`` for
 ``T.__new__``, ``T___init__`` for ``T.__init__``, ``T_meth`` otherwise);
 ``@c_name("x")`` gives another, as ``as x`` does in a block.
 
-Top-level functions are C functions named like the function.  A body of
-``...`` (or only a docstring) describes a hand-written C function; a real
-body is generated.
+Top-level functions are C functions named like the function.  A real
+body is generated.  ``@c_implemented`` marks a hand-written C function
+whose body is its Python reference, never lowered to C; its annotations
+are the C types of its parameters and result (see c_signature()).  A body
+of ``...`` (or only a docstring) is a hand-written C function about which
+nothing is known.  A spec imports the functions of other specs by name:
+``from pyspec.abstract import PyNumber_AsSsize_t``, a path relative to
+the directory of the C file, or to the source root (``from
+Python.pyspec.errors import PyErr_BadInternalCall``).
 
 Decorators
 ----------
@@ -85,7 +91,9 @@ a hand-written PyCFunction, or an entry shared with another spec.
 * Slots.  A dunder of ``slotdefs[]`` (Objects/typeobject.c, see slots.py)
   other than ``__new__`` and ``__init__`` is a slot of the type, whose C
   function is hand-written with the slot's typedef (``lenfunc``,
-  ``binaryfunc``, ...).  Its parameters are unannotated and must be those
+  ``binaryfunc``, ...), with a body of ``...`` or, with
+  ``@c_implemented``, a Python reference.  Its parameters are unannotated
+  and must be those
   of the slot wrapper (``def __getitem__(self, key, /)`` for
   ``__getitem__($self, key, /)``): clinic checks that.  It has no
   docstring: the wrapper's comes from slotdefs.  Its C function is
@@ -99,8 +107,6 @@ a hand-written PyCFunction, or an entry shared with another spec.
   ``sq_repeat``).  A slot creates a wrapper for every dunder of its group
   (``__lt__`` ... ``__ge__`` for ``tp_richcompare``, ``__mod__`` and
   ``__rmod__`` for ``nb_remainder``): the class must declare all of them.
-  The return annotation, if any, is in the C API facts vocabulary of
-  runtime.py (``New[int]``: an exact int, runs no Python code).
 
 * A hand-written PyCFunction: ``@c_name(METH_NOARGS="f")`` or
   ``@c_name(METH_O="f")``: the table entry calls f directly.  The
@@ -134,9 +140,10 @@ import ast
 import dataclasses as dc
 import os
 import shlex
+import sys
 
 from libclinic.errors import ClinicError
-from . import slots
+from . import builtin_types, slots
 
 
 # Where errors about unsupported spec code send the reader.
@@ -148,26 +155,19 @@ README = 'Objects/pyspec/README.rst'
 SPEC_CTYPES = {
     'object': 'PyObject *',
     'str': 'const char *',
-    'cstr': 'const char *',
 }
+
+# The C types of the annotations of a @c_implemented function: these, and
+# a string, which is the C type itself ('PyTypeObject *').
+C_CTYPES = SPEC_CTYPES | {'Py_ssize_t': 'Py_ssize_t', 'int': 'int',
+                          'None': 'void'}
 
 TYPE_CTYPE = 'PyTypeObject *'
 
 # Builtin types a spec class may describe, and their C type objects.
-TYPE_OBJECTS = {
-    'bytes': '&PyBytes_Type',
-    'bytearray': '&PyByteArray_Type',
-    'str': '&PyUnicode_Type',
-    'int': '&PyLong_Type',
-    'float': '&PyFloat_Type',
-    'complex': '&PyComplex_Type',
-    'bool': '&PyBool_Type',
-    'list': '&PyList_Type',
-    'tuple': '&PyTuple_Type',
-    'dict': '&PyDict_Type',
-    'set': '&PySet_Type',
-    'frozenset': '&PyFrozenSet_Type',
-}
+TYPE_OBJECTS = {tp.__name__: row.type_object
+                for tp, row in builtin_types.TABLE.items()
+                if row.check is not None}
 
 # Clinic decorators that are also Python's: they set the kind of the
 # method.  Any other decorator is a clinic-only one (see "Decorators"),
@@ -266,6 +266,45 @@ def decorator_name(decorator: ast.expr) -> str | None:
     return decorator.id if isinstance(decorator, ast.Name) else None
 
 
+def is_c_implemented(node: ast.FunctionDef) -> bool:
+    """True for ``@c_implemented``: a hand-written C function whose body
+    is its Python reference."""
+    return any(decorator_name(d) == 'c_implemented'
+               for d in node.decorator_list)
+
+
+def is_struct(ctype: str) -> bool:
+    """Whether C type *ctype* (of c_signature()) is a C struct: neither a
+    pointer nor a scalar."""
+    return '*' not in ctype and ctype not in C_CTYPES.values() \
+        and ctype.split()[-1] not in ('char', 'short', 'int', 'long')
+
+
+def c_signature(node: ast.FunctionDef) -> tuple[list[tuple[str, str]], str]:
+    """([(parameter, C type)], C return type) of a @c_implemented
+    function: an annotation of C_CTYPES or a string (the C type); no
+    return annotation is ``PyObject *``.  A return type that is neither
+    a scalar nor a pointer is a C struct that the function initializes in
+    place (see emit.py)."""
+    def ctype(annotation: ast.expr | None, default: str | None) -> str:
+        match annotation:
+            case None if default is not None:
+                return default
+            case ast.Constant(str() as text):
+                return text
+            case ast.Name(name) if name in C_CTYPES:
+                return C_CTYPES[name]
+            case ast.Constant(None):
+                return 'void'
+        raise SpecError(f"{node.name}(): the annotations of a "
+                        f"@c_implemented function are C types: "
+                        f"{sorted(C_CTYPES)} or a string",
+                        lineno=getattr(annotation, 'lineno', node.lineno))
+    args = node.args.posonlyargs + node.args.args
+    return ([(a.arg, ctype(a.annotation, None)) for a in args],
+            ctype(node.returns, 'PyObject *'))
+
+
 @dc.dataclass
 class Shared:
     """``meth = module.Class.meth`` in a spec class."""
@@ -288,6 +327,9 @@ class Spec:
         # Specs imported with ``from pkg import module``: name -> path.
         self.imports: dict[str, str] = {}
         self._imported: dict[str, Spec] = {}
+        # Functions imported with ``from pkg.module import f``: name ->
+        # path of the spec.
+        self.imported_functions: dict[str, str] = {}
         for node in self.module.body:
             match node:
                 case ast.FunctionDef(name=name):
@@ -296,6 +338,9 @@ class Spec:
                     self._add_class(node)
                 case ast.ImportFrom():
                     self._add_import(node)
+                case ast.Import(names=names) if all(
+                        a.name in sys.stdlib_module_names for a in names):
+                    pass    # for the Python reference of a function
                 case ast.Import():
                     raise self.error(node, "import a spec as 'from "
                                      "stringlib.pyspec import transmogrify' "
@@ -308,6 +353,11 @@ class Spec:
                          lineno=getattr(node, 'lineno', None))
 
     def _add_function(self, name: str, node: ast.FunctionDef) -> None:
+        if is_c_implemented(node) and is_stub(node):
+            raise self.error(node, f"{name}: the body of a @c_implemented "
+                             "function is its Python reference; write ... "
+                             "without @c_implemented for a C function "
+                             "about which nothing is known")
         if name in self.functions or name in self.shared:
             hint = ''
             if any(decorator_name(d) in ('getter', 'setter')
@@ -322,27 +372,64 @@ class Spec:
 
     def _add_import(self, node: ast.ImportFrom) -> None:
         """``from stringlib.pyspec import transmogrify``: the spec
-        Objects/stringlib/pyspec/transmogrify.py (relative to the directory
-        of the C file of this spec)."""
+        Objects/stringlib/pyspec/transmogrify.py; ``from pyspec.abstract
+        import PyNumber_AsSsize_t``: that function of the spec
+        Objects/pyspec/abstract.py.  Paths are relative to the directory
+        of the C file of this spec, else to the source root (its
+        parent).  Imports of the standard library are for the Python
+        references of @c_implemented functions."""
         if node.module is None or node.module.startswith('libclinic') \
-                or node.module in ('typing', '__future__'):
+                or node.module in sys.stdlib_module_names:
             return
         base = os.path.dirname(os.path.dirname(os.path.abspath(
             self.filename)))
+        parts = node.module.split('.')
         for alias in node.names:
-            path = os.path.join(base, *node.module.split('.'),
-                                alias.name + '.py')
-            self.imports[alias.asname or alias.name] = path
-            if not os.path.exists(path):
+            name = alias.asname or alias.name
+            for root in (base, os.path.dirname(base)):
+                path = os.path.join(root, *parts, alias.name + '.py')
+                if os.path.exists(path):
+                    self.imports[name] = path
+                    break
+                path = os.path.join(root, *parts) + '.py'
+                if os.path.exists(path):
+                    self.imported_functions[name] = path
+                    break
+            else:
+                path = os.path.join(base, *parts, alias.name + '.py')
                 raise self.error(node, f"imported spec {path} not found")
 
     def imported(self, module: str) -> Spec:
         """The spec imported as *module*."""
         if module not in self._imported:
-            spec = Spec.load(self.imports[module])
-            assert spec is not None     # checked by _add_import()
-            self._imported[module] = spec
+            self._imported[module] = load_imported(self.imports[module])
         return self._imported[module]
+
+    def resolve(self, name: str) -> tuple[Spec, ast.FunctionDef] | None:
+        """(the spec defining it, its def) of the function *name* of this
+        spec or imported by it, or None."""
+        if name in self.functions:
+            return self, self.functions[name]
+        path = self.imported_functions.get(name)
+        if path is None:
+            return None
+        return load_imported(path).resolve(name)
+
+    def c_function(self, call: ast.Call
+                   ) -> tuple[Spec, ast.FunctionDef] | None:
+        """(spec, def) of the hand-written C function *call* calls (by
+        name): @c_implemented or a stub, of this spec or imported.  A
+        call copied from another spec (a fast path, see partial_eval.py)
+        names the spec it was written in (``pyspec_scope``)."""
+        func = call.func
+        if not isinstance(func, ast.Name):
+            return None
+        scope = getattr(call, 'pyspec_scope', self.filename)
+        spec = self if scope == self.filename else load_imported(scope)
+        found = spec.resolve(func.id)
+        if found is None or found[0].implemented(func.id):
+            return None
+        return found
 
     @classmethod
     def load(cls, path: str) -> Spec | None:
@@ -412,8 +499,9 @@ class Spec:
     # -- implemented functions ---------------------------------------------
 
     def implemented(self, name: str) -> bool:
+        """Whether spec function *name* has a body lowered to C."""
         node = self.functions.get(name)
-        if node is None or is_stub(node):
+        if node is None or is_stub(node) or is_c_implemented(node):
             return False
         # Slots and hand-written PyCFunctions are C: typeobj.py rejects a
         # body.
@@ -447,6 +535,10 @@ class Spec:
             case _:
                 return None
         return name if self.implemented(name) else None
+
+    def c_implemented_functions(self) -> list[str]:
+        return [name for name, node in self.functions.items()
+                if is_c_implemented(node)]
 
     def describe(self, name: str) -> SpecFunction:
         """The C signature of implemented spec function *name*."""
@@ -796,3 +888,19 @@ class Spec:
                                  "signature)")
             return [lines[0], '', *lines[i + 1:]], param_docs
         return lines[:1], param_docs
+
+
+_IMPORTED: dict[str, tuple[float, Spec]] = {}
+
+
+def load_imported(path: str) -> Spec:
+    """The spec at *path*, imported by another: read once while it is
+    unchanged."""
+    path = os.path.abspath(path)
+    mtime = os.stat(path).st_mtime
+    cached = _IMPORTED.get(path)
+    if cached is None or cached[0] != mtime:
+        spec = Spec.load(path)
+        assert spec is not None
+        cached = _IMPORTED[path] = (mtime, spec)
+    return cached[1]

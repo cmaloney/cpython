@@ -438,21 +438,21 @@ class SoundnessTest(unittest.TestCase):
     def analyzer(cls):
         test_tools.skip_if_missing('clinic')
         with test_tools.imports_under_tool('clinic'):
-            from libclinic.pyspec import call_table, frontend, partial_eval
+            from libclinic.pyspec import facts, frontend, partial_eval
         path = os.path.join(test_tools.basepath, 'Objects', 'pyspec',
                             'bytesobject.py')
         with open(path, encoding='utf-8') as f:
             spec = frontend.Spec(f.read(), path)
-        return spec, call_table, partial_eval, call_table.Analyzer(spec)
+        return spec, facts, partial_eval, facts.analyzer(spec)
 
     def derived_runs_python(self, expr, tp):
         """Whether the facts derivation says that call *expr*, with x of
-        exact type tp, may run Python code."""
-        _, call_table, _, analyzer = self.analyzer()
-        facts = call_table.Facts()
-        analyzer.call(ast.parse(expr, mode='eval').body, {'x': tp}, {},
-                      facts)
-        return facts.runs_python
+        exact type tp, may run Python code (the call is written in the
+        bytes spec, so it may call what the spec imports)."""
+        _, facts, _, analyzer = self.analyzer()
+        found = facts.Facts()
+        analyzer.call(ast.parse(expr, mode='eval').body, {'x': tp}, found)
+        return found.runs_python
 
     def forwarding_cases(self):
         import collections
@@ -475,8 +475,8 @@ class SoundnessTest(unittest.TestCase):
         proxy = types.MappingProxyType(Mapping())
         rev = reversed(Seq())
         return [
-            ('C.PyObject_LengthHint(x, 0)', proxy, operator.length_hint),
-            ('C.PyObject_LengthHint(x, 0)', rev, operator.length_hint),
+            ('PyObject_LengthHint(x, 0)', proxy, operator.length_hint),
+            ('PyObject_LengthHint(x, 0)', rev, operator.length_hint),
             ('iter(x)', proxy, iter),
         ]
 
@@ -487,11 +487,10 @@ class SoundnessTest(unittest.TestCase):
                 self.assertIn(self.derived_runs_python(expr, type(arg)),
                               (True, False))
 
-    # F3: "an exact static type never runs Python code" (the is_static_type
-    # rule of libclinic/pyspec/runtime.py) is false for types that forward
-    # to another object.  Masked because the call table only has entries
-    # for a few leaf types.  Fails until the rule is replaced.
-    @unittest.expectedFailure
+    # F3: "an exact static type never runs Python code" is false for types
+    # that forward to another object.  The facts come from the spec of a
+    # type or the audited table of libclinic/pyspec/builtin_types.py,
+    # which does not list them.
     def test_static_type_rule(self):
         import pickle
         for expr, arg, run in self.forwarding_cases():
@@ -502,13 +501,18 @@ class SoundnessTest(unittest.TestCase):
         # PickleBuffer forwards getbuffer to the object it wraps (a Python
         # __buffer__ cannot be observed today because of an upstream bug,
         # see review F7).
-        self.assertTrue(self.derived_runs_python('C._PyBytes_FromBuffer(x)',
+        self.assertTrue(self.derived_runs_python('_PyBytes_FromBuffer(x)',
                                                  pickle.PickleBuffer))
+        # The leaf types the table lists run none.
+        self.assertFalse(self.derived_runs_python('_PyBytes_FromBuffer(x)',
+                                                  bytearray))
+        self.assertFalse(self.derived_runs_python('PyObject_LengthHint(x, 0)',
+                                                  range))
 
     def test_codec_subclass_result(self):
         # F6: an encoding with a codec may return a bytes subclass, so
-        # neither bytes(str, encoding) nor its escape may claim an exact
-        # bytes result.
+        # neither bytes(str, encoding) nor PyUnicode_AsEncodedString() may
+        # claim an exact bytes result.
         class B(bytes):
             pass
 
@@ -525,15 +529,14 @@ class SoundnessTest(unittest.TestCase):
         self.assertIs(type(bytes('x', 'pyspec_facts_subclass')), B)
         self.assertIs(type('x'.encode('pyspec_facts_subclass')), B)
 
-        spec, call_table, partial_eval, analyzer = self.analyzer()
-        stub = analyzer.escape_facts('PyUnicode_AsEncodedString')
-        self.assertIsNotNone(stub)
-        self.assertIsNone(stub.result_type)
+        spec, _, partial_eval, analyzer = self.analyzer()
+        call = ast.parse('PyUnicode_AsEncodedString(x, "utf-8", NULL)',
+                         mode='eval').body
+        self.assertIsNone(analyzer.call_facts(call, {'x': str}).result_type)
         env = {'cls': partial_eval.Value(bytes), 'source': str,
                'encoding': partial_eval.NOTNULL, 'errors': partial_eval.NULL}
         residual = partial_eval.specialize(spec, 'bytes.__new__', env)
-        facts = analyzer.facts(residual, call_table._type_env(env),
-                               ['source', 'encoding'])
+        facts = analyzer.facts(residual, env, ['source', 'encoding'])
         self.assertIsNone(facts.result_type)
 
 

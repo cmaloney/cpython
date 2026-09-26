@@ -2527,10 +2527,10 @@ static void* _PyBytesWriter_ResizeAndUpdatePointer(PyBytesWriter *writer,
                                                    Py_ssize_t size,
                                                    void *data);
 
-/* A PyBytesWriter written one byte at a time: the C.bytes_appender
-   escape of Objects/pyspec/bytesobject.py.  The generated code keeps it
-   in a local variable and only passes its address to the always inlined
-   functions below, so that the compiler keeps the cursor in registers.
+/* A PyBytesWriter written one byte at a time: the bytes_appender of
+   Objects/pyspec/bytesobject.py.  The generated code keeps it in a local
+   variable and only passes its address to the always inlined functions
+   below, so that the compiler keeps the cursor in registers.
    The out of line helpers never take or return the whole struct: a
    struct of three pointers is passed through memory, which would force
    the cursor onto the stack in the loops; two pointers are returned in
@@ -2611,6 +2611,33 @@ bytes_appender_append_unchecked(bytes_appender *appender, unsigned char value)
 {
     assert(appender->str < appender->end);
     *appender->str++ = (char)value;
+}
+
+/* The bytes written, or NULL with an exception set.  The appender is
+   left empty: bytes_appender_discard() does nothing then. */
+static inline Py_ALWAYS_INLINE PyObject *
+bytes_appender_finish(bytes_appender *appender)
+{
+    PyBytesWriter *writer = appender->writer;
+    appender->writer = NULL;
+    return PyBytesWriter_FinishWithPointer(writer, appender->str);
+}
+
+/* Release the buffer of the appender, unless it is empty. */
+static inline Py_ALWAYS_INLINE void
+bytes_appender_discard(bytes_appender *appender)
+{
+    if (appender->writer != NULL) {
+        PyBytesWriter_Discard(appender->writer);
+    }
+}
+
+/* An exact bytes copy of b, a bytes (or bytes subclass) instance. */
+static inline PyObject *
+bytes_copy(PyObject *b)
+{
+    return PyBytes_FromStringAndSize(PyBytes_AS_STRING(b),
+                                     PyBytes_GET_SIZE(b));
 }
 
 static PyObject*

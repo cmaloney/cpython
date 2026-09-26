@@ -62,7 +62,7 @@ bytes___bytes___impl(PyBytesObject *self)
     if (PyBytes_CheckExact(self)) {
         return Py_NewRef(self);
     }
-    return PyBytes_FromStringAndSize(PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self));
+    return bytes_copy((PyObject *)self);
 }
 
 static PyObject *
@@ -150,34 +150,38 @@ bytes_from_iterator(PyObject *it, PyObject *x)
         item = PyIter_Next(it);
         if (item == NULL) {
             if (PyErr_Occurred()) {
-                PyBytesWriter_Discard(writer.writer);
+                bytes_appender_discard(&writer);
                 return NULL;
             }
             break;
         }
-        if ((PyLong_CheckExact(item) || PyBool_Check(item)) && _PyLong_IsCompact((PyLongObject *)item)) {
-            value = _PyLong_CompactValue((PyLongObject *)item);
+        if ((PyLong_CheckExact(item) || PyBool_Check(item)) && _PyLong_IsCompact((const PyLongObject *)item)) {
+            value = _PyLong_CompactValue((const PyLongObject *)item);
             Py_DECREF(item);
         }
         else {
             value = PyNumber_AsSsize_t(item, NULL);
             Py_DECREF(item);
             if (value == -1 && PyErr_Occurred()) {
-                PyBytesWriter_Discard(writer.writer);
+                bytes_appender_discard(&writer);
                 return NULL;
             }
         }
         if ((value < 0) || (value >= 256)) {
             PyErr_SetString(PyExc_ValueError, "bytes must be in range(0, 256)");
-            PyBytesWriter_Discard(writer.writer);
+            bytes_appender_discard(&writer);
             return NULL;
         }
-        if (bytes_appender_append(&writer, (unsigned char)value) < 0) {
-            PyBytesWriter_Discard(writer.writer);
+        if (bytes_appender_append(&writer, value) < 0) {
+            bytes_appender_discard(&writer);
             return NULL;
         }
     }
-    return PyBytesWriter_FinishWithPointer(writer.writer, writer.str);
+    {
+        PyObject *_return_value = bytes_appender_finish(&writer);
+        bytes_appender_discard(&writer);
+        return _return_value;
+    }
 }
 
 /* bytes_new() for exactly bytes with 0 positional argument(s):
@@ -193,7 +197,7 @@ bytes_new_nargs0(void)
  * if type(source) is bytes:
  *     return source
  * else:
- *     if (func := C.lookup_special(source, '__bytes__')) is not NULL:
+ *     if (func := _PyObject_LookupSpecial(source, '__bytes__')) is not NULL:
  *         result = func()
  *         if not isinstance(result, bytes):
  *             raise TypeError(f'{fqname(type(source))}.__bytes__() must return a bytes, not {fqname(type(result))}')
@@ -202,14 +206,14 @@ bytes_new_nargs0(void)
  *         raise TypeError('string argument without an encoding')
  *     if hasattr(type(source), '__index__'):
  *         try:
- *             size = C.PyNumber_AsSsize_t(source, OverflowError)
+ *             size = PyNumber_AsSsize_t(source, OverflowError)
  *         except TypeError:
  *             return PyBytes_FromObject(source)
  *         if size < 0:
  *             raise ValueError('negative count')
- *         return C._PyBytes_FromSize(size, True)
+ *         return _PyBytes_FromSize(size, True)
  *     if hasattr(type(source), '__buffer__'):
- *         return C._PyBytes_FromBuffer(source)
+ *         return _PyBytes_FromBuffer(source)
  *     if not isinstance(source, str):
  *         if type(source) is list:
  *             return bytes_from_iterator_list(source)
@@ -315,7 +319,7 @@ bytes_new_nargs1(PyObject *source)
 /* bytes_new() for exactly bytes with 2 positional argument(s):
  * if not isinstance(source, str):
  *     raise TypeError('encoding without a string argument')
- * return C.PyUnicode_AsEncodedString(source, encoding, errors)
+ * return PyUnicode_AsEncodedString(source, encoding, errors)
  */
 static PyObject *
 bytes_new_nargs2(PyObject *source, const char *encoding)
@@ -330,7 +334,7 @@ bytes_new_nargs2(PyObject *source, const char *encoding)
 /* bytes_new() for exactly bytes with 3 positional argument(s):
  * if not isinstance(source, str):
  *     raise TypeError('encoding without a string argument')
- * return C.PyUnicode_AsEncodedString(source, encoding, errors)
+ * return PyUnicode_AsEncodedString(source, encoding, errors)
  */
 static PyObject *
 bytes_new_nargs3(PyObject *source, const char *encoding, const char *errors)
@@ -354,7 +358,7 @@ bytes_new_nargs1_bytes(PyObject *source)
 
 /* bytes_new() for exactly bytes with 1 positional argument of exact type bytearray
  * (result is exactly bytes; runs no Python code):
- * return C._PyBytes_FromBuffer(source)
+ * return _PyBytes_FromBuffer(source)
  */
 static PyObject *
 bytes_new_nargs1_bytearray(PyObject *source)
@@ -363,36 +367,27 @@ bytes_new_nargs1_bytearray(PyObject *source)
 }
 
 /* bytes_new() for exactly bytes with 1 positional argument of exact type int
- * (result is exactly bytes; may run Python code):
- * if C.PyNumber_AsSsize_t.fast(source):
- *     size = C.PyNumber_AsSsize_t(source, OverflowError)
+ * (result is exactly bytes; runs no Python code):
+ * if _PyLong_IsCompact(source):
+ *     size = _PyLong_CompactValue(source)
  * else:
- *     try:
- *         size = C.PyNumber_AsSsize_t(source, OverflowError)
- *     except TypeError:
- *         return PyBytes_FromObject(source)
+ *     size = PyNumber_AsSsize_t(source, OverflowError)
  * if size < 0:
  *     raise ValueError('negative count')
- * return C._PyBytes_FromSize(size, True)
+ * return _PyBytes_FromSize(size, True)
  */
 static PyObject *
 bytes_new_nargs1_int(PyObject *source)
 {
     Py_ssize_t size;
 
-    if (_PyLong_IsCompact((PyLongObject *)source)) {
-        size = _PyLong_CompactValue((PyLongObject *)source);
+    if (_PyLong_IsCompact((const PyLongObject *)source)) {
+        size = _PyLong_CompactValue((const PyLongObject *)source);
     }
     else {
         size = PyNumber_AsSsize_t(source, PyExc_OverflowError);
         if (size == -1 && PyErr_Occurred()) {
-            if (PyErr_ExceptionMatches(PyExc_TypeError)) {
-                PyErr_Clear();
-                return PyBytes_FromObject(source);
-            }
-            else {
-                return NULL;
-            }
+            return NULL;
         }
     }
     if (size < 0) {
@@ -498,10 +493,10 @@ static const _PySpecCall bytes_new_spec_calls[] = {
         .result_type = &PyBytes_Type,
         .func.f1 = bytes_from_iterator_tuple,
     },
-    /* bytes(int): result is exactly bytes; may run Python code */
+    /* bytes(int): result is exactly bytes; runs no Python code */
     {
         .nargs = 1,
-        .flags = _PySpec_MAY_RUN_PYTHON,
+        .flags = 0,
         .result_const = -1,
         .result_alias = -1,
         .arg_type = &PyLong_Type,
@@ -664,7 +659,7 @@ const _PySpecCallTable _PySpec_bytes_calls = {
 };
 
 /* bytes_from_iterator() for it = iter(x), x of exact type list:
- * with C.critical_section(x):
+ * with critical_section(x):
  *     result = bytes_from_iterator_list_lock_held(x)
  * if result is not FALLBACK:
  *     return result
@@ -698,17 +693,20 @@ bytes_from_iterator_list(PyObject *x)
 }
 
 /* bytes_from_iterator() for it = iter(x), x of exact type tuple:
- * size = C.PyObject_LengthHint(x, 64)
- * writer = C.bytes_appender(size)
- * for item in x:
- *     if C.PyNumber_AsSsize_t.fast(item):
- *         value = C.PyNumber_AsSsize_t(item, NULL)
- *     else:
- *         value = C.PyNumber_AsSsize_t(item, NULL)
- *     if value < 0 or value >= 256:
- *         raise ValueError('bytes must be in range(0, 256)')
- *     C.bytes_appender_append(writer, value)
- * return C.bytes_appender_finish(writer)
+ * size = len(x)
+ * writer = bytes_appender_init(size)
+ * try:
+ *     for item in x:
+ *         if (type(item) is int or type(item) is bool) and _PyLong_IsCompact(item):
+ *             value = _PyLong_CompactValue(item)
+ *         else:
+ *             value = PyNumber_AsSsize_t(item, NULL)
+ *         if value < 0 or value >= 256:
+ *             raise ValueError('bytes must be in range(0, 256)')
+ *         bytes_appender_append_unchecked(writer, value)
+ *     return bytes_appender_finish(writer)
+ * finally:
+ *     bytes_appender_discard(writer)
  */
 static PyObject *
 bytes_from_iterator_tuple(PyObject *x)
@@ -724,38 +722,45 @@ bytes_from_iterator_tuple(PyObject *x)
     }
     for (Py_ssize_t item_index = 0, item_count = PyTuple_GET_SIZE(x); item_index < item_count; item_index++) {
         item = PyTuple_GET_ITEM(x, item_index);
-        if ((PyLong_CheckExact(item) || PyBool_Check(item)) && _PyLong_IsCompact((PyLongObject *)item)) {
-            value = _PyLong_CompactValue((PyLongObject *)item);
+        if ((PyLong_CheckExact(item) || PyBool_Check(item)) && _PyLong_IsCompact((const PyLongObject *)item)) {
+            value = _PyLong_CompactValue((const PyLongObject *)item);
         }
         else {
             value = PyNumber_AsSsize_t(item, NULL);
             if (value == -1 && PyErr_Occurred()) {
-                PyBytesWriter_Discard(writer.writer);
+                bytes_appender_discard(&writer);
                 return NULL;
             }
         }
         if ((value < 0) || (value >= 256)) {
             PyErr_SetString(PyExc_ValueError, "bytes must be in range(0, 256)");
-            PyBytesWriter_Discard(writer.writer);
+            bytes_appender_discard(&writer);
             return NULL;
         }
-        bytes_appender_append_unchecked(&writer, (unsigned char)value);
+        bytes_appender_append_unchecked(&writer, value);
     }
-    return PyBytesWriter_FinishWithPointer(writer.writer, writer.str);
+    {
+        PyObject *_return_value = bytes_appender_finish(&writer);
+        bytes_appender_discard(&writer);
+        return _return_value;
+    }
 }
 
 /* bytes_from_iterator() for it = iter(x), x of exact type list, the snapshot: called in the critical section of x, runs no Python code; FALLBACK (Py_None) when that could run Python code:
- * size = C.PyObject_LengthHint(x, 64)
- * writer = C.bytes_appender(size)
- * for item in x:
- *     if C.PyNumber_AsSsize_t.fast(item):
- *         value = C.PyNumber_AsSsize_t(item, NULL)
- *     else:
- *         return FALLBACK
- *     if value < 0 or value >= 256:
- *         raise ValueError('bytes must be in range(0, 256)')
- *     C.bytes_appender_append(writer, value)
- * return C.bytes_appender_finish(writer)
+ * size = len(x)
+ * writer = bytes_appender_init(size)
+ * try:
+ *     for item in x:
+ *         if (type(item) is int or type(item) is bool) and _PyLong_IsCompact(item):
+ *             value = _PyLong_CompactValue(item)
+ *         else:
+ *             return FALLBACK
+ *         if value < 0 or value >= 256:
+ *             raise ValueError('bytes must be in range(0, 256)')
+ *         bytes_appender_append_unchecked(writer, value)
+ *     return bytes_appender_finish(writer)
+ * finally:
+ *     bytes_appender_discard(writer)
  */
 static PyObject *
 bytes_from_iterator_list_lock_held(PyObject *x)
@@ -772,21 +777,25 @@ bytes_from_iterator_list_lock_held(PyObject *x)
     PyObject **item_items = _PyList_ITEMS(x);
     for (Py_ssize_t item_index = 0, item_count = PyList_GET_SIZE(x); item_index < item_count; item_index++) {
         item = item_items[item_index];
-        if ((PyLong_CheckExact(item) || PyBool_Check(item)) && _PyLong_IsCompact((PyLongObject *)item)) {
-            value = _PyLong_CompactValue((PyLongObject *)item);
+        if ((PyLong_CheckExact(item) || PyBool_Check(item)) && _PyLong_IsCompact((const PyLongObject *)item)) {
+            value = _PyLong_CompactValue((const PyLongObject *)item);
         }
         else {
-            PyBytesWriter_Discard(writer.writer);
+            bytes_appender_discard(&writer);
             return Py_None;
         }
         if ((value < 0) || (value >= 256)) {
             PyErr_SetString(PyExc_ValueError, "bytes must be in range(0, 256)");
-            PyBytesWriter_Discard(writer.writer);
+            bytes_appender_discard(&writer);
             return NULL;
         }
-        bytes_appender_append_unchecked(&writer, (unsigned char)value);
+        bytes_appender_append_unchecked(&writer, value);
     }
-    return PyBytesWriter_FinishWithPointer(writer.writer, writer.str);
+    {
+        PyObject *_return_value = bytes_appender_finish(&writer);
+        bytes_appender_discard(&writer);
+        return _return_value;
+    }
 }
 
 

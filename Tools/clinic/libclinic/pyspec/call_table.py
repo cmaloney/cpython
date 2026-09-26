@@ -53,24 +53,8 @@ uses the generic entry.
 import ast
 import builtins
 
-from . import emit, partial_eval, runtime
+from . import builtin_types, emit, facts, partial_eval
 from .partial_eval import NOTNULL, NULL, Value
-
-# Exact argument types tried for one-argument calls: the common ones.
-CANDIDATE_TYPES = [bytes, bytearray, memoryview, list, tuple, int, str,
-                   range]
-
-# C type objects of the candidates and of result types.
-TYPE_OBJECTS = {
-    'bytes': '&PyBytes_Type',
-    'bytearray': '&PyByteArray_Type',
-    'memoryview': '&PyMemoryView_Type',
-    'list': '&PyList_Type',
-    'tuple': '&PyTuple_Type',
-    'int': '&PyLong_Type',
-    'str': '&PyUnicode_Type',
-    'range': '&PyRange_Type',
-}
 
 # Keep a type-specialized variant when its residual has at most this
 # fraction of the AST nodes of the generic residual.
@@ -92,260 +76,11 @@ def residual_key(stmts):
     return ast.dump(ast.Module(stmts, [])) + repr(marks)
 
 
-class Facts:
-    """Facts about the results of a list of statements."""
-
-    def __init__(self):
-        # Per return: (exact type or None, index of the argument it
-        # returns or None).
-        self.returns = []
-        self.runs_python = False
-
-    @property
-    def always_raises(self):
-        return not self.returns
-
-    @property
-    def result_type(self):
-        types = {tp for tp, _ in self.returns}
-        if len(types) == 1 and None not in types:
-            return types.pop()
-        return None
-
-    @property
-    def alias(self):
-        aliases = {alias for _, alias in self.returns}
-        if len(aliases) == 1 and None not in aliases:
-            return aliases.pop()
-        return None
-
-    def key(self):
-        return (self.runs_python, self.always_raises, self.result_type,
-                self.alias)
-
-
-class Analyzer:
-    def __init__(self, spec):
-        self.spec = spec
-        self._function_facts = {}
-        self._stub_facts = {}
-        self.params = []
-
-    # -- whole functions ----------------------------------------------------
-
-    def function_facts(self, name, special=None):
-        """Facts of spec function *name* for any arguments, or of the
-        partial_eval.Specialization *special* for its facts."""
-        key = name if special is None else ('specialization', special.name)
-        if key not in self._function_facts:
-            # Recursion: assume the worst while analyzing.
-            unknown = Facts()
-            unknown.returns.append((None, None))
-            unknown.runs_python = True
-            self._function_facts[key] = unknown
-            if special is None:
-                facts = self.facts(self.spec.body(name), {})
-            else:
-                facts = self.facts(special.body, special.types())
-            self._function_facts[key] = facts
-        return self._function_facts[key]
-
-    def escape_facts(self, name):
-        """runtime.StubFacts of escape C.<name>, from the stub of that name
-        in the spec, or None."""
-        if name not in self._stub_facts:
-            node = self.spec.functions.get(name)
-            facts = None
-            if node is not None and not self.spec.implemented(name):
-                facts = runtime.stub_facts(node)
-            self._stub_facts[name] = facts
-        return self._stub_facts[name]
-
-    def facts(self, stmts, types, params=()):
-        """Facts of *stmts*; *types* maps names to their exact types;
-        *params* are the names of the call arguments, in order (a return
-        of one of them is an alias of that argument)."""
-        facts = Facts()
-        saved, self.params = self.params, list(params)
-        try:
-            self.block(stmts, dict(types), {}, facts)
-        finally:
-            self.params = saved
-        return facts
-
-    # -- statements ---------------------------------------------------------
-
-    def block(self, stmts, types, local_types, facts):
-        for stmt in stmts:
-            self.statement(stmt, types, local_types, facts)
-
-    def statement(self, stmt, types, local_types, facts):
-        match stmt:
-            case ast.Pass():
-                pass
-            case ast.If(test=test, body=body, orelse=orelse):
-                self.expression(test, types, local_types, facts)
-                true_types, false_types = self.refine(test)
-                self.block(body, types | true_types, dict(local_types), facts)
-                self.block(orelse, types | false_types, dict(local_types),
-                           facts)
-            case ast.Assign(targets=[ast.Name(name)], value=value):
-                local_types[name] = self.call(value, types, local_types,
-                                              facts)
-            case ast.Return(value=ast.Name(partial_eval.FALLBACK)):
-                # A snapshot restarts: the caller returns another result.
-                pass
-            case ast.Return(value=value):
-                facts.returns.append(self.value(value, types, local_types,
-                                                facts))
-            case ast.Raise():
-                # Building the message only formats type names.
-                pass
-            case ast.Try(body=body, handlers=handlers, orelse=orelse):
-                self.block(body, types, local_types, facts)
-                for handler in handlers:
-                    self.block(handler.body, types, dict(local_types), facts)
-                self.block(orelse, types, dict(local_types), facts)
-            case ast.With(body=body):
-                self.block(body, types, local_types, facts)
-            case ast.Expr(value=ast.Call() as call):
-                self.call(call, types, local_types, facts)
-            case ast.For(target=ast.Name(item), body=body):
-                # The partial evaluator marks the exact type of the
-                # iterated object when it knows it (see partial_eval.py).
-                iterable = getattr(stmt, 'pyspec_iterable', None)
-                if iterable not in partial_eval.ITERATION:
-                    # The __next__ of an iterator of unknown type.
-                    facts.runs_python = True
-                item_type = partial_eval.ITERATION.get(iterable)
-                body_types = types | ({item: item_type} if item_type else {})
-                self.block(body, body_types, dict(local_types), facts)
-            case _:
-                facts.runs_python = True
-                facts.returns.append((None, None))
-
-    def expression(self, node, types, local_types, facts):
-        """Account for the calls a condition makes: walrus operands and
-        escapes.  (A fast path guard, C.<escape>.fast(x), only reads x.)"""
-        for child in ast.walk(node):
-            if isinstance(child, ast.NamedExpr):
-                local_types[child.target.id] = self.call(
-                    child.value, types, local_types, facts)
-            elif (isinstance(child, ast.Call)
-                    and partial_eval._escape(child.func) is not None
-                    and not any(child is named.value
-                                for named in ast.walk(node)
-                                if isinstance(named, ast.NamedExpr))):
-                self.call(child, types, local_types, facts)
-
-    @staticmethod
-    def refine(test):
-        """Exact types proven by *test* in the (body, else) of an if."""
-        match test:
-            case ast.Compare(left=ast.Call(func=ast.Name('type'),
-                                           args=[ast.Name(name)]),
-                             ops=[ast.Is() | ast.IsNot() as op],
-                             comparators=[ast.Name(cls)]):
-                tp = getattr(builtins, cls, None)
-                if isinstance(tp, type):
-                    known = {name: tp}
-                    if isinstance(op, ast.IsNot):
-                        return {}, known
-                    return known, {}
-            case ast.BoolOp(op=ast.And(), values=values):
-                known = {}
-                for value in values:
-                    known |= Analyzer.refine(value)[0]
-                return known, {}
-        return {}, {}
-
-    # -- values -------------------------------------------------------------
-
-    def value(self, node, types, local_types, facts):
-        """(exact type or None, argument index or None) of a returned
-        value."""
-        alias = None
-        if isinstance(node, ast.Name) and node.id in self.params:
-            alias = self.params.index(node.id)
-        return self.value_type(node, types, local_types, facts), alias
-
-    def value_type(self, node, types, local_types, facts):
-        match node:
-            case ast.Constant(value=value):
-                return type(value)
-            case ast.Name(name) if name in types:
-                return types[name]
-            case ast.Name(name) if name in local_types:
-                return local_types[name]
-            case ast.Name():
-                return None
-            case ast.Call():
-                return self.call(node, types, local_types, facts)
-        facts.runs_python = True
-        return None
-
-    def call(self, node, types, local_types, facts):
-        """Exact result type of call *node*; record if it runs Python."""
-        if not isinstance(node, ast.Call):
-            facts.runs_python = True
-            return None
-        func = node.func
-        special = partial_eval.specialization_of(self.spec, node,
-                                                 facts=True)
-        if special is not None:
-            callee = self.function_facts(special.callee, special)
-            facts.runs_python |= callee.runs_python
-            return callee.result_type
-        if (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
-                and func.value.id == 'C'):
-            stub = self.escape_facts(func.attr)
-            if stub is None:
-                # No stub: assume the worst.
-                facts.runs_python = True
-                return None
-            # The fast path, exact type and unchecked lowerings run no
-            # Python code (runtime.Escape).
-            if not any(getattr(node, mark, None) for mark in (
-                    'pyspec_fast', 'pyspec_exact', 'pyspec_unchecked')):
-                arg_types = [self.arg_type(a, types) for a in node.args]
-                facts.runs_python |= stub.runs_python_for(arg_types)
-            return stub.result_type
-        callee_name = self.spec.call_target(func)
-        if callee_name is not None:
-            # An implemented spec function (a stub is a hand-written C
-            # function: assume the worst below).
-            callee = self.function_facts(callee_name)
-            facts.runs_python |= callee.runs_python
-            return callee.result_type
-        if isinstance(func, ast.Name):
-            if func.id == 'iter' and len(node.args) == 1:
-                tp = self.arg_type(node.args[0], types)
-                facts.runs_python |= (tp is None
-                                      or not runtime.is_static_type(tp))
-                return None
-        # e.g. calling the result of lookup_special, or cls(result)
-        facts.runs_python = True
-        return None
-
-    @staticmethod
-    def arg_type(node, types):
-        if isinstance(node, ast.Name):
-            value = types.get(node.id)
-            if isinstance(value, type):
-                return value
-        return None
-
-
-def _type_env(env):
-    return {name: value for name, value in env.items()
-            if isinstance(value, type)}
-
-
 def _const_name(residual):
     """Py_CONSTANT_* name if the residual is just ``return <constant>``."""
     match residual:
         case [ast.Return(value=ast.Constant() as value)]:
-            return emit.CONSTANT_OBJECTS.get(repr(value.value))
+            return builtin_types.constant(value.value)
     return None
 
 
@@ -379,9 +114,12 @@ def _describe(facts, const, arg_names=()):
     return '; '.join(parts)
 
 
+def _type_object(tp):
+    return builtin_types.TABLE[tp].type_object if tp is not None else 'NULL'
+
+
 def _entry(comment, nargs, facts, const, arg_type, func, arg_names=()):
-    result_type = (TYPE_OBJECTS[facts.result_type.__name__]
-                   if facts.result_type is not None else 'NULL')
+    result_type = _type_object(facts.result_type)
     alias = facts.alias if const is None and facts.alias is not None else -1
     return [
         f'    /* {comment}: {_describe(facts, const, arg_names)} */',
@@ -390,7 +128,7 @@ def _entry(comment, nargs, facts, const, arg_type, func, arg_names=()):
         f'        .flags = {_flags(facts)},',
         f'        .result_const = {const if const else -1},',
         f'        .result_alias = {alias},',
-        f'        .arg_type = {TYPE_OBJECTS[arg_type] if arg_type else "NULL"},',
+        f'        .arg_type = {_type_object(arg_type)},',
         f'        .result_type = {result_type},',
         f'        .func.{func[0]} = {func[1]},',
         '    },',
@@ -407,7 +145,7 @@ def generate(generator, descriptions):
     by_type = {}            # type name -> [__new__ description, methods]
     for description in descriptions:
         cls_name, _, meth = description.name.rpartition('.')
-        if not cls_name or cls_name not in TYPE_OBJECTS:
+        if builtin_types.by_name(cls_name) is None:
             continue
         new, methods = by_type.setdefault(cls_name, [None, []])
         if meth == '__new__':
@@ -426,7 +164,7 @@ def generate(generator, descriptions):
             out += lines
         out += [
             f'const _PySpecCallTable _PySpec_{type_name}_calls = {{',
-            f'    .type = {TYPE_OBJECTS[type_name]},',
+            f'    .type = {_type_object(builtin_types.by_name(type_name))},',
         ]
         if calls:
             out += [f'    .ncalls = Py_ARRAY_LENGTH({calls}),',
@@ -441,7 +179,7 @@ def generate(generator, descriptions):
 def generate_calls(generator, description):
     """The variants and the calls array of a clinic __new__."""
     spec = generator.spec
-    analyzer = Analyzer(spec)
+    analyzer = facts.analyzer(spec)
     cls, *params = description.parameters
     required = sum(not p.optional for p in params)
     type_value = getattr(builtins, description.new_type)
@@ -463,14 +201,13 @@ def generate_calls(generator, description):
         generic_size = node_count(generic)
         if nargs == 1:
             functions = {}      # ast dump of the residual -> C name
-            for tp in CANDIDATE_TYPES:
+            for tp in builtin_types.CANDIDATES:
                 typed_env = env | {given[0].name: tp}
                 residual = partial_eval.specialize(spec, name, typed_env)
                 if node_count(residual) > KEEP_RATIO * generic_size:
                     continue
                 key = residual_key(residual)
-                facts = analyzer.facts(residual, _type_env(typed_env),
-                                       arg_names)
+                found = analyzer.facts(residual, typed_env, arg_names)
                 const = _const_name(residual)
                 special = _just_calls(spec, residual, given)
                 if special is not None:
@@ -481,12 +218,11 @@ def generate_calls(generator, description):
                     functions[key] = c_name = (
                         f'{basename}_nargs1_{tp.__name__}')
                     out += _variant(generator, description, c_name,
-                                    residual, given, missing, tp, facts,
+                                    residual, given, missing, tp, found,
                                     const)
-                entries.append((nargs, tp.__name__, functions[key], facts,
-                                const))
-        facts = analyzer.facts(generic, _type_env(env), arg_names)
-        entries.append((nargs, None, f'{basename}_nargs{nargs}', facts,
+                entries.append((nargs, tp, functions[key], found, const))
+        found = analyzer.facts(generic, env, arg_names)
+        entries.append((nargs, None, f'{basename}_nargs{nargs}', found,
                         _const_name(generic)))
 
     table = f'{basename}_spec_calls'
@@ -498,10 +234,10 @@ def generate_calls(generator, description):
         ' * (Tools/clinic/libclinic/pyspec/call_table.py). */',
         f'static const _PySpecCall {table}[] = {{',
     ]
-    for nargs, arg_type, function, facts, const in entries:
-        comment = (f'{description.new_type}('
-                   f'{"" if nargs == 0 else (arg_type or "x")})')
-        out += _entry(comment, nargs, facts, const, arg_type,
+    for nargs, arg_type, function, found, const in entries:
+        shown = '' if nargs == 0 else getattr(arg_type, '__name__', 'x')
+        comment = f'{description.new_type}({shown})'
+        out += _entry(comment, nargs, found, const, arg_type,
                       (f'f{nargs}', function),
                       [p.name for p in params[:nargs]])
     out += ['};', '']
@@ -519,7 +255,7 @@ def generate_methods(generator, type_name, descriptions):
     is the type itself).  Only calls with all parameters, all objects, are
     described."""
     spec = generator.spec
-    analyzer = Analyzer(spec)
+    analyzer = facts.analyzer(spec)
     type_value = getattr(builtins, type_name)
     entries = []
     for description in descriptions:
@@ -541,7 +277,7 @@ def generate_methods(generator, type_name, descriptions):
             # to).
             typed_base = env | {first.name: Value(type_value)}
             args = params
-            candidates = CANDIDATE_TYPES
+            candidates = builtin_types.CANDIDATES
             on = f', on exactly {type_name}'
         else:
             typed_base = env
@@ -553,15 +289,14 @@ def generate_methods(generator, type_name, descriptions):
         arg_names = [a.name for a in args]
         meth = f'(PyCFunction){generator.c_basename(name)}'
         generic = partial_eval.specialize(spec, name, env)
-        generic_facts = analyzer.facts(generic, _type_env(env), arg_names)
+        generic_facts = analyzer.facts(generic, env, arg_names)
         for tp in candidates:
             typed_env = typed_base | {args[0].name: tp}
             residual = partial_eval.specialize(spec, name, typed_env)
-            facts = analyzer.facts(residual, _type_env(typed_env),
-                                   arg_names)
-            if facts.key() != generic_facts.key():
-                entries.append((name, len(args), tp.__name__, facts,
-                                arg_names, meth, on))
+            found = analyzer.facts(residual, typed_env, arg_names)
+            if found.key() != generic_facts.key():
+                entries.append((name, len(args), tp, found, arg_names, meth,
+                                on))
         entries.append((name, len(args), None, generic_facts, arg_names,
                         meth, ''))
 
@@ -573,10 +308,10 @@ def generate_methods(generator, type_name, descriptions):
         'Include/internal/pycore_pyspec.h). */',
         f'static const _PySpecCall {table}[] = {{',
     ]
-    for name, nargs, arg_type, facts, arg_names, meth, on in entries:
-        shown = [arg_type or 'x'] + ['_'] * (nargs - 1)
+    for name, nargs, arg_type, found, arg_names, meth, on in entries:
+        shown = [getattr(arg_type, '__name__', 'x')] + ['_'] * (nargs - 1)
         comment = f'{name}({", ".join(shown)}){on}'
-        out += _entry(comment, nargs, facts, None, arg_type,
+        out += _entry(comment, nargs, found, None, arg_type,
                       ('meth', meth), arg_names)
     out += ['};', '']
     return out, table

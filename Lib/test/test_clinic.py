@@ -40,7 +40,8 @@ with test_tools.imports_under_tool('clinic'):
     from libclinic.dsl_parser import DSLParser
     from libclinic.cli import parse_file, Clinic
     from libclinic.pyspec import runtime as pyspec_runtime
-    from libclinic.pyspec import (call_table as pyspec_call_table,
+    from libclinic.pyspec import (builtin_types as pyspec_builtin_types,
+                                  facts as pyspec_facts,
                                   frontend as pyspec_frontend,
                                   partial_eval as pyspec_partial_eval,
                                   slots as pyspec_slots,
@@ -5698,15 +5699,24 @@ class PyspecTest(PyspecTestBase):
                     "Doc."
                     if type(self) is bytes:
                         return self
-                    return C.bytes_copy(self)
+                    return bytes_copy(self)
 
                 @classmethod
                 def fromhex(cls, string: object, /):
                     "Doc."
-                    result = C.bytes_from_hex(string)
+                    result = _PyBytes_FromHex(string, False)
                     if cls is not bytes:
                         return cls(result)
                     return result
+
+            @c_implemented
+            def bytes_copy(b: object):
+                return exact(bytes, bytes(b))
+
+            @c_implemented
+            def _PyBytes_FromHex(string: object, use_bytearray: int):
+                calls(string, "__buffer__")
+                return exact(bytes, bytes.fromhex(string))
         """
         generated = self.generate(spec, block)
         self.assertIn("static PyObject *\n"
@@ -5729,6 +5739,70 @@ class PyspecTest(PyspecTestBase):
                       "PyObject *string)\n{\n", output)
         self.assertIn("PyObject_CallOneArg((PyObject *)cls, result);",
                       output)
+        # The C functions are called by name, with C arguments.
+        self.assertIn("return bytes_copy((PyObject *)self);", output)
+        self.assertIn("result = _PyBytes_FromHex(string, 0);\n"
+                      "    if (result == NULL) {", output)
+
+    def test_c_implemented(self):
+        # A @c_implemented function: C by hand, never generated.  Its
+        # annotations are C types; the error check of a call comes from
+        # what its Python reference can do.
+        spec = dedent("""
+            class bytes:
+                def __new__(cls, a: object, /):
+                    if a is NULL:
+                        raise PyErr_BadInternalCall()
+                    n = size_of(a)
+                    if at_most(n, 3):
+                        return pair(a, "__name__")
+                    return a
+
+            @c_implemented
+            def PyErr_BadInternalCall() -> None:
+                raise SystemError("bad argument")
+
+            @c_implemented
+            def size_of(x: object) -> Py_ssize_t:
+                calls(x, "__len__")
+                return len(x)
+
+            @c_implemented
+            def at_most(n: Py_ssize_t, m: 'long') -> int:
+                return n <= m
+
+            @c_implemented
+            def pair(x: object, name: object):
+                if x is NULL:
+                    return NULL
+                return unknown((x, name))
+        """)
+        self.generate(spec, self.BLOCK)
+        with open(self.output_path, encoding='utf-8') as f:
+            output = f.read()
+        for name in ('size_of', 'at_most', 'pair', 'PyErr_BadInternalCall'):
+            self.assertNotIn(f'\n{name}(', output)
+        self.assertIn("n = size_of(a);\n"
+                      "    if (n == -1 && PyErr_Occurred()) {", output)
+        # Cannot fail: no check.
+        self.assertIn("if (at_most(n, 3)) {", output)
+        # pair() returns NULL (absent) only for NULL, and a is not NULL
+        # here: the result is a new reference or NULL with an exception.
+        self.assertIn("return pair(a, &_Py_ID(__name__));", output)
+        # The facts of the call table come from the references too.
+        self.assertIn("/* bytes(x): result type not known exactly; may run "
+                      "Python code */", output)
+        self.check_error_c_implemented()
+
+    def check_error_c_implemented(self):
+        spec = dedent(self.SPEC) + dedent("""
+            @c_implemented
+            def f(x: object):
+                ...
+        """)
+        self.expect_failure(spec, self.BLOCK, "f: the body of a "
+                            "@c_implemented function is its Python "
+                            "reference")
 
     def test_missing_block(self):
         # Every clinic function of a spec class declared in the C file has
@@ -5818,7 +5892,7 @@ class PyspecTest(PyspecTestBase):
     def test_bad_annotation(self):
         spec = self.SPEC.replace("a: object", "a: int")
         self.expect_failure(spec, self.BLOCK, "parameter 'a' needs an "
-                            "annotation from ['cstr', 'object', 'str']")
+                            "annotation from ['object', 'str']")
 
     def test_bad_default(self):
         spec = self.SPEC.replace("c: str = NULL", "c: object = None")
@@ -6541,16 +6615,16 @@ class PyspecTypeTest(PyspecTestBase):
             class bytes:
                 @cname("bytes_r")
                 def __repr__(self, /): ...
-        """, "bytes.__repr__: a slot takes only @c_name, not "
-             "@cname('bytes_r')")
+        """, "bytes.__repr__: a slot takes only @c_implemented and "
+             "@c_name, not @cname('bytes_r')")
         self.check_error("""
             @static_type()
             class bytes:
                 @permit_long_summary
                 @c_name(METH_NOARGS="f")
                 def meth(self, /): ...
-        """, "bytes.meth: a PyCFunction takes only @c_name and "
-             "@classmethod, not @permit_long_summary")
+        """, "bytes.meth: a PyCFunction takes only @c_implemented and "
+             "@c_name and @classmethod, not @permit_long_summary")
         self.check_error("""
             @static_type()
             class bytes:
@@ -6932,9 +7006,8 @@ class BytesSpecFactsTest(TestCase):
 
     def facts(self, name, env, args):
         residual = pyspec_partial_eval.specialize(self.spec, name, env)
-        types = {k: v for k, v in env.items() if isinstance(v, type)}
-        analyzer = pyspec_call_table.Analyzer(self.spec)
-        return residual, analyzer.facts(residual, types, args)
+        analyzer = pyspec_facts.analyzer(self.spec)
+        return residual, analyzer.facts(residual, env, args)
 
     def new_facts(self, arg_type):
         pe = pyspec_partial_eval
@@ -6969,7 +7042,7 @@ class BytesSpecFactsTest(TestCase):
                 self.assertIsNone(facts.alias)
                 self.assertIsNone(facts.result_type)
                 self.assertTrue(facts.runs_python)
-                self.assertIn('lookup_special',
+                self.assertIn('_PyObject_LookupSpecial',
                               ast.unparse(ast.Module(residual, [])))
         # What the interpreter does.
         b = BYTES_CASES.BytesOverridingDunderBytes(b'x')
@@ -6988,7 +7061,7 @@ class BytesSpecFactsTest(TestCase):
         self.assertEqual(ast.unparse(ast.Module(first.body, [])),
                          'return source')
         code = ast.unparse(ast.Module(first.orelse, []))
-        self.assertIn('lookup_special', code)
+        self.assertIn('_PyObject_LookupSpecial', code)
         self.assertNotIn('is bytes', code)
 
     def test_bytes_of_other_types(self):
@@ -7000,6 +7073,23 @@ class BytesSpecFactsTest(TestCase):
                 self.assertFalse(facts.runs_python)
         _, facts = self.new_facts(list)
         self.assertIsNone(facts.alias)
+        self.assertTrue(facts.runs_python)
+
+    def test_bytes_of_int(self):
+        # PyNumber_AsSsize_t() of an exact int runs no Python code and can
+        # only raise OverflowError (its Python reference in
+        # Objects/pyspec/abstract.py): the except TypeError of
+        # bytes.__new__ is dead, and bytes(16) runs no Python code.  A
+        # compact int is read inline (the fast path of the reference).
+        residual, facts = self.new_facts(int)
+        self.assertFalse(facts.runs_python)
+        self.assertIs(facts.result_type, bytes)
+        code = ast.unparse(ast.Module(residual, []))
+        self.assertNotIn('except', code)
+        self.assertIn('if _PyLong_IsCompact(source):\n'
+                      '    size = _PyLong_CompactValue(source)', code)
+        # A subclass of int is not an exact int.
+        _, facts = self.new_facts(BYTES_CASES.IntSubclass)
         self.assertTrue(facts.runs_python)
 
     def test_bytes_of_iterables(self):
@@ -7033,7 +7123,7 @@ class BytesSpecFactsTest(TestCase):
                 self.assertEqual(special.params, ['x'])
                 if arg_type is list:
                     code = ast.unparse(ast.Module(special.body, []))
-                    self.assertIn('with C.critical_section(x):', code)
+                    self.assertIn('with critical_section(x):', code)
                     self.assertIn('return bytes_from_iterator(it, x)', code)
                     held = pe.specialization(self.spec, f'{name}_lock_held')
                     self.assertEqual(held.lock, 'x')
@@ -7047,14 +7137,16 @@ class BytesSpecFactsTest(TestCase):
                 self.assertEqual(ast.unparse(loop.iter), 'x')
                 code = ast.unparse(ast.Module(body, []))
                 self.assertNotIn('iter(', code)
-                self.assertIn('if C.PyNumber_AsSsize_t.fast(item):', code)
+                self.assertIn('size = len(x)', code)
+                self.assertIn('if (type(item) is int or type(item) is bool) '
+                              'and _PyLong_IsCompact(item):', code)
                 self.assertEqual('return FALLBACK' in code, arg_type is list)
-                # The buffer has room for every item.
-                append, = [node for node in ast.walk(loop)
-                           if isinstance(node, ast.Call)
-                           and ast.unparse(node.func)
-                           == 'C.bytes_appender_append']
-                self.assertTrue(append.pyspec_unchecked)
+                # The buffer has room for every item: the fast path of
+                # bytes_appender_append() is taken.
+                calls = [ast.unparse(node.func) for node in ast.walk(loop)
+                         if isinstance(node, ast.Call)]
+                self.assertIn('bytes_appender_append_unchecked', calls)
+                self.assertNotIn('bytes_appender_append', calls)
         # Any other iterable: the iterator protocol.
         # A range is not iterated by index: the generic function is
         # called, with the facts of its residual for a range.
@@ -7154,13 +7246,13 @@ class BytesSpecFactsTest(TestCase):
                     self.assertTrue(comment.endswith(', on exactly bytes'))
 
     def test_builtin_type_facts(self):
-        # The evaluator's facts about builtin types (partial_eval.py
-        # BUILTIN_TYPES, and the spec class for bytes) agree with the
-        # builtins of the Python being built.
-        pe = pyspec_partial_eval
-        facts = pe.TypeFacts(self.spec)
-        for tp in [*pe.BUILTIN_TYPES, bytes]:
-            for name in pe.SPECIALS:
+        # The facts about builtin types (libclinic/pyspec/builtin_types.py,
+        # and the spec class for bytes) agree with the builtins of the
+        # Python being built.
+        bt = pyspec_builtin_types
+        facts = bt.TypeFacts(self.spec)
+        for tp in [*bt.TABLE, bytes]:
+            for name in bt.SPECIALS:
                 with self.subTest(tp=tp, name=name):
                     self.assertEqual(facts.defines(tp, name),
                                      name in tp.__dict__)
@@ -7169,7 +7261,7 @@ class BytesSpecFactsTest(TestCase):
                 self.assertEqual(facts.mro(tp), list(tp.__mro__))
         # Types it knows nothing about: nothing is decided.
         self.assertIsNone(facts.has(BYTES_CASES.BytesSubclass, '__bytes__'))
-        self.assertIsNone(facts.has(bytes, '__len__'))
+        self.assertIsNone(facts.has(bytes, '__add__'))
 
     def test_independent_of_host(self):
         # The generated code does not depend on the builtins of the Python
@@ -7192,40 +7284,29 @@ class BytesSpecFactsTest(TestCase):
         self.assertEqual([change.filename for change in writer.changes], [])
 
     def test_iterator_next_facts(self):
-        # bytes_iterator.__next__ -> New[int]: an exact int, and (no
-        # RunsPython) never runs Python code.
-        facts = pyspec_runtime.stub_facts(
-            self.spec.functions['bytes_iterator.__next__'])
+        # bytes_iterator.__next__ returns exact(int): an exact int, and it
+        # states no effect: it runs no Python code.
+        facts = pyspec_facts.analyzer(self.spec).reference_facts(
+            'bytes_iterator.__next__', {})
         self.assertIs(facts.result_type, int)
         self.assertIs(facts.runs_python, False)
         for value in iter(bytes(range(256))):
             self.assertIs(type(value), int)
 
-    def test_escape_stubs(self):
-        # Every escape a body calls has a stub in the spec giving its
-        # facts, and its error convention agrees with the one runtime.py
-        # lowers.
-        escapes = set()
-        for name in self.spec.implemented_functions():
-            for node in ast.walk(self.spec.functions[name]):
-                if (isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Attribute)
-                        and isinstance(node.func.value, ast.Name)
-                        and node.func.value.id == 'C'):
-                    escapes.add(node.func.attr)
-        self.assertIn('bytes_copy', escapes)
-        for name in sorted(escapes):
-            with self.subTest(escape=name):
-                escape = getattr(pyspec_runtime.C, name)
-                if not isinstance(escape, pyspec_runtime.Escape):
-                    continue        # raise escapes
-                self.assertIn(name, self.spec.functions)
-                stub = pyspec_runtime.stub_facts(self.spec.functions[name])
-                error = {pyspec_runtime.ERR_NULL: 'NULL',
-                         pyspec_runtime.ERR_NULL_OR_MISSING: 'NULL',
-                         pyspec_runtime.ERR_MINUS1: -1,
-                         pyspec_runtime.ERR_NEGATIVE: -1}[escape.error]
-                self.assertIn(error, stub.errors)
+    def test_unknown_is_worst(self):
+        # A C function whose body is ... may do anything: a call of it may
+        # run Python code, raise anything and return NULL.
+        spec = pyspec_frontend.Spec(dedent("""
+            def f(x: object):
+                return g(x)
+
+            def g(x: object):
+                ...
+        """))
+        facts = pyspec_facts.analyzer(spec).function_facts('f')
+        self.assertTrue(facts.runs_python)
+        self.assertIn(pyspec_facts.ANY, facts.raises)
+        self.assertIsNone(facts.result_type)
 
 
 class VectorcallFunctionalTest(unittest.TestCase):
