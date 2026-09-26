@@ -18,7 +18,7 @@ hand-written PyCFunctions, and ``center = transmogrify.B.center`` shares
 a method with bytearray (see libclinic/pyspec/frontend.py).
 
 Lib/test/test_clinic.py runs this file as Python and compares it with the
-interpreter's bytes().
+interpreter on the cases of bytesobject_cases.py.
 """
 
 from typing import final
