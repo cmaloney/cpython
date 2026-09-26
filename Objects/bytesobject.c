@@ -2588,12 +2588,6 @@ bytes_appender_append(bytes_appender *appender, unsigned char value)
     return 0;
 }
 
-/* bytes_new_impl(), the bytes_new_nargsN() functions called by
-   bytes_vectorcall(), PyBytes_FromObject() and bytes_from_iterator()
-   (with its list and tuple variants) are generated from
-   Objects/pyspec/bytesobject.py by Argument Clinic. */
-#include "clinic/bytesobject_pyspec.c.h"
-
 static PyObject*
 _PyBytes_FromBuffer(PyObject *x)
 {
@@ -3549,6 +3543,9 @@ _PyBytesWriter_ResizeToAllocated(PyBytesWriter *writer)
 }
 
 
-/* PyBytes_Type and PyBytesIter_Type, with their method and slot tables,
-   are generated from Objects/pyspec/bytesobject.py by Argument Clinic. */
-#include "clinic/bytesobject_types.c.h"
+/* Generated from Objects/pyspec/bytesobject.py by Argument Clinic:
+   bytes_new_impl(), the bytes_new_nargsN() functions called by
+   bytes_vectorcall(), PyBytes_FromObject() and bytes_from_iterator()
+   (with its list and tuple variants), then PyBytes_Type and
+   PyBytesIter_Type with their method and slot tables. */
+#include "clinic/bytesobject_pyspec.c.h"

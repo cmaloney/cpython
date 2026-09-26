@@ -1303,3 +1303,224 @@ const _PySpecCallTable _PySpec_bytes_calls = {
     .methods = bytes_spec_methods,
 };
 
+
+/* bytes */
+
+PyDoc_STRVAR(bytes__doc__,
+"bytes(iterable_of_ints) -> bytes\n"
+"bytes(string, encoding[, errors]) -> bytes\n"
+"bytes(bytes_or_buffer) -> immutable copy of bytes_or_buffer\n"
+"bytes(int) -> bytes object of size given by the parameter initialized with null bytes\n"
+"bytes() -> empty bytes object\n"
+"\n"
+"Construct an immutable array of bytes from:\n"
+"  - an iterable yielding integers in range(256)\n"
+"  - a text string encoded using the specified encoding\n"
+"  - any object implementing the buffer API.\n"
+"  - an integer");
+
+PyDoc_STRVAR(bytes_capitalize__doc__,
+"B.capitalize() -> copy of B\n"
+"\n"
+"Return a copy of B with only its first character capitalized (ASCII)\n"
+"and the rest lower-cased.");
+
+PyDoc_STRVAR(bytes_isalnum__doc__,
+"B.isalnum() -> bool\n"
+"\n"
+"Return True if all characters in B are alphanumeric\n"
+"and there is at least one character in B, False otherwise.");
+
+PyDoc_STRVAR(bytes_isalpha__doc__,
+"B.isalpha() -> bool\n"
+"\n"
+"Return True if all characters in B are alphabetic\n"
+"and there is at least one character in B, False otherwise.");
+
+PyDoc_STRVAR(bytes_isascii__doc__,
+"B.isascii() -> bool\n"
+"\n"
+"Return True if B is empty or all characters in B are ASCII,\n"
+"False otherwise.");
+
+PyDoc_STRVAR(bytes_isdigit__doc__,
+"B.isdigit() -> bool\n"
+"\n"
+"Return True if all characters in B are digits\n"
+"and there is at least one character in B, False otherwise.");
+
+PyDoc_STRVAR(bytes_islower__doc__,
+"B.islower() -> bool\n"
+"\n"
+"Return True if all cased characters in B are lowercase and there is\n"
+"at least one cased character in B, False otherwise.");
+
+PyDoc_STRVAR(bytes_isspace__doc__,
+"B.isspace() -> bool\n"
+"\n"
+"Return True if all characters in B are whitespace\n"
+"and there is at least one character in B, False otherwise.");
+
+PyDoc_STRVAR(bytes_istitle__doc__,
+"B.istitle() -> bool\n"
+"\n"
+"Return True if B is a titlecased string and there is at least one\n"
+"character in B, i.e. uppercase characters may only follow uncased\n"
+"characters and lowercase characters only cased ones. Return False\n"
+"otherwise.");
+
+PyDoc_STRVAR(bytes_isupper__doc__,
+"B.isupper() -> bool\n"
+"\n"
+"Return True if all cased characters in B are uppercase and there is\n"
+"at least one cased character in B, False otherwise.");
+
+PyDoc_STRVAR(bytes_lower__doc__,
+"B.lower() -> copy of B\n"
+"\n"
+"Return a copy of B with all ASCII characters converted to lowercase.");
+
+PyDoc_STRVAR(bytes_swapcase__doc__,
+"B.swapcase() -> copy of B\n"
+"\n"
+"Return a copy of B with uppercase ASCII characters converted\n"
+"to lowercase ASCII and vice versa.");
+
+PyDoc_STRVAR(bytes_title__doc__,
+"B.title() -> copy of B\n"
+"\n"
+"Return a titlecased version of B, i.e. ASCII words start with\n"
+"uppercase characters, all remaining cased characters have lowercase.");
+
+PyDoc_STRVAR(bytes_upper__doc__,
+"B.upper() -> copy of B\n"
+"\n"
+"Return a copy of B with all ASCII characters converted to uppercase.");
+
+static PyMethodDef bytes_methods[] = {
+    {"__getnewargs__", bytes_getnewargs, METH_NOARGS, NULL},
+    BYTES___BYTES___METHODDEF
+    {"capitalize", stringlib_capitalize, METH_NOARGS, bytes_capitalize__doc__},
+    STRINGLIB_CENTER_METHODDEF
+    BYTES_COUNT_METHODDEF
+    BYTES_DECODE_METHODDEF
+    BYTES_ENDSWITH_METHODDEF
+    STRINGLIB_EXPANDTABS_METHODDEF
+    BYTES_FIND_METHODDEF
+    BYTES_FROMHEX_METHODDEF
+    BYTES_HEX_METHODDEF
+    BYTES_INDEX_METHODDEF
+    {"isalnum", stringlib_isalnum, METH_NOARGS, bytes_isalnum__doc__},
+    {"isalpha", stringlib_isalpha, METH_NOARGS, bytes_isalpha__doc__},
+    {"isascii", stringlib_isascii, METH_NOARGS, bytes_isascii__doc__},
+    {"isdigit", stringlib_isdigit, METH_NOARGS, bytes_isdigit__doc__},
+    {"islower", stringlib_islower, METH_NOARGS, bytes_islower__doc__},
+    {"isspace", stringlib_isspace, METH_NOARGS, bytes_isspace__doc__},
+    {"istitle", stringlib_istitle, METH_NOARGS, bytes_istitle__doc__},
+    {"isupper", stringlib_isupper, METH_NOARGS, bytes_isupper__doc__},
+    BYTES_JOIN_METHODDEF
+    STRINGLIB_LJUST_METHODDEF
+    {"lower", stringlib_lower, METH_NOARGS, bytes_lower__doc__},
+    BYTES_LSTRIP_METHODDEF
+    BYTES_MAKETRANS_METHODDEF
+    BYTES_PARTITION_METHODDEF
+    BYTES_REPLACE_METHODDEF
+    BYTES_REMOVEPREFIX_METHODDEF
+    BYTES_REMOVESUFFIX_METHODDEF
+    BYTES_RFIND_METHODDEF
+    BYTES_RINDEX_METHODDEF
+    STRINGLIB_RJUST_METHODDEF
+    BYTES_RPARTITION_METHODDEF
+    BYTES_RSPLIT_METHODDEF
+    BYTES_RSTRIP_METHODDEF
+    BYTES_SPLIT_METHODDEF
+    BYTES_SPLITLINES_METHODDEF
+    BYTES_STARTSWITH_METHODDEF
+    BYTES_STRIP_METHODDEF
+    {"swapcase", stringlib_swapcase, METH_NOARGS, bytes_swapcase__doc__},
+    {"title", stringlib_title, METH_NOARGS, bytes_title__doc__},
+    BYTES_TRANSLATE_METHODDEF
+    {"upper", stringlib_upper, METH_NOARGS, bytes_upper__doc__},
+    STRINGLIB_ZFILL_METHODDEF
+    {NULL, NULL}  /* sentinel */
+};
+
+static PyNumberMethods bytes_as_number = {
+    .nb_remainder = bytes_mod,
+};
+
+static PySequenceMethods bytes_as_sequence = {
+    .sq_length = bytes_length,
+    .sq_concat = _PyBytes_Concat,
+    .sq_repeat = _PyBytes_Repeat,
+    .sq_item = bytes_item,
+    .sq_contains = bytes_contains,
+};
+
+static PyMappingMethods bytes_as_mapping = {
+    .mp_length = bytes_length,
+    .mp_subscript = bytes_subscript,
+};
+
+static PyBufferProcs bytes_as_buffer = {
+    .bf_getbuffer = bytes_buffer_getbuffer,
+};
+
+PyTypeObject PyBytes_Type = {
+    PyVarObject_HEAD_INIT(&PyType_Type, 0)
+    .tp_name = "bytes",
+    .tp_basicsize = PyBytesObject_SIZE,
+    .tp_itemsize = sizeof(char),
+    .tp_dealloc = bytes_dealloc,
+    .tp_repr = bytes_repr,
+    .tp_as_number = &bytes_as_number,
+    .tp_as_sequence = &bytes_as_sequence,
+    .tp_as_mapping = &bytes_as_mapping,
+    .tp_hash = bytes_hash,
+    .tp_str = bytes_str,
+    .tp_as_buffer = &bytes_as_buffer,
+    .tp_flags = Py_TPFLAGS_DEFAULT |
+        Py_TPFLAGS_BASETYPE |
+        Py_TPFLAGS_BYTES_SUBCLASS | _Py_TPFLAGS_MATCH_SELF,
+    .tp_doc = bytes__doc__,
+    .tp_richcompare = bytes_richcompare,
+    .tp_iter = bytes_iter,
+    .tp_methods = bytes_methods,
+    .tp_alloc = bytes_alloc,
+    .tp_new = bytes_new,
+    .tp_free = PyObject_Free,
+    .tp_version_tag = _Py_TYPE_VERSION_BYTES,
+    .tp_vectorcall = bytes_vectorcall,
+    ._tp_iteritem = bytes_iteritem,
+};
+
+/* bytes_iterator */
+
+PyDoc_STRVAR(bytes_iterator___length_hint____doc__,
+"Private method returning an estimate of len(list(it)).");
+
+PyDoc_STRVAR(bytes_iterator___reduce____doc__,
+"Return state information for pickling.");
+
+PyDoc_STRVAR(bytes_iterator___setstate____doc__,
+"Set state information for unpickling.");
+
+static PyMethodDef bytes_iterator_methods[] = {
+    {"__length_hint__", striter_len, METH_NOARGS, bytes_iterator___length_hint____doc__},
+    {"__reduce__", striter_reduce, METH_NOARGS, bytes_iterator___reduce____doc__},
+    {"__setstate__", striter_setstate, METH_O, bytes_iterator___setstate____doc__},
+    {NULL, NULL}  /* sentinel */
+};
+
+PyTypeObject PyBytesIter_Type = {
+    PyVarObject_HEAD_INIT(&PyType_Type, 0)
+    .tp_name = "bytes_iterator",
+    .tp_basicsize = sizeof(striterobject),
+    .tp_dealloc = striter_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT |
+        Py_TPFLAGS_HAVE_GC,
+    .tp_traverse = striter_traverse,
+    .tp_iter = PyObject_SelfIter,
+    .tp_iternext = striter_next,
+    .tp_methods = bytes_iterator_methods,
+};

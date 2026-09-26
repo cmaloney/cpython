@@ -12,7 +12,7 @@ Top-level functions are C functions of the same name.
 
 The classes are the whole types: ``@static_type`` makes clinic generate
 PyBytes_Type and PyBytesIter_Type, their method tables and slot tables,
-into Objects/clinic/bytesobject_types.c.h.  Dunders are slots (C functions
+at the end of Objects/clinic/bytesobject_pyspec.c.h.  Dunders are slots (C functions
 with the slot's signature), ``@c_name(METH_NOARGS=...)`` methods are
 hand-written PyCFunctions, and ``center = transmogrify.B.center`` shares
 a method with bytearray (see libclinic/pyspec/frontend.py).

@@ -6379,8 +6379,7 @@ class PyspecTypeTest(PyspecTestBase):
 
     def types_header(self, spec, text=None):
         self.generate(spec, text or self.CLASS)
-        with open(os.path.join(self.tmp_dir, 'clinic', 'foo_types.c.h'),
-                  encoding='utf-8') as f:
+        with open(self.output_path, encoding='utf-8') as f:
             return f.read()
 
     def test_type_objects(self):
@@ -7077,8 +7076,7 @@ class BytesSpecTest(TestCase):
         parse_file(filename, limited_capi=False, writer=writer)
         written = {os.path.basename(name) for name, _ in writer.files}
         self.assertEqual(written, {'bytesobject.c', 'bytesobject.c.h',
-                                   'bytesobject_pyspec.c.h',
-                                   'bytesobject_types.c.h'})
+                                   'bytesobject_pyspec.c.h'})
         self.assertEqual([change.filename for change in writer.changes], [],
                          'run "make clinic"')
 
@@ -7097,7 +7095,7 @@ class BytesSpecTest(TestCase):
 class BytesSpecTypeTest(TestCase):
     """The classes of the bytes spec are the types bytes and
     bytes_iterator: clinic generates their type objects
-    (Objects/clinic/bytesobject_types.c.h)."""
+    (at the end of Objects/clinic/bytesobject_pyspec.c.h)."""
 
     @classmethod
     def setUpClass(cls):

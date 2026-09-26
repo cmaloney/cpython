@@ -313,8 +313,9 @@ impl_definition block
         return found
 
     def pyspec_outputs(self) -> list[tuple[str, str]]:
-        """(filename, text) of the C generated from the spec: the
-        implemented spec functions and the static types."""
+        """(filename, text) of the C generated from the spec, if any:
+        clinic/<stem>_pyspec.c.h holds the implemented spec functions, then
+        the static types.  The C file includes it once, at its end."""
         spec = self.pyspec
         if spec is None:
             return []
@@ -322,27 +323,30 @@ impl_definition block
         dirname, basename = os.path.split(os.path.abspath(self.filename))
         stem = os.path.splitext(basename)[0]
         spec_name = f"{os.path.basename(dirname)}/pyspec/{stem}.py"
-        outputs = []
+        parts = []
         if spec.implemented_functions():
             try:
-                text = emit.generate(spec, spec_name,
-                                     self.pyspec_c_basenames,
-                                     self.pyspec_self_ctypes)
+                parts.append(emit.generate(spec, spec_name,
+                                           self.pyspec_c_basenames,
+                                           self.pyspec_self_ctypes))
             except emit.SpecError as exc:
                 raise frontend.SpecError(exc.message, filename=spec.filename,
                                          lineno=exc.lineno) from None
-            outputs.append((frontend.output_path(self.filename), text + "\n"))
-        text = self.type_objects(spec, spec_name)
-        if text is not None:
-            outputs.append((typeobj.output_path(self.filename), text + "\n"))
-        for filename, _ in outputs:
-            try:
-                self.writer.makedirs(os.path.dirname(filename))
-            except FileExistsError:
-                pass
-        return outputs
+        types = self.type_objects(spec)
+        if types is not None:
+            if not parts:
+                parts.append(typeobj.header(spec_name))
+            parts.append(types)
+        if not parts:
+            return []
+        output = frontend.output_path(self.filename)
+        try:
+            self.writer.makedirs(os.path.dirname(output))
+        except FileExistsError:
+            pass
+        return [(output, "\n\n".join(parts) + "\n")]
 
-    def type_objects(self, spec: frontend.Spec, spec_name: str) -> str | None:
+    def type_objects(self, spec: frontend.Spec) -> str | None:
         """The static types of the spec (see pyspec/typeobj.py)."""
         clinic_classes = self._clinic_classes(self, '')
         classes = {path: (cls.typedef, cls.type_object)
@@ -352,7 +356,7 @@ impl_definition block
                 f.c_basename,
                 f.c_basename_vectorcall if f.vectorcall else None)
             for path, cls in clinic_classes for f in cls.functions}
-        return typeobj.generate(spec, spec_name, classes, functions)
+        return typeobj.generate(spec, classes, functions)
 
     def _module_and_class(
         self, fields: Sequence[str]
