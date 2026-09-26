@@ -23,33 +23,8 @@ class Value:
     def __init__(self, obj):
         self.obj = obj
 
+
 MAX_INLINE_DEPTH = 8
-
-
-class Spec:
-    def __init__(self, source, filename='<spec>'):
-        self.filename = filename
-        self.module = ast.parse(source, filename)
-        self.functions = {node.name: node for node in self.module.body
-                          if isinstance(node, ast.FunctionDef)}
-        self.config = {}
-        for node in self.module.body:
-            if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                    and isinstance(node.targets[0], ast.Name)
-                    and node.targets[0].id == 'PYSPEC'):
-                self.config = ast.literal_eval(node.value)
-
-    def body(self, name):
-        """Statements of function *name*, without its docstring."""
-        body = self.functions[name].body
-        if (body and isinstance(body[0], ast.Expr)
-                and isinstance(body[0].value, ast.Constant)
-                and isinstance(body[0].value.value, str)):
-            body = body[1:]
-        return body
-
-    def params(self, name):
-        return [a.arg for a in self.functions[name].args.args]
 
 
 def _builtin_type(node):
@@ -186,11 +161,11 @@ class Evaluator:
         self._suffix = itertools.count(1)
 
     def _is_spec_call(self, node):
-        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and node.func.id in self.spec.functions)
+        return (isinstance(node, ast.Call)
+                and self.spec.call_target(node.func) is not None)
 
     def inline(self, call, env, depth):
-        name = call.func.id
+        name = self.spec.call_target(call.func)
         params = self.spec.params(name)
         body = self.spec.body(name)
         mapping = dict(zip(params, call.args))
@@ -243,5 +218,8 @@ class Evaluator:
 
 
 def specialize(spec, name, env):
-    """Residual statements of spec function *name* under facts *env*."""
+    """Residual statements of spec function *name* under facts *env*.
+
+    *spec* is a frontend.Spec.
+    """
     return Evaluator(spec).block(spec.body(name), env)

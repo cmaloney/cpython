@@ -2868,19 +2868,13 @@ static PyObject *_PyBytes_FromIterator(PyObject *it, PyObject *x);
 
 /* bytes_new_impl(), the bytes_new_nargsN() functions called by
    bytes_vectorcall() and PyBytes_FromObject() are generated from
-   Objects/pyspec/bytesobject.py by Tools/pyspec/emit_c.py. */
+   Objects/pyspec/bytesobject.py by Argument Clinic. */
 #include "clinic/bytesobject_pyspec.c.h"
 
 /*[clinic input]
-@classmethod
 bytes.__new__ as bytes_new
-
-    source as x: object = NULL
-    encoding: str = NULL
-    errors: str = NULL
-
 [clinic start generated code]*/
-/*[clinic end generated code: output=da39a3ee5e6b4b0d input=f0a966d19b7262b4]*/
+/*[clinic end generated code: output=da39a3ee5e6b4b0d input=b0f81d762515f5d3]*/
 
 static PyObject*
 _PyBytes_FromBuffer(PyObject *x)

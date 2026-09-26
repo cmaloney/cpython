@@ -12,6 +12,7 @@ from libclinic.block_parser import Block, BlockParser
 from libclinic.codegen import BlockPrinter, Destination, CodeGen
 from libclinic.parser import Parser, PythonParser
 from libclinic.dsl_parser import DSLParser
+from libclinic.pyspec import emit, frontend
 if TYPE_CHECKING:
     from libclinic.clanguage import CLanguage
     from libclinic.function import (
@@ -106,6 +107,11 @@ impl_definition block
         # The attributes implemented by accessors, in the order of definition.
         self.properties: list[Property] = []
         self.codegen = CodeGen(self.limited_capi)
+        # The spec of the file (see libclinic.pyspec), read on first use.
+        self._pyspec: frontend.Spec | None = None
+        self._pyspec_read = False
+        # C basenames of the clinic functions implemented by spec methods.
+        self.pyspec_c_basenames: dict[str, str] = {}
 
         self.line_prefix = self.line_suffix = ''
 
@@ -248,7 +254,41 @@ impl_definition block
                                       printer_2.f.getvalue())
                     continue
 
+        self.write_pyspec_output()
         return printer.f.getvalue()
+
+    @property
+    def pyspec(self) -> frontend.Spec | None:
+        """The spec of the file: pyspec/<stem>.py next to it, if any."""
+        if not self._pyspec_read:
+            self._pyspec_read = True
+            if self.filename:
+                path = frontend.spec_path(self.filename)
+                try:
+                    self._pyspec = frontend.Spec.load(path)
+                except SyntaxError as exc:
+                    fail(f"{path}: {exc}")
+        return self._pyspec
+
+    def write_pyspec_output(self) -> None:
+        """Write the C generated from the implemented spec functions."""
+        spec = self.pyspec
+        if spec is None or not spec.implemented_functions():
+            return
+        # Name the spec the same way whatever the current directory.
+        dirname, basename = os.path.split(os.path.abspath(self.filename))
+        stem = os.path.splitext(basename)[0]
+        spec_name = f"{os.path.basename(dirname)}/pyspec/{stem}.py"
+        try:
+            text = emit.generate(spec, spec_name, self.pyspec_c_basenames)
+        except (emit.SpecError, frontend.SpecError) as exc:
+            fail(f"{spec.filename}: {exc}")
+        output = frontend.output_path(self.filename)
+        try:
+            self.writer.makedirs(os.path.dirname(output))
+        except FileExistsError:
+            pass
+        self.writer.write(output, text + "\n")
 
     def _module_and_class(
         self, fields: Sequence[str]

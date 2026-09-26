@@ -156,8 +156,8 @@ class Function:
     # Line on which the docstring starts (`None` if there is no docstring).
     docstring_line_number: int | None = None
     vectorcall: bool = False
-    # Name of the pyspec function implementing this function (see
-    # libclinic.pyspec), or None.
+    # When a pyspec method implements this function (see
+    # libclinic.pyspec): its C basename, or None.
     pyspec: str | None = None
 
     def __post_init__(self) -> None:

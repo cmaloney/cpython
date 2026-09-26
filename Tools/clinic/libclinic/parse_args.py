@@ -1501,7 +1501,7 @@ class ParseArgsCodeGen:
         if self.impl_prototype:
             self.impl_prototype += ";"
         if self.func.pyspec:
-            # Tools/pyspec/emit_c.py generates the impl from the spec.
+            # libclinic.pyspec.emit generates the impl from the spec.
             self.impl_definition = ""
 
         self.parser_definition = self.parser_definition.replace("{return_value_declaration}", self.return_value_declaration)
@@ -1584,8 +1584,9 @@ class ParseArgsCodeGen:
     def _vectorcall_spec_positional(self) -> list[str]:
         """Positional parsing that leaves through SPEC_nargsN().
 
-        SPEC is the pyspec function implementing this __new__ (see
-        libclinic.pyspec); Tools/pyspec/emit_c.py generates SPEC_nargsN() by
+        SPEC is the C basename of this __new__, implemented by a pyspec
+        method (see libclinic.pyspec); libclinic.pyspec.emit generates
+        SPEC_nargsN() by
         partially evaluating it for exactly the type and N arguments.
 
         Each optional parameter is preceded by a call count check; when the

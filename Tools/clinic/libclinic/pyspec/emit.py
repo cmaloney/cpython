@@ -1,17 +1,20 @@
-"""Generate C from a pyspec file.
+"""Generate C from the implemented functions of a pyspec file.
 
-Usage: python Tools/pyspec/emit_c.py Objects/pyspec/bytesobject.py \\
-           -o Objects/clinic/bytesobject_pyspec.c.h
+Argument Clinic calls generate() after processing a C file with a spec
+and writes the result next to its other output
+(Objects/clinic/bytesobject_pyspec.c.h for Objects/bytesobject.c).
 
-Every function in the spec becomes a C function of the same name:
-  * a function whose first parameter is annotated ``type[T]`` implements a
-    clinic __new__: it becomes NAME_impl() (Argument Clinic declares it and
-    no longer expects a hand-written body), plus NAME_nargsN() for each
+Every implemented spec function becomes a C function:
+  * a method of a spec class implements the clinic function of that name;
+    only __new__ is supported.  For ``bytes.__new__ as bytes_new`` it
+    becomes bytes_new_impl() (Argument Clinic declares it and no longer
+    expects a hand-written body), plus bytes_new_nargsN() for each
     positional argument count N -- the function partially evaluated for
-    exactly T and N arguments, called by the clinic generated vectorcall;
-  * names starting with Py or _Py are defined non-static (their public or
-    internal header declares them);
-  * everything else is static.
+    exactly the class and N arguments, called by the clinic generated
+    vectorcall;
+  * a top-level function becomes the C function of the same name: names
+    starting with Py or _Py are defined non-static (their public or
+    internal header declares them); everything else is static.
 
 The accepted Python subset is small on purpose; anything else is an error.
 
@@ -26,34 +29,25 @@ Conditions:
   integer comparisons, and/or/not
 Calls (result is a new reference or a Py_ssize_t):
   C.<escape>(...), iter(x), f() for an object variable f,
-  <spec function>(...)
+  <spec function>(...), T.<spec method>(...)
 
 Reference ownership: parameters are borrowed; every object local is a new
 reference, assigned once, declared NULL at the top and released with
 Py_XDECREF at every exit except the one returning it.
 """
 
-import argparse
 import ast
 import builtins
-import os
-import sys
 
-TOOLS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(TOOLS, 'pyspec'))
-sys.path.insert(0, os.path.join(TOOLS, 'clinic'))
-
-from libclinic import pyspec as clinic_pyspec              # noqa: E402
-import partial_eval                                         # noqa: E402
-from partial_eval import NOTNULL, NULL, Spec, Value        # noqa: E402
-import pyspec_runtime                                       # noqa: E402
-from pyspec_runtime import (ContextEscape, Escape, ERR_MINUS1,  # noqa: E402
-                            ERR_NULL, ERR_NULL_OR_MISSING, RaiseEscape)
+from . import frontend, partial_eval, runtime
+from .partial_eval import NOTNULL, NULL, Value
+from .runtime import (ContextEscape, Escape, ERR_MINUS1, ERR_NULL,
+                      ERR_NULL_OR_MISSING, RaiseEscape)
 
 OBJECT = 'PyObject *'
 SSIZE = 'Py_ssize_t'
-TYPE = clinic_pyspec.TYPE_CTYPE
-TYPE_OBJECTS = clinic_pyspec.TYPE_OBJECTS
+TYPE = frontend.TYPE_CTYPE
+TYPE_OBJECTS = frontend.TYPE_OBJECTS
 
 TYPE_CHECK = {
     'bytes': 'PyBytes_Check',
@@ -119,7 +113,7 @@ def escape_of(node):
     """Return the escape for a ``C.<name>`` node."""
     if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
             and node.value.id == 'C'):
-        value = getattr(pyspec_runtime.C, node.attr, None)
+        value = getattr(runtime.C, node.attr, None)
         if isinstance(value, (Escape, ContextEscape, RaiseEscape)):
             return value
         raise SpecError(node, f'unknown escape C.{node.attr}')
@@ -129,8 +123,9 @@ def escape_of(node):
 class FunctionEmitter:
     """Lower one list of spec statements to the body of a C function."""
 
-    def __init__(self, spec, params, known_null=()):
-        self.spec = spec
+    def __init__(self, generator, params, known_null=()):
+        self.generator = generator
+        self.spec = generator.spec
         # name -> C type; parameters are borrowed references
         self.params = dict(params)
         self.known_null = set(known_null)
@@ -224,14 +219,15 @@ class FunctionEmitter:
                 **{k: v for k, v in fields.items() if k.startswith('id')})
             ctype = OBJECT if escape.returns == 'object' else SSIZE
             return expr, ctype, escape.error
+        target = self.spec.call_target(call.func)
+        if target is not None:
+            args = ', '.join(self.lower_value(a) for a in call.args)
+            return (f'{self.generator.c_name(target)}({args})',
+                    OBJECT, ERR_NULL)
         if isinstance(call.func, ast.Name):
             name = call.func.id
             if name == 'iter' and len(call.args) == 1:
                 return (f'PyObject_GetIter({self.lower_value(call.args[0])})',
-                        OBJECT, ERR_NULL)
-            if name in self.spec.functions:
-                args = ', '.join(self.lower_value(a) for a in call.args)
-                return (f'{c_name(describe(self.spec, name))}({args})',
                         OBJECT, ERR_NULL)
             if self.ctype_of(name) == OBJECT and not call.args:
                 return f'_PyObject_CallNoArgs({name})', OBJECT, ERR_NULL
@@ -569,22 +565,6 @@ class FunctionEmitter:
         ]
 
 
-def describe(spec, name):
-    """The libclinic.pyspec description of spec function *name*."""
-    try:
-        return clinic_pyspec.spec_function(spec.functions[name],
-                                           spec.filename)
-    except clinic_pyspec.SpecError as exc:
-        raise SpecError(spec.functions[name], str(exc)) from None
-
-
-def c_name(description):
-    """C name of a spec function: NAME_impl() for a clinic __new__."""
-    if description.new_type is not None:
-        return f'{description.name}_impl'
-    return description.name
-
-
 def exported(name):
     return name.startswith(('Py', '_Py'))
 
@@ -598,79 +578,104 @@ def prototype(name, params):
     return f'static PyObject *{name}({text});'
 
 
-def generate(spec, spec_path):
-    out = [
-        '/*[pyspec]',
-        f'Generated by Tools/pyspec/emit_c.py from {spec_path}.',
-        'Do not edit; edit the spec and regenerate.',
-        '[pyspec]*/',
-        '',
-    ]
-    descriptions = [describe(spec, name) for name in spec.functions]
-    for description in descriptions:
-        name = c_name(description)
-        if not exported(name):
-            out.append(prototype(name, c_params(description)))
-    out.append('')
+class Generator:
+    """Generate the C for a spec.
 
-    for description in descriptions:
-        emitter = FunctionEmitter(spec, c_params(description))
-        out += emitter.function(c_name(description),
-                                spec.body(description.name))
+    c_basenames maps the implemented spec methods ("bytes.__new__") to the
+    C basename of their clinic function ("bytes_new").
+    """
+
+    def __init__(self, spec, c_basenames):
+        self.spec = spec
+        self.c_basenames = c_basenames
+
+    def describe(self, name):
+        try:
+            return self.spec.describe(name)
+        except frontend.SpecError as exc:
+            raise SpecError(self.spec.functions[name], str(exc)) from None
+
+    def c_basename(self, name):
+        """C basename: the clinic one for a method, else the name."""
+        if '.' not in name:
+            return name
+        try:
+            return self.c_basenames[name]
+        except KeyError:
+            raise SpecError(self.spec.functions[name],
+                            f'{name} has a body, but no clinic block in '
+                            'the C file uses it') from None
+
+    def c_name(self, name):
+        """C name of spec function *name*: NAME_impl() for a method."""
+        if '.' in name:
+            return f'{self.c_basename(name)}_impl'
+        return name
+
+    def generate(self, spec_path):
+        out = [
+            '/*[pyspec]',
+            f'Generated by Argument Clinic from {spec_path}.',
+            'Do not edit; edit the spec and run "make clinic".',
+            '[pyspec]*/',
+            '',
+        ]
+        names = self.spec.implemented_functions()
+        descriptions = [self.describe(name) for name in names]
+        for description in descriptions:
+            name = self.c_name(description.name)
+            if not exported(name):
+                out.append(prototype(name, c_params(description)))
         out.append('')
 
-    for description in descriptions:
-        if description.new_type is not None:
-            out += generate_arities(spec, description)
-    return '\n'.join(out)
+        for description in descriptions:
+            emitter = FunctionEmitter(self, c_params(description))
+            out += emitter.function(self.c_name(description.name),
+                                    self.spec.body(description.name))
+            out.append('')
+
+        for description in descriptions:
+            if description.new_type is not None:
+                out += self.generate_arities(description)
+        return '\n'.join(out)
+
+    def generate_arities(self, description):
+        """NAME_nargsN() for each allowed N: the __new__ spec partially
+        evaluated for exactly its class and a call with N positional
+        arguments; the rest are NULL.  Argument Clinic declares them and
+        calls them from the vectorcall with converted values."""
+        cls, *params = description.parameters
+        required = sum(not p.optional for p in params)
+        type_value = getattr(builtins, description.new_type)
+        basename = self.c_basename(description.name)
+        out = []
+        for nargs in range(required, len(params) + 1):
+            given, missing = params[:nargs], params[nargs:]
+            env = {cls.name: Value(type_value)}
+            env |= {p.name: NOTNULL for p in given}
+            env |= {p.name: NULL for p in missing}
+            residual = partial_eval.specialize(self.spec, description.name,
+                                               env)
+            emitter = FunctionEmitter(self,
+                                      [(p.name, p.ctype) for p in given],
+                                      known_null=[p.name for p in missing])
+            out += [f'/* {basename}() for exactly '
+                    f'{description.new_type} with {nargs} positional '
+                    'argument(s):',
+                    *[' * ' + line if line else ' *'
+                      for line in ast.unparse(ast.Module(residual, []))
+                      .replace('*/', '* /').splitlines()],
+                    ' */']
+            out += emitter.function(f'{basename}_nargs{nargs}', residual)
+            out.append('')
+        return out
 
 
-def generate_arities(spec, description):
-    """NAME_nargsN() for each allowed N: the clinic __new__ spec NAME
-    partially evaluated for exactly its type and a call with N positional
-    arguments; the rest are NULL.  Argument Clinic declares them and calls
-    them from the vectorcall with converted values."""
-    cls, *params = description.parameters
-    required = sum(not p.optional for p in params)
-    type_value = getattr(builtins, description.new_type)
-    out = []
-    for nargs in range(required, len(params) + 1):
-        given, missing = params[:nargs], params[nargs:]
-        env = {cls.name: Value(type_value)}
-        env |= {p.name: NOTNULL for p in given}
-        env |= {p.name: NULL for p in missing}
-        residual = partial_eval.specialize(spec, description.name, env)
-        emitter = FunctionEmitter(spec, [(p.name, p.ctype) for p in given],
-                                  known_null=[p.name for p in missing])
-        out += [f'/* {description.name}() for exactly '
-                f'{description.new_type} with {nargs} positional '
-                'argument(s):',
-                *[' * ' + line if line else ' *'
-                  for line in ast.unparse(ast.Module(residual, [])).replace(
-                      '*/', '* /').splitlines()],
-                ' */']
-        out += emitter.function(f'{description.name}_nargs{nargs}', residual)
-        out.append('')
-    return out
+def generate(spec: frontend.Spec, spec_path: str,
+             c_basenames: dict[str, str]) -> str:
+    """C for the implemented functions of *spec*, a frontend.Spec.
 
-
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument('spec')
-    parser.add_argument('-o', '--output', required=True)
-    args = parser.parse_args(argv)
-    with open(args.spec) as f:
-        spec = Spec(f.read(), args.spec)
-    srcdir = os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))))
-    spec_path = os.path.relpath(os.path.abspath(args.spec), srcdir)
-    try:
-        text = generate(spec, spec_path)
-    except SpecError as exc:
-        sys.exit(f'{args.spec}: {exc}')
-    with open(args.output, 'w') as f:
-        f.write(text + '\n')
-
-
-if __name__ == '__main__':
-    main()
+    *spec_path* is only named in the header comment.
+    """
+    text: str = Generator(spec, c_basenames).generate(spec_path)
+    return text

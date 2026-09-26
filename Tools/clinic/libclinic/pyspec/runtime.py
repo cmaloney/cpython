@@ -1,8 +1,10 @@
 """Names a pyspec file may use, with Python reference implementations.
 
-A pyspec file is ordinary Python.  Running it with this module gives the
-reference behavior; Tools/pyspec/emit_c.py reads the same file with the
-ast module and lowers it to C.  Three kinds of names appear in a spec:
+A pyspec file is ordinary Python: it imports these names with
+``from libclinic.pyspec.runtime import ...``.  Running it (see load())
+gives the reference behavior; Argument Clinic reads the same file with the
+ast module and lowers it to C (see emit.py).  Three kinds of names appear
+in a spec:
 
 * functions defined in the spec itself (lowered to static C functions,
   or inlined by the partial evaluator);
@@ -11,8 +13,12 @@ ast module and lowers it to C.  Three kinds of names appear in a spec:
   its C call template, result type and error convention for the emitter.
 """
 
+import ast
+import builtins
 import operator
+import os
 import sys
+import types
 
 __all__ = ['NULL', 'C', 'cstr', 'isinstance', 'tp_name', 'fqname']
 
@@ -205,3 +211,49 @@ class C:
     critical_section_sequence_fast = ContextEscape(
         'Py_BEGIN_CRITICAL_SECTION_SEQUENCE_FAST({0});',
         'Py_END_CRITICAL_SECTION_SEQUENCE_FAST();')
+
+
+def load(path):
+    """Execute the spec at *path*; return its functions and methods.
+
+    The result maps "PyBytes_FromObject" or "bytes.__new__" to the Python
+    function.  ``class T:`` in a spec describes the builtin type T, so once
+    the spec has run, the global T is the builtin again: bodies compare
+    with the real type.  Calls ``T.m(...)`` of spec methods call the spec
+    method, as in the generated C.
+    """
+    with open(path, encoding='utf-8') as f:
+        tree = ast.parse(f.read(), path)
+    classes = {node.name for node in tree.body
+               if isinstance(node, ast.ClassDef)}
+
+    class SpecCalls(ast.NodeTransformer):
+        def visit_Attribute(self, node):
+            self.generic_visit(node)
+            if (isinstance(node.value, ast.Name)
+                    and node.value.id in classes
+                    and isinstance(node.ctx, ast.Load)):
+                node.value = ast.copy_location(
+                    ast.Name(f'_spec_{node.value.id}', ast.Load()),
+                    node.value)
+            return node
+
+    tree = ast.fix_missing_locations(SpecCalls().visit(tree))
+    stem = os.path.splitext(os.path.basename(path))[0]
+    module = types.ModuleType(f'_pyspec_{stem}')
+    module.__file__ = path
+    exec(compile(tree, path, 'exec'), module.__dict__)
+    functions = {}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            functions[node.name] = getattr(module, node.name)
+        elif isinstance(node, ast.ClassDef):
+            spec_class = getattr(module, node.name)
+            setattr(module, f'_spec_{node.name}', spec_class)
+            setattr(module, node.name, getattr(builtins, node.name))
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef):
+                    functions[f'{node.name}.{item.name}'] = (
+                        spec_class.__dict__[item.name])
+    return {name: getattr(func, '__func__', func)
+            for name, func in functions.items()}
