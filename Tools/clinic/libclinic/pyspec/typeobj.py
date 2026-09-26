@@ -43,12 +43,15 @@ from . import frontend, slots
 from .frontend import CLINIC, PYCFUNCTION, SHARED, SLOT, SpecError
 
 # Members of PyTypeObject that the spec derives; @static_type cannot set
-# them.
+# them.  tp_new, tp_init and tp_vectorcall come from the clinic __new__ and
+# __init__, or from @static_type when they are not clinic functions
+# (tp_new = PyType_GenericNew).
+FROM_CLINIC = {'tp_new', 'tp_init', 'tp_vectorcall'}
 DERIVED = {
-    'tp_base', 'tp_doc', 'tp_methods', 'tp_new', 'tp_init', 'tp_vectorcall',
+    'tp_base', 'tp_doc', 'tp_methods',
     'tp_as_async', 'tp_as_number', 'tp_as_sequence', 'tp_as_mapping',
     'tp_as_buffer',
-} | {s.slot for s in slots.slotdefs() if s.subtable is None}
+} | {s.slot for s in slots.slotdefs() if s.subtable is None} - FROM_CLINIC
 
 SUBTABLE_ORDER = ['as_async', 'as_number', 'as_sequence', 'as_mapping',
                   'as_buffer']
@@ -394,6 +397,9 @@ class TypeGenerator:
                                 f"is one of {sorted(frontend.TYPE_OBJECTS)}")
             members['tp_base'] = frontend.TYPE_OBJECTS[base.id]
         members.setdefault('tp_name', f'"{self.cls_name}"')
+        for member in FROM_CLINIC & members.keys() & self.members.keys():
+            raise SpecError(f"{self.where}: @static_type: {member} is "
+                            "already the clinic function")
         members |= {k: v for k, v in self.members.items()
                     if k != 'tp_flags'}
         if 'tp_basicsize' not in members:

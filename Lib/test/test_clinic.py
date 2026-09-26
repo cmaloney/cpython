@@ -6574,6 +6574,19 @@ class PyspecTypeTest(PyspecTestBase):
             class bytes:
                 pass
         """, "tp_repr is derived from the spec")
+        # tp_new is the clinic __new__, or given when it is not one.
+        header = self.types_header("""
+            @static_type(tp_new="PyType_GenericNew")
+            class bytes:
+                pass
+        """)
+        self.assertIn('    .tp_new = PyType_GenericNew,\n', header)
+        self.check_error("""
+            @static_type(tp_new="PyType_GenericNew")
+            class bytes:
+                def __new__(cls, a: object, /):
+                    return a
+        """, "tp_new is already the clinic function")
 
     def test_slot_block_rejected(self):
         with self.assertRaisesRegex(ClinicError,
