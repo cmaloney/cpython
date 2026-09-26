@@ -600,8 +600,9 @@ class DSLParser:
 
         If the function is a method of a class of the spec (for
         Objects/foo.c, Objects/pyspec/foo.py), return the lines replacing
-        *function_line*: the Python decorators, the function line, and the
-        parameters and docstring taken from the spec.  See
+        *function_line*: the clinic decorators of the spec method, the
+        function line, and the parameters and docstring taken from the
+        spec.  See
         libclinic.pyspec.frontend.  Otherwise, return [function_line].
         Each line comes with its location in the spec (None: the C file).
 

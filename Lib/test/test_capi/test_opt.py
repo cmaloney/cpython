@@ -3467,8 +3467,7 @@ class TestUopsOptimization(unittest.TestCase):
     def test_call_builtin_class_pyspec_alias_subclass(self):
         # A bytes subclass instance does not get the facts of exact bytes:
         # bytes() calls the generic C function, which returns an exact
-        # bytes copy (the alias would be wrong).  This is the case
-        # _CALL_STR_1 gets wrong for str subclasses.
+        # bytes copy (the alias would be wrong).
         class Sub(bytes):
             pass
 

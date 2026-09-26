@@ -12,10 +12,10 @@ extern "C" {
 
 /* Call tables generated from pyspec files (Objects/pyspec/<file>.py) by
  * Argument Clinic (Tools/clinic/libclinic/pyspec/call_table.py, run by
- * "make clinic").  For a builtin type whose __new__ is
- * implemented by a spec, the table lists direct C entry points for calls
- * of the type with positional, object-typed arguments only, and facts
- * about their results derived from the spec code.  The tier-2 optimizer
+ * "make clinic").  For a builtin type whose __new__ is implemented by a
+ * spec, the table lists direct C entry points for calls of the type with
+ * positional, object-typed arguments only, and facts about their results
+ * derived from the spec code.  The tier-2 optimizer
  * uses them to replace _CALL_BUILTIN_CLASS by a direct call and to type
  * or fold the result.  The table also has the facts of the other methods
  * of the type the spec implements, keyed by their ml_meth.  Every fact

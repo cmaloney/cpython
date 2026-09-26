@@ -4,18 +4,20 @@ Argument Clinic reads this file while processing bytesobject.c (see
 Objects/pyspec/README.rst).  Each method of ``class bytes`` is a clinic
 function (parameters, docstring and clinic decorators); bytesobject.c has
 a one-line block for it (``bytes.split``) above its impl.  Methods with a
-body of ``...`` are implemented in C by hand.  The others are implemented
-here: clinic generates bytes_new_impl() and, for its vectorcall,
-bytes_new_nargsN() -- the method partially evaluated for exactly bytes
-and N positional arguments -- into Objects/clinic/bytesobject_pyspec.c.h.
-Top-level functions are C functions of the same name.
+body of ``...`` are implemented in C by hand.  The others (``__new__``,
+``__bytes__``, ``fromhex``) are implemented here: clinic generates their
+impls into Objects/clinic/bytesobject_pyspec.c.h and, for the vectorcall
+of ``__new__``, bytes_new_nargsN(): ``__new__`` partially evaluated for
+exactly bytes and N positional arguments.  Top-level functions are C
+functions of the same name.
 
 The classes are the whole types: ``@static_type`` makes clinic generate
 PyBytes_Type and PyBytesIter_Type, their method tables and slot tables,
-at the end of Objects/clinic/bytesobject_pyspec.c.h.  Dunders are slots (C functions
-with the slot's signature), ``@c_name(METH_NOARGS=...)`` methods are
-hand-written PyCFunctions, and ``center = transmogrify.B.center`` shares
-a method with bytearray (see libclinic/pyspec/frontend.py).
+at the end of Objects/clinic/bytesobject_pyspec.c.h.  Dunders are slots
+(C functions with the slot's signature), ``@c_name(METH_NOARGS=...)``
+methods are hand-written PyCFunctions, and ``center =
+transmogrify.B.center`` shares a method with bytearray (see
+libclinic/pyspec/frontend.py).
 
 Lib/test/test_clinic.py runs this file as Python and compares it with the
 interpreter on the cases of bytesobject_cases.py.
@@ -507,7 +509,8 @@ class bytes:
 
     # -- Slots: C functions with the signature of their slot (see "Methods
     # that are not clinic functions" in libclinic/pyspec/frontend.py).  The
-    # C name is bytes_<slot> unless @c_name gives it.
+    # C name is bytes_ plus the slot without its prefix (bytes_repr for
+    # tp_repr) unless @c_name gives it.
 
     def __repr__(self, /): ...
     def __hash__(self, /): ...

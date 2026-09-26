@@ -1,4 +1,4 @@
-"""The facts Argument Clinic derives from the pyspec files are verified.
+"""Check the facts Argument Clinic derives from the pyspec files.
 
 The pyspec call tables (Include/internal/pycore_pyspec.h, generated from
 Objects/pyspec/*.py) give the tier-2 optimizer direct C entry points and
@@ -338,9 +338,9 @@ class DebugAssertionTest(unittest.TestCase):
     @unittest.skipUnless(support.Py_DEBUG, 'debug builds only')
     @support.requires_subprocess()
     def test_result_assertions_emitted(self):
-        # After a call with facts from the pyspec table, and after the
-        # hand-written result types of _CALL_STR_1 (claimed for an exact
-        # int argument: str(len(b))) and _CALL_LEN.
+        # After a call with facts from the pyspec table, and after
+        # _CALL_STR_1, whose hand-written result type is claimed for an
+        # exact int argument: str(len(b)).
         # (In a function: changing the globals would invalidate the trace.)
         code = textwrap.dedent('''
             import _opcode
@@ -372,9 +372,8 @@ class DebugAssertionTest(unittest.TestCase):
     @requires_jit()
     @support.requires_subprocess()
     def test_call_str_1_subclass(self):
-        # _CALL_STR_1 used to claim an exact str result, but str(x) may
-        # return a str subclass (fixed by the merged fix-call-str-1-subclass
-        # branch).  With the wrong fact, debug builds fail
+        # str(x) may return a str subclass: _CALL_STR_1 must not claim an
+        # exact str.  With that wrong fact, debug builds fail
         # _ASSERT_RESULT_TYPE right after the str() call and release builds
         # fold type(str(c)) is str to True.
         code = textwrap.dedent('''
@@ -398,8 +397,8 @@ class DebugAssertionTest(unittest.TestCase):
 
 
 class SoundnessTest(unittest.TestCase):
-    """Latent soundness problems found in review (pyspec-notes/review_int.md);
-    these fail if the facts are (or become) wrong."""
+    """Latent soundness problems of the derived facts; these fail if the
+    facts are (or become) wrong."""
 
     @classmethod
     def setUpClass(cls):
@@ -490,8 +489,8 @@ class SoundnessTest(unittest.TestCase):
 
     # F3: "an exact static type never runs Python code" (the is_static_type
     # rule of libclinic/pyspec/runtime.py) is false for types that forward
-    # to another object.  Masked today because the call table only has
-    # entries for a few leaf types.  P2 replaces the rule.
+    # to another object.  Masked because the call table only has entries
+    # for a few leaf types.  Fails until the rule is replaced.
     @unittest.expectedFailure
     def test_static_type_rule(self):
         import pickle

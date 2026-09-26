@@ -3568,10 +3568,11 @@ _PyBytesWriter_ResizeToAllocated(PyBytesWriter *writer)
 }
 
 
-/* Generated from Objects/pyspec/bytesobject.py by Argument Clinic:
-   bytes_new_impl(), the bytes_new_nargsN() functions called by
-   bytes_vectorcall(), PyBytes_FromObject() and bytes_from_iterator()
-   (with its specializations for a list, copied in the critical section
-   of the list, a tuple and a range), then PyBytes_Type and
-   PyBytesIter_Type with their method and slot tables. */
+/* Generated from Objects/pyspec/bytesobject.py by Argument Clinic: the
+   impls of bytes.__new__, __bytes__ and fromhex, PyBytes_FromObject(),
+   bytes_from_iterator() and its specializations for a list (copied in the
+   critical section of the list) and a tuple, the bytes_new_nargsN()
+   functions called by bytes_vectorcall() and their variants per argument
+   type, the tier-2 call table, then PyBytes_Type and PyBytesIter_Type with
+   their method and slot tables. */
 #include "clinic/bytesobject_pyspec.c.h"

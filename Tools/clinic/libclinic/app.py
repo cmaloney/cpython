@@ -112,7 +112,8 @@ impl_definition block
         self._pyspec_read = False
         # C basenames of the clinic functions implemented by spec methods.
         self.pyspec_c_basenames: dict[str, str] = {}
-        # C type of the self (or class) parameter of the other spec methods.
+        # C type of the self (or class) parameter of the implemented spec
+        # methods other than __new__.
         self.pyspec_self_ctypes: dict[str, str] = {}
 
         self.line_prefix = self.line_suffix = ''

@@ -6,7 +6,7 @@ dunder to its C slot: add_operators() creates the wrapper descriptors of a
 static type from it, and a class defining the dunder in Python gets the
 slot function listed there.  It is therefore the machine-readable source of
 truth for "dunder <-> slot" (Doc/c-api/typeobj.rst documents the same slots
-in prose and tables; test_clinic checks that the two agree).
+in prose and tables; test_pyspec_catalog tracks where the two disagree).
 
 Each entry gives the dunder, the slot (``tp_repr``, ``nb_add`` in
 ``tp_as_number``, ...), and the docstring of the wrapper descriptor, whose

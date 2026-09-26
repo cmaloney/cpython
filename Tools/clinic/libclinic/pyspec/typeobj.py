@@ -17,6 +17,7 @@ at the end of the C file, after every function it names):
 What each member of PyTypeObject comes from:
 
   tp_name           the class name (or @static_type(tp_name=...))
+  tp_base           the base class, if any
   tp_basicsize      sizeof(the C type of the class directive), or given
   tp_doc            the class docstring, as is
   tp_flags          Py_TPFLAGS_DEFAULT

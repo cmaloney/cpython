@@ -1586,10 +1586,10 @@ class ParseArgsCodeGen:
 
         SPEC is the C basename of this __new__, implemented by a pyspec
         method (see libclinic.pyspec); libclinic.pyspec.emit generates
-        SPEC_nargsN() by
-        partially evaluating it for exactly the type and N arguments.
+        SPEC_nargsN() by partially evaluating it for exactly the type and N
+        arguments.
 
-        Each optional parameter is preceded by a call count check; when the
+        Each optional parameter is preceded by an argument count check; when the
         arguments run out, the function for that count is called with the
         arguments converted so far.  The call for all parameters is the
         impl_call of the finale.

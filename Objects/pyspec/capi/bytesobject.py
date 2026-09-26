@@ -2,8 +2,8 @@
 file records.
 
 Everything else about them is read from where it is already written: the
-C types from the headers and the C definitions, the documented names and
-prose from Doc/c-api/bytes.rst, ownership from Doc/data/refcounts.dat,
+C types from the headers and the C definitions, the documented signatures
+from Doc/c-api/bytes.rst, ownership from Doc/data/refcounts.dat,
 stable ABI membership from Misc/stable_abi.toml and thread safety from
 Doc/data/threadsafety.dat.  A function implemented in the spec
 (PyBytes_FromObject in Objects/pyspec/bytesobject.py) has its facts
