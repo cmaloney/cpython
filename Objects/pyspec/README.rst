@@ -46,7 +46,8 @@ Add a spec-body method      The same ``def`` with a body in the subset
                             add cases to ``foo_cases.py``.
 Add or rename a slot        ``def __len__(self, /): ...`` in the class,
                             no docstring, with ``@c_name(...)`` if the C
-                            function is not ``<class>_<slot>``; write the C
+                            function is not ``<class>_<slot>`` without the
+                            slot's prefix (``bytes_repr``); write the C
                             function with the slot's typedef.
 Add a hand-written          ``@c_name(METH_O="f")`` (or ``METH_NOARGS``,
 PyCFunction                 plus ``@classmethod`` for ``METH_CLASS``);
@@ -61,7 +62,8 @@ Declare a new type          ``@static_type(...)`` on its class, a
                             ``foo_cases.py``.
 Regenerate                  ``make clinic``, or
                             ``./python Tools/clinic/clinic.py Objects/foo.c``
-Test                        ``./python -m test test_clinic`` (after
+Test                        ``./python -m test test_clinic
+                            test_pyspec_facts test_pyspec_catalog`` (after
                             rebuilding Python if the spec changed)
 ==========================  ===============================================
 

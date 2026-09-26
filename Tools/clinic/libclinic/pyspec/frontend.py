@@ -13,8 +13,9 @@ named T.  A method is written like the clinic block it replaces:
 * parameters are clinic parameter lines: the converter is the annotation,
   then the default; ``/`` and ``*`` as in clinic (and Python).  The
   pseudo-argument ``c_param='x'`` of the converter is clinic's
-  ``name as x`` (the name of the C parameter).  The first parameter of a method or a class method
-  (``self``, ``cls``), when not annotated, is clinic's implicit one;
+  ``name as x`` (the name of the C parameter).  The first parameter of
+  a method or a class method (``self``, ``cls``), when not annotated, is
+  clinic's implicit one;
 * ``@classmethod`` and ``@staticmethod`` as in Python (``__new__`` is
   implicitly a class method, like in Python);
 * any other clinic decorator is written as a Python decorator of the same

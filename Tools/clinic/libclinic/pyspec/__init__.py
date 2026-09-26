@@ -21,7 +21,8 @@ For Objects/foo.c, Objects/pyspec/foo.py is its spec:
                 classes, with their method and slot tables
 
 Argument Clinic uses all of this while processing foo.c: `make clinic`
-regenerates Objects/clinic/foo_pyspec.c.h too (the implemented functions,
-then the type objects), which foo.c includes at its end.  See
+regenerates Objects/clinic/foo_pyspec.c.h too (the implemented functions
+and their call table, then the type objects), which foo.c includes at its
+end.  See
 Objects/pyspec/README.rst.
 """

@@ -5558,7 +5558,7 @@ class PyspecTestBase(TestCase):
 
 
 class PyspecTest(PyspecTestBase):
-    """A spec method with a body implements a clinic __new__."""
+    """Spec functions with a body: their C is generated."""
 
     BLOCK = """
         /*[clinic input]
@@ -6758,7 +6758,8 @@ def spec_files():
             yield os.path.join(dirname, name), (c_files or [None])[0]
 
 
-# The cases of the bytes spec, whose classes BytesSpecFactsTest uses too.
+# The cases of the bytes spec, also used by BytesSpecFactsTest (its
+# classes) and test_pyspec_facts (its SOURCES).
 BYTES_CASES = load_cases(BYTES_SPEC) if os.path.exists(BYTES_SPEC) else None
 
 
@@ -6960,7 +6961,7 @@ class BytesSpecFactsTest(TestCase):
         # the lookup is not decided, and neither the alias nor the exact
         # type holds.  The call table only has entries for exact static
         # types; the generic entry, used for a subclass, has the same
-        # facts.  (_CALL_STR_1 claims an exact str for str subclasses.)
+        # facts.
         for arg_type in (BYTES_CASES.BytesSubclass,
                          BYTES_CASES.BytesOverridingDunderBytes, None):
             with self.subTest(arg_type=arg_type):
@@ -7002,8 +7003,7 @@ class BytesSpecFactsTest(TestCase):
                 self.assertTrue(facts.runs_python)
         self.assertEqual(bytes({BYTES_CASES.IndexOnly(3)}), b'\x03')
         # A list or a tuple is iterated by index, without an iterator,
-        # and ints take a fast path: the old hand-written
-        # _PyBytes_FromSequence_lock_held(), derived.
+        # and exact ints take a fast path.
         for arg_type in (list, tuple):
             with self.subTest(arg_type=arg_type):
                 residual, _ = self.new_facts(arg_type)

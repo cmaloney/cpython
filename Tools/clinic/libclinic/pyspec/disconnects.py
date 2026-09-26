@@ -13,16 +13,17 @@ capi        For each C API function of a type: the headers (Include/), the
             Misc/stable_abi.toml, Doc/data/threadsafety.dat, and the facts
             no other file has (Objects/pyspec/capi/<C file stem>.py).
 docs        The ``.. method:: bytes.x(...)`` and ``.. class::`` lines of
-            Doc/builtins/stdtypes.rst vs the runtime signatures.
+            Doc/builtins/stdtypes.rst vs the runtime signatures (the
+            spec's for ``__new__``).
 slots       The slot tables of Doc/c-api/typeobj.rst vs slotdefs[] in
             Objects/typeobject.c.
 docstrings  The same docstring written by hand in two places.
 typeshed    Optional: typeshed's stdlib/builtins.pyi vs the signatures of
-            the spec (the runtime for types without a spec).
+            the spec (the runtime's for methods without a spec).
 
-Signatures are compared by shape (R2 of the pyspec notes): the kind and
-optionality of each parameter, its name unless it is positional-only, and
-its default when both sides give one.  ``[, x]`` is an optional
+Signatures are compared by shape: the kind and optionality of each
+parameter, its name unless it is positional-only, and its default when
+both sides give one.  ``[, x]`` is an optional
 positional-only parameter, and several signature lines (or @overloads)
 are merged into the one signature that accepts all of them.
 """
@@ -234,7 +235,8 @@ def parse_refcounts(srcdir):
 
 
 def load_facts(srcdir, cfile):
-    """{name: runs Python} from Objects/pyspec/capi/<stem>.py, or None."""
+    """(path, facts) of Objects/pyspec/capi/<stem>.py: facts is {name:
+    runs Python, or 'both' if in both sets}, or None without the file."""
     stem = os.path.splitext(os.path.basename(cfile))[0]
     rel = f'Objects/pyspec/capi/{stem}.py'
     if not os.path.exists(os.path.join(srcdir, rel)):

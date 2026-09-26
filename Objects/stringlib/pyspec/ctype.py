@@ -4,9 +4,8 @@ ctype.h is a C template included by bytesobject.c and bytearrayobject.c;
 ``class B`` stands for either type.  Its functions are hand-written
 PyCFunctions, not clinic functions: ``@c_name(METH_NOARGS="f")`` gives the
 C function and its calling convention, and the docstring is the __doc__ of
-the method as is.  No clinic runs on ctype.h: the specs of the types
-import this module and share its methods with
-``isalnum = ctype.B.isalnum``.  The docstrings are also defined in
+the method as is.  No clinic runs on ctype.h: the spec of a type imports
+this module and shares its methods with ``isalnum = ctype.B.isalnum``.  The docstrings are also defined in
 Objects/bytes_methods.c (_Py_isalnum__doc__, ...), for the types that
 have no spec yet.
 """

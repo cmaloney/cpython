@@ -276,7 +276,7 @@ SOURCES = [
     lambda: call(types.SimpleNamespace()),
     lambda: call(1.5),
     lambda: call(None),
-    # Iterables, including lists and tuples, which Argument Clinic
+    # Iterables, including lists and tuples, which the generated C
     # iterates by index with a fast path for exact ints.
     lambda: call(generator_raises()),
     lambda: call(IteratorRaises()),
