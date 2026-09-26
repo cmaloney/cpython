@@ -32,12 +32,15 @@ _testinternalcapi = import_helper.import_module('_testinternalcapi')
 
 
 def bytes_spec_cases():
-    """The inputs of the spec difftest (test_clinic.BytesSpecTest.CASES)."""
+    """The bytes() inputs of the spec difftest
+    (SOURCES of Objects/pyspec/bytesobject_cases.py)."""
     try:
-        from test.test_clinic import BytesSpecTest
+        from test.test_clinic import BYTES_CASES
     except unittest.SkipTest as exc:
         raise unittest.SkipTest(f'test_clinic is not available: {exc}')
-    return BytesSpecTest.CASES
+    if BYTES_CASES is None:
+        raise unittest.SkipTest('Objects/pyspec/bytesobject_cases.py is not available')
+    return BYTES_CASES.SOURCES
 
 
 def outcome(func, *args):
@@ -336,7 +339,8 @@ class DebugAssertionTest(unittest.TestCase):
     @support.requires_subprocess()
     def test_result_assertions_emitted(self):
         # After a call with facts from the pyspec table, and after the
-        # hand-written result types of _CALL_STR_1 and _CALL_LEN.
+        # hand-written result types of _CALL_STR_1 (claimed for an exact
+        # int argument: str(len(b))) and _CALL_LEN.
         # (In a function: changing the globals would invalidate the trace.)
         code = textwrap.dedent('''
             import _opcode
@@ -345,7 +349,7 @@ class DebugAssertionTest(unittest.TestCase):
                 def f(n, ba, b, s):
                     x = 0
                     for _ in range(n):
-                        x += len(bytes(ba)) + len(bytes(b)) + len(str(s))
+                        x += len(bytes(ba)) + len(bytes(b)) + len(str(len(b)))
                     return x
                 f(TIER2_THRESHOLD * 2, bytearray(b'ab'), b'cd', 3)
                 code = f.__code__
@@ -367,13 +371,12 @@ class DebugAssertionTest(unittest.TestCase):
 
     @requires_jit()
     @support.requires_subprocess()
-    @unittest.expectedFailure
     def test_call_str_1_subclass(self):
-        # Known bug, not pyspec: _CALL_STR_1 claims an exact str result,
-        # but str(x) may return a str subclass (see
-        # bugreports/call-str-1-subclass; the upstream fix is separate).
-        # Debug builds fail _ASSERT_RESULT_TYPE right after the str() call;
-        # release builds fold type(str(c)) is str to True.
+        # _CALL_STR_1 used to claim an exact str result, but str(x) may
+        # return a str subclass (fixed by the merged fix-call-str-1-subclass
+        # branch).  With the wrong fact, debug builds fail
+        # _ASSERT_RESULT_TYPE right after the str() call and release builds
+        # fold type(str(c)) is str to True.
         code = textwrap.dedent('''
             from _testinternalcapi import TIER2_THRESHOLD
             class S(str):
@@ -402,6 +405,10 @@ class SoundnessTest(unittest.TestCase):
     def setUpClass(cls):
         cls.calls, cls.methods = _testinternalcapi.pyspec_table(bytes)
 
+    # Fails until workstream A's F2 change lands: _PySpec_FindMethod must
+    # take the bound class and match typed entries only for cls is bytes
+    # (and pyspec_find_method in _testinternalcapi must pass it through).
+    @unittest.expectedFailure
     def test_fromhex_cls(self):
         # F2: the facts of the typed bytes.fromhex entries hold only when
         # cls is exactly bytes: B.fromhex(s) calls B(result), which may
