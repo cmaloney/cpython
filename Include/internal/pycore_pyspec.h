@@ -73,7 +73,8 @@ typedef struct {
 } _PySpecCallTable;
 
 /* Generated into Objects/clinic/bytesobject_pyspec.c.h. */
-extern const _PySpecCallTable _PySpec_bytes_calls;
+/* Exported for _testinternalcapi (pyspec_call() and friends). */
+PyAPI_DATA(const _PySpecCallTable) _PySpec_bytes_calls;
 
 /* The call table of type tp, or NULL.  Add a line per type with a spec. */
 static inline const _PySpecCallTable *
@@ -134,19 +135,25 @@ _PySpec_LeaveNoPython(PyThreadState *tstate, int saved)
     ((_PyThreadStateImpl *)tstate)->pyspec_no_python = saved;
 }
 
+/* code: the code object about to run. */
 static inline void
-_PySpec_CheckPythonAllowed(PyThreadState *tstate)
+_PySpec_CheckPythonAllowed(PyThreadState *tstate, PyCodeObject *code)
 {
     if (((_PyThreadStateImpl *)tstate)->pyspec_no_python) {
-        Py_FatalError("Python code runs inside a call that the pyspec facts "
-                      "say runs no Python code (a derived fact is wrong: "
-                      "see Include/internal/pycore_pyspec.h)");
+        const char *name = PyUnicode_AsUTF8(code->co_qualname);
+        const char *file = PyUnicode_AsUTF8(code->co_filename);
+        _Py_FatalErrorFormat(
+            __func__,
+            "%s (%s:%d) runs inside a call that the pyspec facts say runs "
+            "no Python code: a derived fact is wrong (see "
+            "Include/internal/pycore_pyspec.h)",
+            name ? name : "?", file ? file : "?", code->co_firstlineno);
     }
 }
 #else
 #  define _PySpec_EnterNoPython(tstate) ((void)(tstate), 0)
 #  define _PySpec_LeaveNoPython(tstate, saved) ((void)(tstate), (void)(saved))
-#  define _PySpec_CheckPythonAllowed(tstate) ((void)(tstate))
+#  define _PySpec_CheckPythonAllowed(tstate, code) ((void)(tstate), (void)(code))
 #endif
 
 /* Call func, from an entry without _PySpec_MAY_RUN_PYTHON: it runs no

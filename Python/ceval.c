@@ -1232,7 +1232,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int 
 {
     _Py_EnsureTstateNotNULL(tstate);
     check_invalid_reentrancy();
-    _PySpec_CheckPythonAllowed(tstate);
+    _PySpec_CheckPythonAllowed(tstate, _PyFrame_GetCode(frame));
     CALL_STAT_INC(pyeval_calls);
 
 #if USE_COMPUTED_GOTOS && !_Py_TAIL_CALL_INTERP
