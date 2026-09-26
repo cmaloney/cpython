@@ -141,6 +141,9 @@ def _returns(annotation, where):
             runs_python = True
         elif kind in ('New', 'Borrowed'):
             ownership = kind.lower()
+            if isinstance(args[0], type) and args[0] is not builtins.object:
+                # New[bytes]: exactly that type; the C type is PyObject *.
+                args = (builtins.object,)
         elif kind == 'OnError':
             errors = tuple('NULL' if _is_null(v) else v for v in args[1:])
             if not errors:
@@ -193,6 +196,8 @@ def load_catalog(spec_path):
         if not is_capi_name(name):
             continue
         func = functions[name]
+        if getattr(func, '__pyspec_helper__', False):
+            continue            # an escape's C function, not our C API
         where = f'{spec_path}:{node.lineno}: {name}()'
         try:
             import annotationlib
@@ -240,16 +245,6 @@ def load_catalog(spec_path):
     return catalog
 
 
-# Escapes (``C.<name>``) of runtime.C known not to run Python code.
-# Anything else called from a spec body is assumed to run Python code.
-ESCAPES_WITHOUT_PYTHON = frozenset({
-    '_PyBytes_FromSize',
-    # Only exact ints are converted; other items fall back to iteration.
-    '_PyBytes_FromSequence_lock_held',
-    'PyErr_BadInternalCall',
-    'critical_section_sequence_fast',
-})
-
 BUILTINS_WITHOUT_PYTHON = frozenset({
     'type', 'isinstance', 'hasattr', 'tp_name', 'fqname',
 })
@@ -268,7 +263,13 @@ def python_calls(tree, name, _seen=None):
         func = node.func
         if (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
                 and func.value.id == 'C'):
-            if func.attr not in ESCAPES_WITHOUT_PYTHON:
+            # The facts of an escape are those of the stub of its name
+            # (see runtime.py); raise and with escapes run no Python code.
+            if isinstance(getattr(runtime.C, func.attr, None),
+                          (runtime.RaiseEscape, runtime.ContextEscape)):
+                continue
+            stub = defs.get(func.attr)
+            if stub is None or runtime.stub_facts(stub).runs_python:
                 found.append(ast.unparse(node))
         elif isinstance(func, ast.Name) and func.id in defs:
             if func.id not in _seen:

@@ -5665,6 +5665,59 @@ class PyspecTest(PyspecTestBase):
         self.assertNotIn("PyFoo_Stub", output)
         self.assertNotIn("PyFoo_Documented", output)
 
+    def test_method_and_class_method(self):
+        # A method or class method with a body: clinic's parsing code
+        # calls NAME_impl(), generated from the spec with clinic's self
+        # (or class) parameter first.
+        block = """
+            /*[clinic input]
+            output preset block
+            class bytes "PyBytesObject *" "&PyBytes_Type"
+            bytes.__bytes__
+            [clinic start generated code]*/
+
+            /*[clinic input]
+            bytes.fromhex
+            [clinic start generated code]*/
+        """
+        spec = """
+            class bytes:
+                def __bytes__(self):
+                    "Doc."
+                    if type(self) is bytes:
+                        return self
+                    return C.bytes_copy(self)
+
+                @classmethod
+                def fromhex(cls, string: object, /):
+                    "Doc."
+                    result = C.bytes_from_hex(string)
+                    if cls is not bytes:
+                        return cls(result)
+                    return result
+        """
+        generated = self.generate(spec, block)
+        self.assertIn("static PyObject *\n"
+                      "bytes___bytes___impl(PyBytesObject *self);", generated)
+        self.assertIn("return bytes___bytes___impl((PyBytesObject *)self);",
+                      generated)
+        self.assertIn("static PyObject *\n"
+                      "bytes_fromhex_impl(PyTypeObject *type, "
+                      "PyObject *string);", generated)
+        self.assertNotIn("foo_vectorcall", generated)
+        with open(self.output_path, encoding='utf-8') as f:
+            output = f.read()
+        self.assertIn("static PyObject *\n"
+                      "bytes___bytes___impl(PyBytesObject *self)\n{\n"
+                      "    if (PyBytes_CheckExact(self)) {\n"
+                      "        return Py_NewRef(self);\n"
+                      "    }\n", output)
+        self.assertIn("static PyObject *\n"
+                      "bytes_fromhex_impl(PyTypeObject *cls, "
+                      "PyObject *string)\n{\n", output)
+        self.assertIn("PyObject_CallOneArg((PyObject *)cls, result);",
+                      output)
+
     def test_body_without_block(self):
         block = self.BLOCK.replace("bytes.__new__ as foo_new",
                                    "bytes.__bytes__")
@@ -6202,6 +6255,32 @@ class BytesSpecTest(TestCase):
         self.assertIs(bytes(b), b)
         self.assertIs(self.bytes_new(b), b)
         self.assertIs(self.spec['PyBytes_FromObject'](b), b)
+
+    def test_dunder_bytes(self):
+        # bytes.__bytes__: an exact bytes returns itself, a subclass
+        # instance gets an exact copy.
+        spec_bytes = self.spec['bytes.__bytes__']
+        b = b'abc'
+        self.assertIs(b.__bytes__(), b)
+        self.assertIs(spec_bytes(b), b)
+        for value in (BytesSubclass(b'xy'), BytesSubclass()):
+            for func in (bytes.__bytes__, spec_bytes):
+                with self.subTest(value=value, func=func):
+                    result = func(value)
+                    self.assertIs(type(result), bytes)
+                    self.assertEqual(result, value)
+                    self.assertIsNot(result, value)
+
+    def test_fromhex(self):
+        spec_fromhex = self.spec['bytes.fromhex']
+        cases = ['', '00ff', ' 0a 1B ', 'abc', 'zz', b'00ff',
+                 bytearray(b'0a'), memoryview(b'ab'), 1, None]
+        for cls in (bytes, BytesSubclass):
+            for string in cases:
+                with self.subTest(cls=cls, string=string):
+                    expected = self.outcome(cls.fromhex, (string,), {})
+                    actual = self.outcome(spec_fromhex, (cls, string), {})
+                    self.assertEqual(actual, expected)
 
     def test_up_to_date(self):
         # Argument Clinic generates Objects/clinic/bytesobject.c.h and

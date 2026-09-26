@@ -27,7 +27,7 @@ __all__ = [
     # C API facts vocabulary
     'char_p', 'void_p', 'const_void_p', 'Py_ssize_t', 'va_list', 'pointer',
     'Out', 'InOut', 'New', 'Borrowed', 'Steals', 'OnError', 'NoError',
-    'NullIn', 'RunsPython',
+    'NullIn', 'RunsPython', 'helper',
 ]
 
 
@@ -212,6 +212,15 @@ class C:
     bytes_subtype_new = escape('bytes_subtype_new({0}, {1})')(
         lambda cls, value: bytes.__new__(cls, value))
 
+    # An exact bytes copy of a bytes (or subclass) instance.
+    bytes_copy = escape(
+        'PyBytes_FromStringAndSize(PyBytes_AS_STRING({0}), '
+        'PyBytes_GET_SIZE({0}))')(
+        lambda b: bytes(memoryview(b)))
+
+    bytes_from_hex = escape('_PyBytes_FromHex({0}, 0)')(
+        lambda string: bytes.fromhex(string))
+
     PyErr_BadInternalCall = RaiseEscape(
         'PyErr_BadInternalCall();',
         lambda: SystemError('bad argument to internal function'))
@@ -247,6 +256,8 @@ class C:
 #
 # Ownership
 #     New[object]     return: a new (strong) reference
+#     New[bytes]      return: a new reference to an object of exactly that
+#                     builtin type (never a subclass instance)
 #     Borrowed[object] return: a borrowed reference
 #     Steals[T]       parameter: the callee takes over the caller's reference
 #                     (or, for a non-object such as a PyBytesWriter *,
@@ -265,8 +276,22 @@ class C:
 #     RunsPython[T]   (return) may run arbitrary Python code (__index__,
 #                     __buffer__, __iter__, warnings, ...).  A stub without it
 #                     claims the function never runs Python code.
+#     RunsPython[T, 'p']
+#                     may run Python code only through the slots of the type
+#                     of parameter p: never when p's exact type is a static
+#                     (builtin) type.
 #
 # For a function with a real body, these facts are derived, not declared.
+#
+# Escapes
+#     The facts of an escape ``C.<name>(...)`` are the annotations of the
+#     top-level stub named <name> in the spec (read by call_table.py and
+#     capi.py from the AST: clinic never executes the spec).  A stub for a
+#     C function that is not part of the C API of the spec's C file (static,
+#     or defined in another file) is decorated with @helper: the C API
+#     catalog skips it.  Escapes without a stub are assumed to run Python
+#     code and to return an object of any type.  ``raise C.<name>()`` and
+#     ``with C.<name>(x):`` escapes never run Python code.
 
 
 class CType:
@@ -328,6 +353,13 @@ NoError = _Wrapper('NoError', 'Return: cannot fail.')
 RunsPython = _Wrapper('RunsPython', 'Return: may run arbitrary Python code.')
 
 
+def helper(func):
+    """Decorator of a stub: a C function outside the C API of the spec's C
+    file, described only for the escapes that call it."""
+    func.__pyspec_helper__ = True
+    return func
+
+
 class NullIn:
     """Error convention: on error, *param is released and set to NULL."""
 
@@ -342,6 +374,79 @@ class NullIn:
 
     def __hash__(self):
         return hash(('NullIn', self.param))
+
+
+class StubFacts:
+    """Facts of a stub read from its AST, for the escape of the same name.
+
+    result_type: the builtin type every result has exactly (New[bytes]), or
+        None.
+    runs_python: False, True, or the name of the parameter through whose
+        type slots it may run Python code (RunsPython[T, 'p']).
+    errors: the error values, as in capi.Function.errors ('NULL', -1, ...).
+    params: the parameter names.
+    """
+
+    def __init__(self, params, result_type, runs_python, errors):
+        self.params = params
+        self.result_type = result_type
+        self.runs_python = runs_python
+        self.errors = errors
+
+    def runs_python_for(self, arg_types):
+        """Whether a call may run Python code, given the exact types of its
+        arguments (None when unknown), in parameter order."""
+        if self.runs_python in (True, False):
+            return self.runs_python
+        index = self.params.index(self.runs_python)
+        tp = arg_types[index] if index < len(arg_types) else None
+        return not (isinstance(tp, type) and is_static_type(tp))
+
+
+HEAPTYPE = 1 << 9
+
+
+def is_static_type(tp):
+    """A builtin (static) type: its slots never run Python code."""
+    return not tp.__flags__ & HEAPTYPE
+
+
+def stub_facts(node):
+    """StubFacts of the stub *node* (an ast.FunctionDef), from the facts
+    vocabulary of its return annotation."""
+    args = node.args
+    params = [a.arg for a in args.posonlyargs + args.args]
+    annotation = node.returns
+    result_type = None
+    runs_python = False
+    errors = None
+    while isinstance(annotation, ast.Subscript):
+        kind = annotation.value
+        items = annotation.slice
+        items = items.elts if isinstance(items, ast.Tuple) else [items]
+        match kind:
+            case ast.Name('RunsPython'):
+                runs_python = True
+                if len(items) == 2:
+                    runs_python = ast.literal_eval(items[1])
+            case ast.Name('OnError'):
+                errors = tuple('NULL' if isinstance(v, ast.Name)
+                               and v.id == 'NULL' else ast.literal_eval(v)
+                               for v in items[1:])
+            case ast.Name('NoError'):
+                errors = ()
+            case ast.Name('New' | 'Borrowed'):
+                if errors is None:
+                    errors = ('NULL',)
+                match items[0]:
+                    case ast.Name(name) if name != 'object':
+                        value = getattr(builtins, name, None)
+                        if isinstance(value, type):
+                            result_type = value
+        annotation = items[0]
+    if errors is None:
+        errors = ()
+    return StubFacts(params, result_type, runs_python, errors)
 
 
 def load(path):

@@ -4,6 +4,8 @@ Do not edit; edit the spec and run "make clinic".
 [pyspec]*/
 
 static PyObject *bytes_new_impl(PyTypeObject *cls, PyObject *source, const char *encoding, const char *errors);
+static PyObject *bytes___bytes___impl(PyBytesObject *self);
+static PyObject *bytes_fromhex_impl(PyTypeObject *cls, PyObject *string);
 
 static PyObject *
 bytes_new_impl(PyTypeObject *cls, PyObject *source, const char *encoding, const char *errors)
@@ -91,6 +93,34 @@ bytes_new_impl(PyTypeObject *cls, PyObject *source, const char *encoding, const 
         return _PyBytes_FromSize(size, 1);
     }
     return PyBytes_FromObject(source);
+}
+
+static PyObject *
+bytes___bytes___impl(PyBytesObject *self)
+{
+    if (PyBytes_CheckExact(self)) {
+        return Py_NewRef(self);
+    }
+    return PyBytes_FromStringAndSize(PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self));
+}
+
+static PyObject *
+bytes_fromhex_impl(PyTypeObject *cls, PyObject *string)
+{
+    PyObject *result = NULL;
+
+    result = _PyBytes_FromHex(string, 0);
+    if (result == NULL) {
+        return NULL;
+    }
+    if (cls != &PyBytes_Type) {
+        {
+            PyObject *_return_value = PyObject_CallOneArg((PyObject *)cls, result);
+            Py_XDECREF(result);
+            return _return_value;
+        }
+    }
+    return result;
 }
 
 PyObject *

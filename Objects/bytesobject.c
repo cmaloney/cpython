@@ -1831,18 +1831,7 @@ static PyBufferProcs bytes_as_buffer = {
 /*[clinic input]
 bytes.__bytes__
 [clinic start generated code]*/
-
-static PyObject *
-bytes___bytes___impl(PyBytesObject *self)
-/*[clinic end generated code: output=63a306a9bc0caac5 input=54e1d9883c2b4b67]*/
-{
-    if (PyBytes_CheckExact(self)) {
-        return Py_NewRef(self);
-    }
-    else {
-        return PyBytes_FromStringAndSize(self->ob_sval, Py_SIZE(self));
-    }
-}
+/*[clinic end generated code: output=da39a3ee5e6b4b0d input=54e1d9883c2b4b67]*/
 
 
 #define LEFTSTRIP 0
@@ -2421,17 +2410,7 @@ bytes_splitlines_impl(PyBytesObject *self, int keepends)
 /*[clinic input]
 bytes.fromhex
 [clinic start generated code]*/
-
-static PyObject *
-bytes_fromhex_impl(PyTypeObject *type, PyObject *string)
-/*[clinic end generated code: output=0973acc63661bb2e input=c08418a83b24de18]*/
-{
-    PyObject *result = _PyBytes_FromHex(string, 0);
-    if (type != &PyBytes_Type && result != NULL) {
-        Py_SETREF(result, PyObject_CallOneArg((PyObject *)type, result));
-    }
-    return result;
-}
+/*[clinic end generated code: output=da39a3ee5e6b4b0d input=c08418a83b24de18]*/
 
 PyObject*
 _PyBytes_FromHex(PyObject *string, int use_bytearray)

@@ -5,8 +5,10 @@ and writes the result next to its other output
 (Objects/clinic/bytesobject_pyspec.c.h for Objects/bytesobject.c).
 
 Every implemented spec function becomes a C function:
-  * a method of a spec class implements the clinic function of that name;
-    only __new__ is supported.  For ``bytes.__new__ as bytes_new`` it
+  * a method of a spec class implements the clinic function of that name.
+    For a method or class method (``bytes.__bytes__``) it becomes the
+    NAME_impl() that clinic's parsing code calls; the first parameter is
+    clinic's self (or class) parameter.  For ``bytes.__new__ as bytes_new`` it
     becomes bytes_new_impl() (Argument Clinic declares it and no longer
     expects a hand-written body), plus bytes_new_nargsN() for each
     positional argument count N -- the function partially evaluated for
@@ -35,7 +37,8 @@ Conditions:
   hasattr(type(x), "__dunder__"), (v := C.<escape>(...)) is [not] NULL,
   integer comparisons, and/or/not
 Calls (result is a new reference or a Py_ssize_t):
-  C.<escape>(...), iter(x), f() for an object variable f,
+  C.<escape>(...), iter(x), f() for an object variable f, f(x) for an
+  object or type variable f (e.g. cls(result)),
   <spec function>(...), T.<spec method>(...)
 
 Reference ownership: parameters are borrowed; every object local is a new
@@ -238,6 +241,11 @@ class FunctionEmitter:
                         OBJECT, ERR_NULL)
             if self.ctype_of(name) == OBJECT and not call.args:
                 return f'_PyObject_CallNoArgs({name})', OBJECT, ERR_NULL
+            if self.ctype_of(name) in (OBJECT, TYPE) and len(call.args) == 1:
+                callable_ = name if self.ctype_of(name) == OBJECT else (
+                    f'(PyObject *){name}')
+                return (f'PyObject_CallOneArg({callable_}, '
+                        f'{self.lower_value(call.args[0])})', OBJECT, ERR_NULL)
         raise SpecError(call, f'unsupported call {ast.unparse(call)}')
 
     @staticmethod
@@ -592,12 +600,18 @@ class Generator:
     C basename of their clinic function ("bytes_new").
     """
 
-    def __init__(self, spec, c_basenames):
+    def __init__(self, spec, c_basenames, self_ctypes=None):
         self.spec = spec
         self.c_basenames = c_basenames
+        self.self_ctypes = self_ctypes or {}
 
     def describe(self, name):
         try:
+            cls_name, _, meth = name.rpartition('.')
+            if cls_name and meth != '__new__':
+                self.c_basename(name)       # used by a clinic block?
+                return describe_method(self.spec, name,
+                                       self.self_ctypes[name])
             return self.spec.describe(name)
         except frontend.SpecError as exc:
             raise SpecError(self.spec.functions[name], str(exc)) from None
@@ -680,11 +694,59 @@ class Generator:
         return out
 
 
+def describe_method(spec, name, self_ctype):
+    """The C signature (frontend.SpecFunction) of implemented spec method
+    *name*, other than __new__: a method or class method whose first
+    parameter is clinic's implicit self (or class) parameter, of C type
+    *self_ctype* (from the clinic class, e.g. "PyBytesObject *").
+
+    The other parameters follow the rules of frontend.Spec.describe().
+    (Kept here while frontend.py is being changed by another workstream;
+    it belongs in Spec.describe().)
+    """
+    node = spec.functions[name]
+    where = f"{spec.where(node)}: {name}()"
+    args = node.args
+    for other in (args.vararg, *args.kwonlyargs, args.kwarg):
+        if other is not None:
+            raise frontend.SpecError(f"{where}: a spec needs positional "
+                                     f"parameters only; {other.arg!r} is "
+                                     "not")
+    positional = args.posonlyargs + args.args
+    if not positional or positional[0].annotation is not None:
+        raise frontend.SpecError(f"{where}: the first parameter must be "
+                                 "the unannotated self (or class)")
+    first_optional = len(positional) - len(args.defaults)
+    parameters = [frontend.SpecParameter(positional[0].arg, self_ctype,
+                                         False)]
+    for i, arg in enumerate(positional[1:], 1):
+        match arg.annotation:
+            case ast.Name(conv) | ast.Call(func=ast.Name(conv)) \
+                    if conv in frontend.SPEC_CTYPES:
+                ctype = frontend.SPEC_CTYPES[conv]
+            case _:
+                raise frontend.SpecError(
+                    f"{where}: parameter {arg.arg!r} needs an annotation "
+                    f"from {sorted(frontend.SPEC_CTYPES)}")
+        optional = i >= first_optional
+        if optional:
+            default = args.defaults[i - first_optional]
+            if not (isinstance(default, ast.Name) and default.id == 'NULL'):
+                raise frontend.SpecError(f"{where}: parameter {arg.arg!r} "
+                                         "may only default to NULL")
+        parameters.append(frontend.SpecParameter(arg.arg, ctype, optional))
+    return frontend.SpecFunction(name, spec.filename, node.lineno,
+                                 parameters)
+
+
 def generate(spec: frontend.Spec, spec_path: str,
-             c_basenames: dict[str, str]) -> str:
+             c_basenames: dict[str, str],
+             self_ctypes: dict[str, str] | None = None) -> str:
     """C for the implemented functions of *spec*, a frontend.Spec.
 
-    *spec_path* is only named in the header comment.
+    *spec_path* is only named in the header comment.  *self_ctypes* maps
+    the implemented spec methods other than __new__ to the C type of their
+    self (or class) parameter.
     """
-    text: str = Generator(spec, c_basenames).generate(spec_path)
+    text: str = Generator(spec, c_basenames, self_ctypes).generate(spec_path)
     return text
