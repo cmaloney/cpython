@@ -9,7 +9,7 @@ writes it; there is no separate command):
 
 * NAME_nargs1_T(): NAME_nargs1 partially evaluated for an argument of
   exact type T, for T from a fixed list of common builtin types
-  (CANDIDATE_TYPES).  No annotation chooses them: a variant is kept only
+  (builtin_types.CANDIDATES).  No annotation chooses them: a variant is kept only
   when its residual code is much smaller than the generic one
   (KEEP_RATIO); variants with identical code share one C function, and a
   variant that would only call a shared specialization
@@ -32,22 +32,17 @@ writes it; there is no separate command):
       reference to it), e.g. ``return self`` under ``type(self) is
       bytes``;
     - result_type: every ``return`` gives an object of that exact type:
-      a constant, an escape whose stub says New[T], a spec function whose
-      own returns all do, or a name whose exact type the path proves
-      (``type(x) is K`` or the argument's known type).  ``isinstance``
-      checks allow subclasses and prove nothing;
+      a constant, a call whose own returns all do (``exact(T)`` in the
+      Python reference of a C function), or a name whose exact type the
+      path proves (``type(x) is K`` or the argument's known type).
+      ``isinstance`` checks allow subclasses and prove nothing;
     - _PySpec_ALWAYS_RAISES: no ``return`` is left;
-    - _PySpec_MAY_RUN_PYTHON: some call on a path may run Python code:
-      an escape whose stub says RunsPython (for RunsPython[T, 'p'], only
-      when the exact type of p is not known to be a static type) unless
-      it is lowered by a fast path, an exact type or unchecked lowering,
-      a call of an object (e.g. a method found by lookup_special), or a
-      spec function or specialization that may.
+    - _PySpec_MAY_RUN_PYTHON: some call on a path may run Python code.
 
-The facts of the escapes come from the stubs of the same name in the spec
-(runtime.stub_facts()): there is no second table here.  All facts hold
-only for the exact argument types of their entry: a subclass instance
-uses the generic entry.
+The facts are those of facts.py, derived from the residual code and from
+the Python references of the C functions it calls.  They hold only for
+the exact argument types of their entry: a subclass instance uses the
+generic entry.
 """
 
 import ast

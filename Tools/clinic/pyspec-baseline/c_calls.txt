@@ -1,0 +1,5 @@
+# Known disconnects: the C of each @c_implemented function (and of the
+# static functions of its file it calls) vs its Python reference: a call
+# that may run Python code that the reference does not account for.
+# Checked by Lib/test/test_pyspec_catalog.py: this list may only shrink.
+# Fixed one?  Delete its line.  Keep the lines sorted.

@@ -250,8 +250,8 @@ def _without_docstring(node: ast.FunctionDef) -> list[ast.stmt]:
 def is_stub(node: ast.FunctionDef) -> bool:
     """True if the body is only a docstring and/or ``...``.
 
-    A stub describes a function implemented in C by hand: it is never
-    lowered to C, and its annotations are not C types for the emitter.
+    A stub is a function implemented in C by hand about which nothing is
+    known: it is never lowered to C, and a call of it may do anything.
     """
     body = _without_docstring(node)
     return not body or (len(body) == 1 and isinstance(body[0], ast.Expr)

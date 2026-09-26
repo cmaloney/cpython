@@ -25,9 +25,9 @@ Python code and raise anything.  ``len(x)`` and ``iter(x)`` call
 
 In the Python reference of a @c_implemented function, what is not one of
 these is the model of the values the C computes: it has no effects (the
-effects of the C are the ones stated).  Tools/clinic/libclinic/pyspec/
-c_check.py checks the statements against the C: every call in the C
-function that may run Python code must be one of them.
+effects of the C are the ones stated).  The c_calls dimension of
+disconnects.py checks them against the C: every call in the C function
+that may run Python code must be accounted for by one of them.
 """
 
 import ast

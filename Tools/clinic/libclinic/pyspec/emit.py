@@ -19,8 +19,9 @@ Every implemented spec function becomes a C function:
     starting with Py or _Py are defined non-static (their public or
     internal header declares them); everything else is static.
 
-Functions whose body is only a docstring and/or ``...`` are stubs
-(frontend.is_stub()) and are never lowered to C.
+Functions whose body is only a docstring and/or ``...`` (stubs,
+frontend.is_stub()) and @c_implemented functions are C written by hand:
+they are never lowered to C, only called.
 
 For a __new__ implemented by the spec, call_table.py then adds
 type-specialized variants of NAME_nargs1() and the call table the tier-2

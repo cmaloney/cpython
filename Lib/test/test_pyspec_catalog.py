@@ -1,7 +1,8 @@
 """Where the code and the files describing it by hand disagree: a ratchet.
 
 Tools/clinic/libclinic/pyspec/disconnects.py lists the disconnects of each
-dimension (C API, docs, slots, docstrings, typeshed).  The known ones are
+dimension (C API, docs, slots, docstrings, typeshed, and the C of the
+@c_implemented functions vs their Python references).  The known ones are
 in Tools/clinic/pyspec-baseline/<dimension>.txt, which may only shrink:
 a new disconnect fails the test, and so does a baseline line that no
 longer matches (delete it).  -v prints the count per dimension.
@@ -64,6 +65,9 @@ class RatchetTest(unittest.TestCase):
 
     def test_docstrings(self):
         self.check('docstrings', disconnects.docstrings(SRCDIR))
+
+    def test_c_calls(self):
+        self.check('c_calls', disconnects.c_calls(SRCDIR))
 
     @unittest.skipUnless(os.environ.get('PYSPEC_TYPESHED'),
                          'set PYSPEC_TYPESHED to a typeshed checkout')

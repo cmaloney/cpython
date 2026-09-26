@@ -4,9 +4,14 @@ For Objects/foo.c, Objects/pyspec/foo.py is its spec:
 
   frontend      reads the spec; turns a spec method into the clinic input
                 of the one-line clinic block naming it in the C file
-  runtime       names a spec imports, with Python reference implementations,
-                and the facts vocabulary of escape stubs (New[...], ...);
+  runtime       names a spec imports, with their meaning as Python: the
+                builtins with a C meaning, @c_implemented and the
+                primitives exact(), unknown(), calls(), runs_python();
                 load() runs a spec as Python (for tests)
+  builtin_types the one table of builtin types without a spec (C type
+                objects, checks, constants, audited special methods)
+  facts         derives the facts of statements and of the calls of C
+                functions from their Python references
   partial_eval  folds a spec function for facts known at a call site
   emit          generates C from the implemented spec functions
   call_table    adds the call table of the tier-2 optimizer to that C

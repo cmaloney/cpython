@@ -20,6 +20,11 @@ slots       The slot tables of Doc/c-api/typeobj.rst vs slotdefs[] in
 docstrings  The same docstring written by hand in two places.
 typeshed    Optional: typeshed's stdlib/builtins.pyi vs the signatures of
             the spec (the runtime's for methods without a spec).
+c_calls     The C of each @c_implemented function vs its Python reference:
+            every call that may run Python code (by the token-level escape
+            analysis of Tools/cases_generator/analyzer.py) is accounted for
+            by the reference: a call of the same function, a calls() of
+            the special method it invokes, or runs_python().
 
 Signatures are compared by shape: the kind and optionality of each
 parameter, its name unless it is positional-only, and its default when
@@ -50,7 +55,7 @@ TYPES = {
 }
 
 BASELINE_DIR = 'Tools/clinic/pyspec-baseline'
-DIMENSIONS = ('capi', 'docs', 'slots', 'docstrings', 'typeshed')
+DIMENSIONS = ('capi', 'docs', 'slots', 'docstrings', 'typeshed', 'c_calls')
 
 
 def read_baseline(srcdir, dimension):
@@ -763,4 +768,252 @@ def typeshed(srcdir, typeshed_dir):
             if not same_shape(theirs, mine):
                 out.append(f'{full}: typeshed {render(theirs)} != {source} '
                            f'{render(mine)}')
+    return sorted(out)
+
+
+# ---------------------------------------------------------------------------
+# Dimension: the C of the @c_implemented functions
+
+# C functions that run Python code only through a special method of an
+# argument: the calls(x, "__name__") that accounts for them.  A call
+# through a slot (``->nb_index(...)``, or a local set from one) is read
+# from slotdefs[] (slots.py).
+SLOT_CALLS = {
+    'PyObject_GetBuffer': '__buffer__',
+    'PyBuffer_Release': '__release_buffer__',
+    'PyObject_Length': '__len__',
+    'PyObject_Size': '__len__',
+    'PyObject_GetIter': '__iter__',
+    'PyIter_Next': '__next__',
+}
+
+# Audited: C functions (without a spec) that run no Python code.
+NO_PYTHON = {
+    # Errors: setting and reading the exception runs no Python code.
+    'PyErr_Format', 'PyErr_SetString', 'PyErr_NoMemory', 'PyErr_Clear',
+    'PyErr_Occurred', 'PyErr_GivenExceptionMatches', '_PyErr_Format',
+    '_PyErr_SetString', '_PyErr_Clear', 'null_error',
+    '_PyThreadState_GET',
+    # Memory and objects of exact builtin types.
+    'memcpy', 'PyLong_AsSsize_t', '_PyLong_IsNegative', '_PyLong_Copy',
+    'PyBuffer_ToContiguous', 'PyBuffer_FillInfo', 'PyBytes_FromStringAndSize',
+    '_PyLong_FromUnsignedChar', '_PyType_LookupRef', '_PyObject_HasLen',
+    'PyBytesWriter_GetData', 'PyBytesWriter_Create', 'PyBytesWriter_Discard',
+    'PyBytesWriter_Finish', 'PyBytesWriter_FinishWithPointer',
+    '_PyBytesWriter_ResizeToAllocated',
+    '_PyBytesWriter_ResizeAndUpdatePointer', 'set_ob_shash',
+    'get_ob_shash', 'PyObject_Malloc', 'PyObject_Calloc',
+    '_PyObject_InitVar', '_Py_atomic_store_ssize_relaxed',
+    'PyMem_Malloc', 'PyObject_Realloc', 'memset', 'PyObject_CheckBuffer',
+    'PyByteArray_FromStringAndSize', 'PyByteArray_Resize',
+    '_PyBytesWriter_GetData', '_PyReftracerTrack', '_Py_AddToAllObjects',
+    '_Py_ForgetReference', '_Py_NewReferenceNoTotal',
+    '_Py_atomic_load_ssize_relaxed',
+    # A fatal error does not return.
+    '_Py_FatalErrorFormat',
+    # tp_alloc has no special method: Python code cannot define it.
+    'tp_alloc',
+    # Releasing a reference (Py_DECREF and the other macros): the
+    # functions checked release only references they made or whose object
+    # their caller keeps alive: no finalizer runs.
+}
+
+
+# Comments, literals and preprocessor lines, blanked before lexing (the
+# lexer of the cases generator does not know them all, and a macro body is
+# not code).
+_LITERALS = re.compile(r"""/\*.*?\*/|//[^\n]*|"(?:[^"\\]|\\.)*"|"""
+                       r"""'(?:[^'\\]|\\.)*'|^[ \t]*\#(?:\\\n|[^\n])*""",
+                       re.S | re.M)
+
+
+def _blank(match):
+    text = match.group()
+    return ('' if text.lstrip().startswith('#') else '0') + \
+        '\n' * text.count('\n')
+
+
+def _c_function(tokens, name, static=False):
+    """The tokens of the body of the C function *name* (file level
+    ``name(...) {...}``, and ``static`` with *static*), or None."""
+    depth, start, braces = 0, 0, []
+    for i, tkn in enumerate(tokens):
+        if tkn.kind == 'LBRACE':
+            # extern "C" { ... } (a header) is not a block.
+            braces.append(tokens[i - 2].text != 'extern')
+            depth += braces[-1]
+        elif tkn.kind == 'RBRACE' and braces:
+            depth -= braces.pop()
+        if depth == 0 and tkn.kind in ('SEMI', 'RBRACE'):
+            start = i
+        elif (depth == 0 and tkn.text == name and i + 1 < len(tokens)
+                and tokens[i + 1].kind == 'LPAREN'):
+            j, parens = i + 1, 0
+            while True:
+                parens += {'LPAREN': 1, 'RPAREN': -1}.get(tokens[j].kind, 0)
+                j += 1
+                if parens == 0:
+                    break
+            if j < len(tokens) and tokens[j].kind == 'LBRACE' and not (
+                    static and 'STATIC' not in {t.kind
+                                                for t in tokens[start:i]}):
+                end, braces = j, 0
+                while True:
+                    braces += {'LBRACE': 1, 'RBRACE': -1}.get(
+                        tokens[end].kind, 0)
+                    end += 1
+                    if braces == 0:
+                        return tokens[j:end]
+    return None
+
+
+# A macro-style name (PyBytes_AS_STRING, Py_SET_SIZE, _PyBytes_CAST): an
+# accessor, or releasing a reference (Py_DECREF, see NO_PYTHON).
+_ACCESSOR = re.compile(r'_?[A-Za-z]+_[A-Z0-9_]+')
+
+
+def _escaping_calls(analyzer, parsing, body, slot_fields):
+    """The calls the token-level escape analysis of the cases generator
+    (analyzer.escaping_call_in_simple_stmt()) reports in *body*: the names
+    called, with a call through a slot as the slot."""
+    aliases = {}
+    for i, tkn in enumerate(body[:-3]):
+        # x = ... ->slot ...; : a local set from a slot.
+        if tkn.kind == 'IDENTIFIER' and body[i + 1].kind == 'EQUALS':
+            for j in range(i + 2, len(body) - 1):
+                if body[j].kind == 'SEMI':
+                    break
+                if (body[j].kind == 'ARROW'
+                        and body[j + 1].text in slot_fields):
+                    aliases[tkn.text] = body[j + 1].text
+    names = set()
+    skip = 0            # the end of an assert(...): a check, not code
+    for i, (tkn, after) in enumerate(zip(body, body[1:])):
+        if i < skip:
+            continue
+        if tkn.text == 'assert':
+            depth = 0
+            for skip in range(i + 1, len(body)):
+                depth += {'LPAREN': 1, 'RPAREN': -1}.get(body[skip].kind, 0)
+                if depth == 0:
+                    break
+            continue
+        if (tkn.kind != 'IDENTIFIER' or after.kind != 'LPAREN'
+                or _ACCESSOR.fullmatch(tkn.text)):
+            continue
+        found = {}
+        analyzer.escaping_call_in_simple_stmt(
+            parsing.SimpleStmt([tkn, after]), found)
+        if found:
+            names.add(aliases.get(tkn.text, tkn.text))
+    return names
+
+
+def _spec_files(srcdir):
+    for top in ('Objects', 'Python', 'Include'):
+        for dirpath, _, files in os.walk(os.path.join(srcdir, top)):
+            if os.path.basename(dirpath) == 'pyspec':
+                for name in sorted(files):
+                    if name.endswith('.py') and not name.endswith(
+                            '_cases.py'):
+                        yield os.path.join(dirpath, name)
+
+
+def c_calls(srcdir):
+    """For each @c_implemented function: every call in its C (and in the
+    static functions of its file it calls) that may run Python code is
+    one its Python reference makes, a calls(x, "__name__") of the special
+    method it invokes, or covered by runs_python()."""
+    sys.path.insert(0, os.path.join(srcdir, 'Tools', 'cases_generator'))
+    try:
+        import analyzer, lexer, parsing
+    finally:
+        del sys.path[0]
+    from . import facts, slots
+    dunders = {}
+    for slotdef in slots.slotdefs():
+        dunders.setdefault(slotdef.slot, set()).add(slotdef.name)
+    dunders['tp_descr_get'] = {'__get__'}
+    specs = [frontend.load_imported(path) for path in _spec_files(srcdir)]
+    implemented = {name for spec in specs
+                   for name in spec.c_implemented_functions()}
+    no_python = set(NO_PYTHON)
+    for rel in ('Objects/bytesobject.c', 'Objects/bytearrayobject.c'):
+        found = load_facts(srcdir, rel)[1] or {}
+        no_python |= {name for name, runs in found.items() if not runs}
+    out = []
+    for spec in specs:
+        rel = os.path.relpath(spec.filename, srcdir).replace(os.sep, '/')
+        base = os.path.dirname(os.path.dirname(spec.filename))
+        stem = os.path.splitext(os.path.basename(spec.filename))[0]
+        cfiles = [os.path.join(base, stem + ext) for ext in ('.c', '.h')]
+        cfile = next((f for f in cfiles if os.path.exists(f)), None)
+        if cfile is None:
+            continue
+        tokens = list(lexer.tokenize(_LITERALS.sub(_blank, _read(
+            srcdir, cfile)), filename=cfile))
+        for name in spec.c_implemented_functions():
+            node = spec.functions[name]
+            positional, keywords = spec.c_name(name)
+            c_name = positional or next(iter(keywords.values()), name)
+            where = f'{rel}: {name}'
+            body = _c_function(tokens, c_name)
+            if body is None:
+                out.append(f'{where}: no C function {c_name} in '
+                           f'{os.path.relpath(cfile, srcdir)}')
+                continue
+            called = set()
+            specials = set()
+            for call in ast.walk(node):
+                match call:
+                    case ast.Call(func=ast.Name('calls'),
+                                  args=[_, ast.Constant(str() as special)]):
+                        specials.add(special)
+                    case ast.Call(func=ast.Name('len' | 'iter' as f),
+                                  args=[ast.Name()]):
+                        specials.add(f'__{f}__')
+                    case ast.Call(func=ast.Name(f)):
+                        called.add(f)
+            # The calls of the C function and of the static functions of
+            # its file it calls.
+            calls, todo, seen = set(), [body], set()
+            while todo:
+                for callee in _escaping_calls(analyzer, parsing, todo.pop(),
+                                              dunders):
+                    inner = (None if callee in implemented
+                             else _c_function(tokens, callee, static=True))
+                    if inner is None:
+                        calls.add(callee)
+                    elif callee not in seen:
+                        seen.add(callee)
+                        todo.append(inner)
+            for callee in sorted(calls):
+                need = dunders.get(callee, {SLOT_CALLS.get(callee)})
+                if (callee in called or callee in no_python
+                        or 'runs_python' in called or need & specials):
+                    continue
+                if callee in implemented:
+                    # Its own facts; whether its C agrees is its own check.
+                    found = spec.resolve(callee) or next(
+                        (s.resolve(callee) for s in specs
+                         if s.resolve(callee)), None)
+                    if found and not facts.analyzer(found[0]).reference_facts(
+                            callee, {}).runs_python:
+                        continue
+                    out.append(f'{where}: calls {callee}(), which may run '
+                               'Python code, and its reference does not')
+                    continue
+                what = ' or '.join(f'calls(x, "{d}")' for d in sorted(
+                    need - {None}))
+                out.append(f'{where}: calls {callee}(), which may run Python '
+                           f'code: account for it with {what or "runs_python()"}'
+                           f'{" or runs_python()" if what else ""}')
+            # A reference that cannot fail: the C cannot either.
+            returns = frontend.c_signature(node)[1] if '.' not in name \
+                else 'void'
+            if (returns != 'void' and not frontend.is_struct(returns)
+                    and calls and not facts.analyzer(spec).reference_facts(
+                        name, {}).raises):
+                out.append(f'{where}: its reference cannot fail, but the C '
+                           f'calls {", ".join(sorted(calls))}')
     return sorted(out)
