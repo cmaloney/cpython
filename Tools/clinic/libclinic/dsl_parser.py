@@ -11,6 +11,7 @@ from types import FunctionType
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import libclinic
+from libclinic import pyspec
 from libclinic import (
     ClinicError, VersionTuple,
     fail, warn, unspecified, unknown, NULL)
@@ -312,7 +313,6 @@ class DSLParser:
         self.target_critical_section = []
         self.disable_fastcall = False
         self.vectorcall: bool = False
-        self.vectorcall_exact: str | None = None
         self.permit_long_summary = False
         self.permit_long_docstring_body = False
 
@@ -489,16 +489,10 @@ class DSLParser:
             fail("Can't set @staticmethod, function is not a normal callable")
         self.kind = STATIC_METHOD
 
-    def at_vectorcall(self, *args: str) -> None:
+    def at_vectorcall(self) -> None:
         if self.vectorcall:
             fail("Called @vectorcall twice!")
         self.vectorcall = True
-        for arg in args:
-            key, eq, value = arg.partition('=')
-            if key != 'exact' or not eq or not value.isidentifier():
-                fail(f"@vectorcall: unknown argument {arg!r}, "
-                     "expected exact=<C function prefix>")
-            self.vectorcall_exact = value
 
     def at_coexist(self) -> None:
         if self.coexist:
@@ -651,11 +645,6 @@ class DSLParser:
             if not cls.type_object:
                 fail(f"@vectorcall requires the type object of {cls.name!r}, "
                      f"which was declared without one")
-            if self.vectorcall_exact and self.kind is not METHOD_NEW:
-                fail("@vectorcall exact= can only be used with __new__")
-            if self.vectorcall_exact and self.critical_section:
-                fail("@vectorcall exact= cannot be used with "
-                     "@critical_section")
 
     def resolve_return_converter(
         self, full_name: str, forced_converter: str
@@ -789,7 +778,6 @@ class DSLParser:
             forced_text_signature=self.forced_text_signature,
             line_number=self.line_number,
             vectorcall=self.vectorcall,
-            vectorcall_exact=self.vectorcall_exact,
         )
         self.add_function(func)
 
@@ -1630,11 +1618,6 @@ class DSLParser:
             if p.group:
                 fail("@vectorcall does not support optional groups",
                      line_number=lineno)
-            if self.function.vectorcall_exact and (
-                    p.is_vararg() or p.is_var_keyword()
-                    or p.is_keyword_only()):
-                fail("@vectorcall exact= requires positional parameters "
-                     f"only; {p.name!r} is not", line_number=lineno)
             if p.is_vararg() or p.is_var_keyword():
                 continue
             if isinstance(p.converter, (self_converter,
@@ -1647,6 +1630,62 @@ class DSLParser:
                 fail("@vectorcall requires all converters to support "
                      f"parse_arg(); parameter {p.name!r} does not",
                      line_number=lineno)
+
+    def check_pyspec(self, lineno: int) -> None:
+        """Pick up a pyspec function named like this function's C basename.
+
+        It implements the function: its NAME_impl() comes from the spec and
+        a vectorcall calling the NAME_nargsN() specializations is generated.
+        """
+        func = self.function
+        assert func is not None
+        try:
+            spec = pyspec.find_spec(self.clinic.filename, func.c_basename)
+        except (pyspec.SpecError, SyntaxError) as exc:
+            fail(str(exc), line_number=lineno)
+        if spec is None:
+            return
+        where = f"{spec.name}() in {spec.path}"
+        if func.kind is not METHOD_NEW:
+            fail(f"{where}: a spec can only implement __new__",
+                 line_number=lineno)
+        assert func.cls is not None
+        if not func.cls.type_object:
+            fail(f"{where}: requires the type object of {func.cls.name!r}, "
+                 "which was declared without one", line_number=lineno)
+        if spec.type_object is None:
+            fail(f"{where}: the first parameter must be the class, "
+                 "annotated type[...]", line_number=lineno)
+        if spec.type_object != func.cls.type_object:
+            fail(f"{where}: type[{spec.new_type}] is {spec.type_object}, "
+                 f"{func.cls.name!r} is {func.cls.type_object}",
+                 line_number=lineno)
+        if func.critical_section:
+            fail(f"{where}: a spec cannot be used with @critical_section",
+                 line_number=lineno)
+        params = [p for p in func.parameters.values()
+                  if not isinstance(p.converter, (self_converter,
+                                                  defining_class_converter))]
+        for p in params:
+            if p.is_vararg() or p.is_var_keyword() or p.is_keyword_only():
+                fail(f"{where}: a spec needs positional parameters only; "
+                     f"{p.name!r} is not", line_number=lineno)
+        spec_params = spec.parameters[1:]
+        if len(params) != len(spec_params):
+            fail(f"{where} takes {len(spec_params)} parameters after the "
+                 f"class, {func.full_name} takes {len(params)}",
+                 line_number=lineno)
+        for p, sp in zip(params, spec_params):
+            if p.converter.type != sp.ctype:
+                fail(f"{where}: parameter {sp.name!r} is {sp.ctype!r}, "
+                     f"the converter of {p.name!r} gives "
+                     f"{p.converter.type!r}", line_number=lineno)
+            if p.is_optional() != sp.optional:
+                fail(f"{where}: parameter {sp.name!r} must "
+                     f"{'' if p.is_optional() else 'not '}default to NULL "
+                     f"like {p.name!r}", line_number=lineno)
+        func.vectorcall = True
+        func.pyspec = spec.name
 
     def do_post_block_processing_cleanup(self, lineno: int) -> None:
         """
@@ -1684,6 +1723,7 @@ class DSLParser:
                          "NULL as a default value")
 
         self.check_remaining_star(lineno)
+        self.check_pyspec(lineno)
         self.check_vectorcall_parameters(lineno)
         try:
             self.function.docstring = self.format_docstring()

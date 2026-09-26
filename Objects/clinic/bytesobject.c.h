@@ -1466,16 +1466,16 @@ bytes_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 }
 
 static PyObject *
-bytes_new_exact_nargs0(void);
+bytes_new_nargs0(void);
 
 static PyObject *
-bytes_new_exact_nargs1(PyObject *x);
+bytes_new_nargs1(PyObject *x);
 
 static PyObject *
-bytes_new_exact_nargs2(PyObject *x, const char *encoding);
+bytes_new_nargs2(PyObject *x, const char *encoding);
 
 static PyObject *
-bytes_new_exact_nargs3(PyObject *x, const char *encoding, const char *errors);
+bytes_new_nargs3(PyObject *x, const char *encoding, const char *errors);
 
 static PyObject *
 bytes_vectorcall(PyObject *type, PyObject *const *args,
@@ -1497,12 +1497,12 @@ bytes_vectorcall(PyObject *type, PyObject *const *args,
             NULL, kwnames);
     }
     if (nargs < 1) {
-        return_value = bytes_new_exact_nargs0();
+        return_value = bytes_new_nargs0();
         goto exit;
     }
     x = args[0];
     if (nargs < 2) {
-        return_value = bytes_new_exact_nargs1(x);
+        return_value = bytes_new_nargs1(x);
         goto exit;
     }
     if (!PyUnicode_Check(args[1])) {
@@ -1519,7 +1519,7 @@ bytes_vectorcall(PyObject *type, PyObject *const *args,
         goto exit;
     }
     if (nargs < 3) {
-        return_value = bytes_new_exact_nargs2(x, encoding);
+        return_value = bytes_new_nargs2(x, encoding);
         goto exit;
     }
     if (!PyUnicode_Check(args[2])) {
@@ -1535,9 +1535,9 @@ bytes_vectorcall(PyObject *type, PyObject *const *args,
         PyErr_SetString(PyExc_ValueError, "embedded null character");
         goto exit;
     }
-    return_value = bytes_new_exact_nargs3(x, encoding, errors);
+    return_value = bytes_new_nargs3(x, encoding, errors);
 
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=25d6d9adde28616b input=a9049054013a1b77]*/
+/*[clinic end generated code: output=39809dbde6ac2b23 input=a9049054013a1b77]*/

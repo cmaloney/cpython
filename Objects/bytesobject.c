@@ -2866,14 +2866,13 @@ bytes_subtype_new(PyTypeObject *, PyObject *);
 static PyObject *_PyBytes_FromSequence_lock_held(PyObject *x);
 static PyObject *_PyBytes_FromIterator(PyObject *it, PyObject *x);
 
-/* bytes_new_exact(), bytes_from_object() and the bytes_new_exact_nargsN()
-   functions called by bytes_vectorcall() are generated from
-   Objects/pyspec/bytesobject.py. */
+/* bytes_new_impl(), the bytes_new_nargsN() functions called by
+   bytes_vectorcall() and PyBytes_FromObject() are generated from
+   Objects/pyspec/bytesobject.py by Tools/pyspec/emit_c.py. */
 #include "clinic/bytesobject_pyspec.c.h"
 
 /*[clinic input]
 @classmethod
-@vectorcall exact=bytes_new_exact
 bytes.__new__ as bytes_new
 
     source as x: object = NULL
@@ -2881,18 +2880,7 @@ bytes.__new__ as bytes_new
     errors: str = NULL
 
 [clinic start generated code]*/
-
-static PyObject *
-bytes_new_impl(PyTypeObject *type, PyObject *x, const char *encoding,
-               const char *errors)
-/*[clinic end generated code: output=1e0c471be311a425 input=d7d5b4f8118ebcaa]*/
-{
-    PyObject *bytes = bytes_new_exact(x, encoding, errors);
-    if (bytes != NULL && type != &PyBytes_Type) {
-        Py_SETREF(bytes, bytes_subtype_new(type, bytes));
-    }
-    return bytes;
-}
+/*[clinic end generated code: output=da39a3ee5e6b4b0d input=f0a966d19b7262b4]*/
 
 static PyObject*
 _PyBytes_FromBuffer(PyObject *x)
@@ -3013,16 +3001,6 @@ _PyBytes_FromIterator(PyObject *it, PyObject *x)
   error:
     PyBytesWriter_Discard(writer);
     return NULL;
-}
-
-PyObject *
-PyBytes_FromObject(PyObject *x)
-{
-    if (x == NULL) {
-        PyErr_BadInternalCall();
-        return NULL;
-    }
-    return bytes_from_object(x);
 }
 
 /* This allocator is needed for subclasses don't want to use __new__.

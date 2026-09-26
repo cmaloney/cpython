@@ -11,15 +11,24 @@ import builtins
 import copy
 import itertools
 
-# Fact values in an environment: NULL, NOTNULL, or an exact type.
+# Fact values in an environment: NULL, NOTNULL, an exact type (of the
+# object the name refers to), or Value(obj) for the object itself.
 NULL = 'NULL'
 NOTNULL = 'NOTNULL'
+
+
+class Value:
+    """The name refers to exactly this object (e.g. cls is bytes)."""
+
+    def __init__(self, obj):
+        self.obj = obj
 
 MAX_INLINE_DEPTH = 8
 
 
 class Spec:
     def __init__(self, source, filename='<spec>'):
+        self.filename = filename
         self.module = ast.parse(source, filename)
         self.functions = {node.name: node for node in self.module.body
                           if isinstance(node, ast.FunctionDef)}
@@ -112,9 +121,14 @@ def _evaluate_is(left, right, env):
         value = env.get(left.id)
         if value == NULL:
             return True
-        if value == NOTNULL or isinstance(value, type):
+        if value == NOTNULL or isinstance(value, (type, Value)):
             return False
         return None
+    if isinstance(left, ast.Name) and isinstance(env.get(left.id), Value):
+        klass = _builtin_type(right)
+        if klass is None:
+            return None
+        return env[left.id].obj is klass
     if right_is_null and isinstance(left, ast.NamedExpr):
         match left.value:
             case ast.Call(func=ast.Attribute(ast.Name('C'), 'lookup_special'),

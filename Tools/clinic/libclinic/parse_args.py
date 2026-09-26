@@ -1500,6 +1500,9 @@ class ParseArgsCodeGen:
             self.impl_prototype = self.impl_definition
         if self.impl_prototype:
             self.impl_prototype += ";"
+        if self.func.pyspec:
+            # Tools/pyspec/emit_c.py generates the impl from the spec.
+            self.impl_definition = ""
 
         self.parser_definition = self.parser_definition.replace("{return_value_declaration}", self.return_value_declaration)
         if self.parser_helper:
@@ -1561,8 +1564,8 @@ class ParseArgsCodeGen:
 
         arity_checked: Already have a number of arguments check.
         """
-        if self.func.vectorcall_exact:
-            pos_code = self._vectorcall_exact_positional()
+        if self.func.pyspec:
+            pos_code = self._vectorcall_spec_positional()
         else:
             pos_code = self._parse_positional_args(
                 argname_fmt='args[%d]', nargs='nargs', limited_capi=False)
@@ -1572,26 +1575,30 @@ class ParseArgsCodeGen:
             return pos_code
         return [*self._check_positional('nargs'), *pos_code]
 
-    def _exact_arguments(self) -> list[str]:
-        """Arguments passed to the NAME_nargsN() functions, in order."""
+    def _spec_arguments(self) -> list[str]:
+        """Arguments passed to the SPEC_nargsN() functions, in order."""
         return [("&" if p.converter.impl_by_reference else "")
                 + p.converter.parser_name
                 for p in self.parameters]
 
-    def _vectorcall_exact_positional(self) -> list[str]:
-        """Positional parsing that leaves through NAME_nargsN().
+    def _vectorcall_spec_positional(self) -> list[str]:
+        """Positional parsing that leaves through SPEC_nargsN().
+
+        SPEC is the pyspec function implementing this __new__ (see
+        libclinic.pyspec); Tools/pyspec/emit_c.py generates SPEC_nargsN() by
+        partially evaluating it for exactly the type and N arguments.
 
         Each optional parameter is preceded by a call count check; when the
         arguments run out, the function for that count is called with the
         arguments converted so far.  The call for all parameters is the
         impl_call of the finale.
         """
-        exact = self.func.vectorcall_exact
-        arguments = self._exact_arguments()
+        spec = self.func.pyspec
+        arguments = self._spec_arguments()
         parser_code: list[str] = []
         for i, p in enumerate(self.parameters):
             if i >= self.min_pos:
-                call = f"{exact}_nargs{i}({', '.join(arguments[:i])})"
+                call = f"{spec}_nargs{i}({', '.join(arguments[:i])})"
                 parser_code.append(libclinic.normalize_snippet(f"""
                     if (nargs < {i + 1}) {{{{
                         return_value = {call};
@@ -1607,16 +1614,16 @@ class ParseArgsCodeGen:
             parser_code.append(libclinic.normalize_snippet(parsearg, indent=4))
         return parser_code
 
-    def _vectorcall_exact_prototypes(self) -> str:
-        """Declarations of the NAME_nargsN() functions."""
-        exact = self.func.vectorcall_exact
+    def _vectorcall_spec_prototypes(self) -> str:
+        """Declarations of the SPEC_nargsN() functions."""
+        spec = self.func.pyspec
         lines = []
         for nargs in range(self.min_pos, len(self.parameters) + 1):
             params = ", ".join(
                 p.converter.simple_declaration(
                     by_reference=p.converter.impl_by_reference)
                 for p in self.parameters[:nargs]) or "void"
-            lines.append(f"static PyObject *\n{exact}_nargs{nargs}({params});")
+            lines.append(f"static PyObject *\n{spec}_nargs{nargs}({params});")
         return "\n\n".join(lines) + "\n\n"
 
     def _assemble_vectorcall(self, preamble: str, fields: tuple[str, ...],
@@ -1631,17 +1638,17 @@ class ParseArgsCodeGen:
             self.codegen.add_include('pycore_runtime.h', '_Py_SINGLETON()')
         else:
             markers = VECTORCALL_FINALE_MARKERS_NEW
-        exact = self.func.vectorcall_exact
-        if exact:
+        spec = self.func.pyspec
+        if spec:
             nargs = len(self.parameters)
-            arguments = ", ".join(self._exact_arguments())
+            arguments = ", ".join(self._spec_arguments())
             markers = markers | {
                 "impl_call":
-                    f"{{return_value}} = {exact}_nargs{nargs}({arguments});",
+                    f"{{return_value}} = {spec}_nargs{nargs}({arguments});",
             }
         code = libclinic.linear_format("\n".join(lines), **markers)
-        if exact:
-            code = self._vectorcall_exact_prototypes() + code
+        if spec:
+            code = self._vectorcall_spec_prototypes() + code
         self.vectorcall_definition = code
 
     def vectorcall_body(self, *fields: str) -> None:

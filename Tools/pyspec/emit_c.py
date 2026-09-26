@@ -3,14 +3,25 @@
 Usage: python Tools/pyspec/emit_c.py Objects/pyspec/bytesobject.py \\
            -o Objects/clinic/bytesobject_pyspec.c.h
 
+Every function in the spec becomes a C function of the same name:
+  * a function whose first parameter is annotated ``type[T]`` implements a
+    clinic __new__: it becomes NAME_impl() (Argument Clinic declares it and
+    no longer expects a hand-written body), plus NAME_nargsN() for each
+    positional argument count N -- the function partially evaluated for
+    exactly T and N arguments, called by the clinic generated vectorcall;
+  * names starting with Py or _Py are defined non-static (their public or
+    internal header declares them);
+  * everything else is static.
+
 The accepted Python subset is small on purpose; anything else is an error.
 
 Statements:
-  if/else, return, raise E("...") / raise E(f"..."), pass,
+  if/else, return, raise E("...") / raise E(f"..."), raise C.<escape>(),
+  pass,
   x = <call>, try: x = <call> / except E: ... / else: ...,
   with C.<context escape>(x): x = <call>
 Conditions:
-  x is [not] NULL, type(x) is K, isinstance(x, K),
+  x is [not] NULL, type(x) is K, cls is [not] K, isinstance(x, K),
   hasattr(type(x), "__dunder__"), (v := C.<escape>(...)) is [not] NULL,
   integer comparisons, and/or/not
 Calls (result is a new reference or a Py_ssize_t):
@@ -28,19 +39,21 @@ import builtins
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+TOOLS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(TOOLS, 'pyspec'))
+sys.path.insert(0, os.path.join(TOOLS, 'clinic'))
 
+from libclinic import pyspec as clinic_pyspec              # noqa: E402
 import partial_eval                                         # noqa: E402
-from partial_eval import NOTNULL, NULL, Spec               # noqa: E402
+from partial_eval import NOTNULL, NULL, Spec, Value        # noqa: E402
 import pyspec_runtime                                       # noqa: E402
 from pyspec_runtime import (ContextEscape, Escape, ERR_MINUS1,  # noqa: E402
-                            ERR_NULL, ERR_NULL_OR_MISSING)
+                            ERR_NULL, ERR_NULL_OR_MISSING, RaiseEscape)
 
 OBJECT = 'PyObject *'
 SSIZE = 'Py_ssize_t'
-CSTR = 'const char *'
-
-ANNOTATION_CTYPES = {'object': OBJECT, 'cstr': CSTR}
+TYPE = clinic_pyspec.TYPE_CTYPE
+TYPE_OBJECTS = clinic_pyspec.TYPE_OBJECTS
 
 TYPE_CHECK = {
     'bytes': 'PyBytes_Check',
@@ -103,11 +116,11 @@ def c_string(text):
 
 
 def escape_of(node):
-    """Return the Escape or ContextEscape for a ``C.<name>`` node."""
+    """Return the escape for a ``C.<name>`` node."""
     if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
             and node.value.id == 'C'):
         value = getattr(pyspec_runtime.C, node.attr, None)
-        if isinstance(value, (Escape, ContextEscape)):
+        if isinstance(value, (Escape, ContextEscape, RaiseEscape)):
             return value
         raise SpecError(node, f'unknown escape C.{node.attr}')
     return None
@@ -218,7 +231,8 @@ class FunctionEmitter:
                         OBJECT, ERR_NULL)
             if name in self.spec.functions:
                 args = ', '.join(self.lower_value(a) for a in call.args)
-                return f'{name}({args})', OBJECT, ERR_NULL
+                return (f'{c_name(describe(self.spec, name))}({args})',
+                        OBJECT, ERR_NULL)
             if self.ctype_of(name) == OBJECT and not call.args:
                 return f'_PyObject_CallNoArgs({name})', OBJECT, ERR_NULL
         raise SpecError(call, f'unsupported call {ast.unparse(call)}')
@@ -244,6 +258,8 @@ class FunctionEmitter:
                 return 'NULL'
             case ast.Name(id) if self.ctype_of(id) is not None:
                 return id
+            case ast.Name(id) if id in TYPE_OBJECTS:
+                return TYPE_OBJECTS[id]
             case ast.Name(id) if (
                     isinstance(getattr(builtins, id, None), type)
                     and issubclass(getattr(builtins, id), BaseException)):
@@ -275,6 +291,12 @@ class FunctionEmitter:
                     if cls in TYPE_CHECK_EXACT:
                 check = f'{TYPE_CHECK_EXACT[cls]}({self.lower_value(obj)})'
                 return f'!{check}' if isinstance(op, ast.IsNot) else check
+            case ast.Compare(left=ast.Name(name),
+                             ops=[ast.Is() | ast.IsNot() as op],
+                             comparators=[ast.Name(cls)]) \
+                    if self.ctype_of(name) == TYPE and cls in TYPE_OBJECTS:
+                equal = '!=' if isinstance(op, ast.IsNot) else '=='
+                return f'{name} {equal} {TYPE_OBJECTS[cls]}'
             case ast.Call(func=ast.Name('isinstance'),
                           args=[obj, ast.Name(cls)]) if cls in TYPE_CHECK:
                 return f'{TYPE_CHECK[cls]}({self.lower_value(obj)})'
@@ -345,6 +367,14 @@ class FunctionEmitter:
                 self.assign(target, value, stmt)
             case ast.Return(value=value):
                 self.return_(value, stmt)
+                self.live = set()
+            case ast.Raise(exc=ast.Call(func=ast.Attribute() as func,
+                                        args=[])):
+                escape = escape_of(func)
+                if not isinstance(escape, RaiseEscape):
+                    raise SpecError(stmt, 'raise needs a C raise escape')
+                self.emit(escape.template)
+                self.error_exit()
                 self.live = set()
             case ast.Raise(exc=ast.Call(func=ast.Name(exc), args=[message])):
                 self.raise_(exc, message, stmt)
@@ -529,7 +559,7 @@ class FunctionEmitter:
         params = ', '.join(c_decl(ctype, name)
                            for name, ctype in self.params.items()) or 'void'
         return [
-            'static PyObject *',
+            'PyObject *' if exported(c_name) else 'static PyObject *',
             f'{c_name}({params})',
             '{',
             *self.declarations(),
@@ -539,25 +569,36 @@ class FunctionEmitter:
         ]
 
 
-def spec_params(spec, name):
-    params = []
-    for arg in spec.functions[name].args.args:
-        annotation = arg.annotation
-        if not isinstance(annotation, ast.Name) or \
-                annotation.id not in ANNOTATION_CTYPES:
-            raise SpecError(arg, f'{name}: parameter {arg.arg!r} needs an '
-                            f'annotation from {sorted(ANNOTATION_CTYPES)}')
-        params.append((arg.arg, ANNOTATION_CTYPES[annotation.id]))
-    return params
+def describe(spec, name):
+    """The libclinic.pyspec description of spec function *name*."""
+    try:
+        return clinic_pyspec.spec_function(spec.functions[name],
+                                           spec.filename)
+    except clinic_pyspec.SpecError as exc:
+        raise SpecError(spec.functions[name], str(exc)) from None
 
 
-def prototype(c_name, params):
-    text = ', '.join(c_decl(ctype, name) for name, ctype in params) or 'void'
-    return f'static PyObject *{c_name}({text});'
+def c_name(description):
+    """C name of a spec function: NAME_impl() for a clinic __new__."""
+    if description.new_type is not None:
+        return f'{description.name}_impl'
+    return description.name
+
+
+def exported(name):
+    return name.startswith(('Py', '_Py'))
+
+
+def c_params(description):
+    return [(p.name, p.ctype) for p in description.parameters]
+
+
+def prototype(name, params):
+    text = ', '.join(c_decl(ctype, n) for n, ctype in params) or 'void'
+    return f'static PyObject *{name}({text});'
 
 
 def generate(spec, spec_path):
-    config = spec.config
     out = [
         '/*[pyspec]',
         f'Generated by Tools/pyspec/emit_c.py from {spec_path}.',
@@ -565,42 +606,50 @@ def generate(spec, spec_path):
         '[pyspec]*/',
         '',
     ]
-    functions = config.get('functions', [])
-    for name in functions:
-        out.append(prototype(name, spec_params(spec, name)))
+    descriptions = [describe(spec, name) for name in spec.functions]
+    for description in descriptions:
+        name = c_name(description)
+        if not exported(name):
+            out.append(prototype(name, c_params(description)))
     out.append('')
 
-    for name in functions:
-        emitter = FunctionEmitter(spec, spec_params(spec, name))
-        out += emitter.function(name, spec.body(name))
+    for description in descriptions:
+        emitter = FunctionEmitter(spec, c_params(description))
+        out += emitter.function(c_name(description),
+                                spec.body(description.name))
         out.append('')
 
-    arities = config.get('arities')
-    if arities:
-        out += generate_arities(spec, arities)
+    for description in descriptions:
+        if description.new_type is not None:
+            out += generate_arities(spec, description)
     return '\n'.join(out)
 
 
-def generate_arities(spec, config):
-    """ENTRY_nargsN() for each N: ENTRY partially evaluated for a call with
-    N positional arguments; the rest are NULL.  Argument Clinic declares
-    them (@vectorcall exact=ENTRY) and calls them with converted values."""
-    entry = config['entry']
-    params = spec_params(spec, entry)
+def generate_arities(spec, description):
+    """NAME_nargsN() for each allowed N: the clinic __new__ spec NAME
+    partially evaluated for exactly its type and a call with N positional
+    arguments; the rest are NULL.  Argument Clinic declares them and calls
+    them from the vectorcall with converted values."""
+    cls, *params = description.parameters
+    required = sum(not p.optional for p in params)
+    type_value = getattr(builtins, description.new_type)
     out = []
-    for nargs in config['nargs']:
+    for nargs in range(required, len(params) + 1):
         given, missing = params[:nargs], params[nargs:]
-        env = {name: NOTNULL for name, _ in given}
-        env |= {name: NULL for name, _ in missing}
-        residual = partial_eval.specialize(spec, entry, env)
-        emitter = FunctionEmitter(spec, given,
-                                  known_null=[n for n, _ in missing])
-        out += [f'/* {entry}() with {nargs} positional argument(s):',
+        env = {cls.name: Value(type_value)}
+        env |= {p.name: NOTNULL for p in given}
+        env |= {p.name: NULL for p in missing}
+        residual = partial_eval.specialize(spec, description.name, env)
+        emitter = FunctionEmitter(spec, [(p.name, p.ctype) for p in given],
+                                  known_null=[p.name for p in missing])
+        out += [f'/* {description.name}() for exactly '
+                f'{description.new_type} with {nargs} positional '
+                'argument(s):',
                 *[' * ' + line if line else ' *'
                   for line in ast.unparse(ast.Module(residual, [])).replace(
                       '*/', '* /').splitlines()],
                 ' */']
-        out += emitter.function(f'{entry}_nargs{nargs}', residual)
+        out += emitter.function(f'{description.name}_nargs{nargs}', residual)
         out.append('')
     return out
 

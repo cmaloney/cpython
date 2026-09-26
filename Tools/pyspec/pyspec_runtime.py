@@ -96,6 +96,20 @@ class ContextEscape:
         return False
 
 
+class RaiseEscape:
+    """``raise C.<name>()``: a C statement that sets an exception.
+
+    Called from Python it returns the exception to raise.
+    """
+
+    def __init__(self, template, func):
+        self.template = template
+        self.func = func
+
+    def __call__(self):
+        return self.func()
+
+
 def escape(template, *, returns='object', error=ERR_NULL):
     def decorator(func):
         return Escape(func, template, returns, error)
@@ -179,6 +193,14 @@ class C:
 
     _PyBytes_FromIterator = escape('_PyBytes_FromIterator({0}, {1})')(
         _bytes_from_iterator)
+
+    # Borrows its second argument.
+    bytes_subtype_new = escape('bytes_subtype_new({0}, {1})')(
+        lambda cls, value: bytes.__new__(cls, value))
+
+    PyErr_BadInternalCall = RaiseEscape(
+        'PyErr_BadInternalCall();',
+        lambda: SystemError('bad argument to internal function'))
 
     critical_section_sequence_fast = ContextEscape(
         'Py_BEGIN_CRITICAL_SECTION_SEQUENCE_FAST({0});',
