@@ -10,7 +10,9 @@ in a spec:
   or inlined by the partial evaluator);
 * the builtins below, which have fixed C meanings;
 * escapes, ``C.<name>(...)``: C functions called directly.  Each carries
-  its C call template, result type and error convention for the emitter.
+  its C call template, result type and error convention for the emitter;
+* the C API facts vocabulary (New[object], Steals[...], OnError[...], ...):
+  annotations of top-level stubs, read by the C API catalog (capi.py).
 """
 
 import ast
@@ -20,7 +22,13 @@ import os
 import sys
 import types
 
-__all__ = ['NULL', 'C', 'cstr', 'isinstance', 'tp_name', 'fqname']
+__all__ = [
+    'NULL', 'C', 'cstr', 'isinstance', 'tp_name', 'fqname',
+    # C API facts vocabulary
+    'char_p', 'void_p', 'const_void_p', 'Py_ssize_t', 'va_list', 'pointer',
+    'Out', 'InOut', 'New', 'Borrowed', 'Steals', 'OnError', 'NoError',
+    'NullIn', 'RunsPython',
+]
 
 
 class _Null:
@@ -211,6 +219,129 @@ class C:
     critical_section_sequence_fast = ContextEscape(
         'Py_BEGIN_CRITICAL_SECTION_SEQUENCE_FAST({0});',
         'Py_END_CRITICAL_SECTION_SEQUENCE_FAST();')
+
+
+# ---------------------------------------------------------------------------
+# C API facts vocabulary
+#
+# Annotations of the top-level functions of a spec, which describe C
+# functions (the C API catalog, checked by capi.py).  Plain Python values:
+# the spec is executed to evaluate them.
+#
+# C types (parameter and return annotations)
+#     object          PyObject *
+#     cstr            const char *        (defined above)
+#     char_p          char *
+#     void_p          void *
+#     const_void_p    const void *
+#     Py_ssize_t      Py_ssize_t
+#     int             int
+#     va_list         va_list
+#     pointer('T')    T *                 (e.g. pointer('PyBytesWriter'))
+#     None            void                (return only)
+#     *args: ...      C varargs ``...``
+#     Out[T]          T *: the callee stores a T in it (Out[object] stores a
+#                     new reference)
+#     InOut[object]   PyObject **: a reference owned by the caller, which the
+#                     callee may replace (releasing the old one)
+#
+# Ownership
+#     New[object]     return: a new (strong) reference
+#     Borrowed[object] return: a borrowed reference
+#     Steals[T]       parameter: the callee takes over the caller's reference
+#                     (or, for a non-object such as a PyBytesWriter *,
+#                     consumes it); other object parameters are borrowed
+#
+# Error convention (return annotation)
+#     New[...] / Borrowed[...]   NULL with an exception set on error
+#     None                       cannot fail (unless OnError says otherwise)
+#     OnError[T, v, ...]         returns v (NULL or -1) with an exception
+#                                set on error; NullIn('p') means that on
+#                                error *p is released and set to NULL
+#     NoError[T]                 cannot fail (any value is a valid result)
+#     Any other return type must say OnError or NoError.
+#
+# Side effects
+#     RunsPython[T]   (return) may run arbitrary Python code (__index__,
+#                     __buffer__, __iter__, warnings, ...).  A stub without it
+#                     claims the function never runs Python code.
+#
+# For a function with a real body, these facts are derived, not declared.
+
+
+class CType:
+    """A C type that has no Python spelling."""
+
+    def __init__(self, c):
+        self.c = c
+
+    def __repr__(self):
+        return f'CType({self.c!r})'
+
+
+char_p = CType('char *')
+void_p = CType('void *')
+const_void_p = CType('const void *')
+Py_ssize_t = CType('Py_ssize_t')
+va_list = CType('va_list')
+
+
+def pointer(name):
+    """``name *``: pointer to a C struct, e.g. pointer('PyBytesWriter')."""
+    return CType(f'{name} *')
+
+
+class Fact:
+    """``Name[args]``: an annotation wrapper."""
+
+    def __init__(self, kind, args):
+        self.kind = kind
+        self.args = args
+
+    def __repr__(self):
+        return f'{self.kind}[{", ".join(map(repr, self.args))}]'
+
+
+class _Wrapper:
+    def __init__(self, kind, doc):
+        self.kind = kind
+        self.__doc__ = doc
+
+    def __getitem__(self, args):
+        if not isinstance(args, tuple):
+            args = (args,)
+        return Fact(self.kind, args)
+
+    def __repr__(self):
+        return self.kind
+
+
+New = _Wrapper('New', 'Return: a new reference; NULL on error.')
+Borrowed = _Wrapper('Borrowed', 'Return: a borrowed reference; NULL on error.')
+Steals = _Wrapper('Steals', 'Parameter: the callee takes the reference.')
+Out = _Wrapper('Out', 'Parameter: T *, the callee stores a T.')
+InOut = _Wrapper('InOut', 'Parameter: PyObject **, the callee may replace '
+                          'the caller-owned reference.')
+OnError = _Wrapper('OnError', 'Return: OnError[T, value, ...]: value with '
+                              'an exception set on error.')
+NoError = _Wrapper('NoError', 'Return: cannot fail.')
+RunsPython = _Wrapper('RunsPython', 'Return: may run arbitrary Python code.')
+
+
+class NullIn:
+    """Error convention: on error, *param is released and set to NULL."""
+
+    def __init__(self, param):
+        self.param = param
+
+    def __repr__(self):
+        return f'NullIn({self.param!r})'
+
+    def __eq__(self, other):
+        return isinstance(other, NullIn) and other.param == self.param
+
+    def __hash__(self):
+        return hash(('NullIn', self.param))
 
 
 def load(path):
