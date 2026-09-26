@@ -76,6 +76,17 @@ def node_count(stmts):
     return sum(1 for stmt in stmts for _ in ast.walk(stmt))
 
 
+def residual_key(stmts):
+    """Residuals with equal keys lower to the same C: the AST, and the
+    marks of the partial evaluator that the emitter reads (e.g. whether a
+    loop iterates a list or a tuple by index)."""
+    marks = [(type(node).__name__, name, repr(value))
+             for stmt in stmts for node in ast.walk(stmt)
+             for name, value in vars(node).items()
+             if name.startswith('pyspec_')]
+    return ast.dump(ast.Module(stmts, [])) + repr(marks)
+
+
 class Facts:
     """Facts about the results of a list of statements."""
 
@@ -183,6 +194,18 @@ class Analyzer:
                 self.block(orelse, types, dict(local_types), facts)
             case ast.With(body=body):
                 self.block(body, types, local_types, facts)
+            case ast.Expr(value=ast.Call() as call):
+                self.call(call, types, local_types, facts)
+            case ast.For(target=ast.Name(item), body=body):
+                # The partial evaluator marks the exact type of the
+                # iterated object when it knows it (see partial_eval.py).
+                iterable = getattr(stmt, 'pyspec_iterable', None)
+                if iterable not in partial_eval.ITERATION:
+                    # The __next__ of an iterator of unknown type.
+                    facts.runs_python = True
+                item_type = partial_eval.ITERATION.get(iterable)
+                body_types = types | ({item: item_type} if item_type else {})
+                self.block(body, body_types, dict(local_types), facts)
             case _:
                 facts.runs_python = True
                 facts.returns.append((None, None))
@@ -414,7 +437,7 @@ def generate_calls(generator, description):
                 residual = partial_eval.specialize(spec, name, typed_env)
                 if node_count(residual) > KEEP_RATIO * generic_size:
                     continue
-                key = ast.dump(ast.Module(residual, []))
+                key = residual_key(residual)
                 facts = analyzer.facts(residual, _type_env(typed_env),
                                        arg_names)
                 const = _const_name(residual)

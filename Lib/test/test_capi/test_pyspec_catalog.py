@@ -90,10 +90,9 @@ EXPECTED_DISCONNECTS = {
     # --- behavior of the spec body vs the doc prose --------------------------
     'behavior:PyBytes_FromObject:identity-unstated':
         'an exact bytes object is returned itself (new reference)',
-    'behavior:PyBytes_FromObject:sequence-unstated':
-        'lists and tuples of ints are accepted; docs only mention buffers',
     'behavior:PyBytes_FromObject:iterable-unstated':
-        'any iterable of ints (except str) is accepted',
+        'any iterable of ints (except str) is accepted, e.g. lists; docs '
+        'only mention buffers',
     'behavior:PyBytes_FromObject:null-unstated':
         'NULL raises SystemError (PyErr_BadInternalCall)',
     'behavior:PyBytes_FromObject:runs-python-unstated':
@@ -175,8 +174,10 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(categories['bytes subclass'], 'buffer')
         self.assertEqual(categories['bytearray'], 'buffer')
         self.assertEqual(categories['memoryview'], 'buffer')
-        self.assertEqual(categories['list'], 'sequence')
-        self.assertEqual(categories['tuple'], 'sequence')
+        # Lists and tuples are iterated like any iterable (by index, see
+        # partial_eval.py), with the same outcomes.
+        self.assertEqual(categories['list'], 'iterable')
+        self.assertEqual(categories['tuple'], 'iterable')
         self.assertEqual(categories['generator'], 'iterable')
         self.assertEqual(categories['dict'], 'iterable')
         self.assertEqual(categories['str'], 'rejected')

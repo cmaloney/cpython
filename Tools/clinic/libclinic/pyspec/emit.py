@@ -30,8 +30,12 @@ The accepted Python subset is small on purpose; anything else is an error.
 Statements:
   if/else, return, raise E("...") / raise E(f"..."), raise C.<escape>(),
   pass,
-  x = <call>, try: x = <call> / except E: ... / else: ...,
-  with C.<context escape>(x): x = <call>
+  x = <call>, C.<escape>(...) (an escape returning an int status),
+  try: x = <call> / except E: ... / else: ...,
+  with C.<context escape>(x): x = <call>,
+  for item in it: ... (it = iter(x); lowered to PyIter_Next() calls, or
+  to an index loop over x when the partial evaluator knows x is an exact
+  list or tuple, see partial_eval.py)
 Conditions:
   x is [not] NULL, type(x) is K, cls is [not] K, isinstance(x, K),
   hasattr(type(x), "__dunder__"), (v := C.<escape>(...)) is [not] NULL,
@@ -42,8 +46,13 @@ Calls (result is a new reference or a Py_ssize_t):
   <spec function>(...), T.<spec method>(...)
 
 Reference ownership: parameters are borrowed; every object local is a new
-reference, assigned once, declared NULL at the top and released with
-Py_XDECREF at every exit except the one returning it.
+reference, declared NULL at the top and released with Py_XDECREF at every
+exit except the one returning it; it may be assigned again only where it
+holds no reference (e.g. in the other branch of an if).  A loop variable
+is a new reference (a borrowed one for a tuple item), released right
+after its last use in the loop body.  A C local initialized by an escape
+(e.g. a bytes_appender) is released like an object, with the release
+statement of its escape, unless an escape that steals it was called.
 """
 
 import ast
@@ -51,8 +60,8 @@ import builtins
 
 from . import call_table, frontend, partial_eval, runtime
 from .partial_eval import NOTNULL, NULL, Value
-from .runtime import (ContextEscape, Escape, ERR_MINUS1, ERR_NULL,
-                      ERR_NULL_OR_MISSING, RaiseEscape)
+from .runtime import (ContextEscape, Escape, ERR_MINUS1, ERR_NEGATIVE,
+                      ERR_NULL, ERR_NULL_OR_MISSING, RaiseEscape)
 
 OBJECT = 'PyObject *'
 SSIZE = 'Py_ssize_t'
@@ -140,8 +149,12 @@ class FunctionEmitter:
         self.params = dict(params)
         self.known_null = set(known_null)
         self.locals = {}            # name -> C type
-        self.owned = []             # object locals, in declaration order
-        self.live = set()           # object locals that may be non-NULL
+        # Object locals and C locals with a release statement, in
+        # declaration order.
+        self.owned = []
+        self.releases = {}          # C local -> its release statement
+        self.live = set()           # owned locals that may hold a value
+        self.loop_vars = []         # owned variables of enclosing loops
         self.lines = []
         self.indent = 1
 
@@ -153,7 +166,18 @@ class FunctionEmitter:
     def cleanup(self, keep=None, null=()):
         for name in self.owned:
             if name in self.live and name != keep and name not in null:
-                self.emit(f'Py_XDECREF({name});')
+                if name in self.releases:
+                    self.emit(self.releases[name].format(name))
+                else:
+                    self.emit(f'Py_XDECREF({name});')
+
+    def release_dead(self, used):
+        """Release the loop variables not in *used* (the names used from
+        here on): the reference is dropped right after its last use."""
+        for name in self.loop_vars:
+            if name in self.live and name not in used:
+                self.emit(f'Py_DECREF({name});')
+                self.live.discard(name)
 
     def error_exit(self, null=()):
         self.cleanup(null=null)
@@ -175,24 +199,39 @@ class FunctionEmitter:
             return self.locals[name]
         return None
 
-    def declare(self, target, ctype, node):
+    def declare(self, target, ctype, node, release=None):
         name = target.id
-        if name in self.params or name in self.locals:
-            raise SpecError(node, f'{name!r} is assigned more than once')
+        if name in self.params:
+            raise SpecError(node, f'{name!r} is a parameter')
+        if name in self.locals:
+            # Assigned again (e.g. in both branches of an if): assign()
+            # checks that it holds no reference then.
+            if self.locals[name] != ctype:
+                raise SpecError(node, f'{name!r} changes type')
+            return
         self.locals[name] = ctype
-        if ctype == OBJECT:
+        if ctype == OBJECT or release is not None:
             self.owned.append(name)
+        if release is not None:
+            self.releases[name] = release
 
     def collect_locals(self, stmts):
         """Declare every local up front so exits can release all of them."""
         for stmt in stmts:
             for node in ast.walk(stmt):
                 if isinstance(node, ast.Assign):
+                    escape = escape_of(node.value.func) if isinstance(
+                        node.value, ast.Call) else None
                     self.declare(node.targets[0], self.call_ctype(node.value),
-                                 node)
+                                 node, getattr(escape, 'release', None))
                 elif isinstance(node, ast.NamedExpr):
                     self.declare(node.target, self.call_ctype(node.value),
                                  node)
+                elif isinstance(node, ast.For):
+                    if not isinstance(node.target, ast.Name):
+                        raise SpecError(node, 'the loop variable must be a '
+                                        'name')
+                    self.declare(node.target, OBJECT, node)
 
     def declarations(self):
         out = []
@@ -203,6 +242,12 @@ class FunctionEmitter:
                 out.append(f'    {c_decl(ctype, name)};')
         return out
 
+    @staticmethod
+    def escape_ctype(escape):
+        if escape.returns == 'object':
+            return OBJECT
+        return escape.returns
+
     # -- calls -------------------------------------------------------------
 
     def call_ctype(self, call):
@@ -210,11 +255,14 @@ class FunctionEmitter:
             raise SpecError(call, 'only call results can be assigned')
         escape = escape_of(call.func)
         if isinstance(escape, Escape):
-            return OBJECT if escape.returns == 'object' else SSIZE
+            return self.escape_ctype(escape)
         return OBJECT
 
-    def lower_call(self, call):
-        """Return (C expression, C type, error convention)."""
+    def lower_call(self, call, target=None):
+        """Return (C expression, C type, error convention).
+
+        *target*: the local assigned, for an escape that initializes it in
+        place (then the expression is an int status)."""
         escape = escape_of(call.func)
         if isinstance(escape, Escape):
             fields = {}
@@ -224,11 +272,22 @@ class FunctionEmitter:
                     fields[str(i)] = c_string(arg.value)
                 else:
                     fields[str(i)] = self.lower_value(arg)
-            expr = escape.template.format(
+            if escape.initializes:
+                if target is None:
+                    raise SpecError(call, f'the result of '
+                                    f'{ast.unparse(call.func)} must be '
+                                    'assigned to a local')
+                fields['target'] = target
+            template = escape.template
+            exact = getattr(call, 'pyspec_exact', None)
+            if exact is not None:
+                # The partial evaluator proved the exact type of the
+                # first argument.
+                template = escape.exact[exact]
+            expr = template.format(
                 *[fields[str(i)] for i in range(len(call.args))],
-                **{k: v for k, v in fields.items() if k.startswith('id')})
-            ctype = OBJECT if escape.returns == 'object' else SSIZE
-            return expr, ctype, escape.error
+                **{k: v for k, v in fields.items() if not k.isdigit()})
+            return expr, self.escape_ctype(escape), escape.error
         target = self.spec.call_target(call.func)
         if target is not None:
             args = ', '.join(self.lower_value(a) for a in call.args)
@@ -256,6 +315,8 @@ class FunctionEmitter:
             return f'{var} == NULL && PyErr_Occurred()'
         if convention == ERR_MINUS1:
             return f'{var} == -1 && PyErr_Occurred()'
+        if convention == ERR_NEGATIVE:
+            return f'{var} < 0'
         raise AssertionError(convention)
 
     # -- expressions -------------------------------------------------------
@@ -337,23 +398,65 @@ class FunctionEmitter:
 
     # -- statements --------------------------------------------------------
 
-    def assign(self, target, value, node, check=True):
-        expr, ctype, convention = self.lower_call(value)
+    def assign(self, target, value, node, check=True, later=None):
+        """*later*: the names used after this statement (see
+        statements()), to release the loop variables used last here."""
         name = target.id
+        if name in self.live:
+            raise SpecError(node, f'{name!r} is assigned again while it '
+                            'holds a reference')
+        expr, ctype, convention = self.lower_call(value, target=name)
         if self.locals.get(name) != ctype:
             raise SpecError(node, f'{name!r} changes type')
+        escape = escape_of(value.func)
+        if isinstance(escape, Escape) and escape.initializes:
+            if not check:
+                raise SpecError(node, 'cannot initialize a C local here')
+            self.emit(f'if ({expr} < 0) {{')
+            self.indent += 1
+            self.error_exit()
+            self.indent -= 1
+            self.emit('}')
+            if name in self.releases:
+                self.live.add(name)
+            return name, ctype, convention
         self.emit(f'{name} = {expr};')
         if ctype == OBJECT:
             self.live.add(name)
+        if later is not None:
+            self.release_dead(later)
         if check:
             self.error_check(name, ctype, convention)
         return name, ctype, convention
 
-    def statements(self, stmts):
-        for stmt in stmts:
-            self.statement(stmt)
+    def call_statement(self, call, node, later):
+        """``C.<escape>(...)`` as a statement: an int status."""
+        escape = escape_of(call.func)
+        if not isinstance(escape, Escape) or escape.returns != 'int':
+            raise SpecError(node, 'only an escape returning an int status '
+                            'can be called as a statement')
+        expr, _, convention = self.lower_call(call)
+        if convention != ERR_NEGATIVE:
+            raise SpecError(node, 'a status must be negative on error')
+        self.emit(f'if ({expr} < 0) {{')
+        self.indent += 1
+        self.error_exit()
+        self.indent -= 1
+        self.emit('}')
+        self.release_dead(later)
 
-    def statement(self, stmt):
+    def statements(self, stmts, later=frozenset()):
+        """*later*: the names used after *stmts*.  Loop variables no
+        longer used are released before each statement, and at the end."""
+        uses = [loaded_names(stmt) for stmt in stmts]
+        for i, stmt in enumerate(stmts):
+            rest = set(later).union(*uses[i + 1:])
+            self.release_dead(rest | uses[i])
+            self.statement(stmt, rest)
+        if not partial_eval.terminates(stmts):
+            self.release_dead(later)
+
+    def statement(self, stmt, later=frozenset()):
         match stmt:
             case ast.Pass():
                 pass
@@ -363,19 +466,27 @@ class FunctionEmitter:
                 self.hoist_named(test)
                 null_in_body, null_in_else = self.null_refinement(test)
                 self.emit(f'if ({self.lower_condition(test)}) {{')
-                branches = [self.block(body, null=null_in_body)]
+                branches = [self.block(body, null=null_in_body, later=later)]
                 self.emit('}')
-                if orelse:
+                dying = [name for name in self.loop_vars
+                         if name in self.live and name not in later]
+                if orelse or dying:
                     self.lines.pop()
                     self.emit('}')
                     self.emit('else {')
-                    branches.append(self.block(orelse, null=null_in_else))
+                    branches.append(self.block(orelse, null=null_in_else,
+                                               later=later))
                     self.emit('}')
                 else:
                     branches.append(self.live - null_in_else)
                 self.join(branches)
             case ast.Assign(targets=[ast.Name() as target], value=value):
-                self.assign(target, value, stmt)
+                self.assign(target, value, stmt, later=later)
+            case ast.Expr(ast.Call() as call):
+                self.call_statement(call, stmt, later)
+            case ast.For(target=ast.Name(item), iter=ast.Name() as iterable,
+                         body=body, orelse=[]):
+                self.for_(stmt, item, iterable, body, later)
             case ast.Return(value=value):
                 self.return_(value, stmt)
                 self.live = set()
@@ -402,12 +513,12 @@ class FunctionEmitter:
                 raise SpecError(stmt,
                                 f'unsupported statement {ast.unparse(stmt)}')
 
-    def block(self, stmts, null=()):
+    def block(self, stmts, null=(), later=frozenset()):
         """Emit a nested block; return its live set, or None if it exits."""
         saved = self.live
         self.live = saved - set(null)
         self.indent += 1
-        self.statements(stmts)
+        self.statements(stmts, later)
         self.indent -= 1
         live = None if partial_eval.terminates(stmts) else self.live
         self.live = saved
@@ -450,6 +561,10 @@ class FunctionEmitter:
                 expr, ctype, convention = self.lower_call(value)
                 if ctype != OBJECT or convention != ERR_NULL:
                     raise SpecError(node, 'can only return a new reference')
+                escape = escape_of(value.func)
+                for index in getattr(escape, 'steals', ()):
+                    # Taken over by the escape.
+                    self.live.discard(value.args[index].id)
                 if not self.live:
                     self.emit(f'return {expr};')
                     return
@@ -541,6 +656,67 @@ class FunctionEmitter:
             branches.append(set(saved))
         self.join(branches)
 
+    def for_(self, stmt, item, iterable, body, later):
+        """``for item in it:`` or, marked by the partial evaluator, an
+        index loop over an exact list or tuple (see partial_eval.py)."""
+        seq = self.lower_value(iterable)
+        live_before = set(self.live)
+        owned = True
+        if getattr(stmt, 'pyspec_sequence', False):
+            index = f'{item}_index'
+            tp = stmt.pyspec_iterable
+            if tp is tuple:
+                # The tuple holds a reference to every item: borrowed.
+                owned = False
+                self.emit(f'for (Py_ssize_t {index} = 0; '
+                          f'{index} < PyTuple_GET_SIZE({seq}); {index}++) {{')
+                self.indent += 1
+                self.emit(f'{item} = PyTuple_GET_ITEM({seq}, {index});')
+            elif tp is list:
+                # What the list iterator does: the size is read again for
+                # every item, since the loop body may change the list.
+                self.emit(f'for (Py_ssize_t {index} = 0; ; {index}++) {{')
+                self.indent += 1
+                self.lines.append('#ifdef Py_GIL_DISABLED')
+                self.emit(f'{item} = _PyList_GetItemRef((PyListObject *){seq}, '
+                          f'{index});')
+                self.lines.append('#else')
+                self.emit(f'{item} = {index} < PyList_GET_SIZE({seq}) ? '
+                          f'Py_NewRef(PyList_GET_ITEM({seq}, {index})) : NULL;')
+                self.lines.append('#endif')
+                self.emit(f'if ({item} == NULL) {{')
+                self.emit('    break;')
+                self.emit('}')
+            else:
+                raise SpecError(stmt, f'no index loop for {tp!r}')
+        else:
+            self.emit('for (;;) {')
+            self.indent += 1
+            self.emit(f'{item} = PyIter_Next({seq});')
+            self.emit(f'if ({item} == NULL) {{')
+            self.indent += 1
+            self.emit('if (PyErr_Occurred()) {')
+            self.indent += 1
+            self.error_exit()
+            self.indent -= 1
+            self.emit('}')
+            self.emit('break;')
+            self.indent -= 1
+            self.emit('}')
+        if owned:
+            self.live.add(item)
+            self.loop_vars.append(item)
+        # The names used by the next iterations stay alive.
+        self.statements(body, (set(later) | loaded_names(stmt)) - {item})
+        if owned:
+            self.loop_vars.pop()
+        if self.live != live_before:
+            raise SpecError(stmt, 'a loop body must release what it '
+                            'assigns: ' + ', '.join(sorted(
+                                self.live ^ live_before)))
+        self.indent -= 1
+        self.emit('}')
+
     def with_(self, func, obj, body, node):
         context = escape_of(func)
         if not isinstance(context, ContextEscape):
@@ -578,6 +754,13 @@ class FunctionEmitter:
             *self.lines,
             '}',
         ]
+
+
+def loaded_names(node):
+    """The names read in *node* (a statement)."""
+    return {child.id for child in ast.walk(node)
+            if isinstance(child, ast.Name)
+            and isinstance(child.ctx, ast.Load)}
 
 
 def exported(name):
@@ -650,9 +833,13 @@ class Generator:
         out.append('')
 
         for description in descriptions:
+            # Nothing is known about the arguments; the evaluator still
+            # specializes loops (see partial_eval.py), but keeps calls
+            # of other spec functions as calls.
+            body = partial_eval.specialize(self.spec, description.name, {},
+                                           inline=False)
             emitter = FunctionEmitter(self, c_params(description))
-            out += emitter.function(self.c_name(description.name),
-                                    self.spec.body(description.name))
+            out += emitter.function(self.c_name(description.name), body)
             out.append('')
 
         for description in descriptions:

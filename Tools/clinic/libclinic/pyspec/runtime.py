@@ -23,7 +23,7 @@ import sys
 import types
 
 __all__ = [
-    'NULL', 'C', 'cstr', 'isinstance', 'tp_name', 'fqname',
+    'NULL', 'C', 'cstr', 'isinstance', 'iter', 'tp_name', 'fqname',
     # C API facts vocabulary
     'char_p', 'void_p', 'const_void_p', 'Py_ssize_t', 'va_list', 'pointer',
     'Out', 'InOut', 'New', 'Borrowed', 'Steals', 'OnError', 'NoError',
@@ -67,6 +67,29 @@ def isinstance(obj, cls):
     return issubclass(type(obj), cls)
 
 
+class _Iterator:
+    """The result of iter(): a for loop over it only calls __next__."""
+
+    def __init__(self, it):
+        self._it = it
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._it)
+
+
+def iter(obj):
+    """PyObject_GetIter().
+
+    ``for item in it:`` over its result is lowered to PyIter_Next() calls:
+    tp_iternext only.  A Python for loop would call ``it.__iter__()``
+    first, which C does not do; the wrapper makes the spec, run as
+    Python, do the same as C."""
+    return _Iterator(builtins.iter(obj))
+
+
 def tp_name(tp):
     """``Py_TYPE(x)->tp_name``; used as ``%.200s`` in error messages."""
     if tp.__flags__ & (1 << 9):     # Py_TPFLAGS_HEAPTYPE
@@ -87,6 +110,7 @@ def fqname(tp):
 ERR_NULL = 'NULL'                # NULL means an exception is set
 ERR_NULL_OR_MISSING = 'MISSING'  # NULL without an exception means "absent"
 ERR_MINUS1 = 'MINUS1'            # -1 with an exception set
+ERR_NEGATIVE = 'NEGATIVE'        # a negative int: an exception is set
 
 
 class Escape:
@@ -94,15 +118,36 @@ class Escape:
 
     template: C expression; ``{0}``, ``{1}`` are the lowered arguments and
         ``{id0}``, ``{id1}`` are string-constant arguments used as C
-        identifiers (e.g. ``&_Py_ID({id1})``).
-    returns: 'object' (new reference) or 'Py_ssize_t'.
+        identifiers (e.g. ``&_Py_ID({id1})``).  A template that names
+        ``{target}`` initializes the local it is assigned to in place
+        (``x = C.f(...)`` becomes ``f(&x, ...)``) and returns an int
+        status, checked with *error*.
+    returns: 'object' (new reference), 'Py_ssize_t', 'int' (a status: the
+        escape is only called as a statement), or the C type of the local
+        a ``{target}`` template initializes.
+    release: for a C local (not an object) that owns a resource, the C
+        statement releasing it (``{0}`` is the local) on the paths where
+        the function exits before passing it to an escape that steals it.
+    steals: the indexes of the arguments the escape takes over (the
+        caller no longer releases them).
+    exact: {builtin type: template} cheaper lowerings used when the exact
+        type of the first argument is known (after ``type(x) is int``,
+        for example): same result and error convention.
     """
 
-    def __init__(self, func, template, returns, error):
+    def __init__(self, func, template, returns, error, release=None,
+                 steals=(), exact=None):
         self.func = func
         self.template = template
         self.returns = returns
         self.error = error
+        self.release = release
+        self.steals = tuple(steals)
+        self.exact = dict(exact or {})
+
+    @property
+    def initializes(self):
+        return '{target}' in self.template
 
     def __call__(self, *args):
         return self.func(*args)
@@ -139,9 +184,9 @@ class RaiseEscape:
         return self.func()
 
 
-def escape(template, *, returns='object', error=ERR_NULL):
+def escape(template, *, returns='object', error=ERR_NULL, **kwargs):
     def decorator(func):
-        return Escape(func, template, returns, error)
+        return Escape(func, template, returns, error, **kwargs)
     return decorator
 
 
@@ -163,35 +208,9 @@ def _as_ssize_t(o, exc):
     i = operator.index(o)
     if -PY_SSIZE_T_MAX - 1 <= i <= PY_SSIZE_T_MAX:
         return i
-    if exc is None:
+    if exc is NULL:
         return PY_SSIZE_T_MAX if i > 0 else -PY_SSIZE_T_MAX - 1
     raise exc(f"cannot fit '{tp_name(type(o))}' into an index-sized integer")
-
-
-def _bytes_from_sequence(x):
-    out = bytearray()
-    for item in x:
-        if not issubclass(type(item), int):
-            return NULL
-        try:
-            value = _as_ssize_t(item, OverflowError)
-        except OverflowError:
-            return NULL
-        if not 0 <= value < 256:
-            raise ValueError("bytes must be in range(0, 256)")
-        out.append(value)
-    return bytes(out)
-
-
-def _bytes_from_iterator(it, x):
-    operator.length_hint(x, 64)
-    out = bytearray()
-    for item in it:
-        value = _as_ssize_t(item, None)
-        if not 0 <= value < 256:
-            raise ValueError("bytes must be in range(0, 256)")
-        out.append(value)
-    return bytes(out)
 
 
 class C:
@@ -204,9 +223,17 @@ class C:
         lambda s, encoding, errors: str.encode(
             s, encoding, 'strict' if errors is NULL else errors))
 
+    # An exact int needs no __index__: a compact one is read inline.
     PyNumber_AsSsize_t = escape(
         'PyNumber_AsSsize_t({0}, {1})',
-        returns='Py_ssize_t', error=ERR_MINUS1)(_as_ssize_t)
+        returns='Py_ssize_t', error=ERR_MINUS1,
+        exact={int: '(_PyLong_IsCompact((PyLongObject *){0}) '
+                    '? _PyLong_CompactValue((PyLongObject *){0}) '
+                    ': PyNumber_AsSsize_t({0}, {1}))'})(_as_ssize_t)
+
+    PyObject_LengthHint = escape(
+        'PyObject_LengthHint({0}, {1})',
+        returns='Py_ssize_t', error=ERR_MINUS1)(operator.length_hint)
 
     _PyBytes_FromSize = escape('_PyBytes_FromSize({0}, {1})')(
         lambda size, zero: b'\0' * size)
@@ -214,14 +241,25 @@ class C:
     _PyBytes_FromBuffer = escape('_PyBytes_FromBuffer({0})')(
         lambda x: memoryview(x).tobytes())
 
-    # NULL without an exception: an item is not an int in range of
-    # Py_ssize_t, use the generic iterator path.
-    _PyBytes_FromSequence_lock_held = escape(
-        '_PyBytes_FromSequence_lock_held({0})',
-        error=ERR_NULL_OR_MISSING)(_bytes_from_sequence)
+    # A bytes_appender (Objects/bytesobject.c): a PyBytesWriter of at
+    # least size bytes, written one byte at a time by a cursor kept in a
+    # local variable.
+    bytes_appender = escape(
+        'bytes_appender_init(&{target}, {0})',
+        returns='bytes_appender', error=ERR_NEGATIVE,
+        release='PyBytesWriter_Discard({0}.writer);')(
+        lambda size: bytearray())
 
-    _PyBytes_FromIterator = escape('_PyBytes_FromIterator({0}, {1})')(
-        _bytes_from_iterator)
+    # Append the byte value (in range(256)).
+    bytes_appender_append = escape(
+        'bytes_appender_append(&{0}, (unsigned char){1})',
+        returns='int', error=ERR_NEGATIVE)(
+        lambda appender, value: appender.append(value))
+
+    # The bytes written; takes over the appender.
+    bytes_appender_finish = escape(
+        'PyBytesWriter_FinishWithPointer({0}.writer, {0}.str)',
+        steals=(0,))(bytes)
 
     # Borrows its second argument.
     bytes_subtype_new = escape('bytes_subtype_new({0}, {1})')(

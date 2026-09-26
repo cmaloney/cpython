@@ -16,7 +16,8 @@ Lib/test/test_clinic.py runs this file as Python and compares it with the
 interpreter's bytes().
 """
 
-from libclinic.pyspec.runtime import NULL, C, isinstance, fqname, tp_name
+from libclinic.pyspec.runtime import (
+    NULL, C, isinstance, iter, fqname, tp_name)
 
 # Argument Clinic decorators (no-ops in Python).
 from libclinic.pyspec.runtime import permit_long_summary, text_signature
@@ -374,19 +375,29 @@ def PyBytes_FromObject(x: object):
     # Use the modern buffer interface
     if hasattr(type(x), "__buffer__"):
         return C._PyBytes_FromBuffer(x)
-    if type(x) is list or type(x) is tuple:
-        with C.critical_section_sequence_fast(x):
-            result = C._PyBytes_FromSequence_lock_held(x)
-        if result is not NULL:
-            return result
+    # Argument Clinic specializes the iteration for an exact list or
+    # tuple: an index loop, without an iterator (see partial_eval.py).
     if not isinstance(x, str):
         try:
             it = iter(x)
         except TypeError:
             pass
         else:
-            return C._PyBytes_FromIterator(it, x)
+            return bytes_from_iterator(it, x)
     raise TypeError(f"cannot convert '{tp_name(type(x))}' object to bytes")
+
+
+def bytes_from_iterator(it: object, x: object):
+    """The bytes of the ints (or objects with __index__) of iterator it,
+    iter(x)."""
+    size = C.PyObject_LengthHint(x, 64)
+    writer = C.bytes_appender(size)
+    for item in it:
+        value = C.PyNumber_AsSsize_t(item, NULL)
+        if value < 0 or value >= 256:
+            raise ValueError("bytes must be in range(0, 256)")
+        C.bytes_appender_append(writer, value)
+    return C.bytes_appender_finish(writer)
 
 
 # ---------------------------------------------------------------------------
@@ -1002,16 +1013,23 @@ def _PyBytes_FromBuffer(x: object) -> RunsPython[New[bytes], 'x']:
 
 
 @helper
-def _PyBytes_FromSequence_lock_held(x: object) -> New[bytes]:
-    """NULL without an exception: an item is not an int that fits in a
-    Py_ssize_t; the caller falls back to iteration.  Only exact ints are
-    converted, so no __index__ runs."""
+def PyObject_LengthHint(o: object, defaultvalue: Py_ssize_t
+                        ) -> RunsPython[OnError[Py_ssize_t, -1], 'o']:
     ...
 
 
-@helper
-def _PyBytes_FromIterator(it: object, x: object) -> RunsPython[New[bytes]]:
-    """Calls __next__ and the __index__ of the items."""
+def bytes_appender(size: Py_ssize_t) -> OnError[int, -1]:
+    """bytes_appender_init(): a PyBytesWriter written byte by byte."""
+    ...
+
+
+def bytes_appender_append(appender: pointer('bytes_appender'), value: int
+                          ) -> OnError[int, -1]:
+    ...
+
+
+def bytes_appender_finish(appender: pointer('bytes_appender')) -> New[bytes]:
+    """PyBytesWriter_FinishWithPointer(): takes over the appender."""
     ...
 
 

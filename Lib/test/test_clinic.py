@@ -6715,7 +6715,8 @@ class BytesSpecFactsTest(TestCase):
                 stub = pyspec_runtime.stub_facts(self.spec.functions[name])
                 error = {pyspec_runtime.ERR_NULL: 'NULL',
                          pyspec_runtime.ERR_NULL_OR_MISSING: 'NULL',
-                         pyspec_runtime.ERR_MINUS1: -1}[escape.error]
+                         pyspec_runtime.ERR_MINUS1: -1,
+                         pyspec_runtime.ERR_NEGATIVE: -1}[escape.error]
                 self.assertIn(error, stub.errors)
 
 
