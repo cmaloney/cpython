@@ -6017,7 +6017,7 @@ class PyspecStubTest(PyspecTestBase):
         """
         output = self.check(spec, "bytes.__init__\n", """
             @vectorcall
-            bytes.__init__ as bytes_init
+            bytes.__init__
                 a: object
                 /
         """)
@@ -6135,9 +6135,9 @@ class PyspecStubTest(PyspecTestBase):
         self.assertIs(pyspec_runtime.text_signature("($self)")(f), f)
         self.assertIs(pyspec_runtime.critical_section("a", "b")(f), f)
 
-    def test_new_and_init_c_basename(self):
-        # The default C basename of T.__new__ is T_new, of T.__init__
-        # T_init; an explicit one is kept.
+    def test_new_c_basename(self):
+        # The default C basename of T.__new__ is T_new; an explicit one is
+        # kept.  T.__init__ keeps clinic's default, T___init__.
         spec = """
             class bytes:
                 def __new__(cls, a: object = NULL):
@@ -6153,7 +6153,7 @@ class PyspecStubTest(PyspecTestBase):
                 def __init__(self, a: object = NULL):
                     ...
         """, "bytes.__init__\n", """
-            bytes.__init__ as bytes_init
+            bytes.__init__
                 a: object = NULL
         """)
         self.check(spec, "bytes.__new__ as spam\n", """

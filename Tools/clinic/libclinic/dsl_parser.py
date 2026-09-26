@@ -635,10 +635,10 @@ class DSLParser:
         if suffix.startswith(' -> ') and '->' in function_line:
             fail(f"{names!r}: the return converter is written in "
                  f"{spec.filename}")
-        if ' as ' not in function_line and meth in ('__new__', '__init__'):
+        if ' as ' not in function_line and meth == '__new__':
             # The C basename of T.__new__ is T_new (see frontend).
             left, arrow, right = function_line.partition('->')
-            c_basename = '_'.join([*prefix.split('.'), meth.strip('_')])
+            c_basename = '_'.join([*prefix.split('.'), 'new'])
             function_line = (f'{left.rstrip()} as {c_basename}'
                              + (f' {arrow}{right}' if arrow else ''))
         indent = function_line[:len(function_line) - len(function_line.lstrip())]

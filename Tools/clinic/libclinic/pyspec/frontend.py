@@ -33,10 +33,13 @@ A block in the .c file is optional for a spec method; it holds the
 function line only (``bytes.split``), and clinic_input() turns the spec
 method into the rest of the block.  Without a block, clinic generates the
 method at the end of the file (see Clinic.parse_spec_methods()) and the
-head of its impl definition is written by hand.  The C basename of a spec method is clinic's default, except
-that ``T.__new__`` and ``T.__init__`` are named ``T_new`` and ``T_init``,
-as most hand-written ``as`` clauses of Objects/ name them (clinic's
-default would be ``T`` and ``T___init__``).
+head of its impl definition is written by hand.
+
+The C basename of a spec method is clinic's default, except that
+``T.__new__`` is named ``T_new`` (clinic's default would be ``T``), as 16
+of the 23 ``__new__`` of Objects/ are named with an ``as`` clause.
+``T.__init__`` keeps clinic's default, ``T___init__``, which 3 of the 4
+``__init__`` of Objects/ use.
 
 Top-level functions are C functions named like the function.  A body of
 ``...`` (or only a docstring) describes a hand-written C function; a real
