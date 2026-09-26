@@ -3491,12 +3491,9 @@ pyspec_find_method(PyObject *self, PyObject *args)
         PyErr_Format(PyExc_ValueError, "%R has no method %s", tp, name);
         return NULL;
     }
-    /* F2 (fromhex facts drop their cls condition): _PySpec_FindMethod() does
-     * not take self_or_cls yet.  Once it does (typed entries of a class
-     * method then match only when cls is exactly tp), pass it here. */
-    (void)self_or_cls;
     return pyspec_index(
-        _PySpec_FindMethod((PyTypeObject *)tp, def->ml_meth, nargs, at),
+        _PySpec_FindMethod((PyTypeObject *)tp, def->ml_meth, self_or_cls,
+                           nargs, at),
         table->methods);
 }
 

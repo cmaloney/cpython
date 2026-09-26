@@ -405,17 +405,11 @@ class SoundnessTest(unittest.TestCase):
     def setUpClass(cls):
         cls.calls, cls.methods = _testinternalcapi.pyspec_table(bytes)
 
-    # Fails until workstream A's F2 change lands: _PySpec_FindMethod must
-    # take the bound class and match typed entries only for cls is bytes
-    # (and pyspec_find_method in _testinternalcapi must pass it through).
-    @unittest.expectedFailure
     def test_fromhex_cls(self):
         # F2: the facts of the typed bytes.fromhex entries hold only when
         # cls is exactly bytes: B.fromhex(s) calls B(result), which may
         # return anything and run Python code.  The entry a consumer finds
         # for B.fromhex must have no facts that are false for B.
-        # XXX Needs _PySpec_FindMethod() to take cls (F2 fix): until then,
-        # the lookup ignores cls and this fails.
         class H(bytes):
             def __new__(cls, value):
                 return 42
