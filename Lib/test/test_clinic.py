@@ -5723,7 +5723,9 @@ class PyspecTest(PyspecTestBase):
         self.assertIn("PyObject_CallOneArg((PyObject *)cls, result);",
                       output)
 
-    def test_body_without_block(self):
+    def test_missing_block(self):
+        # Every clinic function of a spec class declared in the C file has
+        # a one-line block above its impl, where clinic writes the head.
         block = self.BLOCK.replace("bytes.__new__ as foo_new",
                                    "bytes.__bytes__")
         spec = """
@@ -5734,13 +5736,18 @@ class PyspecTest(PyspecTestBase):
                 def __bytes__(self):
                     ...
         """
-        # Without a block, a spec method is generated after the blocks of
-        # the file (see PyspecNoBlockTest), but not with "output preset
-        # block".
-        self.expect_failure(spec, block, "bytes.__new__ has no clinic block "
-                            f"in {self.filename}, so its generated code, "
-                            "except the impl definition, must go to a file "
-                            "destination")
+        with self.assertRaises(ClinicError) as cm:
+            self.generate(spec, block)
+        self.assertEqual(cm.exception.message,
+                         f"bytes.__new__ has no clinic block in "
+                         f"{self.filename}; put this block above its impl:\n"
+                         "/*[clinic input]\nbytes.__new__\n"
+                         "[clinic start generated code]*/")
+        self.assertEqual(cm.exception.filename, self.spec_path)
+        self.assertEqual(cm.exception.lineno, 3)
+        # Classes the C file does not declare are not generated.
+        self.generate(spec.replace("class bytes", "class bytearray")
+                      .replace("return a", "..."), block)
 
     def test_not_new(self):
         block = self.BLOCK.replace("bytes.__new__ as foo_new",
@@ -5889,9 +5896,8 @@ class PyspecStubTest(PyspecTestBase):
         """)
 
     def test_class_and_static_methods(self):
-        # Each spec has only the method under test: the output of a spec
-        # method without a block cannot go to the block (see
-        # PyspecNoBlockTest).
+        # Each spec has only the method under test: each spec method needs
+        # a block.
         self.check("""
             class bytes:
                 @classmethod
@@ -6251,108 +6257,6 @@ class PyspecStubTest(PyspecTestBase):
                             f"{self.spec_path}:3)")
 
 
-class PyspecNoBlockTest(PyspecTestBase):
-    """A spec method needs no block in the C file."""
-
-    CLASS = """
-        /*[clinic input]
-        class bytes "PyBytesObject *" "&PyBytes_Type"
-        [clinic start generated code]*/
-        /*[clinic end generated code: output=da39a3ee5e6b4b0d input=7a238f965d64892b]*/
-    """
-
-    SPEC = """
-        class bytes:
-            def __new__(cls, a: object, /):
-                return a
-
-            @permit_long_summary
-            def meth(self, a: object, /):
-                '''Summary line which is longer than the eighty characters of a summary.'''
-                ...
-
-            def other(self, a: object, /):
-                '''Other summary.'''
-                ...
-    """
-
-    def generate_file(self, spec, text):
-        """Generated (C file, .c.h, _pyspec.c.h) of the C file *text*."""
-        generated = self.generate(spec, dedent(text))
-        with open(os.path.join(self.tmp_dir, 'clinic', 'foo.c.h'),
-                  encoding='utf-8') as f:
-            header = f.read()
-        with open(self.output_path, encoding='utf-8') as f:
-            pyspec_header = f.read()
-        return generated, header, pyspec_header
-
-    @staticmethod
-    def block(line):
-        return ("/*[clinic input]\n" + line
-                + "\n[clinic start generated code]*/\n")
-
-    def test_no_block(self):
-        generated, header, pyspec_header = self.generate_file(
-            self.SPEC, self.CLASS)
-        # The C file is unchanged: it only holds the impl definitions.
-        self.assertEqual(generated, dedent(self.CLASS))
-        self.assertIn("static PyObject *\n"
-                      "bytes_meth_impl(PyBytesObject *self, PyObject *a);\n",
-                      header)
-        self.assertIn('#define BYTES_OTHER_METHODDEF', header)
-        self.assertIn('bytes_new_impl(PyTypeObject *cls, PyObject *a);',
-                      pyspec_header)
-
-        # The same as with one-line blocks, in the order of the spec.
-        blocks = "".join(self.block(f"bytes.{name}")
-                         for name in ("__new__", "meth", "other"))
-        _, header_blocks, pyspec_blocks = self.generate_file(
-            self.SPEC, dedent(self.CLASS) + blocks)
-        self.assertEqual(header, header_blocks)
-        self.assertEqual(pyspec_header, pyspec_blocks)
-
-    def test_mixed(self):
-        # Methods with a block come first, then the others in the order
-        # of the spec.
-        _, header, _ = self.generate_file(
-            self.SPEC, dedent(self.CLASS) + self.block("bytes.meth"))
-        blocks = "".join(self.block(f"bytes.{name}")
-                         for name in ("meth", "__new__", "other"))
-        generated, header_blocks, _ = self.generate_file(
-            self.SPEC, dedent(self.CLASS) + blocks)
-        self.assertEqual(header, header_blocks)
-        self.assertIn("bytes_meth_impl(PyBytesObject *self, PyObject *a)\n"
-                      "/*[clinic end generated code:", generated)
-
-    def test_class_not_declared(self):
-        # Only classes declared in the C file are generated.
-        spec = """
-            class bytearray:
-                def meth(self, a: object, /):
-                    ...
-        """
-        self.generate(spec, dedent(self.CLASS) + "/*[clinic input]\n"
-                      "bytes.meth\n\nDoc.\n[clinic start generated code]*/\n")
-        with open(os.path.join(self.tmp_dir, 'clinic', 'foo.c.h'),
-                  encoding='utf-8') as f:
-            header = f.read()
-        self.assertIn("bytes_meth_impl(PyBytesObject *self);", header)
-        self.assertNotIn("bytearray", header)
-
-    def test_error_names_spec(self):
-        spec = """
-            class bytes:
-                def meth(self, a: nosuchconverter, /):
-                    ...
-        """
-        with self.assertRaises(ClinicError) as cm:
-            self.generate(spec, dedent(self.CLASS))
-        self.assertEqual(cm.exception.filename, self.spec_path)
-        self.assertEqual(cm.exception.lineno, 3)
-        self.assertIn("'nosuchconverter' is not a valid converter",
-                      cm.exception.message)
-
-
 class PyspecTypeTest(PyspecTestBase):
     """@static_type: clinic generates the type object of a spec class, its
     method table and slot tables (libclinic/pyspec/typeobj.py)."""
@@ -6361,6 +6265,16 @@ class PyspecTypeTest(PyspecTestBase):
         /*[clinic input]
         class bytes "PyBytesObject *" "&PyBytes_Type"
         class myiter "myiterobject *" "&MyIter_Type"
+        [clinic start generated code]*/
+    """
+
+    # The blocks of the clinic functions of SPEC.
+    BLOCKS = CLASS + """
+        /*[clinic input]
+        bytes.__new__
+        [clinic start generated code]*/
+        /*[clinic input]
+        bytes.meth
         [clinic start generated code]*/
     """
 
@@ -6423,7 +6337,7 @@ class PyspecTypeTest(PyspecTestBase):
             return f.read()
 
     def test_type_objects(self):
-        header = self.types_header(self.SPEC)
+        header = self.types_header(self.SPEC, self.BLOCKS)
         self.assertIn('PyDoc_STRVAR(bytes__doc__,\n'
                       '"Doc of\\n"\n"  bytes.");', header)
         self.assertIn('PyDoc_STRVAR(bytes_other__doc__,\n"Other(x)");',
@@ -6574,12 +6488,15 @@ class PyspecTypeTest(PyspecTestBase):
                 pass
         """)
         self.assertIn('    .tp_new = PyType_GenericNew,\n', header)
-        self.check_error("""
-            @static_type(tp_new="PyType_GenericNew")
-            class bytes:
-                def __new__(cls, a: object, /):
-                    return a
-        """, "tp_new is already the clinic function")
+        with self.assertRaisesRegex(ClinicError,
+                                    "tp_new is already the clinic function"):
+            self.types_header("""
+                @static_type(tp_new="PyType_GenericNew")
+                class bytes:
+                    def __new__(cls, a: object, /):
+                        return a
+            """, dedent(self.CLASS) + "/*[clinic input]\nbytes.__new__\n"
+                 "[clinic start generated code]*/\n")
 
     def test_slot_block_rejected(self):
         with self.assertRaisesRegex(ClinicError,
@@ -6596,7 +6513,11 @@ class PyspecTypeTest(PyspecTestBase):
                 def meth(self, a: object, /):
                     ...
         """
-        self.generate(spec, self.CLASS)
+        generated = self.generate(spec, dedent(self.CLASS)
+                                  + "/*[clinic input]\nbytes.meth\n"
+                                  "[clinic start generated code]*/\n")
+        self.assertIn('bytes_m_impl(PyBytesObject *self, PyObject *a)\n'
+                      '/*[clinic end generated code:', generated)
         with open(os.path.join(self.tmp_dir, 'clinic', 'foo.c.h'),
                   encoding='utf-8') as f:
             self.assertIn('#define BYTES_M_METHODDEF', f.read())

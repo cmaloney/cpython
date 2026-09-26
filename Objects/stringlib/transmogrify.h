@@ -23,8 +23,13 @@ return_self(PyObject *self)
     return STRINGLIB_NEW(STRINGLIB_STR(self), STRINGLIB_LEN(self));
 }
 
+/*[clinic input]
+B.expandtabs
+[clinic start generated code]*/
+
 static PyObject *
 stringlib_expandtabs_impl(PyObject *self, int tabsize)
+/*[clinic end generated code: output=069cb7fae72e4c2b input=2fc46cffd390d3bc]*/
 {
     const char *e, *p;
     char *q;
@@ -119,8 +124,13 @@ pad(PyObject *self, Py_ssize_t left, Py_ssize_t right, char fill)
     return u;
 }
 
+/*[clinic input]
+B.ljust
+[clinic start generated code]*/
+
 static PyObject *
 stringlib_ljust_impl(PyObject *self, Py_ssize_t width, char fillchar)
+/*[clinic end generated code: output=c79ca173c5ff8337 input=6ba67dd0ddb8e428]*/
 {
     if (STRINGLIB_LEN(self) >= width) {
         return return_self(self);
@@ -130,8 +140,13 @@ stringlib_ljust_impl(PyObject *self, Py_ssize_t width, char fillchar)
 }
 
 
+/*[clinic input]
+B.rjust
+[clinic start generated code]*/
+
 static PyObject *
 stringlib_rjust_impl(PyObject *self, Py_ssize_t width, char fillchar)
+/*[clinic end generated code: output=7df5d728a5439570 input=0875fe120455bfb0]*/
 {
     if (STRINGLIB_LEN(self) >= width) {
         return return_self(self);
@@ -141,8 +156,13 @@ stringlib_rjust_impl(PyObject *self, Py_ssize_t width, char fillchar)
 }
 
 
+/*[clinic input]
+B.center
+[clinic start generated code]*/
+
 static PyObject *
 stringlib_center_impl(PyObject *self, Py_ssize_t width, char fillchar)
+/*[clinic end generated code: output=d8da2e055288b4c2 input=4f4c68c1f7e7550d]*/
 {
     Py_ssize_t marg, left;
 
@@ -156,8 +176,13 @@ stringlib_center_impl(PyObject *self, Py_ssize_t width, char fillchar)
     return pad(self, left, marg - left, fillchar);
 }
 
+/*[clinic input]
+B.zfill
+[clinic start generated code]*/
+
 static PyObject *
 stringlib_zfill_impl(PyObject *self, Py_ssize_t width)
+/*[clinic end generated code: output=0b3c684a7f1b2319 input=d9ea1b05d1753022]*/
 {
     Py_ssize_t fill;
     PyObject *s;

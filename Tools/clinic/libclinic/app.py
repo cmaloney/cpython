@@ -207,7 +207,7 @@ impl_definition block
                 parser.parse(block)
             printer.print_block(block)
 
-        self.parse_spec_methods()
+        self.check_spec_blocks()
 
         # The entry of an attribute is composed of all its accessors, so it
         # is rendered when the whole file is parsed.
@@ -277,20 +277,12 @@ impl_definition block
                     fail(str(exc))
         return self._pyspec
 
-    def parse_spec_methods(self) -> None:
-        """Generate the spec methods which have no clinic block in the file.
-
-        Every method of a spec class declared in the file (``class T``
-        directive) is a clinic function: a block holding only its function
-        line is optional.  Without one, the method is generated after the
-        blocks of the file, in the order of the spec, and its impl
-        definition head, which clinic would write into the block, is
-        written by hand.  The compiler checks that head against the impl
-        prototype of the generated file.
-        """
+    def check_spec_blocks(self) -> None:
+        """Every clinic function of a spec class declared in the file
+        (``class T`` directive) has a one-line block, ``T.meth``, above its
+        impl: clinic writes the impl head there."""
         spec = self.pyspec
-        parser = self.parsers.get('clinic')
-        if spec is None or not isinstance(parser, DSLParser):
+        if spec is None:
             return
         for path, cls in self._clinic_classes(self, ''):
             if cls.name not in spec.classes:
@@ -302,9 +294,12 @@ impl_definition block
                 fail(str(exc))
             for meth in methods:
                 if meth not in declared:
-                    self._parse_spec_method(parser, spec, cls.name,
-                                            path, meth)
-                    declared.add(meth)
+                    node = spec.functions[f'{cls.name}.{meth}']
+                    fail(f"{path}.{meth} has no clinic block in "
+                         f"{self.filename}; put this block above its "
+                         f"impl:\n/*[clinic input]\n{path}.{meth}\n"
+                         "[clinic start generated code]*/",
+                         filename=spec.filename, line_number=node.lineno)
 
     def _clinic_classes(self, parent: Any, prefix: str
                         ) -> list[tuple[str, Class]]:
@@ -316,29 +311,6 @@ impl_definition block
         for name, module in getattr(parent, 'modules', {}).items():
             found += self._clinic_classes(module, f'{prefix}{name}.')
         return found
-
-    def _parse_spec_method(self, parser: DSLParser, spec: frontend.Spec,
-                           cls_name: str, path: str, meth: str) -> None:
-        # The impl definition head is hand-written: drop it.
-        buffers = self.destination_buffers
-        impl_definition = buffers['impl_definition']
-        buffers['impl_definition'] = self.get_destination_buffer('suppress')
-        block = Block(f'{path}.{meth}\n', dsl_name='clinic')
-        name = f'{cls_name}.{meth}'
-        node = spec.functions[name]
-        try:
-            parser.parse(block)
-            if ''.join(block.output).strip():
-                fail(f"{path}.{meth} has no clinic block in "
-                     f"{self.filename}, so its generated code, except the "
-                     "impl definition, must go to a file destination; "
-                     "use the default 'output preset' or give it a block")
-        except libclinic.ClinicError as exc:
-            exc.filename = spec.filename
-            exc.lineno = node.lineno
-            raise
-        finally:
-            buffers['impl_definition'] = impl_definition
 
     def write_pyspec_output(self) -> None:
         """Write the C generated from the implemented spec functions."""

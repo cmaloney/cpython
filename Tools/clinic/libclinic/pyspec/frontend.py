@@ -28,11 +28,10 @@ named T.  A method is written like the clinic block it replaces:
 * a body of ``...`` (or only a docstring) means the C impl is
   hand-written.  A real body implements the function: see emit.py.
 
-A block in the .c file is optional for a spec method; it holds the
-function line only (``bytes.split``), and clinic_input() turns the spec
-method into the rest of the block.  Without a block, clinic generates the
-method at the end of the file (see Clinic.parse_spec_methods()) and the
-head of its impl definition is written by hand.
+Each spec method has a one-line block in the .c file, above its impl:
+the function line only (``bytes.split``).  clinic_input() turns the spec
+method into the rest of the block, and clinic writes the impl head into
+the block's output, as usual.  A missing block is an error.
 
 The C basename of a spec method is clinic's default, except that
 ``T.__new__`` is named ``T_new`` (clinic's default would be ``T``), as 16
