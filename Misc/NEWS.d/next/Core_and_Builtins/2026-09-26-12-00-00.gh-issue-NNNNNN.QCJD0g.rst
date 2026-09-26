@@ -1,0 +1,4 @@
+Fix a crash in the JIT optimizer when ``str(x)`` returned a :class:`str`
+subclass from :meth:`~object.__str__`. The optimizer assumed the result was
+an exact :class:`str`, which could lead to wrong results, a skipped
+:meth:`~object.__del__`, and a use-after-free.

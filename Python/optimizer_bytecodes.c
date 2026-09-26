@@ -1656,8 +1656,14 @@ dummy_func(void) {
             // through str() which strips the reference information from it.
             res = PyJitRef_StripReferenceInfo(arg);
         }
-        else {
+        else if (sym_matches_type(arg, &PyLong_Type) ||
+                 sym_matches_type(arg, &PyFloat_Type)) {
+            // str() of an exact int or float is an exact str.
             res = sym_new_type(ctx, &PyUnicode_Type);
+        }
+        else {
+            // __str__() may return a str subclass.
+            res = sym_new_not_null(ctx);
         }
         a = arg;
         ASSERT_RESULT_FACTS(res, 1);

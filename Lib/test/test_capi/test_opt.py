@@ -7,6 +7,7 @@ import unittest
 import gc
 import os
 import types
+import weakref
 
 import _opcode
 
@@ -3063,6 +3064,83 @@ class TestUopsOptimization(unittest.TestCase):
         self.assertIn("_CALL_STR_1", uops)
         self.assertNotIn("_TO_BOOL_STR", uops)
         self.assertNotIn(self.guard_is_true, uops)
+
+    def test_call_str_1_result_can_be_str_subclass(self):
+        # __str__() may return a str subclass, which str() passes through.
+        class S(str):
+            pass
+
+        class C:
+            def __str__(self):
+                return S("x")
+
+        def testfunc(n):
+            c = C()
+            x = 0
+            for _ in range(n):
+                if type(str(c)) is S:
+                    x += 1
+            return x
+
+        n = 2 * TIER2_THRESHOLD
+        res, ex = self._run_with_optimizer(testfunc, n)
+        self.assertEqual(res, n)
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_CALL_STR_1", uops)
+
+    def test_call_str_1_str_subclass_result_is_deallocated(self):
+        # The discarded result must not be freed as an exact str.
+        dels = 0
+
+        class S(str):
+            def __del__(self):
+                nonlocal dels
+                dels += 1
+
+        class C:
+            def __str__(self):
+                return S("x")
+
+        def testfunc(n):
+            c = C()
+            for _ in range(n):
+                str(c)
+
+        n = 2 * TIER2_THRESHOLD
+        _, ex = self._run_with_optimizer(testfunc, n)
+        gc.collect()
+        self.assertEqual(dels, n)
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_CALL_STR_1", uops)
+        self.assertNotIn("_POP_TOP_UNICODE", uops)
+
+    def test_call_str_1_str_subclass_result_weakref(self):
+        class S(str):
+            pass
+
+        refs = []
+
+        class C:
+            def __str__(self):
+                s = S("x")
+                refs.append(weakref.ref(s))
+                return s
+
+        def testfunc(n):
+            c = C()
+            for _ in range(n):
+                str(c)
+
+        n = 2 * TIER2_THRESHOLD
+        _, ex = self._run_with_optimizer(testfunc, n)
+        gc.collect()
+        self.assertEqual(len(refs), n)
+        self.assertTrue(all(r() is None for r in refs))
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_CALL_STR_1", uops)
 
     def test_call_tuple_1(self):
         def testfunc(n):
