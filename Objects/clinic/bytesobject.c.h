@@ -9,6 +9,186 @@ preserve
 #include "pycore_abstract.h"      // _PyNumber_Index()
 #include "pycore_modsupport.h"    // _PyArg_UnpackKeywords()
 
+static PyObject *
+bytes_new_impl(PyTypeObject *type, PyObject *x, const char *encoding,
+               const char *errors);
+
+static PyObject *
+bytes_new_helper(PyTypeObject *type, PyObject *const *args,
+    Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
+
+    #define NUM_KEYWORDS 3
+    static struct {
+        PyGC_Head _this_is_not_used;
+        PyObject_VAR_HEAD
+        Py_hash_t ob_hash;
+        PyObject *ob_item[NUM_KEYWORDS];
+    } _kwtuple = {
+        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
+        .ob_hash = -1,
+        .ob_item = { &_Py_ID(source), &_Py_ID(encoding), &_Py_ID(errors), },
+    };
+    #undef NUM_KEYWORDS
+    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
+
+    #else  // !Py_BUILD_CORE
+    #  define KWTUPLE NULL
+    #endif  // !Py_BUILD_CORE
+
+    static const char * const _keywords[] = {"source", "encoding", "errors", NULL};
+    static _PyArg_Parser _parser = {
+        .keywords = _keywords,
+        .fname = "bytes",
+        .kwtuple = KWTUPLE,
+    };
+    #undef KWTUPLE
+    PyObject *argsbuf[3];
+    PyObject * const *fastargs;
+    Py_ssize_t noptargs = nargs + nkw - 0;
+    PyObject *x = NULL;
+    const char *encoding = NULL;
+    const char *errors = NULL;
+
+    fastargs = _PyArg_UnpackKeywords(args, nargs, kwargs, kwnames, &_parser,
+            /*minpos*/ 0, /*maxpos*/ 3, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
+    if (!fastargs) {
+        goto exit;
+    }
+    if (!noptargs) {
+        goto skip_optional_pos;
+    }
+    if (fastargs[0]) {
+        x = fastargs[0];
+        if (!--noptargs) {
+            goto skip_optional_pos;
+        }
+    }
+    if (fastargs[1]) {
+        if (!PyUnicode_Check(fastargs[1])) {
+            _PyArg_BadArgument("bytes", "argument 'encoding'", "str", fastargs[1]);
+            goto exit;
+        }
+        Py_ssize_t encoding_length;
+        encoding = PyUnicode_AsUTF8AndSize(fastargs[1], &encoding_length);
+        if (encoding == NULL) {
+            goto exit;
+        }
+        if (strlen(encoding) != (size_t)encoding_length) {
+            PyErr_SetString(PyExc_ValueError, "embedded null character");
+            goto exit;
+        }
+        if (!--noptargs) {
+            goto skip_optional_pos;
+        }
+    }
+    if (!PyUnicode_Check(fastargs[2])) {
+        _PyArg_BadArgument("bytes", "argument 'errors'", "str", fastargs[2]);
+        goto exit;
+    }
+    Py_ssize_t errors_length;
+    errors = PyUnicode_AsUTF8AndSize(fastargs[2], &errors_length);
+    if (errors == NULL) {
+        goto exit;
+    }
+    if (strlen(errors) != (size_t)errors_length) {
+        PyErr_SetString(PyExc_ValueError, "embedded null character");
+        goto exit;
+    }
+skip_optional_pos:
+    return_value = bytes_new_impl(type, x, encoding, errors);
+
+exit:
+    return return_value;
+}
+
+static PyObject *
+bytes_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    return bytes_new_helper(type, _PyTuple_CAST(args)->ob_item,
+        PyTuple_GET_SIZE(args),
+        kwargs ? PyDict_GET_SIZE(kwargs) : 0,
+        kwargs, NULL);
+}
+
+static PyObject *
+bytes_new_nargs0(void);
+
+static PyObject *
+bytes_new_nargs1(PyObject *x);
+
+static PyObject *
+bytes_new_nargs2(PyObject *x, const char *encoding);
+
+static PyObject *
+bytes_new_nargs3(PyObject *x, const char *encoding, const char *errors);
+
+static PyObject *
+bytes_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyObject *x = NULL;
+    const char *encoding = NULL;
+    const char *errors = NULL;
+
+    assert(Py_Is(_PyType_CAST(type), &PyBytes_Type));
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    if (kwnames != NULL || nargs > 3) {
+        return bytes_new_helper(_PyType_CAST(type), args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames);
+    }
+    if (nargs < 1) {
+        return_value = bytes_new_nargs0();
+        goto exit;
+    }
+    x = args[0];
+    if (nargs < 2) {
+        return_value = bytes_new_nargs1(x);
+        goto exit;
+    }
+    if (!PyUnicode_Check(args[1])) {
+        _PyArg_BadArgument("bytes", "argument 'encoding'", "str", args[1]);
+        goto exit;
+    }
+    Py_ssize_t encoding_length;
+    encoding = PyUnicode_AsUTF8AndSize(args[1], &encoding_length);
+    if (encoding == NULL) {
+        goto exit;
+    }
+    if (strlen(encoding) != (size_t)encoding_length) {
+        PyErr_SetString(PyExc_ValueError, "embedded null character");
+        goto exit;
+    }
+    if (nargs < 3) {
+        return_value = bytes_new_nargs2(x, encoding);
+        goto exit;
+    }
+    if (!PyUnicode_Check(args[2])) {
+        _PyArg_BadArgument("bytes", "argument 'errors'", "str", args[2]);
+        goto exit;
+    }
+    Py_ssize_t errors_length;
+    errors = PyUnicode_AsUTF8AndSize(args[2], &errors_length);
+    if (errors == NULL) {
+        goto exit;
+    }
+    if (strlen(errors) != (size_t)errors_length) {
+        PyErr_SetString(PyExc_ValueError, "embedded null character");
+        goto exit;
+    }
+    return_value = bytes_new_nargs3(x, encoding, errors);
+
+exit:
+    return return_value;
+}
+
 PyDoc_STRVAR(bytes___bytes____doc__,
 "__bytes__($self, /)\n"
 "--\n"
@@ -1360,184 +1540,4 @@ skip_optional_pos:
 exit:
     return return_value;
 }
-
-static PyObject *
-bytes_new_impl(PyTypeObject *type, PyObject *x, const char *encoding,
-               const char *errors);
-
-static PyObject *
-bytes_new_helper(PyTypeObject *type, PyObject *const *args,
-    Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames)
-{
-    PyObject *return_value = NULL;
-    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
-
-    #define NUM_KEYWORDS 3
-    static struct {
-        PyGC_Head _this_is_not_used;
-        PyObject_VAR_HEAD
-        Py_hash_t ob_hash;
-        PyObject *ob_item[NUM_KEYWORDS];
-    } _kwtuple = {
-        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
-        .ob_hash = -1,
-        .ob_item = { &_Py_ID(source), &_Py_ID(encoding), &_Py_ID(errors), },
-    };
-    #undef NUM_KEYWORDS
-    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
-
-    #else  // !Py_BUILD_CORE
-    #  define KWTUPLE NULL
-    #endif  // !Py_BUILD_CORE
-
-    static const char * const _keywords[] = {"source", "encoding", "errors", NULL};
-    static _PyArg_Parser _parser = {
-        .keywords = _keywords,
-        .fname = "bytes",
-        .kwtuple = KWTUPLE,
-    };
-    #undef KWTUPLE
-    PyObject *argsbuf[3];
-    PyObject * const *fastargs;
-    Py_ssize_t noptargs = nargs + nkw - 0;
-    PyObject *x = NULL;
-    const char *encoding = NULL;
-    const char *errors = NULL;
-
-    fastargs = _PyArg_UnpackKeywords(args, nargs, kwargs, kwnames, &_parser,
-            /*minpos*/ 0, /*maxpos*/ 3, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
-    if (!fastargs) {
-        goto exit;
-    }
-    if (!noptargs) {
-        goto skip_optional_pos;
-    }
-    if (fastargs[0]) {
-        x = fastargs[0];
-        if (!--noptargs) {
-            goto skip_optional_pos;
-        }
-    }
-    if (fastargs[1]) {
-        if (!PyUnicode_Check(fastargs[1])) {
-            _PyArg_BadArgument("bytes", "argument 'encoding'", "str", fastargs[1]);
-            goto exit;
-        }
-        Py_ssize_t encoding_length;
-        encoding = PyUnicode_AsUTF8AndSize(fastargs[1], &encoding_length);
-        if (encoding == NULL) {
-            goto exit;
-        }
-        if (strlen(encoding) != (size_t)encoding_length) {
-            PyErr_SetString(PyExc_ValueError, "embedded null character");
-            goto exit;
-        }
-        if (!--noptargs) {
-            goto skip_optional_pos;
-        }
-    }
-    if (!PyUnicode_Check(fastargs[2])) {
-        _PyArg_BadArgument("bytes", "argument 'errors'", "str", fastargs[2]);
-        goto exit;
-    }
-    Py_ssize_t errors_length;
-    errors = PyUnicode_AsUTF8AndSize(fastargs[2], &errors_length);
-    if (errors == NULL) {
-        goto exit;
-    }
-    if (strlen(errors) != (size_t)errors_length) {
-        PyErr_SetString(PyExc_ValueError, "embedded null character");
-        goto exit;
-    }
-skip_optional_pos:
-    return_value = bytes_new_impl(type, x, encoding, errors);
-
-exit:
-    return return_value;
-}
-
-static PyObject *
-bytes_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
-{
-    return bytes_new_helper(type, _PyTuple_CAST(args)->ob_item,
-        PyTuple_GET_SIZE(args),
-        kwargs ? PyDict_GET_SIZE(kwargs) : 0,
-        kwargs, NULL);
-}
-
-static PyObject *
-bytes_new_nargs0(void);
-
-static PyObject *
-bytes_new_nargs1(PyObject *x);
-
-static PyObject *
-bytes_new_nargs2(PyObject *x, const char *encoding);
-
-static PyObject *
-bytes_new_nargs3(PyObject *x, const char *encoding, const char *errors);
-
-static PyObject *
-bytes_vectorcall(PyObject *type, PyObject *const *args,
-    size_t nargsf, PyObject *kwnames)
-{
-    PyObject *return_value = NULL;
-    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
-    PyObject *x = NULL;
-    const char *encoding = NULL;
-    const char *errors = NULL;
-
-    assert(Py_Is(_PyType_CAST(type), &PyBytes_Type));
-    /* Make sure the type object is immutable: the generated
-     * vectorcall doesn't deal e.g. with users reassigning __init__. */
-    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
-    if (kwnames != NULL || nargs > 3) {
-        return bytes_new_helper(_PyType_CAST(type), args, nargs,
-            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
-            NULL, kwnames);
-    }
-    if (nargs < 1) {
-        return_value = bytes_new_nargs0();
-        goto exit;
-    }
-    x = args[0];
-    if (nargs < 2) {
-        return_value = bytes_new_nargs1(x);
-        goto exit;
-    }
-    if (!PyUnicode_Check(args[1])) {
-        _PyArg_BadArgument("bytes", "argument 'encoding'", "str", args[1]);
-        goto exit;
-    }
-    Py_ssize_t encoding_length;
-    encoding = PyUnicode_AsUTF8AndSize(args[1], &encoding_length);
-    if (encoding == NULL) {
-        goto exit;
-    }
-    if (strlen(encoding) != (size_t)encoding_length) {
-        PyErr_SetString(PyExc_ValueError, "embedded null character");
-        goto exit;
-    }
-    if (nargs < 3) {
-        return_value = bytes_new_nargs2(x, encoding);
-        goto exit;
-    }
-    if (!PyUnicode_Check(args[2])) {
-        _PyArg_BadArgument("bytes", "argument 'errors'", "str", args[2]);
-        goto exit;
-    }
-    Py_ssize_t errors_length;
-    errors = PyUnicode_AsUTF8AndSize(args[2], &errors_length);
-    if (errors == NULL) {
-        goto exit;
-    }
-    if (strlen(errors) != (size_t)errors_length) {
-        PyErr_SetString(PyExc_ValueError, "embedded null character");
-        goto exit;
-    }
-    return_value = bytes_new_nargs3(x, encoding, errors);
-
-exit:
-    return return_value;
-}
-/*[clinic end generated code: output=39809dbde6ac2b23 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=28575e2612c02130 input=a9049054013a1b77]*/
