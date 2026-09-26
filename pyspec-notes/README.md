@@ -45,7 +45,8 @@ change: drop it before proposing anything.
 | D | catalog out of the spec, disconnect ratchet | merged | `reports/phase1_D.md` |
 | E | debug fact assertions, tripwire, direct-call difftest, F5 | merged | `reports/phase1_E.md` |
 | S | `_CALL_STR_1` exact-str bug fix (based on main) | merged here; local branch `fix-call-str-1-subclass` | `bugreports/call-str-1-subclass/`, `drafts/call-str-1-UPSTREAM.md` |
-| **A** | **`bytes(list)` regression, F1/F2/F4, code size** | **still running when this was written; not merged** | worktree branch `worktree-agent-a04cd2c8ab8f08e5b` |
+| A | `bytes(list)` regression, F1/F2/F4, code size | merged | `reports/phase1_A.md` |
+| Audit | comments and docstrings match the code | merged | `reports/comment_audit.md` |
 
 `DESIGN.md` is the shared brief every agent read (goals, decisions, resource rules);
 `PROPOSALS.md` holds P1/P2.
@@ -61,23 +62,31 @@ change: drop it before proposing anything.
 - Heavy commands run memory-capped (`systemd-run --user --scope -p MemoryMax=...`),
   serially, `make -j8` (an OOM once took down the desktop).
 
-## Test status at the commit that added this file
-Debug JIT build (`../build-exp`): test_clinic, test_bytes, test_capi, test_inspect,
-test_pydoc, test_descr, test_pickle, test_iter, test_pyspec_catalog, test_pyspec_facts:
-4246 tests pass; `PYTHON_JIT=0 -R 3:3` on the four pyspec-related suites passes.
-Expected failures: `test_pyspec_facts.SoundnessTest.test_fromhex_cls` (needs A's F2),
-`test_static_type_rule` (F3, needs P2).  Known: running test_opt after several other
-modules in one invocation fails 21+ guard-removal tests on main too (upstream order
-dependency, not investigated).
+## Performance vs main (PGO+LTO release JIT, instructions / cycles per iteration)
+Every `bytes()` call shape is below main, JIT on and off (full table:
+`reports/phase1_A.md`).  Examples, main -> branch: `bytes(list256)` 6849/1227 ->
+5124/872; `bytes(list16)` 1329/250 -> 798/157; `bytes(b16)` 923/187 -> 218/43;
+`bytes(range256)` 25572/5149 -> 15412/3000; `Sub(b16)` 1332/269 -> 1058/201.
+Methods, slots and startup are neutral; pyperformance shows no bytes-attributable
+change (bytes calls are <1% of every benchmark).  bytes code is +1.3 KB vs main.
+
+## Test status (commit 04079e991e4)
+Debug JIT build (`../build-merge`): test_clinic, test_bytes, test_capi, test_inspect,
+test_pydoc, test_descr, test_pickle, test_iter, test_pyspec_catalog, test_pyspec_facts
+pass, except that running test_opt after other modules in one invocation fails 33
+guard-removal tests (the same upstream order dependency fails 21 on main; test_capi
+alone passes, 1599 tests).  `PYTHON_JIT=0 -R 3:3` on the four pyspec-related suites
+passes.  Free-threaded debug build (`../build-merge-ft`): test_bytes,
+test_free_threading, test_clinic, test_pyspec_facts pass; the F1 snapshot script
+gives 0 torn results.  Only expected failure: `test_static_type_rule` (F3, needs P2).
+Parity with main: `transmogrify.h.h` identical; `bytesobject.c.h` differs only in the
+`bytes.__new__` section.
 
 ## Open items
-1. Merge A when it finishes: fix `bytes(list)` (+28% instr / +38% cycles vs main in the
-   perf review), `Sub(b)` (+4%), F1 (free-threaded snapshot), F2 (fromhex facts keyed on
-   cls: `_PySpec_FindMethod` takes the bound class; then pass it in
-   `_testinternalcapi.pyspec_find_method`, the XXX line, and drop the expectedFailure on
-   `test_fromhex_cls`), F4 (derivation must not read the regen host's builtins), code size.
-   Then a quiet PGO+LTO comparison vs `../build_perf_base_jit` (method in
-   `reports/review_perf.md`).
+1. Tool code grew in A (+979/-209 in libclinic/pyspec, mostly partial_eval.py); P2
+   should net-remove it.  `bytes(16)` still "may run Python" (the `except TypeError`
+   fallback is not provably dead for an exact int; a spec for `PyNumber_AsSsize_t`
+   fixes it).  Two PGO builds of one commit differ by +-1-3% on unrelated shapes.
 2. `_CALL_STR_1` upstream: the user files the issue (text in `drafts/`), replaces
    `gh-NNNNNN` in the commit and NEWS name.  Open choice: `str(int)` keeps the exact-str
    claim (a monkeypatched `_pylong` can break it; main has the same claim); suggested
@@ -97,8 +106,9 @@ dependency, not investigated).
 
 ## Resuming
 - Worktrees of finished agents are removed; their branches remain as
-  `worktree-agent-*`.  A's worktree is under `.claude/worktrees/`.
-- Build dirs (outside the repo): `build-exp` (debug JIT of this branch),
+  `worktree-agent-*`.
+- Build dirs (outside the repo): `build-merge` / `build-merge-ft` (debug JIT /
+  free-threaded debug of 04079e991e4), `build-exp` (older debug JIT of this branch),
   `build_perf_base_jit` (main, PGO+LTO JIT), `build_review_pgo` (PGO+LTO JIT of
   62cc16504fe), `build-str1-dbg` (main, debug tier-2 interpreter).
 - Regenerate with `Tools/clinic/clinic.py Objects/bytesobject.c
