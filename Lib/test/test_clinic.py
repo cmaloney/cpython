@@ -535,6 +535,52 @@ class ClinicWholeFileTest(TestCase):
         expected_docstring_prototype = "// PyDoc_VAR(fn__doc__);"
         self.assertIn(expected_docstring_prototype, generated)
 
+    def test_vectorcall_exact_generated(self):
+        block = dedent("""
+            /*[clinic input]
+            output preset block
+            module m
+            class m.Foo "PyObject *" "Foo_Type"
+            @classmethod
+            @vectorcall exact=foo_exact
+            m.Foo.__new__ as foo_new
+                a: object
+                b: str = NULL
+                /
+                c: int = 0
+            [clinic start generated code]*/
+        """)
+        generated = self.clinic.parse(block)
+        # One declaration per call count, typed by the converters; none
+        # for fewer arguments than required.
+        self.assertNotIn("foo_exact_nargs0", generated)
+        for prototype in (
+            "static PyObject *\nfoo_exact_nargs1(PyObject *a);",
+            "static PyObject *\nfoo_exact_nargs2(PyObject *a, const char *b);",
+            "static PyObject *\n"
+            "foo_exact_nargs3(PyObject *a, const char *b, int c);",
+        ):
+            self.assertIn(prototype, generated)
+        # Each call count leaves the inline parsing with what it converted.
+        vectorcall = generated[generated.index("foo_vectorcall(PyObject"):]
+        self.assertIn(dedent("""\
+            if (nargs < 2) {
+                return_value = foo_exact_nargs1(a);
+                goto exit;
+            }
+        """).replace("\n", "\n    ").rstrip(" "), vectorcall)
+        self.assertIn(dedent("""\
+            if (nargs < 3) {
+                return_value = foo_exact_nargs2(a, b);
+                goto exit;
+            }
+        """).replace("\n", "\n    ").rstrip(" "), vectorcall)
+        self.assertIn("return_value = foo_exact_nargs3(a, b, c);", vectorcall)
+        self.assertNotIn("foo_new_impl(", vectorcall[:vectorcall.index("\n}")])
+        self.assertNotIn("skip_optional", vectorcall[:vectorcall.index("\n}")])
+        # Keyword calls still go through the helper and the impl.
+        self.assertIn("return foo_new_helper(", vectorcall)
+
     def test_directive_set_suffix(self):
         block = dedent("""
             /*[clinic input]
@@ -3283,8 +3329,9 @@ class ClinicParserTest(TestCase):
                                    function_index=2)
         self.assertTrue(func.vectorcall)
 
-    def test_vectorcall_takes_no_arguments(self):
-        err = "at_vectorcall() takes 1 positional argument but 2 were given"
+    def test_vectorcall_unknown_argument(self):
+        err = ("@vectorcall: unknown argument 'bogus=True', "
+               "expected exact=<C function prefix>")
         block = """
             module m
             class Foo "FooObject *" "Foo_Type"
@@ -3292,6 +3339,60 @@ class ClinicParserTest(TestCase):
             Foo.__init__
         """
         self.expect_failure(block, err, lineno=2)
+
+    def test_vectorcall_exact_on_new(self):
+        block = """
+            module m
+            class Foo "FooObject *" "Foo_Type"
+            @classmethod
+            @vectorcall exact=foo_exact
+            Foo.__new__
+                x: object = NULL
+                /
+        """
+        func = self.parse_function(block, signatures_in_block=3,
+                                   function_index=2)
+        self.assertTrue(func.vectorcall)
+        self.assertEqual(func.vectorcall_exact, 'foo_exact')
+
+    def test_vectorcall_exact_on_init(self):
+        err = "@vectorcall exact= can only be used with __new__"
+        block = """
+            module m
+            class Foo "FooObject *" "Foo_Type"
+            @vectorcall exact=foo_exact
+            Foo.__init__
+                x: object = NULL
+                /
+        """
+        self.expect_failure(block, err, lineno=3)
+
+    def test_vectorcall_exact_keyword_only(self):
+        err = ("@vectorcall exact= requires positional parameters only; "
+               "'b' is not")
+        block = """
+            module m
+            class Foo "FooObject *" "Foo_Type"
+            @classmethod
+            @vectorcall exact=foo_exact
+            Foo.__new__
+                a: object
+                *
+                b: object = None
+        """
+        self.expect_failure(block, err, lineno=7)
+
+    def test_vectorcall_exact_not_identifier(self):
+        err = ("@vectorcall: unknown argument 'exact=1x', "
+               "expected exact=<C function prefix>")
+        block = """
+            module m
+            class Foo "FooObject *" "Foo_Type"
+            @classmethod
+            @vectorcall exact=1x
+            Foo.__new__
+        """
+        self.expect_failure(block, err, lineno=3)
 
     def test_vectorcall_without_type_object(self):
         err = "@vectorcall requires the type object of 'Foo'"

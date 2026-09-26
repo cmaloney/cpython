@@ -312,6 +312,7 @@ class DSLParser:
         self.target_critical_section = []
         self.disable_fastcall = False
         self.vectorcall: bool = False
+        self.vectorcall_exact: str | None = None
         self.permit_long_summary = False
         self.permit_long_docstring_body = False
 
@@ -488,10 +489,16 @@ class DSLParser:
             fail("Can't set @staticmethod, function is not a normal callable")
         self.kind = STATIC_METHOD
 
-    def at_vectorcall(self) -> None:
+    def at_vectorcall(self, *args: str) -> None:
         if self.vectorcall:
             fail("Called @vectorcall twice!")
         self.vectorcall = True
+        for arg in args:
+            key, eq, value = arg.partition('=')
+            if key != 'exact' or not eq or not value.isidentifier():
+                fail(f"@vectorcall: unknown argument {arg!r}, "
+                     "expected exact=<C function prefix>")
+            self.vectorcall_exact = value
 
     def at_coexist(self) -> None:
         if self.coexist:
@@ -644,6 +651,11 @@ class DSLParser:
             if not cls.type_object:
                 fail(f"@vectorcall requires the type object of {cls.name!r}, "
                      f"which was declared without one")
+            if self.vectorcall_exact and self.kind is not METHOD_NEW:
+                fail("@vectorcall exact= can only be used with __new__")
+            if self.vectorcall_exact and self.critical_section:
+                fail("@vectorcall exact= cannot be used with "
+                     "@critical_section")
 
     def resolve_return_converter(
         self, full_name: str, forced_converter: str
@@ -777,6 +789,7 @@ class DSLParser:
             forced_text_signature=self.forced_text_signature,
             line_number=self.line_number,
             vectorcall=self.vectorcall,
+            vectorcall_exact=self.vectorcall_exact,
         )
         self.add_function(func)
 
@@ -1617,6 +1630,11 @@ class DSLParser:
             if p.group:
                 fail("@vectorcall does not support optional groups",
                      line_number=lineno)
+            if self.function.vectorcall_exact and (
+                    p.is_vararg() or p.is_var_keyword()
+                    or p.is_keyword_only()):
+                fail("@vectorcall exact= requires positional parameters "
+                     f"only; {p.name!r} is not", line_number=lineno)
             if p.is_vararg() or p.is_var_keyword():
                 continue
             if isinstance(p.converter, (self_converter,

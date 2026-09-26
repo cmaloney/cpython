@@ -156,6 +156,9 @@ class Function:
     # Line on which the docstring starts (`None` if there is no docstring).
     docstring_line_number: int | None = None
     vectorcall: bool = False
+    # @vectorcall exact=NAME: each positional-only call count N (no
+    # keywords) calls NAME_nargsN() with the N converted arguments.
+    vectorcall_exact: str | None = None
 
     def __post_init__(self) -> None:
         self.parent = self.cls or self.module

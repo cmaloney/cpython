@@ -1561,13 +1561,63 @@ class ParseArgsCodeGen:
 
         arity_checked: Already have a number of arguments check.
         """
-        pos_code = self._parse_positional_args(
-            argname_fmt='args[%d]', nargs='nargs', limited_capi=False)
+        if self.func.vectorcall_exact:
+            pos_code = self._vectorcall_exact_positional()
+        else:
+            pos_code = self._parse_positional_args(
+                argname_fmt='args[%d]', nargs='nargs', limited_capi=False)
         # Converter support was validated when @vectorcall was parsed.
         assert pos_code is not None
         if arity_checked:
             return pos_code
         return [*self._check_positional('nargs'), *pos_code]
+
+    def _exact_arguments(self) -> list[str]:
+        """Arguments passed to the NAME_nargsN() functions, in order."""
+        return [("&" if p.converter.impl_by_reference else "")
+                + p.converter.parser_name
+                for p in self.parameters]
+
+    def _vectorcall_exact_positional(self) -> list[str]:
+        """Positional parsing that leaves through NAME_nargsN().
+
+        Each optional parameter is preceded by a call count check; when the
+        arguments run out, the function for that count is called with the
+        arguments converted so far.  The call for all parameters is the
+        impl_call of the finale.
+        """
+        exact = self.func.vectorcall_exact
+        arguments = self._exact_arguments()
+        parser_code: list[str] = []
+        for i, p in enumerate(self.parameters):
+            if i >= self.min_pos:
+                call = f"{exact}_nargs{i}({', '.join(arguments[:i])})"
+                parser_code.append(libclinic.normalize_snippet(f"""
+                    if (nargs < {i + 1}) {{{{
+                        return_value = {call};
+                        goto exit;
+                    }}}}
+                    """, indent=4))
+            parsearg = p.converter.parse_arg(f'args[{i}]',
+                                             p.get_displayname(i + 1),
+                                             limited_capi=False)
+            assert parsearg is not None
+            if p.deprecated_until is not None:
+                parsearg = self.render_deprecated(p, parsearg)
+            parser_code.append(libclinic.normalize_snippet(parsearg, indent=4))
+        return parser_code
+
+    def _vectorcall_exact_prototypes(self) -> str:
+        """Declarations of the NAME_nargsN() functions."""
+        exact = self.func.vectorcall_exact
+        lines = []
+        for nargs in range(self.min_pos, len(self.parameters) + 1):
+            params = ", ".join(
+                p.converter.simple_declaration(
+                    by_reference=p.converter.impl_by_reference)
+                for p in self.parameters[:nargs]) or "void"
+            lines.append(f"static PyObject *\n{exact}_nargs{nargs}({params});")
+        return "\n\n".join(lines) + "\n\n"
 
     def _assemble_vectorcall(self, preamble: str, fields: tuple[str, ...],
                              finale: str) -> None:
@@ -1581,7 +1631,17 @@ class ParseArgsCodeGen:
             self.codegen.add_include('pycore_runtime.h', '_Py_SINGLETON()')
         else:
             markers = VECTORCALL_FINALE_MARKERS_NEW
+        exact = self.func.vectorcall_exact
+        if exact:
+            nargs = len(self.parameters)
+            arguments = ", ".join(self._exact_arguments())
+            markers = markers | {
+                "impl_call":
+                    f"{{return_value}} = {exact}_nargs{nargs}({arguments});",
+            }
         code = libclinic.linear_format("\n".join(lines), **markers)
+        if exact:
+            code = self._vectorcall_exact_prototypes() + code
         self.vectorcall_definition = code
 
     def vectorcall_body(self, *fields: str) -> None:

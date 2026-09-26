@@ -2863,9 +2863,17 @@ static PyNumberMethods bytes_as_number = {
 
 static PyObject *
 bytes_subtype_new(PyTypeObject *, PyObject *);
+static PyObject *_PyBytes_FromSequence_lock_held(PyObject *x);
+static PyObject *_PyBytes_FromIterator(PyObject *it, PyObject *x);
+
+/* bytes_new_exact(), bytes_from_object() and the bytes_new_exact_nargsN()
+   functions called by bytes_vectorcall() are generated from
+   Objects/pyspec/bytesobject.py. */
+#include "clinic/bytesobject_pyspec.c.h"
 
 /*[clinic input]
 @classmethod
+@vectorcall exact=bytes_new_exact
 bytes.__new__ as bytes_new
 
     source as x: object = NULL
@@ -2877,86 +2885,12 @@ bytes.__new__ as bytes_new
 static PyObject *
 bytes_new_impl(PyTypeObject *type, PyObject *x, const char *encoding,
                const char *errors)
-/*[clinic end generated code: output=1e0c471be311a425 input=f0a966d19b7262b4]*/
+/*[clinic end generated code: output=1e0c471be311a425 input=d7d5b4f8118ebcaa]*/
 {
-    PyObject *bytes;
-    PyObject *func;
-    Py_ssize_t size;
-
-    if (x == NULL) {
-        if (encoding != NULL || errors != NULL) {
-            PyErr_SetString(PyExc_TypeError,
-                            encoding != NULL ?
-                            "encoding without a string argument" :
-                            "errors without a string argument");
-            return NULL;
-        }
-        bytes = Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
-    }
-    else if (encoding != NULL) {
-        /* Encode via the codec registry */
-        if (!PyUnicode_Check(x)) {
-            PyErr_SetString(PyExc_TypeError,
-                            "encoding without a string argument");
-            return NULL;
-        }
-        bytes = PyUnicode_AsEncodedString(x, encoding, errors);
-    }
-    else if (errors != NULL) {
-        PyErr_SetString(PyExc_TypeError,
-                        PyUnicode_Check(x) ?
-                        "string argument without an encoding" :
-                        "errors without a string argument");
-        return NULL;
-    }
-    /* We'd like to call PyObject_Bytes here, but we need to check for an
-       integer argument before deferring to PyBytes_FromObject, something
-       PyObject_Bytes doesn't do. */
-    else if ((func = _PyObject_LookupSpecial(x, &_Py_ID(__bytes__))) != NULL) {
-        bytes = _PyObject_CallNoArgs(func);
-        Py_DECREF(func);
-        if (bytes == NULL)
-            return NULL;
-        if (!PyBytes_Check(bytes)) {
-            PyErr_Format(PyExc_TypeError,
-                         "%T.__bytes__() must return a bytes, not %T",
-                         x, bytes);
-            Py_DECREF(bytes);
-            return NULL;
-        }
-    }
-    else if (PyErr_Occurred())
-        return NULL;
-    else if (PyUnicode_Check(x)) {
-        PyErr_SetString(PyExc_TypeError,
-                        "string argument without an encoding");
-        return NULL;
-    }
-    /* Is it an integer? */
-    else if (_PyIndex_Check(x)) {
-        size = PyNumber_AsSsize_t(x, PyExc_OverflowError);
-        if (size == -1 && PyErr_Occurred()) {
-            if (!PyErr_ExceptionMatches(PyExc_TypeError))
-                return NULL;
-            PyErr_Clear();  /* fall through */
-            bytes = PyBytes_FromObject(x);
-        }
-        else {
-            if (size < 0) {
-                PyErr_SetString(PyExc_ValueError, "negative count");
-                return NULL;
-            }
-            bytes = _PyBytes_FromSize(size, 1);
-        }
-    }
-    else {
-        bytes = PyBytes_FromObject(x);
-    }
-
+    PyObject *bytes = bytes_new_exact(x, encoding, errors);
     if (bytes != NULL && type != &PyBytes_Type) {
         Py_SETREF(bytes, bytes_subtype_new(type, bytes));
     }
-
     return bytes;
 }
 
@@ -2987,16 +2921,15 @@ fail:
 }
 
 /* Fast path for a list or tuple of ints.
-   Return 1 on success (*result set to the new bytes object),
-   0 to fall back to the slow path, or -1 on error (with an exception set). */
-static int
-_PyBytes_FromSequence_lock_held(PyObject *x, PyObject **result)
+   Return the new bytes object, NULL without an exception set to fall back
+   to the slow path, or NULL with an exception set on error. */
+static PyObject *
+_PyBytes_FromSequence_lock_held(PyObject *x)
 {
-    *result = NULL;
     Py_ssize_t size = PySequence_Fast_GET_SIZE(x);
     PyBytesWriter *writer = PyBytesWriter_Create(size);
     if (writer == NULL) {
-        return -1;
+        return NULL;
     }
     char *str = PyBytesWriter_GetData(writer);
 
@@ -3006,19 +2939,18 @@ _PyBytes_FromSequence_lock_held(PyObject *x, PyObject **result)
         if (value == -1 && PyErr_Occurred()) {
             PyBytesWriter_Discard(writer);
             PyErr_Clear();
-            return 0;
+            return NULL;
         }
 
         if (value < 0 || value >= 256) {
             PyErr_SetString(PyExc_ValueError,
                             "bytes must be in range(0, 256)");
             PyBytesWriter_Discard(writer);
-            return -1;
+            return NULL;
         }
         *str++ = (char) value;
     }
-    *result = PyBytesWriter_Finish(writer);
-    return *result != NULL ? 1 : -1;
+    return PyBytesWriter_Finish(writer);
 }
 
 static PyObject *
@@ -3086,47 +3018,11 @@ _PyBytes_FromIterator(PyObject *it, PyObject *x)
 PyObject *
 PyBytes_FromObject(PyObject *x)
 {
-    PyObject *it, *result;
-
     if (x == NULL) {
         PyErr_BadInternalCall();
         return NULL;
     }
-
-    if (PyBytes_CheckExact(x)) {
-        return Py_NewRef(x);
-    }
-
-    /* Use the modern buffer interface */
-    if (PyObject_CheckBuffer(x))
-        return _PyBytes_FromBuffer(x);
-
-    if (PyList_CheckExact(x) || PyTuple_CheckExact(x)) {
-        int rc;
-        Py_BEGIN_CRITICAL_SECTION_SEQUENCE_FAST(x);
-        rc = _PyBytes_FromSequence_lock_held(x, &result);
-        Py_END_CRITICAL_SECTION_SEQUENCE_FAST();
-        if (rc != 0) {
-            return result;
-        }
-    }
-
-    if (!PyUnicode_Check(x)) {
-        it = PyObject_GetIter(x);
-        if (it != NULL) {
-            result = _PyBytes_FromIterator(it, x);
-            Py_DECREF(it);
-            return result;
-        }
-        if (!PyErr_ExceptionMatches(PyExc_TypeError)) {
-            return NULL;
-        }
-    }
-
-    PyErr_Format(PyExc_TypeError,
-                 "cannot convert '%.200s' object to bytes",
-                 Py_TYPE(x)->tp_name);
-    return NULL;
+    return bytes_from_object(x);
 }
 
 /* This allocator is needed for subclasses don't want to use __new__.
@@ -3263,6 +3159,7 @@ PyTypeObject PyBytes_Type = {
     bytes_alloc,                                /* tp_alloc */
     bytes_new,                                  /* tp_new */
     PyObject_Free,                              /* tp_free */
+    .tp_vectorcall = bytes_vectorcall,
     .tp_version_tag = _Py_TYPE_VERSION_BYTES,
     ._tp_iteritem = bytes_iteritem,
 };
