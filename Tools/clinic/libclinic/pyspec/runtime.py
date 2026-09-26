@@ -143,13 +143,23 @@ class Escape:
         the function exits before passing it to an escape that steals it.
     steals: the indexes of the arguments the escape takes over (the
         caller no longer releases them).
-    exact: {builtin type: template} cheaper lowerings used when the exact
-        type of the first argument is known (after ``type(x) is int``,
-        for example): same result and error convention.
+    exact: {builtin type: template}: the lowering when the exact type of
+        the first argument is known (``type(x) is list``, for example):
+        same result, but it cannot fail and runs no Python code.
+    fast: a FastPath: a guard on the first argument under which the call
+        has a lowering that cannot fail and runs no Python code.
+    length: with an exact lowering, the result is the length of the first
+        argument (a list or a tuple).
+    capacity: the escape initializes a buffer with room for at least as
+        many units as its first argument.
+    unchecked: for an escape appending one unit to the buffer of its first
+        argument, the lowering when the buffer is known to have room: it
+        cannot fail.
     """
 
     def __init__(self, func, template, returns, error, release=None,
-                 steals=(), exact=None):
+                 steals=(), exact=None, fast=None, length=False,
+                 capacity=False, unchecked=None):
         self.func = func
         self.template = template
         self.returns = returns
@@ -157,6 +167,10 @@ class Escape:
         self.release = release
         self.steals = tuple(steals)
         self.exact = dict(exact or {})
+        self.fast = fast
+        self.length = length
+        self.capacity = capacity
+        self.unchecked = unchecked
 
     @property
     def initializes(self):
@@ -164,6 +178,19 @@ class Escape:
 
     def __call__(self, *args):
         return self.func(*args)
+
+
+class FastPath:
+    """The fast path of an escape (Escape.fast): when the first argument
+    is exactly of one of *types* and *guard* (a C condition on the first
+    argument, ``{0}``) holds, the call is *template*, which cannot fail
+    and runs no Python code.  The partial evaluator splits a statement
+    making the call (see partial_eval.py)."""
+
+    def __init__(self, types, guard, template):
+        self.types = tuple(types)
+        self.guard = guard
+        self.template = template
 
 
 class ContextEscape:
@@ -226,11 +253,11 @@ def _as_ssize_t(o, exc):
     raise exc(f"cannot fit '{tp_name(type(o))}' into an index-sized integer")
 
 
-# PyNumber_AsSsize_t() of an exact int or bool: a compact one is read
-# inline, without a call.
-_AS_SSIZE_T_INT = ('(_PyLong_IsCompact((PyLongObject *){0}) '
-                   '? _PyLong_CompactValue((PyLongObject *){0}) '
-                   ': PyNumber_AsSsize_t({0}, {1}))')
+# PyNumber_AsSsize_t() of an exact int or bool (a bool is a compact int)
+# needs no __index__: a compact one is read inline, without a call.
+_COMPACT_INT = FastPath(
+    (int, bool), '_PyLong_IsCompact((PyLongObject *){0})',
+    '_PyLong_CompactValue((PyLongObject *){0})')
 
 
 class C:
@@ -243,15 +270,17 @@ class C:
         lambda s, encoding, errors: str.encode(
             s, encoding, 'strict' if errors is NULL else errors))
 
-    # An exact int (or bool) needs no __index__: see _AS_SSIZE_T_INT.
     PyNumber_AsSsize_t = escape(
         'PyNumber_AsSsize_t({0}, {1})',
         returns='Py_ssize_t', error=ERR_MINUS1,
-        exact={int: _AS_SSIZE_T_INT, bool: _AS_SSIZE_T_INT})(_as_ssize_t)
+        fast=_COMPACT_INT)(_as_ssize_t)
 
+    # The length of an exact list or tuple.
     PyObject_LengthHint = escape(
         'PyObject_LengthHint({0}, {1})',
-        returns='Py_ssize_t', error=ERR_MINUS1)(operator.length_hint)
+        returns='Py_ssize_t', error=ERR_MINUS1,
+        exact={list: 'PyList_GET_SIZE({0})', tuple: 'PyTuple_GET_SIZE({0})'},
+        length=True)(operator.length_hint)
 
     _PyBytes_FromSize = escape('_PyBytes_FromSize({0}, {1})')(
         lambda size, zero: b'\0' * size)
@@ -265,13 +294,15 @@ class C:
     bytes_appender = escape(
         'bytes_appender_init(&{target}, {0})',
         returns='bytes_appender', error=ERR_NEGATIVE,
-        release='PyBytesWriter_Discard({0}.writer);')(
+        release='PyBytesWriter_Discard({0}.writer);', capacity=True)(
         lambda size: bytearray())
 
     # Append the byte value (in range(256)).
     bytes_appender_append = escape(
         'bytes_appender_append(&{0}, (unsigned char){1})',
-        returns='int', error=ERR_NEGATIVE)(
+        returns='int', error=ERR_NEGATIVE,
+        unchecked='bytes_appender_append_unchecked(&{0}, '
+                  '(unsigned char){1})')(
         lambda appender, value: appender.append(value))
 
     # The bytes written; takes over the appender.
@@ -296,9 +327,9 @@ class C:
         'PyErr_BadInternalCall();',
         lambda: SystemError('bad argument to internal function'))
 
-    critical_section_sequence_fast = ContextEscape(
-        'Py_BEGIN_CRITICAL_SECTION_SEQUENCE_FAST({0});',
-        'Py_END_CRITICAL_SECTION_SEQUENCE_FAST();')
+    # The critical section of an object (nothing without free threading).
+    critical_section = ContextEscape(
+        'Py_BEGIN_CRITICAL_SECTION({0});', 'Py_END_CRITICAL_SECTION();')
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@
 #include "pycore_bytesobject.h"   // _PyBytes_Find(), _PyBytes_RepeatBuffer()
 #include "pycore_call.h"          // _PyObject_CallNoArgs()
 #include "pycore_ceval.h"         // _PyEval_GetBuiltin()
+#include "pycore_critical_section.h" // Py_BEGIN_CRITICAL_SECTION()
 #include "pycore_format.h"        // F_LJUST
 #include "pycore_freelist.h"      // _Py_FREELIST_FREE()
 #include "pycore_global_objects.h"// _Py_GET_GLOBAL_OBJECT()
@@ -2478,9 +2479,18 @@ bytes_appender_append(bytes_appender *appender, unsigned char value)
     return 0;
 }
 
+/* Append a byte where the buffer is known to have room for it. */
+static inline Py_ALWAYS_INLINE void
+bytes_appender_append_unchecked(bytes_appender *appender, unsigned char value)
+{
+    assert(appender->str < appender->end);
+    *appender->str++ = (char)value;
+}
+
 /* bytes_new_impl(), the bytes_new_nargsN() functions called by
    bytes_vectorcall(), PyBytes_FromObject() and bytes_from_iterator()
-   (with its list and tuple variants) are generated from
+   (with its specializations for a list, copied in the critical section
+   of the list, a tuple and a range) are generated from
    Objects/pyspec/bytesobject.py by Argument Clinic. */
 #include "clinic/bytesobject_pyspec.c.h"
 

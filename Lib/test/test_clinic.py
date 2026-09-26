@@ -6937,6 +6937,28 @@ class BytesSpecTest(TestCase):
         lambda: ((LengthHint(2**70),), {}),
         lambda: ((LengthHint(NotImplemented),), {}),
         lambda: ((LenLies(),), {}),
+        # A list is first copied in a snapshot that only takes compact
+        # exact ints and bools; any other item restarts with the iterator.
+        lambda: (([1, 2, IndexOnly(3)],), {}),
+        lambda: (([True, IndexOnly(1), False],), {}),
+        lambda: (([1, 2**40, 3],), {}),
+        lambda: (([1, 2**40, 'a'],), {}),
+        lambda: (([1, IntSubclass(2), 3],), {}),
+        lambda: (([300, IndexOnly(3)],), {}),
+        lambda: (([IndexOnly(300), 5],), {}),
+        lambda: (([5, IndexRaisesTypeError(), 300],), {}),
+        lambda: (([0, 255, 256],), {}),
+        lambda: (([-1, IndexOnly(1)],), {}),
+        lambda: ((list(range(256)) * 40,), {}),
+        lambda: ((list(range(256)) * 40 + [IndexOnly(7)],), {}),
+        lambda: (([IndexOnly(i) for i in range(300)],), {}),
+        lambda: ((list_mutated_by_index(lambda l: l.extend(range(100))),),
+                 {}),
+        # A tuple is copied in one pass; its size cannot change.
+        lambda: (((IndexOnly(1),) * 300,), {}),
+        lambda: ((tuple(range(256)) * 40 + (IndexOnly(7), 2**40),), {}),
+        lambda: (((1, 2**40, 3),), {}),
+        lambda: (((True, False, IntSubclass(9)),), {}),
         # Argument count and converter errors come from the clinic parser,
         # which the spec does not model.
     ]
@@ -7272,26 +7294,50 @@ class BytesSpecFactsTest(TestCase):
                 self.assertIs(facts.result_type, bytes)
                 self.assertTrue(facts.runs_python)
         self.assertEqual(bytes({IndexOnly(3)}), b'\x03')
-        # A list or a tuple is iterated by index, without an iterator,
-        # and ints take a fast path: the old hand-written
-        # _PyBytes_FromSequence_lock_held(), derived.
+        # A list or a tuple is iterated by index, without an iterator, in
+        # a specialization of bytes_from_iterator() shared by every caller;
+        # compact ints take a fast path without a call.  A list is copied
+        # in a snapshot: the old hand-written
+        # _PyBytes_FromSequence_lock_held(), derived.  The loop runs no
+        # Python code, in the critical section of the list, and on an item
+        # that could run Python code the call restarts with the generic
+        # bytes_from_iterator().
         for arg_type in (list, tuple):
             with self.subTest(arg_type=arg_type):
                 residual, _ = self.new_facts(arg_type)
-                loops = [node for stmt in residual
-                         for node in ast.walk(stmt)
+                name = f'bytes_from_iterator_{arg_type.__name__}'
+                self.assertEqual(ast.unparse(ast.Module(residual, [])),
+                                 f'return {name}(source)')
+                special = pe.specialization_of(self.spec, residual[0].value)
+                self.assertEqual(special.params, ['x'])
+                if arg_type is list:
+                    code = ast.unparse(ast.Module(special.body, []))
+                    self.assertIn('with C.critical_section(x):', code)
+                    self.assertIn('return bytes_from_iterator(it, x)', code)
+                    held = pe.specialization(self.spec, f'{name}_lock_held')
+                    self.assertEqual(held.lock, 'x')
+                    body = held.body
+                else:
+                    body = special.body
+                loop, = [node for stmt in body for node in ast.walk(stmt)
                          if isinstance(node, ast.For)]
-                self.assertEqual(len(loops), 1)
-                loop, = loops
                 self.assertTrue(loop.pyspec_sequence)
                 self.assertIs(loop.pyspec_iterable, arg_type)
-                self.assertEqual(ast.unparse(loop.iter), 'source')
-                code = ast.unparse(ast.Module(residual, []))
+                self.assertEqual(ast.unparse(loop.iter), 'x')
+                code = ast.unparse(ast.Module(body, []))
                 self.assertNotIn('iter(', code)
-                self.assertIn(f'if type({loop.target.id}) is int:', code)
+                self.assertIn('if C.PyNumber_AsSsize_t.fast(item):', code)
+                self.assertEqual('return FALLBACK' in code, arg_type is list)
+                # The buffer has room for every item.
+                append, = [node for node in ast.walk(loop)
+                           if isinstance(node, ast.Call)
+                           and ast.unparse(node.func)
+                           == 'C.bytes_appender_append']
+                self.assertTrue(append.pyspec_unchecked)
         # Any other iterable: the iterator protocol.
         residual, _ = self.new_facts(range)
-        loop, = [node for stmt in residual for node in ast.walk(stmt)
+        special = pe.specialization_of(self.spec, residual[-1].value)
+        loop, = [node for stmt in special.body for node in ast.walk(stmt)
                  if isinstance(node, ast.For)]
         self.assertFalse(loop.pyspec_sequence)
         self.assertIs(loop.pyspec_iterable, range)

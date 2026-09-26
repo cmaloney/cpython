@@ -126,16 +126,22 @@ class Analyzer:
 
     # -- whole functions ----------------------------------------------------
 
-    def function_facts(self, name):
-        """Facts of spec function *name* for any arguments."""
-        if name not in self._function_facts:
+    def function_facts(self, name, special=None):
+        """Facts of spec function *name* for any arguments, or of the
+        partial_eval.Specialization *special* for its facts."""
+        key = name if special is None else ('specialization', special.name)
+        if key not in self._function_facts:
             # Recursion: assume the worst while analyzing.
             unknown = Facts()
             unknown.returns.append((None, None))
             unknown.runs_python = True
-            self._function_facts[name] = unknown
-            self._function_facts[name] = self.facts(self.spec.body(name), {})
-        return self._function_facts[name]
+            self._function_facts[key] = unknown
+            if special is None:
+                facts = self.facts(self.spec.body(name), {})
+            else:
+                facts = self.facts(special.body, special.types())
+            self._function_facts[key] = facts
+        return self._function_facts[key]
 
     def escape_facts(self, name):
         """runtime.StubFacts of escape C.<name>, from the stub of that name
@@ -179,6 +185,9 @@ class Analyzer:
             case ast.Assign(targets=[ast.Name(name)], value=value):
                 local_types[name] = self.call(value, types, local_types,
                                               facts)
+            case ast.Return(value=ast.Name(partial_eval.FALLBACK)):
+                # A snapshot restarts: the caller returns another result.
+                pass
             case ast.Return(value=value):
                 facts.returns.append(self.value(value, types, local_types,
                                                 facts))
@@ -209,11 +218,18 @@ class Analyzer:
                 facts.returns.append((None, None))
 
     def expression(self, node, types, local_types, facts):
-        """Account for the calls a condition makes (walrus operands)."""
+        """Account for the calls a condition makes: walrus operands and
+        escapes.  (A fast path guard, C.<escape>.fast(x), only reads x.)"""
         for child in ast.walk(node):
             if isinstance(child, ast.NamedExpr):
                 local_types[child.target.id] = self.call(
                     child.value, types, local_types, facts)
+            elif (isinstance(child, ast.Call)
+                    and partial_eval._escape(child.func) is not None
+                    and not any(child is named.value
+                                for named in ast.walk(node)
+                                if isinstance(named, ast.NamedExpr))):
+                self.call(child, types, local_types, facts)
 
     @staticmethod
     def refine(test):
@@ -267,6 +283,11 @@ class Analyzer:
             facts.runs_python = True
             return None
         func = node.func
+        special = partial_eval.specialization_of(self.spec, node)
+        if special is not None:
+            callee = self.function_facts(special.callee, special)
+            facts.runs_python |= callee.runs_python
+            return callee.result_type
         if (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
                 and func.value.id == 'C'):
             stub = self.escape_facts(func.attr)
@@ -274,8 +295,12 @@ class Analyzer:
                 # No stub: assume the worst.
                 facts.runs_python = True
                 return None
-            arg_types = [self.arg_type(a, types) for a in node.args]
-            facts.runs_python |= stub.runs_python_for(arg_types)
+            # The fast path, exact type and unchecked lowerings run no
+            # Python code (runtime.Escape).
+            if not any(getattr(node, mark, None) for mark in (
+                    'pyspec_fast', 'pyspec_exact', 'pyspec_unchecked')):
+                arg_types = [self.arg_type(a, types) for a in node.args]
+                facts.runs_python |= stub.runs_python_for(arg_types)
             return stub.result_type
         callee_name = self.spec.call_target(func)
         if callee_name is not None:
@@ -439,7 +464,12 @@ def generate_calls(generator, description):
                 facts = analyzer.facts(residual, _type_env(typed_env),
                                        arg_names)
                 const = _const_name(residual)
-                if key not in functions:
+                special = _just_calls(spec, residual, given)
+                if special is not None:
+                    # The variant would only call it.
+                    generator.use(special.name)
+                    functions[key] = special.name
+                elif key not in functions:
                     functions[key] = c_name = (
                         f'{basename}_nargs1_{tp.__name__}')
                     out += _variant(generator, description, c_name,
@@ -542,6 +572,18 @@ def generate_methods(generator, type_name, descriptions):
                       ('meth', meth), arg_names)
     out += ['};', '']
     return out, table
+
+
+def _just_calls(spec, residual, given):
+    """The Specialization a residual only calls with the given arguments
+    (the same C signature), or None."""
+    match residual:
+        case [ast.Return(value=ast.Call(args=args) as call)]:
+            special = partial_eval.specialization_of(spec, call)
+            if special is not None and [ast.unparse(a) for a in args] == [
+                    p.name for p in given]:
+                return special
+    return None
 
 
 def _variant(generator, description, c_name, residual, given, missing, tp,

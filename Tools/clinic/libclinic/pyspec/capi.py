@@ -909,6 +909,9 @@ def _outcomes(stmts, tp, param):
         match stmt:
             case ast.Return(value=ast.Name(id=n)) if n == param:
                 out.append('identity')
+            case ast.Return(value=ast.Call() as call) if hasattr(
+                    call, 'pyspec_specialization'):
+                out.append('iter')  # a shared specialization has a loop
             case ast.Return(value=ast.Call(func=ast.Attribute(attr=attr))):
                 out.append(attr)
             case ast.Return(value=ast.Name()):

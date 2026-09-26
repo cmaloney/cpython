@@ -24,18 +24,41 @@ evaluated, the rest of the block is versioned: specialized for an exact
 list and an exact tuple when that gives an index loop, and kept generic
 for other types (VERSIONED_ITERABLES).
 
-In a loop body where the type of the items is not known, a statement
-that passes the item to an escape with a cheaper lowering for an exact
-type (Escape.exact, e.g. PyNumber_AsSsize_t() of an exact int) is split:
-``if type(item) is int: <statement> else: <statement>``, the first one
-with the call marked with the type (``call.pyspec_exact``) for the
-emitter.  The rest of the body is shared.
+In a loop body, a statement that passes the item to an escape with a
+fast path (Escape.fast, e.g. PyNumber_AsSsize_t() of a compact exact
+int) is split: ``if C.<escape>.fast(item): <statement> else:
+<statement>``, the first one with the call marked ``call.pyspec_fast``
+for the emitter.  The rest of the body is shared.
+
+Shared specializations.  A tail call of a spec function whose residual
+for the facts of the call has a loop is not inlined: the residual becomes
+a C function of its own (a Specialization), emitted once and called by
+every call with the same facts.  A loop costs far more than a call, and
+the loop code is not duplicated.
+
+Snapshots.  The residual of a list loop is split in two, as the
+hand-written _PyBytes_FromSequence_lock_held() was: every statement that
+may run Python code (per the facts of call_table.Analyzer) is replaced by
+``return FALLBACK``, and the rest, which runs no Python code, is called
+with the list locked (a critical section; nothing without free
+threading): nothing can change the list meanwhile, so it iterates a
+consistent snapshot, borrows its items, and reads its size once.  On
+FALLBACK the call restarts through the generic, unspecialized function.
+As the snapshot ran no Python code, the restart cannot be observed.
+
+Capacity.  A buffer created with the length of a sequence (Escape.length,
+Escape.capacity) that a loop over the sequence appends to at most once
+per iteration needs no capacity check in that loop
+(Escape.unchecked), when the loop runs a fixed number of iterations: a
+tuple, or a list in a snapshot.
 """
 
 import ast
 import builtins
 import copy
 import itertools
+import types
+import weakref
 
 from . import runtime
 
@@ -45,6 +68,10 @@ from . import runtime
 # these exact types.
 NULL = 'NULL'
 NOTNULL = 'NOTNULL'
+
+# ``return FALLBACK`` in a snapshot (see the module docstring): restart
+# through the generic function.
+FALLBACK = 'FALLBACK'
 
 
 class Value:
@@ -118,6 +145,9 @@ BUILTIN_TYPES = {
     set: (object, ()),
     frozenset: (object, ()),
     range: (object, ()),
+    types.GeneratorType: (object, ()),
+    type(iter([])): (object, ()),       # list_iterator
+    types.NoneType: (object, ()),
 }
 
 
@@ -377,17 +407,29 @@ def _names_loaded(stmts):
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
 
 
-def _has_index_loop(stmts, name):
-    return any(isinstance(node, ast.For)
-               and getattr(node, 'pyspec_sequence', False)
-               and isinstance(node.iter, ast.Name) and node.iter.id == name
-               for stmt in stmts for node in ast.walk(stmt))
+def _index_loops(spec, stmts):
+    """The names iterated by index in *stmts*, directly or by the
+    specializations called."""
+    names = set()
+    for stmt in stmts:
+        for node in ast.walk(stmt):
+            if (isinstance(node, ast.For)
+                    and getattr(node, 'pyspec_sequence', False)
+                    and isinstance(node.iter, ast.Name)):
+                names.add(node.iter.id)
+            called = specialization_of(spec, node)
+            if called is not None:
+                names.update(arg.id for param, arg in zip(called.params,
+                                                          node.args)
+                             if param in called.index_params
+                             and isinstance(arg, ast.Name))
+    return names
 
 
 def annotate_exact(stmt, env):
     """A copy of *stmt* (an assignment, an expression statement or a
     return) with the escape calls whose first argument has a known exact
-    type that the escape lowers more cheaply marked with it
+    type that the escape lowers more cheaply (Escape.exact) marked with it
     (``call.pyspec_exact``); None when there is none."""
     marked = False
     stmt = copy.deepcopy(stmt)
@@ -402,33 +444,45 @@ def annotate_exact(stmt, env):
     return stmt if marked else None
 
 
-def _split_on_item_type(stmt, item):
+def fast_guard(node):
+    """(escape name, item name) for ``C.<escape>.fast(item)``, else None."""
+    match node:
+        case ast.Call(func=ast.Attribute(
+                          ast.Attribute(ast.Name('C'), name), 'fast'),
+                      args=[ast.Name(item)]):
+            return name, item
+    return None
+
+
+def _split_fast(stmt, item, item_type):
     """[stmt], or, if *stmt* (an assignment or an expression statement)
-    passes *item* to an escape with a cheaper lowering for its exact type
-    (Escape.exact), ``if type(item) is K: <stmt, marked> else: <stmt>``
-    for each such type K."""
+    passes *item* (of exact type item_type, None if unknown) as the first
+    argument of an escape with a fast path (Escape.fast) for that type,
+    ``if C.<escape>.fast(item): <stmt, marked> else: <stmt>``.  The guard
+    is marked with item_type (``pyspec_item_type``): the emitter only
+    tests the type when it is not known."""
     if not isinstance(stmt, (ast.Assign, ast.Expr)):
         return [stmt]
-    out = [stmt]
-    for tp in reversed(_exact_types_for([stmt], item)):
-        marked = annotate_exact(stmt, {item: tp})
-        out = [ast.If(_type_test(item, tp), [marked], out)]
-    return out
-
-
-def _exact_types_for(stmts, name):
-    """The types for which an escape called on *name* in *stmts* has a
-    cheaper lowering (Escape.exact)."""
-    types = []
-    for stmt in stmts:
-        for node in ast.walk(stmt):
-            if isinstance(node, ast.Call) and node.args:
-                escape = _escape(node.func)
-                first = node.args[0]
-                if (escape is not None and isinstance(first, ast.Name)
-                        and first.id == name):
-                    types += [tp for tp in escape.exact if tp not in types]
-    return types
+    marked = copy.deepcopy(stmt)
+    for node in ast.walk(marked):
+        if not (isinstance(node, ast.Call) and node.args
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == item):
+            continue
+        escape = _escape(node.func)
+        fast = getattr(escape, 'fast', None)
+        if fast is None or (item_type is not None
+                            and item_type not in fast.types):
+            continue
+        node.pyspec_fast = True
+        guard = ast.Call(
+            ast.Attribute(ast.Attribute(ast.Name('C', ast.Load()),
+                                        node.func.attr, ast.Load()),
+                          'fast', ast.Load()),
+            [ast.Name(item, ast.Load())], [])
+        guard.pyspec_item_type = item_type
+        return [ast.If(guard, [marked], [stmt])]
+    return [stmt]
 
 
 def terminates(stmts):
@@ -536,6 +590,9 @@ class Evaluator:
                 and self.spec.call_target(node.func) is not None)
 
     def inline(self, call, env, depth):
+        outlined = self.outline(call, env, depth)
+        if outlined is not None:
+            return outlined
         name = self.spec.call_target(call.func)
         params = self.spec.params(name)
         body = self.spec.body(name)
@@ -638,6 +695,31 @@ class Evaluator:
                 break
         return out
 
+    def outline(self, call, env, depth):
+        """``[return <call of a Specialization>]`` for a tail call of a
+        spec function whose residual for the facts of the call has a
+        loop, else None."""
+        name = self.spec.call_target(call.func)
+        params = self.spec.params(name)
+        if ('.' in name or len(call.args) != len(params)
+                or not all(isinstance(a, ast.Name) for a in call.args)):
+            return None
+        args = [a.id for a in call.args]
+        callee_env = {}
+        for param, arg in zip(params, args):
+            fact = env.get(arg)
+            if isinstance(fact, IterOf):
+                fact = (IterOf(params[args.index(fact.source)], fact.tp)
+                        if fact.source in args else NOTNULL)
+            if fact is not None and not isinstance(fact, Bound):
+                callee_env[param] = fact
+        special = specialize_call(self.spec, name, callee_env, depth + 1)
+        if special is None:
+            return None
+        return [ast.Return(special.call([call.args[params.index(p)]
+                                         for p in special.params]),
+                           lineno=0)]
+
     # -- loops ---------------------------------------------------------------
 
     @staticmethod
@@ -655,7 +737,7 @@ class Evaluator:
         for tp in VERSIONED_ITERABLES:
             residual = self.block(copy.deepcopy(tail), env | {name: tp},
                                   depth, True)
-            if _has_index_loop(residual, name):
+            if name in _index_loops(self.spec, residual):
                 branches.append((tp, residual))
         if not branches:
             return None
@@ -689,13 +771,276 @@ class Evaluator:
         item_type = ITERATION.get(iterable)
         body = self.block(stmt.body, env | {item: item_type or NOTNULL},
                           depth, inline)
-        if item_type is None:
-            body = [split for part in body
-                    for split in _split_on_item_type(part, item)]
-        new.body = body
+        new.body = [split for part in body
+                    for split in _split_fast(part, item, item_type)]
         new.pyspec_iterable = iterable
         new.pyspec_sequence = sequence
         return new
+
+
+# -- shared specializations (see the module docstring) -----------------------
+
+# spec -> {(callee, facts): Specialization or None, and name: Specialization}
+_SPECIALIZATIONS = weakref.WeakKeyDictionary()
+
+
+class Specialization:
+    """Spec function *callee* partially evaluated for the facts *env*
+    about its parameters: the C function *name*(*params*) whose body is
+    *body*.  *params* are the parameters the body uses, in order.
+
+    *index_params*: the parameters iterated by index.  *lock*: for a
+    snapshot (the body may return FALLBACK), the parameter whose critical
+    section the caller holds."""
+
+    def __init__(self, name, callee, params, env, body, lock=None):
+        self.name = name
+        self.callee = callee
+        self.params = params
+        self.env = env
+        self.body = body
+        self.lock = lock
+        self.index_params = set()
+
+    def call(self, args):
+        node = ast.Call(ast.Name(self.name, ast.Load()),
+                        [copy.copy(a) for a in args], [])
+        node.pyspec_specialization = self.name
+        return node
+
+    def types(self):
+        """The exact types of the parameters."""
+        return {p: v for p, v in self.env.items() if isinstance(v, type)}
+
+
+def _registry(spec):
+    try:
+        return _SPECIALIZATIONS[spec]
+    except KeyError:
+        return _SPECIALIZATIONS.setdefault(spec, {})
+
+
+def specialization(spec, name):
+    """The Specialization called *name*."""
+    return _registry(spec)[name]
+
+
+def specialization_of(spec, node):
+    """The Specialization a call node calls, or None."""
+    name = getattr(node, 'pyspec_specialization', None)
+    return None if name is None else specialization(spec, name)
+
+
+def _fact_key(fact):
+    match fact:
+        case type():
+            return fact.__name__
+        case Value():
+            return ('value', repr(fact.obj))
+        case IterOf():
+            return ('iter', fact.source, fact.tp.__name__)
+        case Other():
+            return ('other', tuple(tp.__name__ for tp in fact.types))
+    return fact
+
+
+def _has_loop(stmts):
+    return any(isinstance(node, ast.For)
+               for stmt in stmts for node in ast.walk(stmt))
+
+
+def _unique_name(taken, base):
+    name, suffix = base, itertools.count(2)
+    while name in taken:
+        name = f'{base}_{next(suffix)}'
+    return name
+
+
+def specialize_call(spec, callee, env, depth=0):
+    """The Specialization of spec function *callee* for the facts *env*
+    about its parameters, or None when its residual has no loop (the
+    call is inlined instead).  Made once per (callee, facts)."""
+    registry = _registry(spec)
+    params = spec.params(callee)
+    key = (callee, tuple((p, _fact_key(env.get(p))) for p in params))
+    if key in registry:
+        return registry[key]
+    registry[key] = None            # while evaluating: recursion inlines
+    body = Evaluator(spec).block(spec.body(callee), env, depth)
+    # A private copy: the residual shares nodes with the spec, and the
+    # snapshot and mark_presized() mark them.
+    body = copy.deepcopy(remove_dead_iterators(body))
+    if not _has_loop(body):
+        return None
+    type_names = [env[p].__name__ for p in params
+                  if isinstance(env.get(p), type)]
+    name = _unique_name(registry, '_'.join([callee, *type_names]))
+    special = _snapshot(spec, callee, name, params, env, body)
+    if special is None:
+        mark_presized(body)
+        loaded = _names_loaded(body)
+        special = Specialization(name, callee,
+                                 [p for p in params if p in loaded], env,
+                                 body)
+        special.index_params = (_index_loops(spec, body)
+                                & set(special.params))
+    registry[key] = registry[name] = special
+    return special
+
+
+def _snapshot(spec, callee, name, params, env, body):
+    """For a *body* iterating one list parameter by index: the
+    Specialization *name* that calls NAME_lock_held(), the snapshot of
+    *body*, in the critical section of the list, and on FALLBACK restarts
+    with the generic callee.  None when the body is not a list loop or has
+    no path without Python code."""
+    loops = [node for stmt in body for node in ast.walk(stmt)
+             if isinstance(node, ast.For)]
+    match loops:
+        case [ast.For(iter=ast.Name(seq)) as loop] if (
+                loop.pyspec_sequence and loop.pyspec_iterable is list
+                and seq in params):
+            pass
+        case _:
+            return None
+    from .call_table import Analyzer
+    snapshot = _Snapshot(Analyzer(spec), loop)
+    free = snapshot.block(body, {p: v for p, v in env.items()
+                                 if isinstance(v, type)})
+    if free is None or not snapshot.returns:
+        return None
+    mark_presized(free)
+    loaded = _names_loaded(free)
+    held = Specialization(f'{name}_lock_held', callee,
+                          [p for p in params if p in loaded], env, free,
+                          lock=seq)
+    held.index_params = {seq}
+    _registry(spec)[held.name] = held
+
+    # The arguments of the restart: an iterator iter(p) of a parameter p
+    # is made again.
+    rebuilt = {p: env[p].source for p in params
+               if isinstance(env.get(p), IterOf) and p not in held.params
+               and env[p].source in params}
+    result = _unique_name(set(params), 'result')
+
+    def load(n):
+        return ast.Name(n, ast.Load())
+
+    def store(n):
+        return ast.Name(n, ast.Store())
+
+    lock = ast.Call(ast.Attribute(load('C'), 'critical_section', ast.Load()),
+                    [load(seq)], [])
+    glue = [
+        ast.With([ast.withitem(lock)],
+                 [ast.Assign([store(result)],
+                             held.call([load(p) for p in held.params]),
+                             lineno=0)],
+                 lineno=0),
+        ast.If(ast.Compare(load(result), [ast.IsNot()], [load(FALLBACK)]),
+               [ast.Return(load(result))], []),
+        *[ast.Assign([store(p)], ast.Call(load('iter'), [load(source)], []),
+                     lineno=0)
+          for p, source in rebuilt.items()],
+        ast.Return(ast.Call(load(callee), [load(p) for p in params], [])),
+    ]
+    special = Specialization(name, callee,
+                             [p for p in params if p not in rebuilt], env,
+                             glue)
+    special.index_params = {seq}
+    return special
+
+
+class _Snapshot:
+    """The snapshot of a list loop: see _snapshot()."""
+
+    def __init__(self, analyzer, loop):
+        self.analyzer = analyzer
+        self.loop = loop
+        self.returns = False        # some path returns a result
+
+    def runs_python(self, stmts, types):
+        return self.analyzer.facts(stmts, types).runs_python
+
+    def block(self, stmts, types, in_loop=False):
+        """*stmts* with the statements that may run Python code replaced
+        by ``return FALLBACK``; None if one is outside the loop."""
+        out = []
+        for stmt in stmts:
+            if isinstance(stmt, ast.If) and not self.runs_python(
+                    [ast.If(stmt.test, [ast.Pass()], [])], types):
+                body_types, else_types = self.analyzer.refine(stmt.test)
+                new = copy.copy(stmt)
+                new.body = self.block(stmt.body, types | body_types, in_loop)
+                new.orelse = self.block(stmt.orelse, types | else_types,
+                                        in_loop)
+                if new.body is None or new.orelse is None:
+                    return None
+                new.body = new.body or [ast.Pass()]
+                stmt = new
+            elif stmt is self.loop:
+                new = copy.copy(stmt)
+                new.body = self.block(stmt.body, types, True)
+                if new.body is None:
+                    return None
+                new.pyspec_python_free = True
+                stmt = new
+            elif self.runs_python([stmt], types):
+                if not in_loop:
+                    return None
+                out.append(ast.Return(ast.Name(FALLBACK, ast.Load())))
+                break
+            elif isinstance(stmt, ast.Return):
+                self.returns = True
+            out.append(stmt)
+            if terminates(out):
+                break
+        return out
+
+
+def mark_presized(stmts):
+    """Mark ``call.pyspec_unchecked`` the appends to a buffer that has
+    room for all of them: see Capacity in the module docstring.  Only the
+    top level of *stmts* (a function body) is scanned."""
+    lengths = {}            # local -> the sequence it is the length of
+    capacity = {}           # buffer local -> the sequence it has room for
+    for stmt in stmts:
+        match stmt:
+            case ast.Assign(targets=[ast.Name(target)],
+                            value=ast.Call(func=func,
+                                           args=[ast.Name(arg), *_]) as call):
+                escape = _escape(func)
+                if (getattr(escape, 'length', False)
+                        and getattr(call, 'pyspec_exact', None)):
+                    lengths[target] = arg
+                    continue
+                if getattr(escape, 'capacity', False) and arg in lengths:
+                    capacity[target] = lengths[arg]
+                    continue
+            case ast.For(iter=ast.Name(seq)) if (
+                    stmt.pyspec_sequence
+                    and (stmt.pyspec_iterable is tuple
+                         or getattr(stmt, 'pyspec_python_free', False))):
+                inner = [node for part in stmt.body
+                         for node in ast.walk(part)]
+                if not any(isinstance(node, ast.For) for node in inner):
+                    for buffer, sequence in capacity.items():
+                        appends = [node for node in inner
+                                   if _appends_to(node, buffer)]
+                        if sequence == seq and len(appends) <= 1:
+                            for node in appends:
+                                node.pyspec_unchecked = True
+        # Any other use of a buffer: it is no longer known to have room.
+        loaded = _names_loaded([stmt])
+        capacity = {b: q for b, q in capacity.items() if b not in loaded}
+
+
+def _appends_to(node, buffer):
+    return (isinstance(node, ast.Call)
+            and getattr(_escape(node.func), 'unchecked', None) is not None
+            and node.args and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == buffer)
 
 
 def remove_dead_iterators(stmts, live=frozenset()):
@@ -719,6 +1064,9 @@ def remove_dead_iterators(stmts, live=frozenset()):
                 setattr(stmt, field, block)
         for handler in getattr(stmt, 'handlers', ()):
             handler.body = remove_dead_iterators(handler.body, after)
+        if isinstance(stmt, ast.Assign):
+            live -= {target.id for target in stmt.targets
+                     if isinstance(target, ast.Name)}
         live |= _names_loaded([stmt])
         out.append(stmt)
     out.reverse()
