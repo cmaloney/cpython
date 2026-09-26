@@ -63,6 +63,279 @@ class bytes:
             return C._PyBytes_FromSize(size, True)
         return PyBytes_FromObject(source)
 
+    def __bytes__(self):
+        """Convert this value to exact type bytes."""
+        ...
+
+    def split(self, sep: object = None, maxsplit: Py_ssize_t = -1):
+        """Return a list of the sections in the bytes, using sep as the delimiter.
+
+          sep
+            The delimiter according which to split the bytes.
+            None (the default value) means split on ASCII whitespace
+            characters (space, tab, return, newline, formfeed, vertical tab).
+          maxsplit
+            Maximum number of splits to do.
+            -1 (the default value) means no limit.
+        """
+        ...
+
+    def partition(self, sep: Py_buffer, /):
+        """Partition the bytes into three parts using the given separator.
+
+        This will search for the separator sep in the bytes.  If the
+        separator is found, returns a 3-tuple containing the part before the
+        separator, the separator itself, and the part after it.
+
+        If the separator is not found, returns a 3-tuple containing the
+        original bytes object and two empty bytes objects.
+        """
+        ...
+
+    def rpartition(self, sep: Py_buffer, /):
+        """Partition the bytes into three parts using the given separator.
+
+        This will search for the separator sep in the bytes, starting at the
+        end.  If the separator is found, returns a 3-tuple containing the
+        part before the separator, the separator itself, and the part after
+        it.
+
+        If the separator is not found, returns a 3-tuple containing two
+        empty bytes objects and the original bytes object.
+        """
+        ...
+
+    rsplit = split
+    """Return a list of the sections in the bytes, using sep as the delimiter.
+
+    Splitting is done starting at the end of the bytes and working to
+    the front.
+    """
+
+    def join(self, iterable_of_bytes: object, /):
+        """Concatenate any number of bytes objects.
+
+        The bytes whose method is called is inserted in between each pair.
+
+        The result is returned as a new bytes object.
+
+        Example: b'.'.join([b'ab', b'pq', b'rs']) -> b'ab.pq.rs'.
+        """
+        ...
+
+    def find(
+        self,
+        sub: object,
+        start: slice_index(accept={int, NoneType}, c_default='0') = None,
+        end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
+        /,
+    ):
+        """Return the lowest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+
+          start
+            Optional start position. Default: start of the bytes.
+          end
+            Optional stop position. Default: end of the bytes.
+
+        Return -1 on failure.
+        """
+        ...
+
+    index = find
+    """Return the lowest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+
+    Raise ValueError if the subsection is not found.
+    """
+
+    rfind = find
+    """Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+
+    Return -1 on failure.
+    """
+
+    rindex = find
+    """Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+
+    Raise ValueError if the subsection is not found.
+    """
+
+    def strip(self, bytes: object = None, /):
+        """Strip leading and trailing bytes contained in the argument.
+
+        If the argument is omitted or None, strip leading and trailing ASCII
+        whitespace.
+        """
+        ...
+
+    def lstrip(self, bytes: object = None, /):
+        """Strip leading bytes contained in the argument.
+
+        If the argument is omitted or None, strip leading  ASCII whitespace.
+        """
+        ...
+
+    def rstrip(self, bytes: object = None, /):
+        """Strip trailing bytes contained in the argument.
+
+        If the argument is omitted or None, strip trailing ASCII whitespace.
+        """
+        ...
+
+    count = find
+    """Return the number of non-overlapping occurrences of subsection 'sub' in bytes B[start:end]."""
+
+    def translate(
+        self,
+        table: object,
+        /,
+        delete: object(c_name='deletechars', c_default="NULL") = b'',
+    ):
+        """Return a copy with each character mapped by the given translation table.
+
+          table
+            Translation table, which must be a bytes object of length 256.
+
+        All characters occurring in the optional argument delete are
+        removed.  The remaining characters are mapped through the given
+        translation table.
+        """
+        ...
+
+    @staticmethod
+    def maketrans(frm: Py_buffer, to: Py_buffer, /):
+        """Return a translation table usable for the bytes or bytearray translate method.
+
+        The returned table will be one where each byte in frm is mapped to
+        the byte at the same position in to.
+
+        The bytes objects frm and to must be of the same length.
+        """
+        ...
+
+    def replace(self, old: Py_buffer, new: Py_buffer, /,
+                count: Py_ssize_t = -1):
+        """Return a copy with all occurrences of substring old replaced by new.
+
+          count
+            Maximum number of occurrences to replace.
+            -1 (the default value) means replace all occurrences.
+
+        If count is given, only the first count occurrences are replaced.
+        If count is not specified or -1, then all occurrences are replaced.
+        """
+        ...
+
+    def removeprefix(self, prefix: Py_buffer, /):
+        """Return a bytes object with the given prefix string removed if present.
+
+        If the bytes starts with the prefix string, return
+        bytes[len(prefix):].  Otherwise, return a copy of the original
+        bytes.
+        """
+        ...
+
+    def removesuffix(self, suffix: Py_buffer, /):
+        """Return a bytes object with the given suffix string removed if present.
+
+        If the bytes ends with the suffix string and that suffix is not
+        empty, return bytes[:-len(prefix)].  Otherwise, return a copy of the
+        original bytes.
+        """
+        ...
+
+    def startswith(
+        self,
+        prefix: object(c_name='subobj'),
+        start: slice_index(accept={int, NoneType}, c_default='0') = None,
+        end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
+        /,
+    ):
+        """Return True if the bytes starts with the specified prefix, False otherwise.
+
+          prefix
+            A bytes or a tuple of bytes to try.
+          start
+            Optional start position. Default: start of the bytes.
+          end
+            Optional stop position. Default: end of the bytes.
+        """
+        ...
+
+    def endswith(
+        self,
+        suffix: object(c_name='subobj'),
+        start: slice_index(accept={int, NoneType}, c_default='0') = None,
+        end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
+        /,
+    ):
+        """Return True if the bytes ends with the specified suffix, False otherwise.
+
+          suffix
+            A bytes or a tuple of bytes to try.
+          start
+            Optional start position. Default: start of the bytes.
+          end
+            Optional stop position. Default: end of the bytes.
+        """
+        ...
+
+    def decode(
+        self,
+        encoding: str(c_default="NULL") = 'utf-8',
+        errors: str(c_default="NULL") = 'strict',
+    ):
+        """Decode the bytes using the codec registered for encoding.
+
+          encoding
+            The encoding with which to decode the bytes.
+          errors
+            The error handling scheme to use for the handling of decoding
+            errors.  The default is 'strict' meaning that decoding errors
+            raise a UnicodeDecodeError.  Other possible values are 'ignore'
+            and 'replace' as well as any other name registered with
+            codecs.register_error that can handle UnicodeDecodeErrors.
+        """
+        ...
+
+    def splitlines(self, keepends: bool = False):
+        """Return a list of the lines in the bytes, breaking at line boundaries.
+
+        Line breaks are not included in the resulting list unless keepends
+        is given and true.
+        """
+        ...
+
+    @classmethod
+    def fromhex(cls, string: object, /):
+        r"""Create a bytes object from a string of hexadecimal numbers.
+
+        Spaces between two numbers are accepted.
+        Example: bytes.fromhex('B9 01EF') -> b'\\xb9\\x01\\xef'.
+        """
+        ...
+
+    def hex(self, sep: object = NULL, bytes_per_sep: Py_ssize_t = 1):
+        r"""Create a string of hexadecimal numbers from a bytes object.
+
+          sep
+            An optional single character or byte to separate hex bytes.
+          bytes_per_sep
+            How many bytes between separators.  Positive values count from
+            the right, negative values count from the left.
+
+        Example:
+        >>> value = b'\xb9\x01\xef'
+        >>> value.hex()
+        'b901ef'
+        >>> value.hex(':')
+        'b9:01:ef'
+        >>> value.hex(':', 2)
+        'b9:01ef'
+        >>> value.hex(':', -2)
+        'b901:ef'
+        """
+        ...
+
 
 def PyBytes_FromObject(x: object):
     if x is NULL:
