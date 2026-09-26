@@ -622,6 +622,10 @@ def generate(spec, spec_path):
     for description in descriptions:
         if description.new_type is not None:
             out += generate_arities(spec, description)
+    # --- call table hook (tier-2 optimizer): Tools/pyspec/call_table.py ---
+    import call_table
+    out += call_table.generate(spec, descriptions)
+    # --- end call table hook ---
     return '\n'.join(out)
 
 

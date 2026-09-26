@@ -304,6 +304,7 @@
     <ClInclude Include="..\Include\internal\pycore_pylifecycle.h" />
     <ClInclude Include="..\Include\internal\pycore_pymem.h" />
     <ClInclude Include="..\Include\internal\pycore_pymem_init.h" />
+    <ClInclude Include="..\Include\internal\pycore_pyspec.h" />
     <ClInclude Include="..\Include\internal\pycore_pystate.h" />
     <ClInclude Include="..\Include\internal\pycore_pystats.h" />
     <ClInclude Include="..\Include\internal\pycore_pythonrun.h" />

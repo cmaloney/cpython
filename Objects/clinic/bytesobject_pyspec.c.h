@@ -303,3 +303,296 @@ bytes_new_nargs3(PyObject *source, const char *encoding, const char *errors)
     return PyUnicode_AsEncodedString(source, encoding, errors);
 }
 
+/* bytes_new() for exactly bytes with 1 positional argument of exact type bytes
+ * (result type not known exactly; may run Python code):
+ * if (func := C.lookup_special(source, '__bytes__')) is not NULL:
+ *     result = func()
+ *     if not isinstance(result, bytes):
+ *         raise TypeError(f'{fqname(type(source))}.__bytes__() must return a bytes, not {fqname(type(result))}')
+ *     return result
+ * return source
+ */
+static PyObject *
+bytes_new_nargs1_bytes(PyObject *source)
+{
+    PyObject *result = NULL;
+    PyObject *func = NULL;
+
+    func = _PyObject_LookupSpecial(source, &_Py_ID(__bytes__));
+    if (func == NULL && PyErr_Occurred()) {
+        return NULL;
+    }
+    if (func != NULL) {
+        result = _PyObject_CallNoArgs(func);
+        if (result == NULL) {
+            Py_XDECREF(func);
+            return NULL;
+        }
+        if (!PyBytes_Check(result)) {
+            PyErr_Format(PyExc_TypeError, "%T.__bytes__() must return a bytes, not %T", source, result);
+            Py_XDECREF(result);
+            Py_XDECREF(func);
+            return NULL;
+        }
+        Py_XDECREF(func);
+        return result;
+    }
+    return Py_NewRef(source);
+}
+
+/* bytes_new() for exactly bytes with 1 positional argument of exact type bytearray
+ * (result is exactly bytes; runs no Python code):
+ * return C._PyBytes_FromBuffer(source)
+ */
+static PyObject *
+bytes_new_nargs1_bytearray(PyObject *source)
+{
+    return _PyBytes_FromBuffer(source);
+}
+
+/* bytes_new() for exactly bytes with 1 positional argument of exact type list
+ * (result is exactly bytes; may run Python code):
+ * with C.critical_section_sequence_fast(source):
+ *     result_1 = C._PyBytes_FromSequence_lock_held(source)
+ * if result_1 is not NULL:
+ *     return result_1
+ * try:
+ *     it_1 = iter(source)
+ * except TypeError:
+ *     pass
+ * else:
+ *     return C._PyBytes_FromIterator(it_1, source)
+ * raise TypeError(f"cannot convert '{tp_name(type(source))}' object to bytes")
+ */
+static PyObject *
+bytes_new_nargs1_list(PyObject *source)
+{
+    PyObject *result_1 = NULL;
+    PyObject *it_1 = NULL;
+
+    Py_BEGIN_CRITICAL_SECTION_SEQUENCE_FAST(source);
+    result_1 = _PyBytes_FromSequence_lock_held(source);
+    Py_END_CRITICAL_SECTION_SEQUENCE_FAST();
+    if (result_1 == NULL && PyErr_Occurred()) {
+        return NULL;
+    }
+    if (result_1 != NULL) {
+        return result_1;
+    }
+    it_1 = PyObject_GetIter(source);
+    if (it_1 == NULL) {
+        if (PyErr_ExceptionMatches(PyExc_TypeError)) {
+            PyErr_Clear();
+        }
+        else {
+            return NULL;
+        }
+    }
+    else {
+        {
+            PyObject *_return_value = _PyBytes_FromIterator(it_1, source);
+            Py_XDECREF(it_1);
+            return _return_value;
+        }
+    }
+    PyErr_Format(PyExc_TypeError, "cannot convert '%.200s' object to bytes", Py_TYPE(source)->tp_name);
+    return NULL;
+}
+
+/* bytes_new() for exactly bytes with 1 positional argument of exact type int
+ * (result is exactly bytes; may run Python code):
+ * try:
+ *     size = C.PyNumber_AsSsize_t(source, OverflowError)
+ * except TypeError:
+ *     return PyBytes_FromObject(source)
+ * if size < 0:
+ *     raise ValueError('negative count')
+ * return C._PyBytes_FromSize(size, True)
+ */
+static PyObject *
+bytes_new_nargs1_int(PyObject *source)
+{
+    Py_ssize_t size;
+
+    size = PyNumber_AsSsize_t(source, PyExc_OverflowError);
+    if (size == -1 && PyErr_Occurred()) {
+        if (PyErr_ExceptionMatches(PyExc_TypeError)) {
+            PyErr_Clear();
+            return PyBytes_FromObject(source);
+        }
+        else {
+            return NULL;
+        }
+    }
+    if (size < 0) {
+        PyErr_SetString(PyExc_ValueError, "negative count");
+        return NULL;
+    }
+    return _PyBytes_FromSize(size, 1);
+}
+
+/* bytes_new() for exactly bytes with 1 positional argument of exact type str
+ * (always raises; runs no Python code):
+ * raise TypeError('string argument without an encoding')
+ */
+static PyObject *
+bytes_new_nargs1_str(PyObject *source)
+{
+    PyErr_SetString(PyExc_TypeError, "string argument without an encoding");
+    return NULL;
+}
+
+/* bytes_new() for exactly bytes with 1 positional argument of exact type range
+ * (result is exactly bytes; may run Python code):
+ * try:
+ *     it_1 = iter(source)
+ * except TypeError:
+ *     pass
+ * else:
+ *     return C._PyBytes_FromIterator(it_1, source)
+ * raise TypeError(f"cannot convert '{tp_name(type(source))}' object to bytes")
+ */
+static PyObject *
+bytes_new_nargs1_range(PyObject *source)
+{
+    PyObject *it_1 = NULL;
+
+    it_1 = PyObject_GetIter(source);
+    if (it_1 == NULL) {
+        if (PyErr_ExceptionMatches(PyExc_TypeError)) {
+            PyErr_Clear();
+        }
+        else {
+            return NULL;
+        }
+    }
+    else {
+        {
+            PyObject *_return_value = _PyBytes_FromIterator(it_1, source);
+            Py_XDECREF(it_1);
+            return _return_value;
+        }
+    }
+    PyErr_Format(PyExc_TypeError, "cannot convert '%.200s' object to bytes", Py_TYPE(source)->tp_name);
+    return NULL;
+}
+
+/* Call table of bytes() for the tier-2 optimizer, see
+ * Include/internal/pycore_pyspec.h.  Generated by Tools/pyspec/call_table.py. */
+static const _PySpecCall bytes_new_spec_calls[] = {
+    /* bytes(): always Py_CONSTANT_EMPTY_BYTES, no side effects; runs no Python code */
+    {
+        .nargs = 0,
+        .flags = 0,
+        .result_const = Py_CONSTANT_EMPTY_BYTES,
+        .arg_type = NULL,
+        .result_type = &PyBytes_Type,
+        .func.f0 = bytes_new_nargs0,
+    },
+    /* bytes(bytes): result type not known exactly; may run Python code */
+    {
+        .nargs = 1,
+        .flags = _PySpec_MAY_RUN_PYTHON,
+        .result_const = -1,
+        .arg_type = &PyBytes_Type,
+        .result_type = NULL,
+        .func.f1 = bytes_new_nargs1_bytes,
+    },
+    /* bytes(bytearray): result is exactly bytes; runs no Python code */
+    {
+        .nargs = 1,
+        .flags = 0,
+        .result_const = -1,
+        .arg_type = &PyByteArray_Type,
+        .result_type = &PyBytes_Type,
+        .func.f1 = bytes_new_nargs1_bytearray,
+    },
+    /* bytes(memoryview): result is exactly bytes; runs no Python code */
+    {
+        .nargs = 1,
+        .flags = 0,
+        .result_const = -1,
+        .arg_type = &PyMemoryView_Type,
+        .result_type = &PyBytes_Type,
+        .func.f1 = bytes_new_nargs1_bytearray,
+    },
+    /* bytes(list): result is exactly bytes; may run Python code */
+    {
+        .nargs = 1,
+        .flags = _PySpec_MAY_RUN_PYTHON,
+        .result_const = -1,
+        .arg_type = &PyList_Type,
+        .result_type = &PyBytes_Type,
+        .func.f1 = bytes_new_nargs1_list,
+    },
+    /* bytes(tuple): result is exactly bytes; may run Python code */
+    {
+        .nargs = 1,
+        .flags = _PySpec_MAY_RUN_PYTHON,
+        .result_const = -1,
+        .arg_type = &PyTuple_Type,
+        .result_type = &PyBytes_Type,
+        .func.f1 = bytes_new_nargs1_list,
+    },
+    /* bytes(int): result is exactly bytes; may run Python code */
+    {
+        .nargs = 1,
+        .flags = _PySpec_MAY_RUN_PYTHON,
+        .result_const = -1,
+        .arg_type = &PyLong_Type,
+        .result_type = &PyBytes_Type,
+        .func.f1 = bytes_new_nargs1_int,
+    },
+    /* bytes(str): always raises; runs no Python code */
+    {
+        .nargs = 1,
+        .flags = _PySpec_ALWAYS_RAISES,
+        .result_const = -1,
+        .arg_type = &PyUnicode_Type,
+        .result_type = NULL,
+        .func.f1 = bytes_new_nargs1_str,
+    },
+    /* bytes(range): result is exactly bytes; may run Python code */
+    {
+        .nargs = 1,
+        .flags = _PySpec_MAY_RUN_PYTHON,
+        .result_const = -1,
+        .arg_type = &PyRange_Type,
+        .result_type = &PyBytes_Type,
+        .func.f1 = bytes_new_nargs1_range,
+    },
+    /* bytes(dict): result is exactly bytes; may run Python code */
+    {
+        .nargs = 1,
+        .flags = _PySpec_MAY_RUN_PYTHON,
+        .result_const = -1,
+        .arg_type = &PyDict_Type,
+        .result_type = &PyBytes_Type,
+        .func.f1 = bytes_new_nargs1_range,
+    },
+    /* bytes(float): result is exactly bytes; may run Python code */
+    {
+        .nargs = 1,
+        .flags = _PySpec_MAY_RUN_PYTHON,
+        .result_const = -1,
+        .arg_type = &PyFloat_Type,
+        .result_type = &PyBytes_Type,
+        .func.f1 = bytes_new_nargs1_range,
+    },
+    /* bytes(x): result type not known exactly; may run Python code */
+    {
+        .nargs = 1,
+        .flags = _PySpec_MAY_RUN_PYTHON,
+        .result_const = -1,
+        .arg_type = NULL,
+        .result_type = NULL,
+        .func.f1 = bytes_new_nargs1,
+    },
+};
+
+const _PySpecCallTable _PySpec_bytes_calls = {
+    .type = &PyBytes_Type,
+    .ncalls = Py_ARRAY_LENGTH(bytes_new_spec_calls),
+    .calls = bytes_new_spec_calls,
+};
+
