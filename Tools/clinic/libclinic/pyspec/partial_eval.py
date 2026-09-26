@@ -340,8 +340,21 @@ def refine(test, env):
     """The environments of the body and of the else clause of
     ``if test`` that is not decided by *env*: ``type(x) is K`` gives x
     the exact type K in the body (and in the else clause for ``is
-    not``)."""
+    not``), ``x is NULL`` and ``x is K`` (x is the type K) are decided."""
     match test:
+        case ast.Compare(left=ast.Name(name),
+                         ops=[ast.Is() | ast.IsNot() as op],
+                         comparators=[right]) if env.get(name) is None:
+            klass = _builtin_type(right)
+            if isinstance(right, ast.Name) and right.id == 'NULL':
+                known, other = env | {name: NULL}, env | {name: NOTNULL}
+            elif klass is not None:
+                known, other = env | {name: Value(klass)}, env
+            else:
+                return env, env
+            if isinstance(op, ast.IsNot):
+                return other, known
+            return known, other
         case ast.Compare(left=ast.Call(func=ast.Name('type'),
                                        args=[ast.Name(name)]),
                          ops=[ast.Is() | ast.IsNot() as op],
@@ -552,10 +565,29 @@ def _pure_value(residual, param):
 
 
 class Evaluator:
-    def __init__(self, spec):
+    def __init__(self, spec, arities=()):
         self.spec = spec
         self.facts = TypeFacts(spec)
         self._suffix = itertools.count(1)
+        # (facts, C function, arguments): see arity_call().
+        self.arities = arities
+
+    def arity_call(self, stmts, i, env):
+        """``[return F(args)]`` when the rest of a function body,
+        stmts[i:], under *env*, is the whole body under the facts of the
+        arity function F (NAME_nargsN(), emit.py): the facts about the
+        parameters are the same, and stmts[:i] do nothing under them."""
+        for facts, c_name, args in self.arities:
+            if any(_fact_key(env.get(p)) != _fact_key(fact)
+                   for p, fact in facts.items()):
+                continue
+            if Evaluator(self.spec).block(copy.deepcopy(stmts[:i]), facts):
+                continue
+            call = ast.Call(ast.Name(c_name, ast.Load()),
+                            [ast.Name(a, ast.Load()) for a in args], [])
+            call.pyspec_c_function = c_name
+            return [ast.Return(call, lineno=0)]
+        return None
 
     def special_method(self, tp, name):
         """The spec method (name) that C.lookup_special(x, name) finds for
@@ -623,11 +655,17 @@ class Evaluator:
         body = [_Rename(mapping).visit(copy.deepcopy(s)) for s in body]
         return self.block(body, env, depth + 1)
 
-    def block(self, stmts, env, depth=0, inline=True):
+    def block(self, stmts, env, depth=0, inline=True, top=False):
+        """*top*: *stmts* is a whole function body (see arity_call())."""
         out = []
         stmts = list(stmts)
         i = 0
         while i < len(stmts):
+            if top and i and self.arities:
+                call = self.arity_call(stmts, i, env)
+                if call is not None:
+                    out += call
+                    break
             stmt = stmts[i]
             i += 1
             match stmt:
@@ -701,6 +739,12 @@ class Evaluator:
                     stmt.orelse = self.block(stmt.orelse, else_env, depth,
                                              inline)
                     out.append(stmt)
+                    # After an if whose one branch exits, the facts of
+                    # the other hold.
+                    if terminates(stmt.body):
+                        env = else_env
+                    elif terminates(stmt.orelse):
+                        env = body_env
             elif (inline and isinstance(stmt, ast.Return)
                     and self._is_spec_call(stmt.value)
                     and depth < MAX_INLINE_DEPTH):
@@ -1141,11 +1185,14 @@ def remove_dead_iterators(stmts, live=frozenset()):
     return out
 
 
-def specialize(spec, name, env, inline=True):
+def specialize(spec, name, env, inline=True, arities=()):
     """Residual statements of spec function *name* under facts *env*.
 
     *spec* is a frontend.Spec.  With *inline* false, tail calls of other
     spec functions stay calls, except where the block is versioned.
+    *arities*: (facts, C function, arguments) of the arity functions of
+    a __new__ (see Evaluator.arity_call()).
     """
-    residual = Evaluator(spec).block(spec.body(name), env, inline=inline)
+    residual = Evaluator(spec, arities).block(spec.body(name), env,
+                                              inline=inline, top=True)
     return remove_dead_iterators(residual)

@@ -7380,6 +7380,21 @@ class BytesSpecFactsTest(TestCase):
         _, facts = self.facts('bytes_from_iterator', env, ['it', 'x'])
         self.assertTrue(facts.runs_python)
 
+    def test_new_calls_arity_function(self):
+        # After the checks of bytes_new_impl(), the facts are those of
+        # bytes_new_nargs1() (exactly bytes, one argument), whose code is
+        # the rest of the body: it is called, not repeated.
+        pe = pyspec_partial_eval
+        facts = {'cls': pe.Value(bytes), 'source': pe.NOTNULL,
+                 'encoding': pe.NULL, 'errors': pe.NULL}
+        arities = [(facts, 'bytes_new_nargs1', ['source'])]
+        residual = pe.specialize(self.spec, 'bytes.__new__', {},
+                                 inline=False, arities=arities)
+        self.assertEqual(ast.unparse(residual[-1]),
+                         'return bytes_new_nargs1(source)')
+        self.assertNotIn('lookup_special',
+                         ast.unparse(ast.Module(residual, [])))
+
     def test_dunder_bytes(self):
         _, facts = self.dunder_bytes_facts(bytes)
         self.assertEqual(facts.alias, 0)

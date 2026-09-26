@@ -279,6 +279,10 @@ class FunctionEmitter:
             self.generator.use(special.name)
             args = ', '.join(self.lower_value(a) for a in call.args)
             return f'{special.name}({args})', OBJECT, ERR_NULL
+        c_function = getattr(call, 'pyspec_c_function', None)
+        if c_function is not None:
+            args = ', '.join(self.lower_value(a) for a in call.args)
+            return f'{c_function}({args})', OBJECT, ERR_NULL
         escape = escape_of(call.func)
         if isinstance(escape, Escape):
             fields = {}
@@ -906,9 +910,12 @@ class Generator:
         for description in descriptions:
             # Nothing is known about the arguments; the evaluator still
             # specializes loops (see partial_eval.py), but keeps calls
-            # of other spec functions as calls.
-            body = partial_eval.specialize(self.spec, description.name, {},
-                                           inline=False)
+            # of other spec functions as calls.  Where the rest of a
+            # __new__ is an arity function, it is called.
+            body = partial_eval.specialize(
+                self.spec, description.name, {}, inline=False,
+                arities=[(env, name, [p.name for p in given])
+                         for env, name, given, _ in self.arities(description)])
             emitter = FunctionEmitter(self, c_params(description))
             out += emitter.function(self.c_name(description.name), body)
             out.append('')
@@ -956,11 +963,11 @@ class Generator:
             '',
         ]
 
-    def generate_arities(self, description):
-        """NAME_nargsN() for each allowed N: the __new__ spec partially
-        evaluated for exactly its class and a call with N positional
-        arguments; the rest are NULL.  Argument Clinic declares them and
-        calls them from the vectorcall with converted values."""
+    def arities(self, description):
+        """(facts, C name, given, missing parameters) of the NAME_nargsN()
+        functions of a __new__ (none for other functions)."""
+        if description.new_type is None:
+            return []
         cls, *params = description.parameters
         required = sum(not p.optional for p in params)
         type_value = getattr(builtins, description.new_type)
@@ -971,6 +978,18 @@ class Generator:
             env = {cls.name: Value(type_value)}
             env |= {p.name: NOTNULL for p in given}
             env |= {p.name: NULL for p in missing}
+            out.append((env, f'{basename}_nargs{nargs}', given, missing))
+        return out
+
+    def generate_arities(self, description):
+        """NAME_nargsN() for each allowed N: the __new__ spec partially
+        evaluated for exactly its class and a call with N positional
+        arguments; the rest are NULL.  Argument Clinic declares them and
+        calls them from the vectorcall with converted values."""
+        basename = self.c_basename(description.name)
+        out = []
+        for env, name, given, missing in self.arities(description):
+            nargs = len(given)
             residual = partial_eval.specialize(self.spec, description.name,
                                                env)
             emitter = FunctionEmitter(self,

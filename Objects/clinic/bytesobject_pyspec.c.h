@@ -15,9 +15,6 @@ static PyObject *
 bytes_new_impl(PyTypeObject *cls, PyObject *source, const char *encoding, const char *errors)
 {
     PyObject *value = NULL;
-    PyObject *result = NULL;
-    PyObject *func = NULL;
-    Py_ssize_t size;
 
     if (cls != &PyBytes_Type) {
         value = bytes_new_impl(&PyBytes_Type, source, encoding, errors);
@@ -56,52 +53,7 @@ bytes_new_impl(PyTypeObject *cls, PyObject *source, const char *encoding, const 
         PyErr_SetString(PyExc_TypeError, "errors without a string argument");
         return NULL;
     }
-    if (PyBytes_CheckExact(source)) {
-        return Py_NewRef(source);
-    }
-    else {
-        func = _PyObject_LookupSpecial(source, &_Py_ID(__bytes__));
-        if (func == NULL && PyErr_Occurred()) {
-            return NULL;
-        }
-        if (func != NULL) {
-            result = _PyObject_CallNoArgs(func);
-            if (result == NULL) {
-                Py_XDECREF(func);
-                return NULL;
-            }
-            if (!PyBytes_Check(result)) {
-                PyErr_Format(PyExc_TypeError, "%T.__bytes__() must return a bytes, not %T", source, result);
-                Py_XDECREF(result);
-                Py_XDECREF(func);
-                return NULL;
-            }
-            Py_XDECREF(func);
-            return result;
-        }
-        if (PyUnicode_Check(source)) {
-            PyErr_SetString(PyExc_TypeError, "string argument without an encoding");
-            return NULL;
-        }
-        if (_PyIndex_Check(source)) {
-            size = PyNumber_AsSsize_t(source, PyExc_OverflowError);
-            if (size == -1 && PyErr_Occurred()) {
-                if (PyErr_ExceptionMatches(PyExc_TypeError)) {
-                    PyErr_Clear();
-                    return PyBytes_FromObject(source);
-                }
-                else {
-                    return NULL;
-                }
-            }
-            if (size < 0) {
-                PyErr_SetString(PyExc_ValueError, "negative count");
-                return NULL;
-            }
-            return _PyBytes_FromSize(size, 1);
-        }
-        return PyBytes_FromObject(source);
-    }
+    return bytes_new_nargs1(source);
 }
 
 static PyObject *
