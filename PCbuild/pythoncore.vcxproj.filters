@@ -591,6 +591,9 @@
     <ClInclude Include="..\Include\internal\pycore_bytes_methods.h">
       <Filter>Include\internal</Filter>
     </ClInclude>
+    <ClInclude Include="..\Include\internal\pycore_bytearrayobject.h">
+      <Filter>Include\internal</Filter>
+    </ClInclude>
     <ClInclude Include="..\Include\internal\pycore_bytesobject.h">
       <Filter>Include\internal</Filter>
     </ClInclude>

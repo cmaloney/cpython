@@ -2,6 +2,7 @@
 
 #include "Python.h"
 #include "pycore_abstract.h"      // _PyIndex_Check()
+#include "pycore_bytearrayobject.h" // _PyByteArray_TryTakeBytes()
 #include "pycore_bytes_methods.h"
 #include "pycore_bytesobject.h"
 #include "pycore_ceval.h"         // _PyEval_GetBuiltin()
@@ -1083,6 +1084,26 @@ bytearray___init___impl(PyByteArrayObject *self, PyObject *arg,
         }
     }
 
+    /* Take a unique temporary bytes over as the buffer rather than copying
+       it.  The caller holds the only reference and cannot use it again, so
+       nothing can observe that the bytes and the bytearray now share
+       storage.  Only the vectorcall reaches this: tp_new and tp_init hold
+       `arg` in an args tuple, which is a second reference. */
+    if (PyBytes_CheckExact(arg) && PyBytes_GET_SIZE(arg) > 0
+        && PyUnstable_Object_IsUniqueReferencedTemporary(arg))
+    {
+        /* Only the empty bytes may be the immortal one, and ob_alloc == 0
+           has to mean exactly that, so an empty source keeps the
+           already-set-up empty buffer instead of replacing it. */
+        Py_ssize_t size = PyBytes_GET_SIZE(arg);
+        /* Borrow until reinit has cleared the hash: _PyBytes_ClearHash()
+           asserts the bytes has a single reference, the caller's. */
+        self->ob_bytes_object = arg;
+        bytearray_reinit_from_bytes(self, size);
+        Py_INCREF(arg);
+        return 0;
+    }
+
     /* Use the buffer API */
     if (PyObject_CheckBuffer(arg)) {
         Py_ssize_t size;
@@ -1693,6 +1714,26 @@ bytearray_take_bytes_impl(PyByteArrayObject *self, PyObject *n)
     self->ob_bytes_object = remaining;
     bytearray_reinit_from_bytes(self, remaining_length);
     return result;
+}
+
+
+int
+_PyByteArray_TryTakeBytes(PyObject *op, PyObject **result)
+{
+    PyByteArrayObject *self = _PyByteArray_CAST(op);
+    int ret;
+    Py_BEGIN_CRITICAL_SECTION(op);
+    if (self->ob_exports != 0) {
+        /* An export can see the contents change, so the buffer has to stay
+           where it is.  Not an error: the caller copies instead. */
+        ret = 0;
+    }
+    else {
+        *result = bytearray_take_bytes_impl(self, Py_None);
+        ret = (*result == NULL) ? -1 : 1;
+    }
+    Py_END_CRITICAL_SECTION();
+    return ret;
 }
 
 

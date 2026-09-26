@@ -2,6 +2,7 @@
 
 #include "Python.h"
 #include "pycore_abstract.h"      // _PyIndex_Check()
+#include "pycore_bytearrayobject.h" // _PyByteArray_TryTakeBytes()
 #include "pycore_bytes_methods.h" // _Py_bytes_startswith()
 #include "pycore_bytesobject.h"   // _PyBytes_Find(), _PyBytes_RepeatBuffer()
 #include "pycore_call.h"          // _PyObject_CallNoArgs()
@@ -2962,6 +2963,23 @@ bytes_new_impl(PyTypeObject *type, PyObject *x, const char *encoding,
                 return NULL;
             }
             bytes = _PyBytes_FromSize(size, 1);
+        }
+    }
+    /* Take the buffer of a unique temporary bytearray rather than copying
+       it.  The caller holds the only reference and cannot use it again, so
+       nothing can observe that the bytearray is left empty.  Only the
+       vectorcall reaches this: tp_new holds `x` in an args tuple, which is
+       a second reference. */
+    else if (PyByteArray_CheckExact(x)
+             && PyUnstable_Object_IsUniqueReferencedTemporary(x))
+    {
+        int taken = _PyByteArray_TryTakeBytes(x, &bytes);
+        if (taken < 0) {
+            return NULL;
+        }
+        if (taken == 0) {
+            /* Buffer exports; it has to be copied after all. */
+            bytes = PyBytes_FromObject(x);
         }
     }
     else {
