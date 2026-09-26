@@ -6935,6 +6935,16 @@ class BytesSpecTypeTest(TestCase):
         self.assertFalse(tp.__flags__ & (1 << 10))  # @final
         self.assertTrue(tp.__flags__ & (1 << 14))   # Py_TPFLAGS_HAVE_GC
 
+    def test_iterator_next_facts(self):
+        # bytes_iterator.__next__ -> New[int]: an exact int, and (no
+        # RunsPython) never runs Python code.
+        facts = pyspec_runtime.stub_facts(
+            self.spec.functions['bytes_iterator.__next__'])
+        self.assertIs(facts.result_type, int)
+        self.assertIs(facts.runs_python, False)
+        for value in iter(bytes(range(256))):
+            self.assertIs(type(value), int)
+
 
 class PyspecSlotdefsTest(TestCase):
     """slotdefs[] of Objects/typeobject.c, as Argument Clinic reads it

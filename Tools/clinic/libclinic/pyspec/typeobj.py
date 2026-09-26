@@ -142,6 +142,21 @@ def _c_string(text: str) -> str:
     return docstring_for_c_string(text)
 
 
+def _c_stub(spec: frontend.Spec, name: str, kind: str) -> ast.FunctionDef:
+    """The stub of a method implemented in C by hand, with the fixed C
+    signature of its *kind* (a slot or a PyCFunction)."""
+    node = spec.functions[name]
+    if not frontend.is_stub(node):
+        raise SpecError(f"{spec.where(node)}: {name} is a {kind} "
+                        "implemented in C: its body is ...")
+    for arg in node.args.posonlyargs + node.args.args:
+        if arg.annotation is not None:
+            raise SpecError(f"{spec.where(arg)}: {name}: the C signature "
+                            f"of a {kind} is fixed: parameters are not "
+                            "annotated")
+    return node
+
+
 def _exported(name: str) -> bool:
     return name.startswith(('Py', '_Py'))
 
@@ -176,23 +191,11 @@ class TypeGenerator:
 
     # -- methods -----------------------------------------------------------
 
-    def _stub(self, name: str, kind: str) -> ast.FunctionDef:
-        node = self.spec.functions[name]
-        if not frontend.is_stub(node):
-            raise SpecError(f"{self.spec.where(node)}: {name} is a {kind} "
-                            "implemented in C: its body is ...")
-        for arg in node.args.posonlyargs + node.args.args:
-            if arg.annotation is not None:
-                raise SpecError(f"{self.spec.where(arg)}: {name}: the "
-                                f"C signature of a {kind} is fixed: "
-                                "parameters are not annotated")
-        return node
-
     def _pycfunction_entry(self, spec: frontend.Spec, name: str,
                            meth: str) -> tuple[list[str], str]:
         """(docstring definition, method table entry) of a hand-written
         PyCFunction of *spec*."""
-        node = self._stub_in(spec, name)
+        node = _c_stub(spec, name, 'PyCFunction')
         _, keywords = spec.c_name(name)
         (flag, c_func), = keywords.items()
         nparams = frontend.PYCFUNCTION_FLAGS[flag]
@@ -210,17 +213,6 @@ class TypeGenerator:
             doc_name = f'{self.prefix}_{meth}__doc__'
             docs = [f'PyDoc_STRVAR({doc_name},', _c_string(doc) + ');', '']
         return docs, f'    {{"{meth}", {c_func}, {flag}, {doc_name}}},'
-
-    def _stub_in(self, spec: frontend.Spec, name: str) -> ast.FunctionDef:
-        node = spec.functions[name]
-        if not frontend.is_stub(node):
-            raise SpecError(f"{spec.where(node)}: {name} is implemented "
-                            "in C by hand: its body is ...")
-        for arg in node.args.posonlyargs + node.args.args:
-            if arg.annotation is not None:
-                raise SpecError(f"{spec.where(arg)}: {name}: a hand-written "
-                                "PyCFunction has no converters")
-        return node
 
     def _clinic_entry(self, name: str) -> str:
         try:
@@ -273,7 +265,7 @@ class TypeGenerator:
         deferred = []
         for meth in dunders:
             name = f'{self.cls_name}.{meth}'
-            node = self._stub(name, 'slot')
+            node = _c_stub(spec, name, 'slot')
             if frontend._docstring(node.body) is not None:
                 raise SpecError(f"{spec.where(node)}: {name}: a slot has "
                                 "no docstring: its wrapper's comes from "
