@@ -2,7 +2,6 @@
 
 #include "Python.h"
 #include "pycore_abstract.h"      // _PyIndex_Check()
-#include "pycore_bytearrayobject.h" // _PyByteArray_TryTakeBytes()
 #include "pycore_bytes_methods.h" // _Py_bytes_startswith()
 #include "pycore_bytesobject.h"   // _PyBytes_Find(), _PyBytes_RepeatBuffer()
 #include "pycore_call.h"          // _PyObject_CallNoArgs()
@@ -2973,14 +2972,10 @@ bytes_new_impl(PyTypeObject *type, PyObject *x, const char *encoding,
     else if (PyByteArray_CheckExact(x)
              && PyUnstable_Object_IsUniqueReferencedTemporary(x))
     {
-        int taken = _PyByteArray_TryTakeBytes(x, &bytes);
-        if (taken < 0) {
-            return NULL;
-        }
-        if (taken == 0) {
-            /* Buffer exports; it has to be copied after all. */
-            bytes = PyBytes_FromObject(x);
-        }
+        /* A buffer export holds a reference to the bytearray, so a unique
+           temporary has none and take_bytes() can always hand over. */
+        assert(((PyByteArrayObject *)x)->ob_exports == 0);
+        bytes = PyObject_CallMethodNoArgs(x, &_Py_ID(take_bytes));
     }
     else {
         bytes = PyBytes_FromObject(x);

@@ -1309,7 +1309,6 @@ PYTHON_HEADERS= \
 		$(srcdir)/Include/internal/pycore_blocks_output_buffer.h \
 		$(srcdir)/Include/internal/pycore_brc.h \
 		$(srcdir)/Include/internal/pycore_bytes_methods.h \
-		$(srcdir)/Include/internal/pycore_bytearrayobject.h \
 		$(srcdir)/Include/internal/pycore_bytesobject.h \
 		$(srcdir)/Include/internal/pycore_call.h \
 		$(srcdir)/Include/internal/pycore_capsule.h \
