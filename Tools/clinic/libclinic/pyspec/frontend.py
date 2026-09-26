@@ -22,10 +22,9 @@ named T.  A method is written like the clinic block it replaces:
 * the docstring is the text help() shows after the signature: the summary,
   then the parameter section clinic renders ("  name" and the parameter
   docstring indented by 4), then the rest of the docstring;
-* ``meth = other`` in the class body is a clinic clone
-  (``T.meth = T.other``); the string literal following it, if any, is its
-  docstring.  A decorated clone is written as the call a decorator stands
-  for: ``meth = permit_long_summary(other)``;
+* there are no clones, as Python has none: two methods with the same
+  signature (``find`` and ``count``) are two full ``def`` statements, and
+  clinic generates for the second what it generates for a clone;
 * a body of ``...`` (or only a docstring) means the C impl is
   hand-written.  A real body implements the function: see emit.py.
 
@@ -208,18 +207,6 @@ class SpecFunction:
         return TYPE_OBJECTS[self.new_type]
 
 
-@dc.dataclass
-class Clone:
-    """``meth = target`` in a spec class."""
-    target: str
-    lineno: int
-    # ``meth = deco(target)``: the decorators, outermost first.
-    decorators: list[ast.expr] = dc.field(default_factory=list)
-    docstring: str | None = None
-    # Column of the docstring, stripped from its lines.
-    docstring_margin: int = 0
-
-
 def spec_path(filename: str) -> str:
     """Path of the spec file for the C file *filename*."""
     dirname, basename = os.path.split(filename)
@@ -247,21 +234,6 @@ def _quote(word: str) -> str:
     if shlex.quote(word) == word:
         return word
     return '"' + word.replace('\\', '\\\\').replace('"', '\\"') + '"'
-
-
-def _clone_target(value: ast.expr) -> tuple[str, list[ast.expr]] | None:
-    """For ``meth = d1(d2(args)(target))``: target and [d1, d2(args)].
-
-    None if *value* is not a (decorated) name.
-    """
-    decorators = []
-    while isinstance(value, ast.Call) and len(value.args) == 1 \
-            and not value.keywords:
-        decorators.append(value.func)
-        value = value.args[0]
-    if isinstance(value, ast.Name):
-        return value.id, decorators
-    return None
 
 
 def is_stub(node: ast.FunctionDef) -> bool:
@@ -294,7 +266,6 @@ class Spec:
         # order of the file.
         self.functions: dict[str, ast.FunctionDef] = {}
         self.classes: dict[str, ast.ClassDef] = {}
-        self.clones: dict[str, Clone] = {}
         self.shared: dict[str, Shared] = {}
         # Specs imported with ``from pkg import module``: name -> path.
         self.imports: dict[str, str] = {}
@@ -362,14 +333,10 @@ class Spec:
                     self.shared[f'{node.name}.{name}'] = Shared(
                         module, cls, meth, stmt.lineno)
                 case ast.Assign(targets=[ast.Name(name)],
-                                value=value) if _clone_target(value):
-                    target, decorators = _clone_target(value)
-                    clone = Clone(target, stmt.lineno, decorators)
-                    doc = _docstring(body[i + 1:i + 2])
-                    if doc is not None:
-                        clone.docstring = doc
-                        clone.docstring_margin = body[i + 1].col_offset
-                    self.clones[f'{node.name}.{name}'] = clone
+                                value=ast.Name() | ast.Call()):
+                    raise SpecError(f"{self.where(stmt)}: Python has no "
+                                    f"clones: write {name} as a full def "
+                                    "(clinic generates the same code)")
 
     # -- implemented functions ---------------------------------------------
 
@@ -495,8 +462,6 @@ class Spec:
         clinic functions")."""
         if name in self.shared:
             return SHARED
-        if name in self.clones:
-            return CLINIC
         meth = name.rpartition('.')[2]
         if slots.is_slot(meth):
             return SLOT
@@ -511,7 +476,7 @@ class Spec:
         return CLINIC
 
     def entries(self, cls_name: str) -> list[str]:
-        """Names of all the methods, clones and shared methods of class
+        """Names of all the methods and shared methods of class
         *cls_name*, in order."""
         names = []
         for stmt in self.classes[cls_name].body:
@@ -519,8 +484,7 @@ class Spec:
                 case ast.FunctionDef(name=name):
                     names.append(name)
                 case ast.Assign(targets=[ast.Name(name)]) \
-                        if (f'{cls_name}.{name}' in self.clones
-                            or f'{cls_name}.{name}' in self.shared):
+                        if f'{cls_name}.{name}' in self.shared:
                     names.append(name)
         return names
 
@@ -537,60 +501,32 @@ class Spec:
 
     def has_method(self, name: str) -> bool:
         """True if *name* is a clinic function of the spec."""
-        if not (name in self.clones or ('.' in name
-                                        and name in self.functions)):
+        if '.' not in name or name not in self.functions:
             return False
         return self.method_kind(name) == CLINIC
 
     def methods(self, cls_name: str) -> list[str]:
-        """Names of the clinic functions (methods and clones) of class
+        """Names of the clinic functions of class
         *cls_name*, in order."""
         return [meth for meth in self.entries(cls_name)
                 if self.method_kind(f'{cls_name}.{meth}') == CLINIC]
 
     def decorator_lineno(self, name: str, decorator: str) -> int:
-        """Line of decorator *decorator* of method (or clone) *name*."""
-        clone = self.clones.get(name)
-        if clone is not None:
-            decorators, lineno = clone.decorators, clone.lineno
-        else:
-            node = self.functions[name]
-            decorators, lineno = node.decorator_list, node.lineno
-        for d in decorators:
+        """Line of decorator *decorator* of method *name*."""
+        node = self.functions[name]
+        for d in node.decorator_list:
             if isinstance(d, ast.Call):
                 d = d.func
             if isinstance(d, ast.Name) and d.id == decorator:
                 return d.lineno
-        return lineno
+        return node.lineno
 
-    def clinic_input(self, name: str, clinic_class: str
-                     ) -> tuple[list[str], str, list[str]]:
-        """Clinic DSL for spec method (or clone) *name*.
+    def clinic_input(self, name: str) -> tuple[list[str], str, list[str]]:
+        """Clinic DSL for spec method *name*.
 
         Return (decorator lines, text to append to the function line,
-        the lines after the function line).  *clinic_class* is the dotted
-        clinic name of the class, used for the target of a clone.
+        the lines after the function line).
         """
-        clone = self.clones.get(name)
-        if clone is not None:
-            cls_name = name.partition('.')[0]
-            target = f'{cls_name}.{clone.target}'
-            if target not in self.functions:
-                raise SpecError(f"{self.filename}:{clone.lineno}: {name} "
-                                f"clones {target}, which is not a spec "
-                                "method")
-            # Clinic requires the kind of a clone to be that of its
-            # target, and copies everything else from it.
-            _, kind = self._decorators(self.functions[target])
-            decorators = [f'@{kind}'] if kind in METHOD_DECORATORS else []
-            decorators += [self._decorator_line(d) for d in clone.decorators]
-            lines = []
-            if clone.docstring is not None:
-                lines = ['', *self._clean_docstring(
-                    clone.docstring, clone.docstring_margin)]
-            return (decorators,
-                    f' = {clinic_class}.{clone.target}', lines)
-
         node = self.functions[name]
         decorators, kind = self._decorators(node)
         suffix = ''

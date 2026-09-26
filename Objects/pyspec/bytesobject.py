@@ -121,26 +121,21 @@ class bytes:
 
     @permit_long_summary
     @text_signature("($self, sub[, start[, end]], /)")
-    def find(
+    def count(
         self,
         sub: object,
         start: slice_index(accept={int, NoneType}, c_default='0') = None,
         end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
         /,
     ):
-        """Return the lowest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+        """Return the number of non-overlapping occurrences of subsection 'sub' in bytes B[start:end].
 
           start
             Optional start position. Default: start of the bytes.
           end
             Optional stop position. Default: end of the bytes.
-
-        Return -1 on failure.
         """
         ...
-
-    count = permit_long_summary(find)
-    """Return the number of non-overlapping occurrences of subsection 'sub' in bytes B[start:end]."""
 
     def decode(
         self,
@@ -182,6 +177,26 @@ class bytes:
 
     expandtabs = transmogrify.B.expandtabs
 
+    @permit_long_summary
+    @text_signature("($self, sub[, start[, end]], /)")
+    def find(
+        self,
+        sub: object,
+        start: slice_index(accept={int, NoneType}, c_default='0') = None,
+        end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
+        /,
+    ):
+        """Return the lowest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+
+          start
+            Optional start position. Default: start of the bytes.
+          end
+            Optional stop position. Default: end of the bytes.
+
+        Return -1 on failure.
+        """
+        ...
+
     @classmethod
     def fromhex(cls, string: object, /):
         r"""Create a bytes object from a string of hexadecimal numbers.
@@ -216,11 +231,25 @@ class bytes:
         """
         ...
 
-    index = permit_long_summary(find)
-    """Return the lowest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+    @permit_long_summary
+    @text_signature("($self, sub[, start[, end]], /)")
+    def index(
+        self,
+        sub: object,
+        start: slice_index(accept={int, NoneType}, c_default='0') = None,
+        end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
+        /,
+    ):
+        """Return the lowest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
 
-    Raise ValueError if the subsection is not found.
-    """
+          start
+            Optional start position. Default: start of the bytes.
+          end
+            Optional stop position. Default: end of the bytes.
+
+        Raise ValueError if the subsection is not found.
+        """
+        ...
 
     isalnum = ctype.B.isalnum
 
@@ -317,17 +346,45 @@ class bytes:
         """
         ...
 
-    rfind = permit_long_summary(find)
-    """Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+    @permit_long_summary
+    @text_signature("($self, sub[, start[, end]], /)")
+    def rfind(
+        self,
+        sub: object,
+        start: slice_index(accept={int, NoneType}, c_default='0') = None,
+        end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
+        /,
+    ):
+        """Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
 
-    Return -1 on failure.
-    """
+          start
+            Optional start position. Default: start of the bytes.
+          end
+            Optional stop position. Default: end of the bytes.
 
-    rindex = permit_long_summary(find)
-    """Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+        Return -1 on failure.
+        """
+        ...
 
-    Raise ValueError if the subsection is not found.
-    """
+    @permit_long_summary
+    @text_signature("($self, sub[, start[, end]], /)")
+    def rindex(
+        self,
+        sub: object,
+        start: slice_index(accept={int, NoneType}, c_default='0') = None,
+        end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
+        /,
+    ):
+        """Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+
+          start
+            Optional start position. Default: start of the bytes.
+          end
+            Optional stop position. Default: end of the bytes.
+
+        Raise ValueError if the subsection is not found.
+        """
+        ...
 
     rjust = transmogrify.B.rjust
 
@@ -345,6 +402,30 @@ class bytes:
         ...
 
     @permit_long_summary
+    def rsplit(self, sep: object = None, maxsplit: Py_ssize_t = -1):
+        """Return a list of the sections in the bytes, using sep as the delimiter.
+
+          sep
+            The delimiter according which to split the bytes.
+            None (the default value) means split on ASCII whitespace
+            characters (space, tab, return, newline, formfeed, vertical tab).
+          maxsplit
+            Maximum number of splits to do.
+            -1 (the default value) means no limit.
+
+        Splitting is done starting at the end of the bytes and working to
+        the front.
+        """
+        ...
+
+    def rstrip(self, bytes: object = None, /):
+        """Strip trailing bytes contained in the argument.
+
+        If the argument is omitted or None, strip trailing ASCII whitespace.
+        """
+        ...
+
+    @permit_long_summary
     def split(self, sep: object = None, maxsplit: Py_ssize_t = -1):
         """Return a list of the sections in the bytes, using sep as the delimiter.
 
@@ -355,20 +436,6 @@ class bytes:
           maxsplit
             Maximum number of splits to do.
             -1 (the default value) means no limit.
-        """
-        ...
-
-    rsplit = permit_long_summary(split)
-    """Return a list of the sections in the bytes, using sep as the delimiter.
-
-    Splitting is done starting at the end of the bytes and working to
-    the front.
-    """
-
-    def rstrip(self, bytes: object = None, /):
-        """Strip trailing bytes contained in the argument.
-
-        If the argument is omitted or None, strip trailing ASCII whitespace.
         """
         ...
 

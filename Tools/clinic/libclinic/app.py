@@ -273,6 +273,8 @@ impl_definition block
                     self._pyspec = frontend.Spec.load(path)
                 except SyntaxError as exc:
                     fail(f"{path}: {exc}")
+                except frontend.SpecError as exc:
+                    fail(str(exc))
         return self._pyspec
 
     def parse_spec_methods(self) -> None:
@@ -299,18 +301,10 @@ impl_definition block
             except frontend.SpecError as exc:
                 fail(str(exc))
             for meth in methods:
-                # A clone needs its target first: the order of the spec
-                # is that of the method table, not of clinic.
-                todo = [meth]
-                while (clone := spec.clones.get(f'{cls.name}.{todo[-1]}')) \
-                        and clone.target not in declared \
-                        and clone.target not in todo:
-                    todo.append(clone.target)
-                for name in reversed(todo):
-                    if name not in declared:
-                        self._parse_spec_method(parser, spec, cls.name,
-                                                path, name)
-                        declared.add(name)
+                if meth not in declared:
+                    self._parse_spec_method(parser, spec, cls.name,
+                                            path, meth)
+                    declared.add(meth)
 
     def _clinic_classes(self, parent: Any, prefix: str
                         ) -> list[tuple[str, Class]]:
@@ -331,7 +325,7 @@ impl_definition block
         buffers['impl_definition'] = self.get_destination_buffer('suppress')
         block = Block(f'{path}.{meth}\n', dsl_name='clinic')
         name = f'{cls_name}.{meth}'
-        node = spec.functions.get(name) or spec.clones[name]
+        node = spec.functions[name]
         try:
             parser.parse(block)
             if ''.join(block.output).strip():

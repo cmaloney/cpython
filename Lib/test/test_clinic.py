@@ -5948,7 +5948,9 @@ class PyspecStubTest(PyspecTestBase):
             bytes.meth -> Py_ssize_t
         """)
 
-    def test_clone(self):
+    def test_same_signature_as_clone(self):
+        # Python has no clones: a method with the signature of another is
+        # a full def, and clinic generates what it does for a clone.
         spec = """
             class bytes:
                 def meth(self, a: object = None, /):
@@ -5959,11 +5961,15 @@ class PyspecStubTest(PyspecTestBase):
                     '''
                     ...
 
-                other = meth
-                '''Other summary.
+                def other(self, a: object = None, /):
+                    '''Other summary.
 
-                More.
-                '''
+                      a
+                        Doc of a.
+
+                    More.
+                    '''
+                    ...
         """
         output = self.check(spec, """
             bytes.meth
@@ -6098,36 +6104,20 @@ class PyspecStubTest(PyspecTestBase):
                 /
         """)
 
-    def test_decorated_clone(self):
-        # A decorated clone is written as the call the decorator is.
-        long_summary = "Other " + "x" * 80
-        spec = f"""
-            class bytes:
-                def meth(self, a: object = None, /):
-                    '''Summary.'''
-                    ...
+    def test_no_clones(self):
+        for clone in ("other = meth", "other = permit_long_summary(meth)"):
+            spec = f"""
+                class bytes:
+                    def meth(self, a: object = None, /):
+                        '''Summary.'''
+                        ...
 
-                other = permit_long_summary(meth)
-                '''{long_summary}'''
-        """
-        self.check(spec, """
-            bytes.meth
-            [clinic start generated code]*/
-            /*[clinic input]
-            bytes.other
-        """, f"""
-            bytes.meth
-                a: object = None
-                /
-
-            Summary.
-            [clinic start generated code]*/
-            /*[clinic input]
-            @permit_long_summary
-            bytes.other = bytes.meth
-
-            {long_summary}
-        """)
+                    {clone}
+            """
+            with self.subTest(clone=clone):
+                self.expect_failure(spec, self.block("bytes.meth\n"),
+                                    "Python has no clones: write other as "
+                                    "a full def")
 
     def test_unneeded_permit_long_summary(self):
         # The warning points at the decorator in the spec.
@@ -6138,8 +6128,10 @@ class PyspecStubTest(PyspecTestBase):
                     '''Summary.'''
                     ...
 
-                other = permit_long_summary(meth)
-                '''Other.'''
+                @permit_long_summary
+                def other(self, /):
+                    '''Other.'''
+                    ...
         """
         with support.captured_stdout() as stdout:
             self.generate(spec, self.block(
@@ -6279,8 +6271,9 @@ class PyspecNoBlockTest(PyspecTestBase):
                 '''Summary line which is longer than the eighty characters of a summary.'''
                 ...
 
-            other = meth
-            '''Other summary.'''
+            def other(self, a: object, /):
+                '''Other summary.'''
+                ...
     """
 
     def generate_file(self, spec, text):

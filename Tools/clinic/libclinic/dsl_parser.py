@@ -632,7 +632,7 @@ class DSLParser:
                 fail(f"{names!r}: {shlex.split(line)[0]} of a spec method "
                      f"is written in {spec.filename}")
         try:
-            spec_decorators, suffix, rest = spec.clinic_input(name, prefix)
+            spec_decorators, suffix, rest = spec.clinic_input(name)
         except frontend.SpecError as exc:
             fail(str(exc))
         self.spec_function = name
@@ -668,9 +668,7 @@ class DSLParser:
     def spec_note(self) -> str:
         spec = self.clinic.pyspec
         assert spec is not None and self.spec_function is not None
-        node = spec.functions.get(self.spec_function)
-        lineno = (node.lineno if node is not None
-                  else spec.clones[self.spec_function].lineno)
+        lineno = spec.functions[self.spec_function].lineno
         return (f"\n(in the clinic input taken from {self.spec_function} in "
                 f"{spec.filename}:{lineno})")
 

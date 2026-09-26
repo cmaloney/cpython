@@ -207,57 +207,6 @@ bytes___bytes__(PyObject *self, PyObject *Py_UNUSED(ignored))
     return bytes___bytes___impl((PyBytesObject *)self);
 }
 
-PyDoc_STRVAR(bytes_find__doc__,
-"find($self, sub[, start[, end]], /)\n"
-"--\n"
-"\n"
-"Return the lowest index in B where subsection \'sub\' is found, such that \'sub\' is contained within B[start,end].\n"
-"\n"
-"  start\n"
-"    Optional start position. Default: start of the bytes.\n"
-"  end\n"
-"    Optional stop position. Default: end of the bytes.\n"
-"\n"
-"Return -1 on failure.");
-
-#define BYTES_FIND_METHODDEF    \
-    {"find", _PyCFunction_CAST(bytes_find), METH_FASTCALL, bytes_find__doc__},
-
-static PyObject *
-bytes_find_impl(PyBytesObject *self, PyObject *sub, Py_ssize_t start,
-                Py_ssize_t end);
-
-static PyObject *
-bytes_find(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
-{
-    PyObject *return_value = NULL;
-    PyObject *sub;
-    Py_ssize_t start = 0;
-    Py_ssize_t end = PY_SSIZE_T_MAX;
-
-    if (!_PyArg_CheckPositional("find", nargs, 1, 3)) {
-        goto exit;
-    }
-    sub = args[0];
-    if (nargs < 2) {
-        goto skip_optional;
-    }
-    if (!_PyEval_SliceIndex(args[1], &start)) {
-        goto exit;
-    }
-    if (nargs < 3) {
-        goto skip_optional;
-    }
-    if (!_PyEval_SliceIndex(args[2], &end)) {
-        goto exit;
-    }
-skip_optional:
-    return_value = bytes_find_impl((PyBytesObject *)self, sub, start, end);
-
-exit:
-    return return_value;
-}
-
 PyDoc_STRVAR(bytes_count__doc__,
 "count($self, sub[, start[, end]], /)\n"
 "--\n"
@@ -457,6 +406,57 @@ bytes_endswith(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
     }
 skip_optional:
     return_value = bytes_endswith_impl((PyBytesObject *)self, subobj, start, end);
+
+exit:
+    return return_value;
+}
+
+PyDoc_STRVAR(bytes_find__doc__,
+"find($self, sub[, start[, end]], /)\n"
+"--\n"
+"\n"
+"Return the lowest index in B where subsection \'sub\' is found, such that \'sub\' is contained within B[start,end].\n"
+"\n"
+"  start\n"
+"    Optional start position. Default: start of the bytes.\n"
+"  end\n"
+"    Optional stop position. Default: end of the bytes.\n"
+"\n"
+"Return -1 on failure.");
+
+#define BYTES_FIND_METHODDEF    \
+    {"find", _PyCFunction_CAST(bytes_find), METH_FASTCALL, bytes_find__doc__},
+
+static PyObject *
+bytes_find_impl(PyBytesObject *self, PyObject *sub, Py_ssize_t start,
+                Py_ssize_t end);
+
+static PyObject *
+bytes_find(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    PyObject *return_value = NULL;
+    PyObject *sub;
+    Py_ssize_t start = 0;
+    Py_ssize_t end = PY_SSIZE_T_MAX;
+
+    if (!_PyArg_CheckPositional("find", nargs, 1, 3)) {
+        goto exit;
+    }
+    sub = args[0];
+    if (nargs < 2) {
+        goto skip_optional;
+    }
+    if (!_PyEval_SliceIndex(args[1], &start)) {
+        goto exit;
+    }
+    if (nargs < 3) {
+        goto skip_optional;
+    }
+    if (!_PyEval_SliceIndex(args[2], &end)) {
+        goto exit;
+    }
+skip_optional:
+    return_value = bytes_find_impl((PyBytesObject *)self, sub, start, end);
 
 exit:
     return return_value;
@@ -1098,95 +1098,6 @@ exit:
     return return_value;
 }
 
-PyDoc_STRVAR(bytes_split__doc__,
-"split($self, /, sep=None, maxsplit=-1)\n"
-"--\n"
-"\n"
-"Return a list of the sections in the bytes, using sep as the delimiter.\n"
-"\n"
-"  sep\n"
-"    The delimiter according which to split the bytes.\n"
-"    None (the default value) means split on ASCII whitespace\n"
-"    characters (space, tab, return, newline, formfeed, vertical tab).\n"
-"  maxsplit\n"
-"    Maximum number of splits to do.\n"
-"    -1 (the default value) means no limit.");
-
-#define BYTES_SPLIT_METHODDEF    \
-    {"split", _PyCFunction_CAST(bytes_split), METH_FASTCALL|METH_KEYWORDS, bytes_split__doc__},
-
-static PyObject *
-bytes_split_impl(PyBytesObject *self, PyObject *sep, Py_ssize_t maxsplit);
-
-static PyObject *
-bytes_split(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
-{
-    PyObject *return_value = NULL;
-    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
-
-    #define NUM_KEYWORDS 2
-    static struct {
-        PyGC_Head _this_is_not_used;
-        PyObject_VAR_HEAD
-        Py_hash_t ob_hash;
-        PyObject *ob_item[NUM_KEYWORDS];
-    } _kwtuple = {
-        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
-        .ob_hash = -1,
-        .ob_item = { &_Py_ID(sep), &_Py_ID(maxsplit), },
-    };
-    #undef NUM_KEYWORDS
-    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
-
-    #else  // !Py_BUILD_CORE
-    #  define KWTUPLE NULL
-    #endif  // !Py_BUILD_CORE
-
-    static const char * const _keywords[] = {"sep", "maxsplit", NULL};
-    static _PyArg_Parser _parser = {
-        .keywords = _keywords,
-        .fname = "split",
-        .kwtuple = KWTUPLE,
-    };
-    #undef KWTUPLE
-    PyObject *argsbuf[2];
-    Py_ssize_t noptargs = nargs + (kwnames ? PyTuple_GET_SIZE(kwnames) : 0) - 0;
-    PyObject *sep = Py_None;
-    Py_ssize_t maxsplit = -1;
-
-    args = _PyArg_UnpackKeywords(args, nargs, NULL, kwnames, &_parser,
-            /*minpos*/ 0, /*maxpos*/ 2, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
-    if (!args) {
-        goto exit;
-    }
-    if (!noptargs) {
-        goto skip_optional_pos;
-    }
-    if (args[0]) {
-        sep = args[0];
-        if (!--noptargs) {
-            goto skip_optional_pos;
-        }
-    }
-    {
-        Py_ssize_t ival = -1;
-        PyObject *iobj = _PyNumber_Index(args[1]);
-        if (iobj != NULL) {
-            ival = PyLong_AsSsize_t(iobj);
-            Py_DECREF(iobj);
-        }
-        if (ival == -1 && PyErr_Occurred()) {
-            goto exit;
-        }
-        maxsplit = ival;
-    }
-skip_optional_pos:
-    return_value = bytes_split_impl((PyBytesObject *)self, sep, maxsplit);
-
-exit:
-    return return_value;
-}
-
 PyDoc_STRVAR(bytes_rsplit__doc__,
 "rsplit($self, /, sep=None, maxsplit=-1)\n"
 "--\n"
@@ -1308,6 +1219,95 @@ bytes_rstrip(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
     bytes = args[0];
 skip_optional:
     return_value = bytes_rstrip_impl((PyBytesObject *)self, bytes);
+
+exit:
+    return return_value;
+}
+
+PyDoc_STRVAR(bytes_split__doc__,
+"split($self, /, sep=None, maxsplit=-1)\n"
+"--\n"
+"\n"
+"Return a list of the sections in the bytes, using sep as the delimiter.\n"
+"\n"
+"  sep\n"
+"    The delimiter according which to split the bytes.\n"
+"    None (the default value) means split on ASCII whitespace\n"
+"    characters (space, tab, return, newline, formfeed, vertical tab).\n"
+"  maxsplit\n"
+"    Maximum number of splits to do.\n"
+"    -1 (the default value) means no limit.");
+
+#define BYTES_SPLIT_METHODDEF    \
+    {"split", _PyCFunction_CAST(bytes_split), METH_FASTCALL|METH_KEYWORDS, bytes_split__doc__},
+
+static PyObject *
+bytes_split_impl(PyBytesObject *self, PyObject *sep, Py_ssize_t maxsplit);
+
+static PyObject *
+bytes_split(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
+
+    #define NUM_KEYWORDS 2
+    static struct {
+        PyGC_Head _this_is_not_used;
+        PyObject_VAR_HEAD
+        Py_hash_t ob_hash;
+        PyObject *ob_item[NUM_KEYWORDS];
+    } _kwtuple = {
+        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
+        .ob_hash = -1,
+        .ob_item = { &_Py_ID(sep), &_Py_ID(maxsplit), },
+    };
+    #undef NUM_KEYWORDS
+    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
+
+    #else  // !Py_BUILD_CORE
+    #  define KWTUPLE NULL
+    #endif  // !Py_BUILD_CORE
+
+    static const char * const _keywords[] = {"sep", "maxsplit", NULL};
+    static _PyArg_Parser _parser = {
+        .keywords = _keywords,
+        .fname = "split",
+        .kwtuple = KWTUPLE,
+    };
+    #undef KWTUPLE
+    PyObject *argsbuf[2];
+    Py_ssize_t noptargs = nargs + (kwnames ? PyTuple_GET_SIZE(kwnames) : 0) - 0;
+    PyObject *sep = Py_None;
+    Py_ssize_t maxsplit = -1;
+
+    args = _PyArg_UnpackKeywords(args, nargs, NULL, kwnames, &_parser,
+            /*minpos*/ 0, /*maxpos*/ 2, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
+    if (!args) {
+        goto exit;
+    }
+    if (!noptargs) {
+        goto skip_optional_pos;
+    }
+    if (args[0]) {
+        sep = args[0];
+        if (!--noptargs) {
+            goto skip_optional_pos;
+        }
+    }
+    {
+        Py_ssize_t ival = -1;
+        PyObject *iobj = _PyNumber_Index(args[1]);
+        if (iobj != NULL) {
+            ival = PyLong_AsSsize_t(iobj);
+            Py_DECREF(iobj);
+        }
+        if (ival == -1 && PyErr_Occurred()) {
+            goto exit;
+        }
+        maxsplit = ival;
+    }
+skip_optional_pos:
+    return_value = bytes_split_impl((PyBytesObject *)self, sep, maxsplit);
 
 exit:
     return return_value;
@@ -1540,4 +1540,4 @@ skip_optional_pos:
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=47eda23cfc139fcb input=a9049054013a1b77]*/
+/*[clinic end generated code: output=2aaf9258c5e5e483 input=a9049054013a1b77]*/

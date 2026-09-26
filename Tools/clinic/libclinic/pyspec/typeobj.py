@@ -229,8 +229,7 @@ class TypeGenerator:
         shared = self.spec.shared[name]
         other = self.spec.imported(shared.module)
         other_name = f'{shared.cls}.{shared.meth}'
-        if other_name not in other.functions and \
-                other_name not in other.clones:
+        if other_name not in other.functions:
             raise SpecError(f"{self.spec.filename}:{shared.lineno}: "
                             f"{other.filename} has no method {other_name}")
         kind = other.method_kind(other_name)
