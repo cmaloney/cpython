@@ -3307,10 +3307,11 @@ class TestUopsOptimization(unittest.TestCase):
                 self.assertIsNotNone(ex)
                 uops = get_opnames(ex)
                 self.assertIn("_GUARD_TYPE", uops)
-                # bytes(bytearray) and bytes(memoryview) run no Python
-                # code (derived from the spec): their call does not
-                # escape.
-                if isinstance(source, (bytearray, memoryview)):
+                # bytes(bytearray), bytes(memoryview) and bytes(range)
+                # run no Python code (derived from the spec: a range
+                # yields exact ints, which need no __index__): their call
+                # does not escape.
+                if isinstance(source, (bytearray, memoryview, range)):
                     self.assertIn("_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON",
                                   uops)
                     self.assertNotIn("_CALL_BUILTIN_CLASS_1_INLINE", uops)

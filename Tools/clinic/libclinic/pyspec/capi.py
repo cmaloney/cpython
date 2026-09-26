@@ -258,6 +258,10 @@ def python_calls(tree, name, _seen=None):
     defs = _function_defs(tree)
     found = []
     for node in ast.walk(defs[name]):
+        if isinstance(node, ast.For):
+            # The __next__ of the iterator.
+            found.append(f'for {ast.unparse(node.target)} in '
+                         f'{ast.unparse(node.iter)}')
         if not isinstance(node, ast.Call):
             continue
         func = node.func
@@ -860,14 +864,12 @@ def refcounts_lines(func):
 CATEGORY_LABELS = {
     'identity': 'returned unchanged (same object, new reference)',
     'buffer': 'copied through the buffer protocol',
-    'sequence': 'list/tuple fast path (items: ints in range(256))',
     'iterable': 'iterated; each item converted with __index__, '
                 'must be in range(256)',
 }
 CATEGORY_KEYWORDS = {
     'identity': ('same object', 'unchanged', 'itself'),
     'buffer': ('buffer protocol',),
-    'sequence': ('list', 'tuple', 'sequence'),
     'iterable': ('iterable', 'iterator', 'iterat'),
 }
 
@@ -918,6 +920,8 @@ def _outcomes(stmts, tp, param):
             case ast.If(body=body, orelse=orelse):
                 out += _outcomes(body, tp, param) + _outcomes(orelse, tp,
                                                               param)
+            case ast.For():
+                out.append('iter')
             case ast.With(body=body):
                 for s in body:
                     if isinstance(s, ast.Assign):
@@ -940,9 +944,7 @@ def _category(outcomes):
             return 'identity'
         if o == '_PyBytes_FromBuffer':
             return 'buffer'
-        if o == '_PyBytes_FromSequence_lock_held':
-            return 'sequence'
-        if o in ('iter', '_PyBytes_FromIterator'):
+        if o == 'iter':
             return 'iterable'
     return 'rejected'
 

@@ -6,7 +6,6 @@
 #include "pycore_bytesobject.h"   // _PyBytes_Find(), _PyBytes_RepeatBuffer()
 #include "pycore_call.h"          // _PyObject_CallNoArgs()
 #include "pycore_ceval.h"         // _PyEval_GetBuiltin()
-#include "pycore_critical_section.h" // Py_BEGIN_CRITICAL_SECTION_SEQUENCE_FAST()
 #include "pycore_format.h"        // F_LJUST
 #include "pycore_freelist.h"      // _Py_FREELIST_FREE()
 #include "pycore_global_objects.h"// _Py_GET_GLOBAL_OBJECT()
@@ -2396,11 +2395,76 @@ bytes_mod(PyObject *self, PyObject *arg)
 
 static PyObject *
 bytes_subtype_new(PyTypeObject *, PyObject *);
-static PyObject *_PyBytes_FromSequence_lock_held(PyObject *x);
-static PyObject *_PyBytes_FromIterator(PyObject *it, PyObject *x);
+static Py_ssize_t _PyBytesWriter_ResizeToAllocated(PyBytesWriter *writer);
+static void* _PyBytesWriter_ResizeAndUpdatePointer(PyBytesWriter *writer,
+                                                   Py_ssize_t size,
+                                                   void *data);
+
+/* A PyBytesWriter written one byte at a time: the C.bytes_appender
+   escape of Objects/pyspec/bytesobject.py.  The generated code keeps it
+   in a local variable and only passes its address to the always inlined
+   functions below; the rare paths take it by value.  Its address never
+   escapes, so that the compiler keeps the cursor in registers. */
+typedef struct {
+    PyBytesWriter *writer;
+    char *str;      /* where the next byte goes */
+    char *end;      /* end of the buffer */
+} bytes_appender;
+
+/* A writer of at least size bytes; writer is NULL on error. */
+static Py_NO_INLINE bytes_appender
+bytes_appender_create(Py_ssize_t size)
+{
+    bytes_appender appender = {PyBytesWriter_Create(size), NULL, NULL};
+    if (appender.writer != NULL) {
+        size = _PyBytesWriter_ResizeToAllocated(appender.writer);
+        appender.str = PyBytesWriter_GetData(appender.writer);
+        appender.end = appender.str + size;
+    }
+    return appender;
+}
+
+/* Return 0, or -1 with an exception set. */
+static inline Py_ALWAYS_INLINE int
+bytes_appender_init(bytes_appender *appender, Py_ssize_t size)
+{
+    *appender = bytes_appender_create(size);
+    return appender->writer == NULL ? -1 : 0;
+}
+
+/* The buffer is full: grow it by at least one byte.  str is NULL on
+   error. */
+static Py_NO_INLINE bytes_appender
+bytes_appender_grow(bytes_appender appender)
+{
+    PyBytesWriter *writer = appender.writer;
+    char *data = PyBytesWriter_GetData(writer);
+    appender.str = _PyBytesWriter_ResizeAndUpdatePointer(
+        writer, appender.end - data + 1, appender.str);
+    if (appender.str != NULL) {
+        Py_ssize_t size = _PyBytesWriter_ResizeToAllocated(writer);
+        appender.end = (char *)PyBytesWriter_GetData(writer) + size;
+    }
+    return appender;
+}
+
+/* Return 0, or -1 with an exception set. */
+static inline Py_ALWAYS_INLINE int
+bytes_appender_append(bytes_appender *appender, unsigned char value)
+{
+    if (appender->str == appender->end) {
+        *appender = bytes_appender_grow(*appender);
+        if (appender->str == NULL) {
+            return -1;
+        }
+    }
+    *appender->str++ = (char)value;
+    return 0;
+}
 
 /* bytes_new_impl(), the bytes_new_nargsN() functions called by
-   bytes_vectorcall() and PyBytes_FromObject() are generated from
+   bytes_vectorcall(), PyBytes_FromObject() and bytes_from_iterator()
+   (with its list and tuple variants) are generated from
    Objects/pyspec/bytesobject.py by Argument Clinic. */
 #include "clinic/bytesobject_pyspec.c.h"
 
@@ -2427,101 +2491,6 @@ _PyBytes_FromBuffer(PyObject *x)
 fail:
     PyBytesWriter_Discard(writer);
     PyBuffer_Release(&view);
-    return NULL;
-}
-
-/* Fast path for a list or tuple of ints.
-   Return the new bytes object, NULL without an exception set to fall back
-   to the slow path, or NULL with an exception set on error. */
-static PyObject *
-_PyBytes_FromSequence_lock_held(PyObject *x)
-{
-    Py_ssize_t size = PySequence_Fast_GET_SIZE(x);
-    PyBytesWriter *writer = PyBytesWriter_Create(size);
-    if (writer == NULL) {
-        return NULL;
-    }
-    char *str = PyBytesWriter_GetData(writer);
-
-    PyObject *const *items = PySequence_Fast_ITEMS(x);
-    for (Py_ssize_t i = 0; i < size; i++) {
-        Py_ssize_t value = PyLong_AsSsize_t(items[i]);
-        if (value == -1 && PyErr_Occurred()) {
-            PyBytesWriter_Discard(writer);
-            PyErr_Clear();
-            return NULL;
-        }
-
-        if (value < 0 || value >= 256) {
-            PyErr_SetString(PyExc_ValueError,
-                            "bytes must be in range(0, 256)");
-            PyBytesWriter_Discard(writer);
-            return NULL;
-        }
-        *str++ = (char) value;
-    }
-    return PyBytesWriter_Finish(writer);
-}
-
-static PyObject *
-_PyBytes_FromIterator(PyObject *it, PyObject *x)
-{
-    Py_ssize_t i, size;
-
-    /* For iterator version, create a bytes object and resize as needed */
-    size = PyObject_LengthHint(x, 64);
-    if (size == -1 && PyErr_Occurred())
-        return NULL;
-
-    PyBytesWriter *writer = PyBytesWriter_Create(size);
-    if (writer == NULL) {
-        return NULL;
-    }
-    size = _PyBytesWriter_ResizeToAllocated(writer);
-    char *str = PyBytesWriter_GetData(writer);
-
-    /* Run the iterator to exhaustion */
-    for (i = 0; ; i++) {
-        PyObject *item;
-        Py_ssize_t value;
-
-        /* Get the next item */
-        item = PyIter_Next(it);
-        if (item == NULL) {
-            if (PyErr_Occurred())
-                goto error;
-            break;
-        }
-
-        /* Interpret it as an int (__index__) */
-        value = PyNumber_AsSsize_t(item, NULL);
-        Py_DECREF(item);
-        if (value == -1 && PyErr_Occurred())
-            goto error;
-
-        /* Range check */
-        if (value < 0 || value >= 256) {
-            PyErr_SetString(PyExc_ValueError,
-                            "bytes must be in range(0, 256)");
-            goto error;
-        }
-
-        /* Append the byte */
-        if (i >= size) {
-            str = _PyBytesWriter_ResizeAndUpdatePointer(writer, size + 1, str);
-            if (str == NULL) {
-                goto error;
-            }
-
-            // Set the writer size to its allocated size
-            size = _PyBytesWriter_ResizeToAllocated(writer);
-        }
-        *str++ = (char) value;
-    }
-    return PyBytesWriter_FinishWithPointer(writer, str);
-
-  error:
-    PyBytesWriter_Discard(writer);
     return NULL;
 }
 

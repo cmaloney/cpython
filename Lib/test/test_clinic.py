@@ -6727,6 +6727,104 @@ def generator():
     yield 2
 
 
+def generator_raises():
+    yield 1
+    raise KeyError('mid-way')
+
+
+class IteratorRaises:
+    """Raises from __next__ after two items."""
+
+    def __init__(self):
+        self.n = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.n += 1
+        if self.n > 2:
+            raise KeyError('mid-way')
+        return self.n
+
+
+class OddIterator:
+    """An iterator whose __iter__ does not return itself: iteration only
+    calls __next__, and never __iter__ again."""
+
+    def __init__(self):
+        self.n = 0
+
+    def __iter__(self):
+        return iter([99])
+
+    def __next__(self):
+        self.n += 1
+        if self.n > 2:
+            raise StopIteration
+        return self.n
+
+
+class IterReturnsOdd:
+    def __iter__(self):
+        return OddIterator()
+
+
+class LengthHint:
+    """Iterates [1, 2]; __length_hint__ gives *hint* (or raises it)."""
+
+    def __init__(self, hint):
+        self.hint = hint
+
+    def __iter__(self):
+        return iter([1, 2])
+
+    def __length_hint__(self):
+        if isinstance(self.hint, BaseException):
+            raise self.hint
+        return self.hint
+
+
+class LenLies:
+    """__len__ says 5; iteration yields 2 items."""
+
+    def __len__(self):
+        return 5
+
+    def __iter__(self):
+        return iter([1, 2])
+
+
+class IntSubclassWithIndex(int):
+    """An int: its __index__ is not called."""
+
+    def __index__(self):
+        return 7
+
+
+class IndexMutates:
+    """__index__ calls mutate(items) on the list being converted."""
+
+    def __init__(self, items, mutate, value=2):
+        self.items = items
+        self.mutate = mutate
+        self.value = value
+
+    def __index__(self):
+        self.mutate(self.items)
+        return self.value
+
+
+def list_mutated_by_index(mutate):
+    items = [1]
+    items += [IndexMutates(items, mutate), 3]
+    return items
+
+
+class ListSubclass(list):
+    pass
+
+
 @unittest.skipUnless(os.path.exists(BYTES_SPEC), 'needs the source tree')
 class BytesSpecTest(TestCase):
     """Objects/pyspec/bytesobject.py, run as Python, matches bytes()."""
@@ -6793,6 +6891,52 @@ class BytesSpecTest(TestCase):
         lambda: ((types.SimpleNamespace(),), {}),
         lambda: ((1.5,), {}),
         lambda: ((None,), {}),
+        # Iterables, including lists and tuples, which Argument Clinic
+        # iterates by index with a fast path for exact ints.
+        lambda: ((generator_raises(),), {}),
+        lambda: ((IteratorRaises(),), {}),
+        lambda: ((IterReturnsOdd(),), {}),
+        lambda: ((iter(range(3)),), {}),
+        lambda: ((iter([1, IndexOnly(2), 3]),), {}),
+        lambda: (({IndexOnly(3), IndexOnly(3)},), {}),
+        lambda: ((frozenset([IndexOnly(4)]),), {}),
+        lambda: (({IndexOnly(300)},), {}),
+        lambda: ((range(256),), {}),
+        lambda: ((range(250, 260),), {}),
+        lambda: ((range(-1, 3),), {}),
+        lambda: ((range(2**70, 2**70 + 1),), {}),
+        lambda: ((b'ab',), {}),
+        lambda: (({'a': 1},), {}),
+        lambda: (([True, False, 1],), {}),
+        lambda: (((True, 2),), {}),
+        lambda: (([IntSubclassWithIndex(5)],), {}),
+        lambda: (((IntSubclass(255), IntSubclass(256)),), {}),
+        lambda: (([-2**70],), {}),
+        lambda: (((2**70,),), {}),
+        lambda: (((1, 2**64, 'a'),), {}),
+        lambda: ((iter([2**64]),), {}),
+        lambda: ((['a', 300],), {}),
+        lambda: (([300, 'a'],), {}),
+        lambda: (((1, IndexRaisesTypeError()),), {}),
+        lambda: (([1, IndexOnly(-1)],), {}),
+        lambda: ((tuple(range(256)),), {}),
+        lambda: ((list(range(300)),), {}),
+        lambda: ((list(range(200)) * 3,), {}),
+        lambda: ((ListSubclass([1, 2]),), {}),
+        lambda: ((list_mutated_by_index(list.clear),), {}),
+        lambda: ((list_mutated_by_index(lambda l: l.append(4)),), {}),
+        lambda: ((list_mutated_by_index(lambda l: l.pop()),), {}),
+        lambda: ((list_mutated_by_index(
+            lambda l: l.insert(0, 9) if len(l) < 4 else None),), {}),
+        lambda: ((list_mutated_by_index(lambda l: l.append('x')),), {}),
+        lambda: ((LengthHint(KeyError('hint')),), {}),
+        lambda: ((LengthHint('x'),), {}),
+        lambda: ((LengthHint(-1),), {}),
+        lambda: ((LengthHint(0),), {}),
+        lambda: ((LengthHint(1000),), {}),
+        lambda: ((LengthHint(2**70),), {}),
+        lambda: ((LengthHint(NotImplemented),), {}),
+        lambda: ((LenLies(),), {}),
         # Argument count and converter errors come from the clinic parser,
         # which the spec does not model.
     ]
@@ -7113,6 +7257,56 @@ class BytesSpecFactsTest(TestCase):
         self.assertIsNone(facts.alias)
         self.assertTrue(facts.runs_python)
 
+    def test_bytes_of_iterables(self):
+        # bytes_from_iterator() has a spec body: the facts of bytes(x)
+        # depend on what iterating x runs.  A range yields exact ints, so
+        # neither __next__ nor __index__ runs Python code; the items of a
+        # list, a tuple, a dict or a set may have a Python __index__.
+        pe = pyspec_partial_eval
+        _, facts = self.new_facts(range)
+        self.assertIs(facts.result_type, bytes)
+        self.assertFalse(facts.runs_python)
+        for arg_type in (list, tuple, dict, set):
+            with self.subTest(arg_type=arg_type):
+                _, facts = self.new_facts(arg_type)
+                self.assertIs(facts.result_type, bytes)
+                self.assertTrue(facts.runs_python)
+        self.assertEqual(bytes({IndexOnly(3)}), b'\x03')
+        # A list or a tuple is iterated by index, without an iterator,
+        # and ints take a fast path: the old hand-written
+        # _PyBytes_FromSequence_lock_held(), derived.
+        for arg_type in (list, tuple):
+            with self.subTest(arg_type=arg_type):
+                residual, _ = self.new_facts(arg_type)
+                loops = [node for stmt in residual
+                         for node in ast.walk(stmt)
+                         if isinstance(node, ast.For)]
+                self.assertEqual(len(loops), 1)
+                loop, = loops
+                self.assertTrue(loop.pyspec_sequence)
+                self.assertIs(loop.pyspec_iterable, arg_type)
+                self.assertEqual(ast.unparse(loop.iter), 'source')
+                code = ast.unparse(ast.Module(residual, []))
+                self.assertNotIn('iter(', code)
+                self.assertIn(f'if type({loop.target.id}) is int:', code)
+        # Any other iterable: the iterator protocol.
+        residual, _ = self.new_facts(range)
+        loop, = [node for stmt in residual for node in ast.walk(stmt)
+                 if isinstance(node, ast.For)]
+        self.assertFalse(loop.pyspec_sequence)
+        self.assertIs(loop.pyspec_iterable, range)
+        # An argument of unknown type is versioned for list and tuple.
+        residual, facts = self.new_facts(None)
+        code = ast.unparse(ast.Module(residual, []))
+        self.assertIn('if type(source) is list:', code)
+        self.assertIn('if type(source) is tuple:', code)
+        self.assertIn('bytes_from_iterator(it_1, source)', code)
+        self.assertTrue(facts.runs_python)
+        # Unknown iterators run Python code (generators, __next__).
+        env = {'it': pe.NOTNULL, 'x': pe.NOTNULL}
+        _, facts = self.facts('bytes_from_iterator', env, ['it', 'x'])
+        self.assertTrue(facts.runs_python)
+
     def test_dunder_bytes(self):
         _, facts = self.dunder_bytes_facts(bytes)
         self.assertEqual(facts.alias, 0)
@@ -7168,7 +7362,8 @@ class BytesSpecFactsTest(TestCase):
                 stub = pyspec_runtime.stub_facts(self.spec.functions[name])
                 error = {pyspec_runtime.ERR_NULL: 'NULL',
                          pyspec_runtime.ERR_NULL_OR_MISSING: 'NULL',
-                         pyspec_runtime.ERR_MINUS1: -1}[escape.error]
+                         pyspec_runtime.ERR_MINUS1: -1,
+                         pyspec_runtime.ERR_NEGATIVE: -1}[escape.error]
                 self.assertIn(error, stub.errors)
 
 
