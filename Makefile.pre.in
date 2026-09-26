@@ -2047,7 +2047,8 @@ BYTESTR_DEPS = \
 		$(srcdir)/Objects/stringlib/partition.h \
 		$(srcdir)/Objects/stringlib/split.h \
 		$(srcdir)/Objects/stringlib/stringdefs.h \
-		$(srcdir)/Objects/stringlib/transmogrify.h
+		$(srcdir)/Objects/stringlib/transmogrify.h \
+		$(srcdir)/Objects/stringlib/clinic/transmogrify.h.h
 
 UNICODE_DEPS = \
 		$(srcdir)/Objects/stringlib/asciilib.h \
@@ -2075,6 +2076,12 @@ Objects/unicodeobject.o: $(srcdir)/Objects/unicodeobject.c $(UNICODE_DEPS)
 
 Objects/dictobject.o: $(srcdir)/Objects/stringlib/eq.h
 Objects/setobject.o: $(srcdir)/Objects/stringlib/eq.h
+
+# Objects/foo.o includes what Argument Clinic generates for Objects/foo.c:
+# Objects/clinic/foo.c.h and, from the spec Objects/pyspec/foo.py,
+# Objects/clinic/foo_pyspec.c.h.
+$(foreach h,$(wildcard $(srcdir)/Objects/clinic/*.c.h),$(eval \
+	Objects/$(patsubst %_pyspec,%,$(basename $(basename $(notdir $(h))))).o: $(h)))
 
 Objects/obmalloc.o: $(srcdir)/Objects/mimalloc/alloc.c \
 		$(srcdir)/Objects/mimalloc/alloc-aligned.c \
