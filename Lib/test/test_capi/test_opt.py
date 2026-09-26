@@ -67,7 +67,10 @@ def get_all_executors(func):
 
 def iter_opnames(ex):
     for item in ex:
-        yield item[0]
+        # Debug builds check the optimizer's result facts at run time
+        # with _ASSERT_RESULT_* uops; release builds have none.
+        if not item[0].startswith("_ASSERT_RESULT_"):
+            yield item[0]
 
 
 def get_opnames(ex):

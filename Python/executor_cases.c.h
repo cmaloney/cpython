@@ -18451,7 +18451,7 @@
             STAT_INC(CALL, hit);
             volatile _PySpecFunc1 func_v = (_PySpecFunc1)func;
             PyObject *res_o = _PySpec_CallNoPython1(
-                func_v, PyStackRef_AsPyObjectBorrow(arg));
+                tstate, func_v, PyStackRef_AsPyObjectBorrow(arg));
             assert((res_o != NULL) ^ (_PyErr_Occurred(tstate) != NULL));
             if (res_o == NULL) {
                 SET_CURRENT_CACHED_VALUES(0);
@@ -18482,7 +18482,7 @@
             STAT_INC(CALL, hit);
             volatile _PySpecFunc1 func_v = (_PySpecFunc1)func;
             PyObject *res_o = _PySpec_CallNoPython1(
-                func_v, PyStackRef_AsPyObjectBorrow(arg));
+                tstate, func_v, PyStackRef_AsPyObjectBorrow(arg));
             assert((res_o != NULL) ^ (_PyErr_Occurred(tstate) != NULL));
             if (res_o == NULL) {
                 stack_pointer[0] = arg;
@@ -18517,7 +18517,7 @@
             STAT_INC(CALL, hit);
             volatile _PySpecFunc1 func_v = (_PySpecFunc1)func;
             PyObject *res_o = _PySpec_CallNoPython1(
-                func_v, PyStackRef_AsPyObjectBorrow(arg));
+                tstate, func_v, PyStackRef_AsPyObjectBorrow(arg));
             assert((res_o != NULL) ^ (_PyErr_Occurred(tstate) != NULL));
             if (res_o == NULL) {
                 stack_pointer[0] = _stack_item_0;
@@ -18554,7 +18554,7 @@
             STAT_INC(CALL, hit);
             volatile _PySpecFunc1 func_v = (_PySpecFunc1)func;
             PyObject *res_o = _PySpec_CallNoPython1(
-                func_v, PyStackRef_AsPyObjectBorrow(arg));
+                tstate, func_v, PyStackRef_AsPyObjectBorrow(arg));
             assert((res_o != NULL) ^ (_PyErr_Occurred(tstate) != NULL));
             if (res_o == NULL) {
                 stack_pointer[0] = callable;
@@ -18570,6 +18570,682 @@
             _tos_cache1 = _stack_item_1;
             _tos_cache0 = callable;
             SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_TYPE_0_r01: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            res = stack_pointer[-1];
+            PyObject *type = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      Py_IS_TYPE(PyStackRef_AsPyObjectBorrow(res), (PyTypeObject *)type),
+                                      "the tier-2 optimizer's exact result type is wrong");
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(1);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_TYPE_0_r11: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            res = _stack_item_0;
+            PyObject *type = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      Py_IS_TYPE(PyStackRef_AsPyObjectBorrow(res), (PyTypeObject *)type),
+                                      "the tier-2 optimizer's exact result type is wrong");
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_TYPE_0_r22: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            res = _stack_item_1;
+            PyObject *type = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      Py_IS_TYPE(PyStackRef_AsPyObjectBorrow(res), (PyTypeObject *)type),
+                                      "the tier-2 optimizer's exact result type is wrong");
+            _tos_cache1 = res;
+            _tos_cache0 = _stack_item_0;
+            SET_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_TYPE_0_r33: {
+            CHECK_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            _PyStackRef _stack_item_2 = _tos_cache2;
+            res = _stack_item_2;
+            PyObject *type = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      Py_IS_TYPE(PyStackRef_AsPyObjectBorrow(res), (PyTypeObject *)type),
+                                      "the tier-2 optimizer's exact result type is wrong");
+            _tos_cache2 = res;
+            _tos_cache1 = _stack_item_1;
+            _tos_cache0 = _stack_item_0;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_TYPE_1_r02: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            res = stack_pointer[-2];
+            PyObject *type = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      Py_IS_TYPE(PyStackRef_AsPyObjectBorrow(res), (PyTypeObject *)type),
+                                      "the tier-2 optimizer's exact result type is wrong");
+            _tos_cache1 = stack_pointer[-1];
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(2);
+            stack_pointer += -2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_TYPE_1_r12: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            res = stack_pointer[-1];
+            PyObject *type = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      Py_IS_TYPE(PyStackRef_AsPyObjectBorrow(res), (PyTypeObject *)type),
+                                      "the tier-2 optimizer's exact result type is wrong");
+            _tos_cache1 = _stack_item_0;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(2);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_TYPE_1_r22: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            res = _stack_item_0;
+            PyObject *type = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      Py_IS_TYPE(PyStackRef_AsPyObjectBorrow(res), (PyTypeObject *)type),
+                                      "the tier-2 optimizer's exact result type is wrong");
+            _tos_cache1 = _stack_item_1;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_TYPE_1_r33: {
+            CHECK_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            _PyStackRef _stack_item_2 = _tos_cache2;
+            res = _stack_item_1;
+            PyObject *type = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      Py_IS_TYPE(PyStackRef_AsPyObjectBorrow(res), (PyTypeObject *)type),
+                                      "the tier-2 optimizer's exact result type is wrong");
+            _tos_cache2 = _stack_item_2;
+            _tos_cache1 = res;
+            _tos_cache0 = _stack_item_0;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_TYPE_2_r03: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            res = stack_pointer[-3];
+            PyObject *type = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      Py_IS_TYPE(PyStackRef_AsPyObjectBorrow(res), (PyTypeObject *)type),
+                                      "the tier-2 optimizer's exact result type is wrong");
+            _tos_cache2 = stack_pointer[-1];
+            _tos_cache1 = stack_pointer[-2];
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -3;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_TYPE_2_r13: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            res = stack_pointer[-2];
+            PyObject *type = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      Py_IS_TYPE(PyStackRef_AsPyObjectBorrow(res), (PyTypeObject *)type),
+                                      "the tier-2 optimizer's exact result type is wrong");
+            _tos_cache2 = _stack_item_0;
+            _tos_cache1 = stack_pointer[-1];
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_TYPE_2_r23: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            res = stack_pointer[-1];
+            PyObject *type = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      Py_IS_TYPE(PyStackRef_AsPyObjectBorrow(res), (PyTypeObject *)type),
+                                      "the tier-2 optimizer's exact result type is wrong");
+            _tos_cache2 = _stack_item_1;
+            _tos_cache1 = _stack_item_0;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_TYPE_2_r33: {
+            CHECK_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            _PyStackRef _stack_item_2 = _tos_cache2;
+            res = _stack_item_0;
+            PyObject *type = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      Py_IS_TYPE(PyStackRef_AsPyObjectBorrow(res), (PyTypeObject *)type),
+                                      "the tier-2 optimizer's exact result type is wrong");
+            _tos_cache2 = _stack_item_2;
+            _tos_cache1 = _stack_item_1;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_TYPE_3_r03: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            res = stack_pointer[-4];
+            PyObject *type = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      Py_IS_TYPE(PyStackRef_AsPyObjectBorrow(res), (PyTypeObject *)type),
+                                      "the tier-2 optimizer's exact result type is wrong");
+            _tos_cache2 = stack_pointer[-1];
+            _tos_cache1 = stack_pointer[-2];
+            _tos_cache0 = stack_pointer[-3];
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -3;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_TYPE_3_r13: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            res = stack_pointer[-3];
+            PyObject *type = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      Py_IS_TYPE(PyStackRef_AsPyObjectBorrow(res), (PyTypeObject *)type),
+                                      "the tier-2 optimizer's exact result type is wrong");
+            _tos_cache2 = _stack_item_0;
+            _tos_cache1 = stack_pointer[-1];
+            _tos_cache0 = stack_pointer[-2];
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_TYPE_3_r23: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            res = stack_pointer[-2];
+            PyObject *type = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      Py_IS_TYPE(PyStackRef_AsPyObjectBorrow(res), (PyTypeObject *)type),
+                                      "the tier-2 optimizer's exact result type is wrong");
+            _tos_cache2 = _stack_item_1;
+            _tos_cache1 = _stack_item_0;
+            _tos_cache0 = stack_pointer[-1];
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_TYPE_3_r33: {
+            CHECK_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            _PyStackRef _stack_item_2 = _tos_cache2;
+            res = stack_pointer[-1];
+            PyObject *type = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      Py_IS_TYPE(PyStackRef_AsPyObjectBorrow(res), (PyTypeObject *)type),
+                                      "the tier-2 optimizer's exact result type is wrong");
+            _tos_cache2 = _stack_item_2;
+            _tos_cache1 = _stack_item_1;
+            _tos_cache0 = _stack_item_0;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_TYPE_r00: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            oparg = CURRENT_OPARG();
+            res = stack_pointer[-1 - oparg];
+            PyObject *type = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      Py_IS_TYPE(PyStackRef_AsPyObjectBorrow(res), (PyTypeObject *)type),
+                                      "the tier-2 optimizer's exact result type is wrong");
+            SET_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_IS_0_r01: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            res = stack_pointer[-1];
+            PyObject *value = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      PyStackRef_AsPyObjectBorrow(res) == (PyObject *)value,
+                                      "the tier-2 optimizer's constant result is wrong");
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(1);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_IS_0_r11: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            res = _stack_item_0;
+            PyObject *value = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      PyStackRef_AsPyObjectBorrow(res) == (PyObject *)value,
+                                      "the tier-2 optimizer's constant result is wrong");
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_IS_0_r22: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            res = _stack_item_1;
+            PyObject *value = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      PyStackRef_AsPyObjectBorrow(res) == (PyObject *)value,
+                                      "the tier-2 optimizer's constant result is wrong");
+            _tos_cache1 = res;
+            _tos_cache0 = _stack_item_0;
+            SET_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_IS_0_r33: {
+            CHECK_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            _PyStackRef _stack_item_2 = _tos_cache2;
+            res = _stack_item_2;
+            PyObject *value = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      PyStackRef_AsPyObjectBorrow(res) == (PyObject *)value,
+                                      "the tier-2 optimizer's constant result is wrong");
+            _tos_cache2 = res;
+            _tos_cache1 = _stack_item_1;
+            _tos_cache0 = _stack_item_0;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_IS_1_r02: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            res = stack_pointer[-2];
+            PyObject *value = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      PyStackRef_AsPyObjectBorrow(res) == (PyObject *)value,
+                                      "the tier-2 optimizer's constant result is wrong");
+            _tos_cache1 = stack_pointer[-1];
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(2);
+            stack_pointer += -2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_IS_1_r12: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            res = stack_pointer[-1];
+            PyObject *value = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      PyStackRef_AsPyObjectBorrow(res) == (PyObject *)value,
+                                      "the tier-2 optimizer's constant result is wrong");
+            _tos_cache1 = _stack_item_0;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(2);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_IS_1_r22: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            res = _stack_item_0;
+            PyObject *value = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      PyStackRef_AsPyObjectBorrow(res) == (PyObject *)value,
+                                      "the tier-2 optimizer's constant result is wrong");
+            _tos_cache1 = _stack_item_1;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_IS_1_r33: {
+            CHECK_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            _PyStackRef _stack_item_2 = _tos_cache2;
+            res = _stack_item_1;
+            PyObject *value = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      PyStackRef_AsPyObjectBorrow(res) == (PyObject *)value,
+                                      "the tier-2 optimizer's constant result is wrong");
+            _tos_cache2 = _stack_item_2;
+            _tos_cache1 = res;
+            _tos_cache0 = _stack_item_0;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_IS_2_r03: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            res = stack_pointer[-3];
+            PyObject *value = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      PyStackRef_AsPyObjectBorrow(res) == (PyObject *)value,
+                                      "the tier-2 optimizer's constant result is wrong");
+            _tos_cache2 = stack_pointer[-1];
+            _tos_cache1 = stack_pointer[-2];
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -3;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_IS_2_r13: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            res = stack_pointer[-2];
+            PyObject *value = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      PyStackRef_AsPyObjectBorrow(res) == (PyObject *)value,
+                                      "the tier-2 optimizer's constant result is wrong");
+            _tos_cache2 = _stack_item_0;
+            _tos_cache1 = stack_pointer[-1];
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_IS_2_r23: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            res = stack_pointer[-1];
+            PyObject *value = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      PyStackRef_AsPyObjectBorrow(res) == (PyObject *)value,
+                                      "the tier-2 optimizer's constant result is wrong");
+            _tos_cache2 = _stack_item_1;
+            _tos_cache1 = _stack_item_0;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_IS_2_r33: {
+            CHECK_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            _PyStackRef _stack_item_2 = _tos_cache2;
+            res = _stack_item_0;
+            PyObject *value = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      PyStackRef_AsPyObjectBorrow(res) == (PyObject *)value,
+                                      "the tier-2 optimizer's constant result is wrong");
+            _tos_cache2 = _stack_item_2;
+            _tos_cache1 = _stack_item_1;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_IS_3_r03: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            res = stack_pointer[-4];
+            PyObject *value = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      PyStackRef_AsPyObjectBorrow(res) == (PyObject *)value,
+                                      "the tier-2 optimizer's constant result is wrong");
+            _tos_cache2 = stack_pointer[-1];
+            _tos_cache1 = stack_pointer[-2];
+            _tos_cache0 = stack_pointer[-3];
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -3;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_IS_3_r13: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            res = stack_pointer[-3];
+            PyObject *value = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      PyStackRef_AsPyObjectBorrow(res) == (PyObject *)value,
+                                      "the tier-2 optimizer's constant result is wrong");
+            _tos_cache2 = _stack_item_0;
+            _tos_cache1 = stack_pointer[-1];
+            _tos_cache0 = stack_pointer[-2];
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_IS_3_r23: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            res = stack_pointer[-2];
+            PyObject *value = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      PyStackRef_AsPyObjectBorrow(res) == (PyObject *)value,
+                                      "the tier-2 optimizer's constant result is wrong");
+            _tos_cache2 = _stack_item_1;
+            _tos_cache1 = _stack_item_0;
+            _tos_cache0 = stack_pointer[-1];
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_IS_3_r33: {
+            CHECK_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            _PyStackRef _stack_item_2 = _tos_cache2;
+            res = stack_pointer[-1];
+            PyObject *value = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      PyStackRef_AsPyObjectBorrow(res) == (PyObject *)value,
+                                      "the tier-2 optimizer's constant result is wrong");
+            _tos_cache2 = _stack_item_2;
+            _tos_cache1 = _stack_item_1;
+            _tos_cache0 = _stack_item_0;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ASSERT_RESULT_IS_r00: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef res;
+            oparg = CURRENT_OPARG();
+            res = stack_pointer[-1 - oparg];
+            PyObject *value = (PyObject *)CURRENT_OPERAND0_64();
+            _PyObject_ASSERT_WITH_MSG(
+                                      PyStackRef_AsPyObjectBorrow(res),
+                                      PyStackRef_AsPyObjectBorrow(res) == (PyObject *)value,
+                                      "the tier-2 optimizer's constant result is wrong");
+            SET_CURRENT_CACHED_VALUES(0);
             ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
             break;
         }

@@ -4349,6 +4349,7 @@
                 res = sym_new_type(ctx, &PyUnicode_Type);
             }
             a = arg;
+            ASSERT_RESULT_FACTS(res, 1);
             CHECK_STACK_BOUNDS(-1);
             stack_pointer[-3] = res;
             stack_pointer[-2] = a;
@@ -4381,6 +4382,7 @@
                 res = sym_new_type(ctx, &PyTuple_Type);
             }
             a = arg;
+            ASSERT_RESULT_FACTS(res, 1);
             CHECK_STACK_BOUNDS(-1);
             stack_pointer[-3] = res;
             stack_pointer[-2] = a;
@@ -4537,6 +4539,7 @@
                 ADD_OP(_SWAP, 3, 0);
                 args[0] = PyJitRef_Borrow(callable);
                 callable = PyJitRef_StripReferenceInfo(arg);
+                ASSERT_RESULT_FACTS(callable, 2);
             }
             else if (call != NULL) {
                 if (oparg == 0) {
@@ -4559,6 +4562,7 @@
                 else {
                     callable = sym_new_not_null(ctx);
                 }
+                ASSERT_RESULT_FACTS(callable, oparg + 1);
             }
             else {
                 callable = sym_new_not_null(ctx);
@@ -4576,6 +4580,14 @@
         }
 
         case _CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON: {
+            break;
+        }
+
+        case _ASSERT_RESULT_TYPE: {
+            break;
+        }
+
+        case _ASSERT_RESULT_IS: {
             break;
         }
 
@@ -4741,6 +4753,7 @@
             }
             a = arg;
             c = callable;
+            ASSERT_RESULT_FACTS(res, 2);
             stack_pointer[-3] = res;
             stack_pointer[-2] = a;
             stack_pointer[-1] = c;
@@ -4784,6 +4797,9 @@
                 optimize_pop_top(ctx, this_instr, null);
                 optimize_pop_top(ctx, this_instr, callable);
                 ADD_OP(_LOAD_CONST_INLINE_BORROW, 0, (uintptr_t)out);
+            }
+            else {
+                ASSERT_RESULT_FACTS(res, 0);
             }
             CHECK_STACK_BOUNDS(-3);
             stack_pointer[-4] = res;
@@ -5047,6 +5063,7 @@
                 res = PyJitRef_StripReferenceInfo(self_or_null);
                 c = self_or_null;
                 s = callable;
+                ASSERT_RESULT_FACTS(res, 2);
             }
             else {
                 if (callable_o && Py_IS_TYPE(callable_o, &PyMethodDescr_Type)
@@ -5064,6 +5081,7 @@
                 else {
                     res = sym_new_not_null(ctx);
                 }
+                ASSERT_RESULT_FACTS(res, 2);
                 c = callable;
                 if (sym_is_not_null(self_or_null)) {
                     args--;

@@ -102,6 +102,11 @@ typedef struct _PyThreadStateImpl {
 #if _Py_TIER2
     struct _PyJitTracerState *jit_tracer_state;
 #endif
+#ifdef Py_DEBUG
+    // Non-zero while a call the pyspec facts say runs no Python code is
+    // running: see _PySpec_EnterNoPython() in pycore_pyspec.h.
+    int pyspec_no_python;
+#endif
 
 #ifdef Py_GIL_DISABLED
     // gh-144438: Add padding to ensure that the fields above don't share a

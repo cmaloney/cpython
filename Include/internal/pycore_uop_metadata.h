@@ -328,6 +328,16 @@ const uint32_t _PyUop_Flags[MAX_UOP_ID+1] = {
     [_CALL_BUILTIN_CLASS_0_INLINE] = HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
     [_CALL_BUILTIN_CLASS_1_INLINE] = HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
     [_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON] = HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG,
+    [_ASSERT_RESULT_TYPE_0] = 0,
+    [_ASSERT_RESULT_TYPE_1] = 0,
+    [_ASSERT_RESULT_TYPE_2] = 0,
+    [_ASSERT_RESULT_TYPE_3] = 0,
+    [_ASSERT_RESULT_TYPE] = HAS_ARG_FLAG,
+    [_ASSERT_RESULT_IS_0] = 0,
+    [_ASSERT_RESULT_IS_1] = 0,
+    [_ASSERT_RESULT_IS_2] = 0,
+    [_ASSERT_RESULT_IS_3] = 0,
+    [_ASSERT_RESULT_IS] = HAS_ARG_FLAG,
     [_GUARD_CALLABLE_BUILTIN_O] = HAS_ARG_FLAG | HAS_EXIT_FLAG,
     [_CALL_BUILTIN_O] = HAS_ARG_FLAG | HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
     [_GUARD_CALLABLE_BUILTIN_FAST] = HAS_ARG_FLAG | HAS_EXIT_FLAG,
@@ -442,6 +452,8 @@ const ReplicationRange _PyUop_Replication[MAX_UOP_ID+1] = {
     [_LOAD_SMALL_INT] = { 0, 4 },
     [_SWAP_FAST] = { 0, 8 },
     [_INIT_CALL_PY_EXACT_ARGS] = { 0, 5 },
+    [_ASSERT_RESULT_TYPE] = { 0, 4 },
+    [_ASSERT_RESULT_IS] = { 0, 4 },
     [_COPY] = { 1, 4 },
     [_SWAP] = { 2, 4 },
     [_GUARD_BIT_IS_SET_POP] = { 4, 8 },
@@ -3086,6 +3098,96 @@ const _PyUopCachingInfo _PyUop_Caching[MAX_UOP_ID+1] = {
             { 3, 3, _CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON_r33 },
         },
     },
+    [_ASSERT_RESULT_TYPE_0] = {
+        .best = { 0, 1, 2, 3 },
+        .entries = {
+            { 1, 0, _ASSERT_RESULT_TYPE_0_r01 },
+            { 1, 1, _ASSERT_RESULT_TYPE_0_r11 },
+            { 2, 2, _ASSERT_RESULT_TYPE_0_r22 },
+            { 3, 3, _ASSERT_RESULT_TYPE_0_r33 },
+        },
+    },
+    [_ASSERT_RESULT_TYPE_1] = {
+        .best = { 0, 1, 2, 3 },
+        .entries = {
+            { 2, 0, _ASSERT_RESULT_TYPE_1_r02 },
+            { 2, 1, _ASSERT_RESULT_TYPE_1_r12 },
+            { 2, 2, _ASSERT_RESULT_TYPE_1_r22 },
+            { 3, 3, _ASSERT_RESULT_TYPE_1_r33 },
+        },
+    },
+    [_ASSERT_RESULT_TYPE_2] = {
+        .best = { 0, 1, 2, 3 },
+        .entries = {
+            { 3, 0, _ASSERT_RESULT_TYPE_2_r03 },
+            { 3, 1, _ASSERT_RESULT_TYPE_2_r13 },
+            { 3, 2, _ASSERT_RESULT_TYPE_2_r23 },
+            { 3, 3, _ASSERT_RESULT_TYPE_2_r33 },
+        },
+    },
+    [_ASSERT_RESULT_TYPE_3] = {
+        .best = { 0, 1, 2, 3 },
+        .entries = {
+            { 3, 0, _ASSERT_RESULT_TYPE_3_r03 },
+            { 3, 1, _ASSERT_RESULT_TYPE_3_r13 },
+            { 3, 2, _ASSERT_RESULT_TYPE_3_r23 },
+            { 3, 3, _ASSERT_RESULT_TYPE_3_r33 },
+        },
+    },
+    [_ASSERT_RESULT_TYPE] = {
+        .best = { 0, 0, 0, 0 },
+        .entries = {
+            { 0, 0, _ASSERT_RESULT_TYPE_r00 },
+            { -1, -1, -1 },
+            { -1, -1, -1 },
+            { -1, -1, -1 },
+        },
+    },
+    [_ASSERT_RESULT_IS_0] = {
+        .best = { 0, 1, 2, 3 },
+        .entries = {
+            { 1, 0, _ASSERT_RESULT_IS_0_r01 },
+            { 1, 1, _ASSERT_RESULT_IS_0_r11 },
+            { 2, 2, _ASSERT_RESULT_IS_0_r22 },
+            { 3, 3, _ASSERT_RESULT_IS_0_r33 },
+        },
+    },
+    [_ASSERT_RESULT_IS_1] = {
+        .best = { 0, 1, 2, 3 },
+        .entries = {
+            { 2, 0, _ASSERT_RESULT_IS_1_r02 },
+            { 2, 1, _ASSERT_RESULT_IS_1_r12 },
+            { 2, 2, _ASSERT_RESULT_IS_1_r22 },
+            { 3, 3, _ASSERT_RESULT_IS_1_r33 },
+        },
+    },
+    [_ASSERT_RESULT_IS_2] = {
+        .best = { 0, 1, 2, 3 },
+        .entries = {
+            { 3, 0, _ASSERT_RESULT_IS_2_r03 },
+            { 3, 1, _ASSERT_RESULT_IS_2_r13 },
+            { 3, 2, _ASSERT_RESULT_IS_2_r23 },
+            { 3, 3, _ASSERT_RESULT_IS_2_r33 },
+        },
+    },
+    [_ASSERT_RESULT_IS_3] = {
+        .best = { 0, 1, 2, 3 },
+        .entries = {
+            { 3, 0, _ASSERT_RESULT_IS_3_r03 },
+            { 3, 1, _ASSERT_RESULT_IS_3_r13 },
+            { 3, 2, _ASSERT_RESULT_IS_3_r23 },
+            { 3, 3, _ASSERT_RESULT_IS_3_r33 },
+        },
+    },
+    [_ASSERT_RESULT_IS] = {
+        .best = { 0, 0, 0, 0 },
+        .entries = {
+            { 0, 0, _ASSERT_RESULT_IS_r00 },
+            { -1, -1, -1 },
+            { -1, -1, -1 },
+            { -1, -1, -1 },
+        },
+    },
     [_GUARD_CALLABLE_BUILTIN_O] = {
         .best = { 0, 0, 0, 0 },
         .entries = {
@@ -4614,6 +4716,40 @@ const uint16_t _PyUop_Uncached[MAX_UOP_REGS_ID+1] = {
     [_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON_r13] = _CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON,
     [_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON_r23] = _CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON,
     [_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON_r33] = _CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON,
+    [_ASSERT_RESULT_TYPE_0_r01] = _ASSERT_RESULT_TYPE_0,
+    [_ASSERT_RESULT_TYPE_0_r11] = _ASSERT_RESULT_TYPE_0,
+    [_ASSERT_RESULT_TYPE_0_r22] = _ASSERT_RESULT_TYPE_0,
+    [_ASSERT_RESULT_TYPE_0_r33] = _ASSERT_RESULT_TYPE_0,
+    [_ASSERT_RESULT_TYPE_1_r02] = _ASSERT_RESULT_TYPE_1,
+    [_ASSERT_RESULT_TYPE_1_r12] = _ASSERT_RESULT_TYPE_1,
+    [_ASSERT_RESULT_TYPE_1_r22] = _ASSERT_RESULT_TYPE_1,
+    [_ASSERT_RESULT_TYPE_1_r33] = _ASSERT_RESULT_TYPE_1,
+    [_ASSERT_RESULT_TYPE_2_r03] = _ASSERT_RESULT_TYPE_2,
+    [_ASSERT_RESULT_TYPE_2_r13] = _ASSERT_RESULT_TYPE_2,
+    [_ASSERT_RESULT_TYPE_2_r23] = _ASSERT_RESULT_TYPE_2,
+    [_ASSERT_RESULT_TYPE_2_r33] = _ASSERT_RESULT_TYPE_2,
+    [_ASSERT_RESULT_TYPE_3_r03] = _ASSERT_RESULT_TYPE_3,
+    [_ASSERT_RESULT_TYPE_3_r13] = _ASSERT_RESULT_TYPE_3,
+    [_ASSERT_RESULT_TYPE_3_r23] = _ASSERT_RESULT_TYPE_3,
+    [_ASSERT_RESULT_TYPE_3_r33] = _ASSERT_RESULT_TYPE_3,
+    [_ASSERT_RESULT_TYPE_r00] = _ASSERT_RESULT_TYPE,
+    [_ASSERT_RESULT_IS_0_r01] = _ASSERT_RESULT_IS_0,
+    [_ASSERT_RESULT_IS_0_r11] = _ASSERT_RESULT_IS_0,
+    [_ASSERT_RESULT_IS_0_r22] = _ASSERT_RESULT_IS_0,
+    [_ASSERT_RESULT_IS_0_r33] = _ASSERT_RESULT_IS_0,
+    [_ASSERT_RESULT_IS_1_r02] = _ASSERT_RESULT_IS_1,
+    [_ASSERT_RESULT_IS_1_r12] = _ASSERT_RESULT_IS_1,
+    [_ASSERT_RESULT_IS_1_r22] = _ASSERT_RESULT_IS_1,
+    [_ASSERT_RESULT_IS_1_r33] = _ASSERT_RESULT_IS_1,
+    [_ASSERT_RESULT_IS_2_r03] = _ASSERT_RESULT_IS_2,
+    [_ASSERT_RESULT_IS_2_r13] = _ASSERT_RESULT_IS_2,
+    [_ASSERT_RESULT_IS_2_r23] = _ASSERT_RESULT_IS_2,
+    [_ASSERT_RESULT_IS_2_r33] = _ASSERT_RESULT_IS_2,
+    [_ASSERT_RESULT_IS_3_r03] = _ASSERT_RESULT_IS_3,
+    [_ASSERT_RESULT_IS_3_r13] = _ASSERT_RESULT_IS_3,
+    [_ASSERT_RESULT_IS_3_r23] = _ASSERT_RESULT_IS_3,
+    [_ASSERT_RESULT_IS_3_r33] = _ASSERT_RESULT_IS_3,
+    [_ASSERT_RESULT_IS_r00] = _ASSERT_RESULT_IS,
     [_GUARD_CALLABLE_BUILTIN_O_r00] = _GUARD_CALLABLE_BUILTIN_O,
     [_CALL_BUILTIN_O_r03] = _CALL_BUILTIN_O,
     [_GUARD_CALLABLE_BUILTIN_FAST_r00] = _GUARD_CALLABLE_BUILTIN_FAST,
@@ -4879,6 +5015,50 @@ const uint16_t _PyUop_SpillsAndReloads[4][4] = {
 const char *const _PyOpcode_uop_name[MAX_UOP_REGS_ID+1] = {
     [_ALLOCATE_OBJECT] = "_ALLOCATE_OBJECT",
     [_ALLOCATE_OBJECT_r00] = "_ALLOCATE_OBJECT_r00",
+    [_ASSERT_RESULT_IS] = "_ASSERT_RESULT_IS",
+    [_ASSERT_RESULT_IS_r00] = "_ASSERT_RESULT_IS_r00",
+    [_ASSERT_RESULT_IS_0] = "_ASSERT_RESULT_IS_0",
+    [_ASSERT_RESULT_IS_0_r01] = "_ASSERT_RESULT_IS_0_r01",
+    [_ASSERT_RESULT_IS_0_r11] = "_ASSERT_RESULT_IS_0_r11",
+    [_ASSERT_RESULT_IS_0_r22] = "_ASSERT_RESULT_IS_0_r22",
+    [_ASSERT_RESULT_IS_0_r33] = "_ASSERT_RESULT_IS_0_r33",
+    [_ASSERT_RESULT_IS_1] = "_ASSERT_RESULT_IS_1",
+    [_ASSERT_RESULT_IS_1_r02] = "_ASSERT_RESULT_IS_1_r02",
+    [_ASSERT_RESULT_IS_1_r12] = "_ASSERT_RESULT_IS_1_r12",
+    [_ASSERT_RESULT_IS_1_r22] = "_ASSERT_RESULT_IS_1_r22",
+    [_ASSERT_RESULT_IS_1_r33] = "_ASSERT_RESULT_IS_1_r33",
+    [_ASSERT_RESULT_IS_2] = "_ASSERT_RESULT_IS_2",
+    [_ASSERT_RESULT_IS_2_r03] = "_ASSERT_RESULT_IS_2_r03",
+    [_ASSERT_RESULT_IS_2_r13] = "_ASSERT_RESULT_IS_2_r13",
+    [_ASSERT_RESULT_IS_2_r23] = "_ASSERT_RESULT_IS_2_r23",
+    [_ASSERT_RESULT_IS_2_r33] = "_ASSERT_RESULT_IS_2_r33",
+    [_ASSERT_RESULT_IS_3] = "_ASSERT_RESULT_IS_3",
+    [_ASSERT_RESULT_IS_3_r03] = "_ASSERT_RESULT_IS_3_r03",
+    [_ASSERT_RESULT_IS_3_r13] = "_ASSERT_RESULT_IS_3_r13",
+    [_ASSERT_RESULT_IS_3_r23] = "_ASSERT_RESULT_IS_3_r23",
+    [_ASSERT_RESULT_IS_3_r33] = "_ASSERT_RESULT_IS_3_r33",
+    [_ASSERT_RESULT_TYPE] = "_ASSERT_RESULT_TYPE",
+    [_ASSERT_RESULT_TYPE_r00] = "_ASSERT_RESULT_TYPE_r00",
+    [_ASSERT_RESULT_TYPE_0] = "_ASSERT_RESULT_TYPE_0",
+    [_ASSERT_RESULT_TYPE_0_r01] = "_ASSERT_RESULT_TYPE_0_r01",
+    [_ASSERT_RESULT_TYPE_0_r11] = "_ASSERT_RESULT_TYPE_0_r11",
+    [_ASSERT_RESULT_TYPE_0_r22] = "_ASSERT_RESULT_TYPE_0_r22",
+    [_ASSERT_RESULT_TYPE_0_r33] = "_ASSERT_RESULT_TYPE_0_r33",
+    [_ASSERT_RESULT_TYPE_1] = "_ASSERT_RESULT_TYPE_1",
+    [_ASSERT_RESULT_TYPE_1_r02] = "_ASSERT_RESULT_TYPE_1_r02",
+    [_ASSERT_RESULT_TYPE_1_r12] = "_ASSERT_RESULT_TYPE_1_r12",
+    [_ASSERT_RESULT_TYPE_1_r22] = "_ASSERT_RESULT_TYPE_1_r22",
+    [_ASSERT_RESULT_TYPE_1_r33] = "_ASSERT_RESULT_TYPE_1_r33",
+    [_ASSERT_RESULT_TYPE_2] = "_ASSERT_RESULT_TYPE_2",
+    [_ASSERT_RESULT_TYPE_2_r03] = "_ASSERT_RESULT_TYPE_2_r03",
+    [_ASSERT_RESULT_TYPE_2_r13] = "_ASSERT_RESULT_TYPE_2_r13",
+    [_ASSERT_RESULT_TYPE_2_r23] = "_ASSERT_RESULT_TYPE_2_r23",
+    [_ASSERT_RESULT_TYPE_2_r33] = "_ASSERT_RESULT_TYPE_2_r33",
+    [_ASSERT_RESULT_TYPE_3] = "_ASSERT_RESULT_TYPE_3",
+    [_ASSERT_RESULT_TYPE_3_r03] = "_ASSERT_RESULT_TYPE_3_r03",
+    [_ASSERT_RESULT_TYPE_3_r13] = "_ASSERT_RESULT_TYPE_3_r13",
+    [_ASSERT_RESULT_TYPE_3_r23] = "_ASSERT_RESULT_TYPE_3_r23",
+    [_ASSERT_RESULT_TYPE_3_r33] = "_ASSERT_RESULT_TYPE_3_r33",
     [_BINARY_OP] = "_BINARY_OP",
     [_BINARY_OP_r23] = "_BINARY_OP_r23",
     [_BINARY_OP_ADD_FLOAT] = "_BINARY_OP_ADD_FLOAT",
@@ -6798,6 +6978,26 @@ int _PyUop_num_popped(int opcode, int oparg)
         case _CALL_BUILTIN_CLASS_1_INLINE:
             return 0;
         case _CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON:
+            return 0;
+        case _ASSERT_RESULT_TYPE_0:
+            return 0;
+        case _ASSERT_RESULT_TYPE_1:
+            return 0;
+        case _ASSERT_RESULT_TYPE_2:
+            return 0;
+        case _ASSERT_RESULT_TYPE_3:
+            return 0;
+        case _ASSERT_RESULT_TYPE:
+            return 0;
+        case _ASSERT_RESULT_IS_0:
+            return 0;
+        case _ASSERT_RESULT_IS_1:
+            return 0;
+        case _ASSERT_RESULT_IS_2:
+            return 0;
+        case _ASSERT_RESULT_IS_3:
+            return 0;
+        case _ASSERT_RESULT_IS:
             return 0;
         case _GUARD_CALLABLE_BUILTIN_O:
             return 0;

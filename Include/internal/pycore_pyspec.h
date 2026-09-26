@@ -8,6 +8,8 @@ extern "C" {
 #  error "this header requires Py_BUILD_CORE define"
 #endif
 
+#include "pycore_tstate.h"         // _PyThreadStateImpl
+
 /* Call tables generated from pyspec files (Objects/pyspec/<file>.py) by
  * Argument Clinic (Tools/clinic/libclinic/pyspec/call_table.py, run by
  * "make clinic").  For a builtin type whose __new__ is
@@ -109,13 +111,55 @@ _PySpec_FindCall(PyTypeObject *tp, int nargs, PyTypeObject *arg_type)
     return generic;
 }
 
-/* Call func, from an entry without _PySpec_MAY_RUN_PYTHON: it runs no
- * Python code, so the cases generator treats this call as not escaping
- * (Tools/cases_generator/analyzer.py). */
-static inline PyObject *
-_PySpec_CallNoPython1(_PySpecFunc1 func, PyObject *arg)
+/* "Runs no Python code" tripwire.  In debug builds, a call that the facts
+ * say runs no Python code (an entry without _PySpec_MAY_RUN_PYTHON) is made
+ * between _PySpec_EnterNoPython() and _PySpec_LeaveNoPython(), and
+ * _PyEval_EvalFrameDefault() calls _PySpec_CheckPythonAllowed(): every
+ * Python function, method, slot wrapper, generator or finalizer runs
+ * through it, so a wrong fact is a fatal error at the call that ran Python.
+ * In release builds these do nothing. */
+#ifdef Py_DEBUG
+static inline int
+_PySpec_EnterNoPython(PyThreadState *tstate)
 {
-    return func(arg);
+    _PyThreadStateImpl *ts = (_PyThreadStateImpl *)tstate;
+    int saved = ts->pyspec_no_python;
+    ts->pyspec_no_python = 1;
+    return saved;
+}
+
+static inline void
+_PySpec_LeaveNoPython(PyThreadState *tstate, int saved)
+{
+    ((_PyThreadStateImpl *)tstate)->pyspec_no_python = saved;
+}
+
+static inline void
+_PySpec_CheckPythonAllowed(PyThreadState *tstate)
+{
+    if (((_PyThreadStateImpl *)tstate)->pyspec_no_python) {
+        Py_FatalError("Python code runs inside a call that the pyspec facts "
+                      "say runs no Python code (a derived fact is wrong: "
+                      "see Include/internal/pycore_pyspec.h)");
+    }
+}
+#else
+#  define _PySpec_EnterNoPython(tstate) ((void)(tstate), 0)
+#  define _PySpec_LeaveNoPython(tstate, saved) ((void)(tstate), (void)(saved))
+#  define _PySpec_CheckPythonAllowed(tstate) ((void)(tstate))
+#endif
+
+/* Call func, from an entry without _PySpec_MAY_RUN_PYTHON: it runs no
+ * Python code (checked in debug builds).  This does not mean that the call
+ * does not escape: e.g. a critical section may detach the thread, and
+ * releasing a buffer may decref another object. */
+static inline PyObject *
+_PySpec_CallNoPython1(PyThreadState *tstate, _PySpecFunc1 func, PyObject *arg)
+{
+    int saved = _PySpec_EnterNoPython(tstate);
+    PyObject *res = func(arg);
+    _PySpec_LeaveNoPython(tstate, saved);
+    return res;
 }
 
 /* The facts of method meth (the ml_meth of a method of tp) called with

@@ -4900,13 +4900,33 @@ dummy_func(
             STAT_INC(CALL, hit);
             volatile _PySpecFunc1 func_v = (_PySpecFunc1)func;
             PyObject *res_o = _PySpec_CallNoPython1(
-                func_v, PyStackRef_AsPyObjectBorrow(arg));
+                tstate, func_v, PyStackRef_AsPyObjectBorrow(arg));
             assert((res_o != NULL) ^ (_PyErr_Occurred(tstate) != NULL));
             if (res_o == NULL) {
                 ERROR_NO_POP();
             }
             /* callable is immortal: there is no reference to release. */
             callable = PyStackRef_FromPyObjectSteal(res_o);
+        }
+
+        /* Debug builds only: the optimizer emits these right after a call
+         * whose result it has facts about (an exact type or an immortal
+         * constant, from a pyspec call table or a hand-written rule in
+         * optimizer_bytecodes.c), to check the fact at run time.  oparg is
+         * the number of stack items above the result.  In release builds
+         * they are never emitted (and their bodies are empty). */
+        tier2 replicate(0:4) op(_ASSERT_RESULT_TYPE, (type/4, res, unused[oparg] -- res, unused[oparg])) {
+            _PyObject_ASSERT_WITH_MSG(
+                PyStackRef_AsPyObjectBorrow(res),
+                Py_IS_TYPE(PyStackRef_AsPyObjectBorrow(res), (PyTypeObject *)type),
+                "the tier-2 optimizer's exact result type is wrong");
+        }
+
+        tier2 replicate(0:4) op(_ASSERT_RESULT_IS, (value/4, res, unused[oparg] -- res, unused[oparg])) {
+            _PyObject_ASSERT_WITH_MSG(
+                PyStackRef_AsPyObjectBorrow(res),
+                PyStackRef_AsPyObjectBorrow(res) == (PyObject *)value,
+                "the tier-2 optimizer's constant result is wrong");
         }
 
         macro(CALL_BUILTIN_CLASS) =

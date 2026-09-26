@@ -318,6 +318,36 @@ add_op(JitOptContext *ctx, _PyUOpInstruction *this_instr,
 
 #define JUMP_TO_LABEL(label) goto label;
 
+#ifdef Py_DEBUG
+/* Debug builds check at run time the facts the optimizer uses about the
+ * result res of a call (an exact type or an immortal constant): emit the
+ * call (unless its handler already emitted a replacement), then an
+ * _ASSERT_RESULT_* uop.  above is the number of stack items above res. */
+static void
+assert_result_facts(JitOptContext *ctx, _PyUOpInstruction *this_instr,
+                    _PyUOpInstruction *out_start, JitOptRef res, int above)
+{
+    if (ctx->out_buffer.next == out_start) {
+        *(ctx->out_buffer.next++) = *this_instr;
+    }
+    if (ctx->out_buffer.end - ctx->out_buffer.next < 2) {
+        return;
+    }
+    PyObject *value = sym_get_const(ctx, res);
+    PyTypeObject *tp = sym_get_type(res);
+    if (value != NULL && _Py_IsImmortal(value)) {
+        ADD_OP(_ASSERT_RESULT_IS, above, (uintptr_t)value);
+    }
+    else if (tp != NULL && _Py_IsImmortal((PyObject *)tp)) {
+        ADD_OP(_ASSERT_RESULT_TYPE, above, (uintptr_t)tp);
+    }
+}
+#  define ASSERT_RESULT_FACTS(RES, ABOVE) \
+    assert_result_facts(ctx, this_instr, out_ptr, (RES), (ABOVE))
+#else
+#  define ASSERT_RESULT_FACTS(RES, ABOVE) ((void)0)
+#endif
+
 static int
 check_stack_bounds(JitOptContext *ctx, JitOptRef *stack_pointer, int offset, int opcode)
 {
