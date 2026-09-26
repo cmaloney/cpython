@@ -34,7 +34,9 @@ Shared specializations.  A tail call of a spec function whose residual
 for the facts of the call has a loop is not inlined: the residual becomes
 a C function of its own (a Specialization), emitted once and called by
 every call with the same facts.  A loop costs far more than a call, and
-the loop code is not duplicated.
+the loop code is not duplicated.  A residual that does not iterate by
+index is not worth its own code: the call stays a call of the generic
+function, and only its facts come from the residual.
 
 Snapshots.  The residual of a list loop is split in two, as the
 hand-written _PyBytes_FromSequence_lock_held() was: every statement that
@@ -728,6 +730,12 @@ class Evaluator:
         special = specialize_call(self.spec, name, callee_env, depth + 1)
         if special is None:
             return None
+        if not special.index_params:
+            # Not worth its own code: the generic function, with the
+            # facts of the specialization.
+            call = copy.copy(call)
+            call.pyspec_facts = special.name
+            return [ast.Return(call, lineno=0)]
         return [ast.Return(special.call([call.args[params.index(p)]
                                          for p in special.params]),
                            lineno=0)]
@@ -862,9 +870,13 @@ def specialization(spec, name):
     return _registry(spec)[name]
 
 
-def specialization_of(spec, node):
-    """The Specialization a call node calls, or None."""
+def specialization_of(spec, node, facts=False):
+    """The Specialization a call node calls, or None.  With *facts*, also
+    the one whose facts a call of the generic function has
+    (``pyspec_facts``)."""
     name = getattr(node, 'pyspec_specialization', None)
+    if name is None and facts:
+        name = getattr(node, 'pyspec_facts', None)
     return None if name is None else specialization(spec, name)
 
 

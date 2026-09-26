@@ -283,7 +283,8 @@ class Analyzer:
             facts.runs_python = True
             return None
         func = node.func
-        special = partial_eval.specialization_of(self.spec, node)
+        special = partial_eval.specialization_of(self.spec, node,
+                                                 facts=True)
         if special is not None:
             callee = self.function_facts(special.callee, special)
             facts.runs_python |= callee.runs_python

@@ -7357,8 +7357,13 @@ class BytesSpecFactsTest(TestCase):
                            == 'C.bytes_appender_append']
                 self.assertTrue(append.pyspec_unchecked)
         # Any other iterable: the iterator protocol.
+        # A range is not iterated by index: the generic function is
+        # called, with the facts of its residual for a range.
         residual, _ = self.new_facts(range)
-        special = pe.specialization_of(self.spec, residual[-1].value)
+        self.assertEqual(ast.unparse(residual[-1]),
+                         'return bytes_from_iterator(it_1, source)')
+        special = pe.specialization_of(self.spec, residual[-1].value,
+                                       facts=True)
         loop, = [node for stmt in special.body for node in ast.walk(stmt)
                  if isinstance(node, ast.For)]
         self.assertFalse(loop.pyspec_sequence)
