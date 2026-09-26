@@ -168,6 +168,9 @@
         case _POP_TOP_OPARG: {
             JitOptRef *args;
             args = &stack_pointer[-oparg];
+            if (oparg == 0) {
+                ADD_OP(_NOP, 0, 0);
+            }
             for (int i = oparg-1; i >= 0; i--) {
                 optimize_pop_top(ctx, this_instr, args[i]);
             }
@@ -4481,10 +4484,76 @@
         }
 
         case _CALL_BUILTIN_CLASS: {
+            JitOptRef *args;
+            JitOptRef self_or_null;
             JitOptRef callable;
+            args = &stack_pointer[-oparg];
+            self_or_null = stack_pointer[-1 - oparg];
             callable = stack_pointer[-2 - oparg];
-            callable = sym_new_not_null(ctx);
+            PyObject *callable_o = sym_get_const(ctx, callable);
+            const _PySpecCall *call = NULL;
+            if (callable_o != NULL && PyType_Check(callable_o) &&
+                sym_is_null(self_or_null) && oparg <= 1)
+            {
+                PyTypeObject *tp = (PyTypeObject *)callable_o;
+                PyTypeObject *arg_type = NULL;
+                if (oparg == 1) {
+                    arg_type = sym_get_type(args[0]);
+                    if (arg_type == NULL) {
+                        PyTypeObject *probable = sym_get_probable_type(args[0]);
+                        const _PySpecCall *typed = NULL;
+                        if (probable != NULL) {
+                            typed = _PySpec_FindCall(tp, 1, probable);
+                        }
+                        if (typed != NULL && typed->arg_type == probable &&
+                            typed->result_type != NULL)
+                        {
+                            ADD_OP(_GUARD_TYPE, 0, (uintptr_t)probable);
+                            sym_set_type(args[0], probable);
+                            arg_type = probable;
+                        }
+                    }
+                }
+                call = _PySpec_FindCall(tp, oparg, arg_type);
+            }
+            if (call != NULL && call->result_const >= 0 && oparg == 0) {
+                PyObject *value = Py_GetConstantBorrowed(call->result_const);
+                assert(_Py_IsImmortal(value));
+                optimize_pop_top(ctx, this_instr, self_or_null);
+                optimize_pop_top(ctx, this_instr, callable);
+                ADD_OP(_LOAD_CONST_INLINE_BORROW, 0, (uintptr_t)value);
+                ADD_OP(_PUSH_NULL, 0, 0);
+                callable = PyJitRef_Borrow(sym_new_const(ctx, value));
+            }
+            else if (call != NULL) {
+                if (oparg == 0) {
+                    ADD_OP(_CALL_BUILTIN_CLASS_0_INLINE, oparg, (uintptr_t)call->func.f0);
+                }
+                else {
+                    ADD_OP(_CALL_BUILTIN_CLASS_1_INLINE, oparg, (uintptr_t)call->func.f1);
+                }
+                if (call->result_const >= 0) {
+                    callable = sym_new_const(ctx, Py_GetConstantBorrowed(call->result_const));
+                }
+                else if (call->result_type != NULL) {
+                    callable = sym_new_type(ctx, call->result_type);
+                }
+                else {
+                    callable = sym_new_not_null(ctx);
+                }
+            }
+            else {
+                callable = sym_new_not_null(ctx);
+            }
             stack_pointer[-2 - oparg] = callable;
+            break;
+        }
+
+        case _CALL_BUILTIN_CLASS_0_INLINE: {
+            break;
+        }
+
+        case _CALL_BUILTIN_CLASS_1_INLINE: {
             break;
         }
 
@@ -5796,6 +5865,15 @@
             JitOptRef func;
             func = stack_pointer[-2 - oparg];
             sym_set_recorded_value(func, (PyObject *)this_instr->operand0);
+            break;
+        }
+
+        case _RECORD_ARG0_TYPE: {
+            JitOptRef *args;
+            args = &stack_pointer[-oparg];
+            if (oparg > 0) {
+                sym_set_recorded_type(args[0], (PyTypeObject *)this_instr->operand0);
+            }
             break;
         }
 

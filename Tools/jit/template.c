@@ -30,6 +30,7 @@
 #include "pycore_opcode_utils.h"
 #include "pycore_optimizer.h"
 #include "pycore_pyatomic_ft_wrappers.h"
+#include "pycore_pyspec.h"
 #include "pycore_range.h"
 #include "pycore_setobject.h"
 #include "pycore_sliceobject.h"

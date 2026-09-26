@@ -18352,6 +18352,92 @@
             break;
         }
 
+        case _CALL_BUILTIN_CLASS_0_INLINE_r22: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef callable;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            callable = _stack_item_0;
+            PyObject *func = (PyObject *)CURRENT_OPERAND0_64();
+            assert(sizeof(_PySpecFunc0) == sizeof(uintptr_t));
+            STAT_INC(CALL, hit);
+            volatile _PySpecFunc0 func_v = (_PySpecFunc0)func;
+            stack_pointer[0] = callable;
+            stack_pointer[1] = _stack_item_1;
+            stack_pointer += 2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            _PyFrame_SetStackPointer(frame, stack_pointer);
+            _PyFrame_StackPointerValidate(frame);
+            PyObject *res_o = func_v();
+            _PyFrame_StackPointerInvalidate(frame);
+            assert((res_o != NULL) ^ (_PyErr_Occurred(tstate) != NULL));
+            if (res_o == NULL) {
+                SET_CURRENT_CACHED_VALUES(0);
+                JUMP_TO_ERROR();
+            }
+            _PyStackRef temp = callable;
+            callable = PyStackRef_FromPyObjectSteal(res_o);
+            stack_pointer[-2] = callable;
+            assert(stack_pointer == _PyFrame_GetStackPointer(frame));
+            _PyFrame_StackPointerValidate(frame);
+            PyStackRef_CLOSE(temp);
+            _PyFrame_StackPointerInvalidate(frame);
+            _tos_cache1 = _stack_item_1;
+            _tos_cache0 = callable;
+            _tos_cache2 = PyStackRef_ZERO_BITS;
+            SET_CURRENT_CACHED_VALUES(2);
+            stack_pointer += -2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _CALL_BUILTIN_CLASS_1_INLINE_r33: {
+            CHECK_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef arg;
+            _PyStackRef callable;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            _PyStackRef _stack_item_2 = _tos_cache2;
+            arg = _stack_item_2;
+            callable = _stack_item_0;
+            PyObject *func = (PyObject *)CURRENT_OPERAND0_64();
+            assert(sizeof(_PySpecFunc1) == sizeof(uintptr_t));
+            STAT_INC(CALL, hit);
+            volatile _PySpecFunc1 func_v = (_PySpecFunc1)func;
+            stack_pointer[0] = callable;
+            stack_pointer[1] = _stack_item_1;
+            stack_pointer[2] = arg;
+            stack_pointer += 3;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            _PyFrame_SetStackPointer(frame, stack_pointer);
+            _PyFrame_StackPointerValidate(frame);
+            PyObject *res_o = func_v(PyStackRef_AsPyObjectBorrow(arg));
+            _PyFrame_StackPointerInvalidate(frame);
+            assert((res_o != NULL) ^ (_PyErr_Occurred(tstate) != NULL));
+            if (res_o == NULL) {
+                SET_CURRENT_CACHED_VALUES(0);
+                JUMP_TO_ERROR();
+            }
+            _PyStackRef temp = callable;
+            callable = PyStackRef_FromPyObjectSteal(res_o);
+            stack_pointer[-3] = callable;
+            assert(stack_pointer == _PyFrame_GetStackPointer(frame));
+            _PyFrame_StackPointerValidate(frame);
+            PyStackRef_CLOSE(temp);
+            _PyFrame_StackPointerInvalidate(frame);
+            _tos_cache2 = arg;
+            _tos_cache1 = _stack_item_1;
+            _tos_cache0 = callable;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -3;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
         case _GUARD_CALLABLE_BUILTIN_O_r00: {
             CHECK_CURRENT_CACHED_VALUES(0);
             ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
