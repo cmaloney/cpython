@@ -412,10 +412,13 @@ bytes_new_nargs1_bytearray(PyObject *source)
 
 /* bytes_new() for exactly bytes with 1 positional argument of exact type int
  * (result is exactly bytes; may run Python code):
- * try:
+ * if C.PyNumber_AsSsize_t.fast(source):
  *     size = C.PyNumber_AsSsize_t(source, OverflowError)
- * except TypeError:
- *     return PyBytes_FromObject(source)
+ * else:
+ *     try:
+ *         size = C.PyNumber_AsSsize_t(source, OverflowError)
+ *     except TypeError:
+ *         return PyBytes_FromObject(source)
  * if size < 0:
  *     raise ValueError('negative count')
  * return C._PyBytes_FromSize(size, True)
@@ -425,14 +428,19 @@ bytes_new_nargs1_int(PyObject *source)
 {
     Py_ssize_t size;
 
-    size = PyNumber_AsSsize_t(source, PyExc_OverflowError);
-    if (size == -1 && PyErr_Occurred()) {
-        if (PyErr_ExceptionMatches(PyExc_TypeError)) {
-            PyErr_Clear();
-            return PyBytes_FromObject(source);
-        }
-        else {
-            return NULL;
+    if (_PyLong_IsCompact((PyLongObject *)source)) {
+        size = _PyLong_CompactValue((PyLongObject *)source);
+    }
+    else {
+        size = PyNumber_AsSsize_t(source, PyExc_OverflowError);
+        if (size == -1 && PyErr_Occurred()) {
+            if (PyErr_ExceptionMatches(PyExc_TypeError)) {
+                PyErr_Clear();
+                return PyBytes_FromObject(source);
+            }
+            else {
+                return NULL;
+            }
         }
     }
     if (size < 0) {

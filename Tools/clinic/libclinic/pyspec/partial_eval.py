@@ -28,7 +28,8 @@ In a loop body, a statement that passes the item to an escape with a
 fast path (Escape.fast, e.g. PyNumber_AsSsize_t() of a compact exact
 int) is split: ``if C.<escape>.fast(item): <statement> else:
 <statement>``, the first one with the call marked ``call.pyspec_fast``
-for the emitter.  The rest of the body is shared.
+for the emitter.  The rest of the body is shared.  Outside loops, only
+a statement whose argument has a known exact type is split.
 
 Shared specializations.  A tail call of a spec function whose residual
 for the facts of the call has a loop is not inlined: the residual becomes
@@ -457,15 +458,20 @@ def fast_guard(node):
 
 
 def _split_fast(stmt, item, item_type):
-    """[stmt], or, if *stmt* (an assignment or an expression statement)
-    passes *item* (of exact type item_type, None if unknown) as the first
-    argument of an escape with a fast path (Escape.fast) for that type,
-    ``if C.<escape>.fast(item): <stmt, marked> else: <stmt>``.  The guard
-    is marked with item_type (``pyspec_item_type``): the emitter only
-    tests the type when it is not known."""
-    if not isinstance(stmt, (ast.Assign, ast.Expr)):
-        return [stmt]
-    marked = copy.deepcopy(stmt)
+    """[stmt], or, if *stmt* (an assignment, an expression statement, or
+    a try around an assignment) passes *item* (of exact type item_type,
+    None if unknown) as the first argument of an escape with a fast path
+    (Escape.fast) for that type, ``if C.<escape>.fast(item): <the
+    assignment or statement, marked> else: <stmt>``.  The guard is marked
+    with item_type (``pyspec_item_type``): the emitter only tests the type
+    when it is not known."""
+    match stmt:
+        case ast.Assign() | ast.Expr():
+            marked = copy.deepcopy(stmt)
+        case ast.Try(body=[ast.Assign() as assign]):
+            marked = copy.deepcopy(assign)
+        case _:
+            return [stmt]
     for node in ast.walk(marked):
         if not (isinstance(node, ast.Call) and node.args
                 and isinstance(node.args[0], ast.Name)
@@ -484,6 +490,18 @@ def _split_fast(stmt, item, item_type):
             [ast.Name(item, ast.Load())], [])
         guard.pyspec_item_type = item_type
         return [ast.If(guard, [marked], [stmt])]
+    return [stmt]
+
+
+def _split_known(stmt, env):
+    """_split_fast() for an argument whose exact type is known."""
+    for node in ast.walk(stmt):
+        if (isinstance(node, ast.Call) and node.args
+                and isinstance(node.args[0], ast.Name)):
+            fast = getattr(_escape(node.func), 'fast', None)
+            tp = env.get(node.args[0].id)
+            if fast is not None and tp in fast.types:
+                return _split_fast(stmt, node.args[0].id, tp)
     return [stmt]
 
 
@@ -689,12 +707,13 @@ class Evaluator:
                 out += self.inline(stmt.value, env, depth)
             elif isinstance(stmt, ast.Try):
                 stmt = copy.deepcopy(stmt)
-                stmt.body = self.block(stmt.body, env, depth, inline)
+                # The body is one assignment (see emit.py), split below.
+                stmt.body = [annotate_exact(s, env) or s for s in stmt.body]
                 # Handlers and else clauses are cold: keep calls as calls.
                 for handler in stmt.handlers:
                     handler.body = self.block(handler.body, env, depth, False)
                 stmt.orelse = self.block(stmt.orelse, env, depth, False)
-                out.append(stmt)
+                out += _split_known(stmt, env)
             elif isinstance(stmt, ast.With):
                 stmt = copy.deepcopy(stmt)
                 stmt.body = self.block(stmt.body, env, depth, False)
@@ -702,7 +721,7 @@ class Evaluator:
             elif isinstance(stmt, ast.For):
                 out.append(self.loop(stmt, env, depth, inline))
             elif isinstance(stmt, (ast.Assign, ast.Expr, ast.Return)):
-                out.append(annotate_exact(stmt, env) or stmt)
+                out += _split_known(annotate_exact(stmt, env) or stmt, env)
             else:
                 out.append(stmt)
             if terminates(out):
