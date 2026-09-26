@@ -14,23 +14,53 @@ named T.  A method is written like the clinic block it replaces:
   (``self``, ``cls``), when not annotated, is clinic's implicit one;
 * ``@classmethod`` and ``@staticmethod`` as in Python (``__new__`` is
   implicitly a class method, like in Python);
+* any other clinic decorator is written as a Python decorator of the same
+  name and arguments: ``@permit_long_summary``,
+  ``@text_signature("($self, sub[, start[, end]], /)")``,
+  ``@critical_section``, ``@vectorcall``, ...  (see "Decorators" below);
 * the return annotation, if any, is the clinic return converter;
 * the docstring is the text help() shows after the signature: the summary,
   then the parameter section clinic renders ("  name" and the parameter
   docstring indented by 4), then the rest of the docstring;
 * ``meth = other`` in the class body is a clinic clone
   (``T.meth = T.other``); the string literal following it, if any, is its
-  docstring;
+  docstring.  A decorated clone is written as the call a decorator stands
+  for: ``meth = permit_long_summary(other)``;
 * a body of ``...`` (or only a docstring) means the C impl is
   hand-written.  A real body implements the function: see emit.py.
 
-The .c file keeps, per function, a clinic block with its clinic-only
-decorators and the function line only (``bytes.__new__ as bytes_new``);
-clinic_input() turns the spec method into the rest of the block.
+The .c file keeps, per function, a clinic block with the function line
+only (``bytes.split``); clinic_input() turns the spec method into the rest
+of the block.  The C basename of a spec method is clinic's default, except
+that ``T.__new__`` and ``T.__init__`` are named ``T_new`` and ``T_init``,
+as most hand-written ``as`` clauses of Objects/ name them (clinic's
+default would be ``T`` and ``T___init__``).
 
 Top-level functions are C functions named like the function.  A body of
 ``...`` (or only a docstring) describes a hand-written C function; a real
 body is generated.
+
+Decorators
+----------
+The rule is: any clinic decorator may be written on a spec method as a
+Python decorator with the same name and arguments, and runtime.py defines
+each as an identity decorator.  This is the whole rule, because:
+
+* a clinic decorator already is a per-function fact written above the
+  function line, and a Python decorator is written in the same place with
+  the same shape (``@name`` or ``@name(args)``), so the translation is
+  mechanical both ways and needs no table of meanings in the frontend:
+  clinic itself validates the names and arguments, as it does in a .c
+  file;
+* none of them changes what the function does when called from Python:
+  they choose how clinic renders C (text signature, calling convention,
+  locking, accessor kind) or silence a docstring lint.  An identity
+  decorator is therefore the exact Python meaning, and the spec stays an
+  ordinary, runnable Python file.  (``@classmethod`` and ``@staticmethod``
+  are the two that do change the Python meaning; they are Python's own.)
+
+A decorator's arguments must be string or integer constants, since a
+clinic decorator line only holds words.
 """
 
 from __future__ import annotations
@@ -38,6 +68,7 @@ from __future__ import annotations
 import ast
 import dataclasses as dc
 import os
+import shlex
 
 
 # Annotations of the parameters of implemented spec functions, and the C
@@ -67,8 +98,8 @@ TYPE_OBJECTS = {
     'frozenset': '&PyFrozenSet_Type',
 }
 
-# The only decorators of spec methods; clinic-only decorators stay in the
-# .c file.
+# Clinic decorators that are also Python's: they set the kind of the
+# method.  Any other decorator is a clinic-only one (see "Decorators").
 METHOD_DECORATORS = ('classmethod', 'staticmethod')
 
 
@@ -106,6 +137,8 @@ class Clone:
     """``meth = target`` in a spec class."""
     target: str
     lineno: int
+    # ``meth = deco(target)``: the decorators, outermost first.
+    decorators: list[ast.expr] = dc.field(default_factory=list)
     docstring: str | None = None
     # Column of the docstring, stripped from its lines.
     docstring_margin: int = 0
@@ -130,6 +163,28 @@ def _docstring(body: list[ast.stmt]) -> str | None:
             and isinstance(body[0].value, ast.Constant)
             and isinstance(body[0].value.value, str)):
         return body[0].value.value
+    return None
+
+
+def _quote(word: str) -> str:
+    """Quote *word* for a clinic decorator line (split with shlex)."""
+    if shlex.quote(word) == word:
+        return word
+    return '"' + word.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+def _clone_target(value: ast.expr) -> tuple[str, list[ast.expr]] | None:
+    """For ``meth = d1(d2(args)(target))``: target and [d1, d2(args)].
+
+    None if *value* is not a (decorated) name.
+    """
+    decorators = []
+    while isinstance(value, ast.Call) and len(value.args) == 1 \
+            and not value.keywords:
+        decorators.append(value.func)
+        value = value.args[0]
+    if isinstance(value, ast.Name):
+        return value.id, decorators
     return None
 
 
@@ -181,8 +236,9 @@ class Spec:
                 case ast.FunctionDef(name=name):
                     self.functions[f'{node.name}.{name}'] = stmt
                 case ast.Assign(targets=[ast.Name(name)],
-                                value=ast.Name(target)):
-                    clone = Clone(target, stmt.lineno)
+                                value=value) if _clone_target(value):
+                    target, decorators = _clone_target(value)
+                    clone = Clone(target, stmt.lineno, decorators)
                     doc = _docstring(body[i + 1:i + 2])
                     if doc is not None:
                         clone.docstring = doc
@@ -277,6 +333,21 @@ class Spec:
         return name in self.clones or (
             '.' in name and name in self.functions)
 
+    def decorator_lineno(self, name: str, decorator: str) -> int:
+        """Line of decorator *decorator* of method (or clone) *name*."""
+        clone = self.clones.get(name)
+        if clone is not None:
+            decorators, lineno = clone.decorators, clone.lineno
+        else:
+            node = self.functions[name]
+            decorators, lineno = node.decorator_list, node.lineno
+        for d in decorators:
+            if isinstance(d, ast.Call):
+                d = d.func
+            if isinstance(d, ast.Name) and d.id == decorator:
+                return d.lineno
+        return lineno
+
     def clinic_input(self, name: str, clinic_class: str
                      ) -> tuple[list[str], str, list[str]]:
         """Clinic DSL for spec method (or clone) *name*.
@@ -293,7 +364,11 @@ class Spec:
                 raise SpecError(f"{self.filename}:{clone.lineno}: {name} "
                                 f"clones {target}, which is not a spec "
                                 "method")
-            decorators, _ = self._decorators(self.functions[target])
+            # Clinic requires the kind of a clone to be that of its
+            # target, and copies everything else from it.
+            _, kind = self._decorators(self.functions[target])
+            decorators = [f'@{kind}'] if kind in METHOD_DECORATORS else []
+            decorators += [self._decorator_line(d) for d in clone.decorators]
             lines = []
             if clone.docstring is not None:
                 lines = ['', *self._clean_docstring(
@@ -323,27 +398,46 @@ class Spec:
             lines += ['', *docstring]
         return decorators, suffix, lines
 
+    def _decorator_line(self, decorator: ast.expr) -> str:
+        """The clinic DSL line of a decorator: ``@name arg ...``."""
+        match decorator:
+            case ast.Name(name):
+                return f'@{name}'
+            case ast.Call(func=ast.Name(name), args=args, keywords=[]):
+                words = []
+                for arg in args:
+                    match arg:
+                        case ast.Constant(value=str() | int() as value) \
+                                if not isinstance(value, bool):
+                            words.append(_quote(str(value)))
+                        case _:
+                            raise SpecError(
+                                f"{self.where(arg)}: the arguments of a "
+                                "clinic decorator must be string or "
+                                "integer constants")
+                return ' '.join([f'@{name}', *words])
+        raise SpecError(f"{self.where(decorator)}: a spec decorator is "
+                        "a clinic decorator: @name or @name(args)")
+
     def _decorators(self, node: ast.FunctionDef) -> tuple[list[str], str]:
+        """Clinic decorator lines of *node*, in order, and its kind."""
         kind = 'method'
+        decorators = []
         for decorator in node.decorator_list:
-            match decorator:
-                case ast.Name(deco) if deco in METHOD_DECORATORS:
-                    if kind != 'method':
-                        raise SpecError(f"{self.where(decorator)}: only "
-                                        "one of @classmethod and "
-                                        "@staticmethod")
-                    kind = deco
-                case _:
-                    raise SpecError(
-                        f"{self.where(decorator)}: spec methods take only "
-                        "@classmethod and @staticmethod; clinic decorators "
-                        "stay in the .c file")
+            line = self._decorator_line(decorator)
+            if line[1:] in METHOD_DECORATORS:
+                if kind != 'method':
+                    raise SpecError(f"{self.where(decorator)}: only "
+                                    "one of @classmethod and "
+                                    "@staticmethod")
+                kind = line[1:]
+            decorators.append(line)
         if node.name == '__new__':
             if kind != 'method':
                 raise SpecError(f"{self.where(node)}: __new__ is implicitly "
                                 "a class method; remove the decorator")
             kind = 'classmethod'
-        decorators = [f'@{kind}'] if kind != 'method' else []
+            decorators.insert(0, '@classmethod')
         return decorators, kind
 
     def _segment(self, node: ast.expr | ast.keyword, what: str) -> str:

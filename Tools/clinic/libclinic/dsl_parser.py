@@ -619,20 +619,28 @@ class DSLParser:
             fail(f"{names!r} has no parameters or docstring, and class "
                  f"{cls.name} in {spec.filename} has no method {meth!r} "
                  "to take them from")
-        decorators = [shlex.split(line)[0] for line in head
-                      if self.valid_line(line)]
-        for decorator in ('@classmethod', '@staticmethod'):
-            if decorator in decorators:
-                fail(f"{names!r}: {decorator} of a spec method is written "
-                     f"in {spec.filename}")
+        for line in head:
+            if self.valid_line(line) and line.lstrip().startswith('@'):
+                fail(f"{names!r}: {shlex.split(line)[0]} of a spec method "
+                     f"is written in {spec.filename}")
         try:
             spec_decorators, suffix, rest = spec.clinic_input(name, prefix)
         except frontend.SpecError as exc:
             fail(str(exc))
+        self.spec_function = name
+        for line in spec_decorators:
+            decorator = line.split()[0]
+            if decorator not in self.directives:
+                fail(f"{names!r}: unknown clinic decorator {decorator}")
         if suffix.startswith(' -> ') and '->' in function_line:
             fail(f"{names!r}: the return converter is written in "
                  f"{spec.filename}")
-        self.spec_function = name
+        if ' as ' not in function_line and meth in ('__new__', '__init__'):
+            # The C basename of T.__new__ is T_new (see frontend).
+            left, arrow, right = function_line.partition('->')
+            c_basename = '_'.join([*prefix.split('.'), meth.strip('_')])
+            function_line = (f'{left.rstrip()} as {c_basename}'
+                             + (f' {arrow}{right}' if arrow else ''))
         indent = function_line[:len(function_line) - len(function_line.lstrip())]
         return [*spec_decorators,
                 function_line.rstrip() + suffix,
@@ -646,6 +654,14 @@ class DSLParser:
                   else spec.clones[self.spec_function].lineno)
         return (f"\n(in the clinic input taken from {self.spec_function} in "
                 f"{spec.filename}:{lineno})")
+
+    def decorator_location(self, name: str, lineno: int | None
+                           ) -> tuple[str | None, int | None]:
+        """Where decorator @name of the current function is written."""
+        spec = self.clinic.pyspec
+        if spec is None or self.spec_function is None:
+            return self.clinic.filename, lineno
+        return spec.filename, spec.decorator_lineno(self.spec_function, name)
 
     def check_spec_duplicate(self, lineno: int) -> None:
         """A function is either in the spec or in its block, not both."""
@@ -1648,9 +1664,11 @@ class DSLParser:
                      line_number=docstring_line(0))
         else:
             if self.permit_long_summary:
+                filename, lineno = self.decorator_location(
+                    'permit_long_summary', f.line_number)
                 warn("Remove the @permit_long_summary decorator from "
-                     f"{f.full_name!r}!\n", filename=self.clinic.filename,
-                     line_number=f.line_number)
+                     f"{f.full_name!r}!\n", filename=filename,
+                     line_number=lineno)
 
         if long_body:
             if not self.permit_long_docstring_body:
@@ -1660,9 +1678,11 @@ class DSLParser:
                      line_number=docstring_line(long_body[0]))
         else:
             if self.permit_long_docstring_body:
+                filename, lineno = self.decorator_location(
+                    'permit_long_docstring_body', f.line_number)
                 warn("Remove the @permit_long_docstring_body decorator from "
-                     f"{f.full_name!r}!\n", filename=self.clinic.filename,
-                     line_number=f.line_number)
+                     f"{f.full_name!r}!\n", filename=filename,
+                     line_number=lineno)
 
         markers = [i for i, line in enumerate(lines) if '{parameters}' in line]
         parameters_marker_count = len(f.docstring.split('{parameters}')) - 1

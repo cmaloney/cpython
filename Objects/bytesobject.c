@@ -1849,13 +1849,12 @@ bytes___bytes___impl(PyBytesObject *self)
 #define BOTHSTRIP 2
 
 /*[clinic input]
-@permit_long_summary
 bytes.split
 [clinic start generated code]*/
 
 static PyObject *
 bytes_split_impl(PyBytesObject *self, PyObject *sep, Py_ssize_t maxsplit)
-/*[clinic end generated code: output=52126b5844c1d8ef input=d8a0fdedd75cb240]*/
+/*[clinic end generated code: output=52126b5844c1d8ef input=2b78f90beeb7a053]*/
 {
     Py_ssize_t len = PyBytes_GET_SIZE(self), n;
     const char *s = PyBytes_AS_STRING(self), *sub;
@@ -1907,13 +1906,12 @@ bytes_rpartition_impl(PyBytesObject *self, Py_buffer *sep)
 }
 
 /*[clinic input]
-@permit_long_summary
 bytes.rsplit
 [clinic start generated code]*/
 
 static PyObject *
 bytes_rsplit_impl(PyBytesObject *self, PyObject *sep, Py_ssize_t maxsplit)
-/*[clinic end generated code: output=ba698d9ea01e1c8f input=0a5615018ffc2036]*/
+/*[clinic end generated code: output=ba698d9ea01e1c8f input=f7b1498f94dc207c]*/
 {
     Py_ssize_t len = PyBytes_GET_SIZE(self), n;
     const char *s = PyBytes_AS_STRING(self), *sub;
@@ -1963,57 +1961,52 @@ PyBytes_Join(PyObject *sep, PyObject *iterable)
 }
 
 /*[clinic input]
-@permit_long_summary
-@text_signature "($self, sub[, start[, end]], /)"
 bytes.find
 [clinic start generated code]*/
 
 static PyObject *
 bytes_find_impl(PyBytesObject *self, PyObject *sub, Py_ssize_t start,
                 Py_ssize_t end)
-/*[clinic end generated code: output=d5961a1c77b472a1 input=107de06e7482df30]*/
+/*[clinic end generated code: output=d5961a1c77b472a1 input=5e804e58bae1db0d]*/
 {
     return _Py_bytes_find(PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
                           sub, start, end);
 }
 
 /*[clinic input]
-@permit_long_summary
 bytes.index
 [clinic start generated code]*/
 
 static PyObject *
 bytes_index_impl(PyBytesObject *self, PyObject *sub, Py_ssize_t start,
                  Py_ssize_t end)
-/*[clinic end generated code: output=0da25cc74683ba42 input=fe966eac449e9820]*/
+/*[clinic end generated code: output=0da25cc74683ba42 input=56e9d17ab609989b]*/
 {
     return _Py_bytes_index(PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
                            sub, start, end);
 }
 
 /*[clinic input]
-@permit_long_summary
 bytes.rfind
 [clinic start generated code]*/
 
 static PyObject *
 bytes_rfind_impl(PyBytesObject *self, PyObject *sub, Py_ssize_t start,
                  Py_ssize_t end)
-/*[clinic end generated code: output=51b60fa4ad011c09 input=8bf1570ac2a1cf9e]*/
+/*[clinic end generated code: output=51b60fa4ad011c09 input=7002006916cd46f9]*/
 {
     return _Py_bytes_rfind(PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
                            sub, start, end);
 }
 
 /*[clinic input]
-@permit_long_summary
 bytes.rindex
 [clinic start generated code]*/
 
 static PyObject *
 bytes_rindex_impl(PyBytesObject *self, PyObject *sub, Py_ssize_t start,
                   Py_ssize_t end)
-/*[clinic end generated code: output=42bf674e0a0aabf6 input=972f3725056915fe]*/
+/*[clinic end generated code: output=42bf674e0a0aabf6 input=ea266a98ddd82fb3]*/
 {
     return _Py_bytes_rindex(PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
                             sub, start, end);
@@ -2133,14 +2126,13 @@ bytes_rstrip_impl(PyBytesObject *self, PyObject *bytes)
 
 
 /*[clinic input]
-@permit_long_summary
 bytes.count
 [clinic start generated code]*/
 
 static PyObject *
 bytes_count_impl(PyBytesObject *self, PyObject *sub, Py_ssize_t start,
                  Py_ssize_t end)
-/*[clinic end generated code: output=9848140b9be17d0f input=fd8d5655be0913b5]*/
+/*[clinic end generated code: output=9848140b9be17d0f input=e5404a6484893af5]*/
 {
     return _Py_bytes_count(PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
                            sub, start, end);
@@ -2148,14 +2140,13 @@ bytes_count_impl(PyBytesObject *self, PyObject *sub, Py_ssize_t start,
 
 
 /*[clinic input]
-@permit_long_summary
 bytes.translate
 [clinic start generated code]*/
 
 static PyObject *
 bytes_translate_impl(PyBytesObject *self, PyObject *table,
                      PyObject *deletechars)
-/*[clinic end generated code: output=43be3437f1956211 input=fdcc2623e50717a1]*/
+/*[clinic end generated code: output=43be3437f1956211 input=caabc5d481419d02]*/
 {
     const char *input;
     char *output;
@@ -2271,13 +2262,12 @@ bytes_translate_impl(PyBytesObject *self, PyObject *table,
 
 
 /*[clinic input]
-@permit_long_summary
 bytes.maketrans
 [clinic start generated code]*/
 
 static PyObject *
 bytes_maketrans_impl(Py_buffer *frm, Py_buffer *to)
-/*[clinic end generated code: output=a36f6399d4b77f6f input=20fdf7ea6159180a]*/
+/*[clinic end generated code: output=a36f6399d4b77f6f input=8206156c906586c0]*/
 {
     return _Py_bytes_maketrans(frm, to);
 }
@@ -2300,13 +2290,12 @@ bytes_replace_impl(PyBytesObject *self, Py_buffer *old, Py_buffer *new,
 /** End DALKE **/
 
 /*[clinic input]
-@permit_long_summary
-bytes.removeprefix as bytes_removeprefix
+bytes.removeprefix
 [clinic start generated code]*/
 
 static PyObject *
 bytes_removeprefix_impl(PyBytesObject *self, Py_buffer *prefix)
-/*[clinic end generated code: output=f006865331a06ab6 input=0a863caade798e00]*/
+/*[clinic end generated code: output=f006865331a06ab6 input=28855ba6ad958c07]*/
 {
     const char *self_start = PyBytes_AS_STRING(self);
     Py_ssize_t self_len = PyBytes_GET_SIZE(self);
@@ -2329,13 +2318,12 @@ bytes_removeprefix_impl(PyBytesObject *self, Py_buffer *prefix)
 }
 
 /*[clinic input]
-@permit_long_summary
-bytes.removesuffix as bytes_removesuffix
+bytes.removesuffix
 [clinic start generated code]*/
 
 static PyObject *
 bytes_removesuffix_impl(PyBytesObject *self, Py_buffer *suffix)
-/*[clinic end generated code: output=d887d308e3242eeb input=a4935896b078c633]*/
+/*[clinic end generated code: output=d887d308e3242eeb input=7f94a621e5927f14]*/
 {
     const char *self_start = PyBytes_AS_STRING(self);
     Py_ssize_t self_len = PyBytes_GET_SIZE(self);
@@ -2359,30 +2347,26 @@ bytes_removesuffix_impl(PyBytesObject *self, Py_buffer *suffix)
 }
 
 /*[clinic input]
-@permit_long_summary
-@text_signature "($self, prefix[, start[, end]], /)"
 bytes.startswith
 [clinic start generated code]*/
 
 static PyObject *
 bytes_startswith_impl(PyBytesObject *self, PyObject *subobj,
                       Py_ssize_t start, Py_ssize_t end)
-/*[clinic end generated code: output=b1e8da1cbd528e8c input=5f12ea07368b0800]*/
+/*[clinic end generated code: output=b1e8da1cbd528e8c input=c54ae23053f02ce8]*/
 {
     return _Py_bytes_startswith(PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
                                 subobj, start, end);
 }
 
 /*[clinic input]
-@permit_long_summary
-@text_signature "($self, suffix[, start[, end]], /)"
 bytes.endswith
 [clinic start generated code]*/
 
 static PyObject *
 bytes_endswith_impl(PyBytesObject *self, PyObject *subobj, Py_ssize_t start,
                     Py_ssize_t end)
-/*[clinic end generated code: output=038b633111f3629d input=6dace6c7778ccf9e]*/
+/*[clinic end generated code: output=038b633111f3629d input=bfaf5129e342cda4]*/
 {
     return _Py_bytes_endswith(PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
                               subobj, start, end);
@@ -2403,13 +2387,12 @@ bytes_decode_impl(PyBytesObject *self, const char *encoding,
 
 
 /*[clinic input]
-@permit_long_summary
 bytes.splitlines
 [clinic start generated code]*/
 
 static PyObject *
 bytes_splitlines_impl(PyBytesObject *self, int keepends)
-/*[clinic end generated code: output=3484149a5d880ffb input=0181b59f234ff258]*/
+/*[clinic end generated code: output=3484149a5d880ffb input=86b958250366bc79]*/
 {
     return stringlib_splitlines(
         (PyObject*) self, PyBytes_AS_STRING(self),
@@ -2653,9 +2636,9 @@ static PyObject *_PyBytes_FromIterator(PyObject *it, PyObject *x);
 #include "clinic/bytesobject_pyspec.c.h"
 
 /*[clinic input]
-bytes.__new__ as bytes_new
+bytes.__new__
 [clinic start generated code]*/
-/*[clinic end generated code: output=da39a3ee5e6b4b0d input=b0f81d762515f5d3]*/
+/*[clinic end generated code: output=da39a3ee5e6b4b0d input=b39ff265a4f043e1]*/
 
 static PyObject*
 _PyBytes_FromBuffer(PyObject *x)

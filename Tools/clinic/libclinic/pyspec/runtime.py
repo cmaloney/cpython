@@ -39,6 +39,21 @@ NULL = _Null()
 cstr = str
 
 
+def _clinic_decorator(*args):
+    """``@d`` or ``@d(args)``: return the function unchanged."""
+    if len(args) == 1 and callable(args[0]):
+        return args[0]
+    return lambda func: func
+
+
+# The Argument Clinic decorators other than @classmethod and @staticmethod
+# (see frontend.py): they only affect the generated C, so for Python they
+# are identity decorators.
+coexist = critical_section = deleter = disable = getter = _clinic_decorator
+permit_long_docstring_body = permit_long_summary = _clinic_decorator
+setter = text_signature = vectorcall = _clinic_decorator
+
+
 def isinstance(obj, cls):
     """PyXxx_Check(): looks at the real type only, never at __class__."""
     return issubclass(type(obj), cls)

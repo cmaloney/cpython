@@ -5756,6 +5756,7 @@ class PyspecStubTest(PyspecTestBase):
     def test_parameters_and_docstring(self):
         spec = """
             class bytes:
+                @critical_section
                 def meth(self, a: object, /, b: int(c_name='bb') = 0, *,
                          c: str(accept={str, NoneType}) = None):
                     '''Summary line.
@@ -5772,7 +5773,6 @@ class PyspecStubTest(PyspecTestBase):
                     ...
         """
         output = self.check(spec, """
-            @critical_section
             bytes.meth as bytes_m
         """, """
             @critical_section
@@ -5963,17 +5963,193 @@ class PyspecStubTest(PyspecTestBase):
                             "'bytes.meth': @classmethod of a spec method "
                             f"is written in {self.spec_path}")
 
-    def test_clinic_decorator_in_spec(self):
+    def test_clinic_decorator_in_block(self):
         spec = """
             class bytes:
+                def meth(self, a: object):
+                    ...
+        """
+        self.expect_failure(spec, self.block("@critical_section\n"
+                                             "bytes.meth\n"),
+                            "'bytes.meth': @critical_section of a spec "
+                            f"method is written in {self.spec_path}")
+
+    # Any clinic decorator is written on the spec method as a Python
+    # decorator with the same name and arguments.
+
+    def test_clinic_decorators(self):
+        long_summary = "Summary " + "x" * 80
+        spec = f"""
+            class bytes:
+                @permit_long_summary
                 @critical_section
+                @text_signature('($self, a[, b], /)')
+                def meth(self, a: object, b: object = NULL, /):
+                    '''{long_summary}'''
+                    ...
+
+                @vectorcall
+                def __init__(self, a: object, /):
+                    ...
+        """
+        output = self.check(spec, "bytes.meth\n", f"""
+            @permit_long_summary
+            @critical_section
+            @text_signature "($self, a[, b], /)"
+            bytes.meth
+                a: object
+                b: object = NULL
+                /
+
+            {long_summary}
+        """)
+        self.assertIn('"meth($self, a[, b], /)\\n"', output)
+        self.assertIn('Py_BEGIN_CRITICAL_SECTION(self);', output)
+        output = self.check(spec, "bytes.__init__\n", """
+            @vectorcall
+            bytes.__init__ as bytes_init
+                a: object
+                /
+        """)
+        self.assertIn('bytes_vectorcall(PyObject *type', output)
+
+    def test_clinic_decorator_arguments(self):
+        # Arguments are words of the clinic line, quoted as needed.
+        spec = """
+            class bytes:
+                @critical_section('self', 'a')
+                @disable('fastcall')
+                def meth(self, a: object, /):
+                    ...
+        """
+        self.check(spec, "bytes.meth\n", """
+            @critical_section self a
+            @disable fastcall
+            bytes.meth
+                a: object
+                /
+        """)
+
+    def test_decorated_clone(self):
+        # A decorated clone is written as the call the decorator is.
+        long_summary = "Other " + "x" * 80
+        spec = f"""
+            class bytes:
+                def meth(self, a: object = None, /):
+                    '''Summary.'''
+                    ...
+
+                other = permit_long_summary(meth)
+                '''{long_summary}'''
+        """
+        self.check(spec, """
+            bytes.meth
+            [clinic start generated code]*/
+            /*[clinic input]
+            bytes.other
+        """, f"""
+            bytes.meth
+                a: object = None
+                /
+
+            Summary.
+            [clinic start generated code]*/
+            /*[clinic input]
+            @permit_long_summary
+            bytes.other = bytes.meth
+
+            {long_summary}
+        """)
+
+    def test_unneeded_permit_long_summary(self):
+        # The warning points at the decorator in the spec.
+        spec = """
+            class bytes:
+                @permit_long_summary
+                def meth(self, /):
+                    '''Summary.'''
+                    ...
+
+                other = permit_long_summary(meth)
+                '''Other.'''
+        """
+        with support.captured_stdout() as stdout:
+            self.generate(spec, self.block(
+                "bytes.meth\n"
+                "[clinic start generated code]*/\n"
+                "/*[clinic input]\n"
+                "bytes.other\n"))
+        self.assertIn(f"Warning in file {self.spec_path!r} on line 3:\n"
+                      "Remove the @permit_long_summary decorator from "
+                      "'bytes.meth'!", stdout.getvalue())
+        self.assertIn(f"Warning in file {self.spec_path!r} on line 8:\n"
+                      "Remove the @permit_long_summary decorator from "
+                      "'bytes.other'!", stdout.getvalue())
+
+    def test_unknown_clinic_decorator(self):
+        spec = """
+            class bytes:
+                @nosuchdecorator
                 def meth(self, a: object):
                     ...
         """
         self.expect_failure(spec, self.block("bytes.meth\n"),
-                            "spec methods take only @classmethod and "
-                            "@staticmethod; clinic decorators stay in the "
-                            ".c file")
+                            "'bytes.meth': unknown clinic decorator "
+                            "@nosuchdecorator\n(in the clinic input taken "
+                            f"from bytes.meth in {self.spec_path}:4)")
+
+    def test_clinic_decorator_non_constant_argument(self):
+        spec = """
+            class bytes:
+                @text_signature(SIGNATURE)
+                def meth(self, a: object):
+                    ...
+        """
+        self.expect_failure(spec, self.block("bytes.meth\n"),
+                            "the arguments of a clinic decorator must be "
+                            "string or integer constants")
+
+    def test_runtime_clinic_decorators(self):
+        # runtime.py has an identity decorator for each clinic decorator,
+        # so that the spec runs as Python.
+        clinic_decorators = {name.removeprefix('at_')
+                             for name in dir(DSLParser)
+                             if name.startswith('at_')}
+        clinic_decorators -= {'classmethod', 'staticmethod'}
+        runtime = {name for name, value in vars(pyspec_runtime).items()
+                   if value is pyspec_runtime._clinic_decorator
+                   and not name.startswith('_')}
+        self.assertEqual(runtime, clinic_decorators)
+        def f(): pass
+        self.assertIs(pyspec_runtime.permit_long_summary(f), f)
+        self.assertIs(pyspec_runtime.text_signature("($self)")(f), f)
+        self.assertIs(pyspec_runtime.critical_section("a", "b")(f), f)
+
+    def test_new_and_init_c_basename(self):
+        # The default C basename of T.__new__ is T_new, of T.__init__
+        # T_init; an explicit one is kept.
+        spec = """
+            class bytes:
+                def __new__(cls, a: object = NULL):
+                    ...
+
+                def __init__(self, a: object = NULL):
+                    ...
+        """
+        self.check(spec, "bytes.__new__\n", """
+            @classmethod
+            bytes.__new__ as bytes_new
+                a: object = NULL
+        """)
+        self.check(spec, "bytes.__init__\n", """
+            bytes.__init__ as bytes_init
+                a: object = NULL
+        """)
+        self.check(spec, "bytes.__new__ as spam\n", """
+            @classmethod
+            bytes.__new__ as spam
+                a: object = NULL
+        """)
 
     def test_parameter_docs_out_of_order(self):
         spec = """

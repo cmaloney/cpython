@@ -16,6 +16,9 @@ interpreter's bytes().
 
 from libclinic.pyspec.runtime import NULL, C, isinstance, fqname, tp_name
 
+# Argument Clinic decorators (no-ops in Python).
+from libclinic.pyspec.runtime import permit_long_summary, text_signature
+
 
 class bytes:
     def __new__(
@@ -67,6 +70,7 @@ class bytes:
         """Convert this value to exact type bytes."""
         ...
 
+    @permit_long_summary
     def split(self, sep: object = None, maxsplit: Py_ssize_t = -1):
         """Return a list of the sections in the bytes, using sep as the delimiter.
 
@@ -105,7 +109,7 @@ class bytes:
         """
         ...
 
-    rsplit = split
+    rsplit = permit_long_summary(split)
     """Return a list of the sections in the bytes, using sep as the delimiter.
 
     Splitting is done starting at the end of the bytes and working to
@@ -123,6 +127,8 @@ class bytes:
         """
         ...
 
+    @permit_long_summary
+    @text_signature("($self, sub[, start[, end]], /)")
     def find(
         self,
         sub: object,
@@ -141,19 +147,19 @@ class bytes:
         """
         ...
 
-    index = find
+    index = permit_long_summary(find)
     """Return the lowest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
 
     Raise ValueError if the subsection is not found.
     """
 
-    rfind = find
+    rfind = permit_long_summary(find)
     """Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
 
     Return -1 on failure.
     """
 
-    rindex = find
+    rindex = permit_long_summary(find)
     """Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
 
     Raise ValueError if the subsection is not found.
@@ -181,9 +187,10 @@ class bytes:
         """
         ...
 
-    count = find
+    count = permit_long_summary(find)
     """Return the number of non-overlapping occurrences of subsection 'sub' in bytes B[start:end]."""
 
+    @permit_long_summary
     def translate(
         self,
         table: object,
@@ -201,6 +208,7 @@ class bytes:
         """
         ...
 
+    @permit_long_summary
     @staticmethod
     def maketrans(frm: Py_buffer, to: Py_buffer, /):
         """Return a translation table usable for the bytes or bytearray translate method.
@@ -225,6 +233,7 @@ class bytes:
         """
         ...
 
+    @permit_long_summary
     def removeprefix(self, prefix: Py_buffer, /):
         """Return a bytes object with the given prefix string removed if present.
 
@@ -234,6 +243,7 @@ class bytes:
         """
         ...
 
+    @permit_long_summary
     def removesuffix(self, suffix: Py_buffer, /):
         """Return a bytes object with the given suffix string removed if present.
 
@@ -243,6 +253,8 @@ class bytes:
         """
         ...
 
+    @permit_long_summary
+    @text_signature("($self, prefix[, start[, end]], /)")
     def startswith(
         self,
         prefix: object(c_name='subobj'),
@@ -261,6 +273,8 @@ class bytes:
         """
         ...
 
+    @permit_long_summary
+    @text_signature("($self, suffix[, start[, end]], /)")
     def endswith(
         self,
         suffix: object(c_name='subobj'),
@@ -297,6 +311,7 @@ class bytes:
         """
         ...
 
+    @permit_long_summary
     def splitlines(self, keepends: bool = False):
         """Return a list of the lines in the bytes, breaking at line boundaries.
 
