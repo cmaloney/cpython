@@ -11,7 +11,7 @@ from types import FunctionType
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import libclinic
-from libclinic.pyspec import frontend
+from libclinic.pyspec import emit, frontend
 from libclinic import (
     ClinicError, VersionTuple,
     fail, warn, unspecified, unknown, NULL)
@@ -1774,14 +1774,17 @@ class DSLParser:
         name = self.spec_function
         if spec is None or name is None or not spec.implemented(name):
             return
+        if func.kind in (CALLABLE, CLASS_METHOD) and func.cls is not None:
+            self.check_pyspec_method(lineno)
+            return
         try:
             description = spec.describe(name)
         except frontend.SpecError as exc:
             fail(str(exc), line_number=lineno)
         where = f"{name}() in {spec.filename}"
         if func.kind is not METHOD_NEW:
-            fail(f"{where}: a spec can only implement __new__",
-                 line_number=lineno)
+            fail(f"{where}: a spec can only implement __new__, methods and "
+                 "class methods", line_number=lineno)
         assert func.cls is not None
         if not func.cls.type_object:
             fail(f"{where}: requires the type object of {func.cls.name!r}, "
@@ -1809,6 +1812,49 @@ class DSLParser:
         func.vectorcall = True
         func.pyspec = func.c_basename
         self.clinic.pyspec_c_basenames[name] = func.c_basename
+
+    def check_pyspec_method(self, lineno: int) -> None:
+        """Let a spec method (or class method) with a body implement this
+        function: its NAME_impl() comes from the spec (see
+        libclinic.pyspec.emit); the parsing code is clinic's as usual."""
+        func = self.function
+        assert func is not None
+        spec = self.clinic.pyspec
+        name = self.spec_function
+        assert spec is not None and name is not None
+        where = f"{name}() in {spec.filename}"
+        if func.critical_section:
+            fail(f"{where}: a spec cannot be used with @critical_section",
+                 line_number=lineno)
+        selves = [p for p in func.parameters.values()
+                  if isinstance(p.converter, self_converter)]
+        params = [p for p in func.parameters.values()
+                  if not isinstance(p.converter, (self_converter,
+                                                  defining_class_converter))]
+        if len(selves) != 1:
+            fail(f"{where}: needs clinic's implicit self parameter",
+                 line_number=lineno)
+        # What self_converter.pre_render() will choose.
+        conv = selves[0].converter
+        assert isinstance(conv, self_converter)
+        self_ctype = (conv.specified_type or conv.type
+                      or correct_name_for_self(func)[0])
+        try:
+            description = emit.describe_method(spec, name, self_ctype)
+        except frontend.SpecError as exc:
+            fail(str(exc), line_number=lineno)
+        spec_params = description.parameters[1:]
+        if len(params) != len(spec_params):
+            fail(f"{where} takes {len(spec_params)} parameters after self, "
+                 f"{func.full_name} takes {len(params)}", line_number=lineno)
+        for p, sp in zip(params, spec_params):
+            if p.converter.type != sp.ctype:
+                fail(f"{where}: parameter {sp.name!r} is {sp.ctype!r}, "
+                     f"its converter gives {p.converter.type!r}",
+                     line_number=lineno)
+        func.pyspec = func.c_basename
+        self.clinic.pyspec_c_basenames[name] = func.c_basename
+        self.clinic.pyspec_self_ctypes[name] = self_ctype
 
     def do_post_block_processing_cleanup(self, lineno: int) -> None:
         """

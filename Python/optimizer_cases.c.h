@@ -4525,9 +4525,27 @@
                 ADD_OP(_PUSH_NULL, 0, 0);
                 callable = PyJitRef_Borrow(sym_new_const(ctx, value));
             }
+            else if (call != NULL && oparg == 1 && call->result_alias == 0 &&
+                 (call->arg_type == NULL ||
+                  sym_matches_type(args[0], call->arg_type)) &&
+                 _Py_IsImmortal(callable_o))
+            {
+                JitOptRef arg = args[0];
+                if (PyJitRef_IsBorrowed(arg)) {
+                    ADD_OP(_MAKE_HEAP_SAFE, 0, 0);
+                }
+                ADD_OP(_SWAP, 3, 0);
+                args[0] = PyJitRef_Borrow(callable);
+                callable = PyJitRef_StripReferenceInfo(arg);
+            }
             else if (call != NULL) {
                 if (oparg == 0) {
                     ADD_OP(_CALL_BUILTIN_CLASS_0_INLINE, oparg, (uintptr_t)call->func.f0);
+                }
+                else if ((call->flags & _PySpec_MAY_RUN_PYTHON) == 0 &&
+                     _Py_IsImmortal(callable_o))
+                {
+                    ADD_OP(_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON, oparg, (uintptr_t)call->func.f1);
                 }
                 else {
                     ADD_OP(_CALL_BUILTIN_CLASS_1_INLINE, oparg, (uintptr_t)call->func.f1);
@@ -4554,6 +4572,10 @@
         }
 
         case _CALL_BUILTIN_CLASS_1_INLINE: {
+            break;
+        }
+
+        case _CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON: {
             break;
         }
 
@@ -5003,23 +5025,56 @@
             self_or_null = stack_pointer[-1 - oparg];
             callable = stack_pointer[-2 - oparg];
             PyObject *callable_o = sym_get_const(ctx, callable);
+            const _PySpecCall *spec = NULL;
             if (callable_o && Py_IS_TYPE(callable_o, &PyMethodDescr_Type)
                 && sym_is_not_null(self_or_null)) {
                 PyMethodDescrObject *method = (PyMethodDescrObject *)callable_o;
-                PyCFunction cfunc = method->d_method->ml_meth;
-                ADD_OP(_CALL_METHOD_DESCRIPTOR_NOARGS_INLINE, oparg + 1, (uintptr_t)cfunc);
+                spec = _PySpec_FindMethod(method->d_common.d_type,
+                                      method->d_method->ml_meth, 1,
+                                      sym_get_type(self_or_null));
+                if (spec != NULL && spec->arg_type != NULL &&
+                    !sym_matches_type(self_or_null, spec->arg_type)) {
+                    spec = NULL;
+                }
             }
-            res = sym_new_not_null(ctx);
-            c = callable;
-            if (sym_is_not_null(self_or_null)) {
-                args--;
-                s = args[0];
-            }
-            else if (sym_is_null(self_or_null)) {
-                s = args[0];
+            if (spec != NULL && spec->result_alias == 0) {
+                assert(oparg == 0);
+                ADD_OP(_COPY, 1, 0);
+                if (PyJitRef_IsBorrowed(self_or_null)) {
+                    ADD_OP(_MAKE_HEAP_SAFE, 0, 0);
+                }
+                ADD_OP(_SWAP, 3, 0);
+                res = PyJitRef_StripReferenceInfo(self_or_null);
+                c = self_or_null;
+                s = callable;
             }
             else {
-                s = sym_new_unknown(ctx);
+                if (callable_o && Py_IS_TYPE(callable_o, &PyMethodDescr_Type)
+                    && sym_is_not_null(self_or_null)) {
+                    PyMethodDescrObject *method = (PyMethodDescrObject *)callable_o;
+                    PyCFunction cfunc = method->d_method->ml_meth;
+                    ADD_OP(_CALL_METHOD_DESCRIPTOR_NOARGS_INLINE, oparg + 1, (uintptr_t)cfunc);
+                }
+                if (spec != NULL && spec->result_const >= 0) {
+                    res = sym_new_const(ctx, Py_GetConstantBorrowed(spec->result_const));
+                }
+                else if (spec != NULL && spec->result_type != NULL) {
+                    res = sym_new_type(ctx, spec->result_type);
+                }
+                else {
+                    res = sym_new_not_null(ctx);
+                }
+                c = callable;
+                if (sym_is_not_null(self_or_null)) {
+                    args--;
+                    s = args[0];
+                }
+                else if (sym_is_null(self_or_null)) {
+                    s = args[0];
+                }
+                else {
+                    s = sym_new_unknown(ctx);
+                }
             }
             CHECK_STACK_BOUNDS(1 - oparg);
             stack_pointer[-2 - oparg] = res;

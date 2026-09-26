@@ -70,7 +70,9 @@ class bytes:
 
     def __bytes__(self):
         """Convert this value to exact type bytes."""
-        ...
+        if type(self) is bytes:
+            return self
+        return C.bytes_copy(self)
 
     @permit_long_summary
     def split(self, sep: object = None, maxsplit: Py_ssize_t = -1):
@@ -329,7 +331,10 @@ class bytes:
         Spaces between two numbers are accepted.
         Example: bytes.fromhex('B9 01EF') -> b'\\xb9\\x01\\xef'.
         """
-        ...
+        result = C.bytes_from_hex(string)
+        if cls is not bytes:
+            return cls(result)
+        return result
 
     def hex(self, sep: object = NULL, bytes_per_sep: Py_ssize_t = 1):
         r"""Create a string of hexadecimal numbers from a bytes object.
@@ -948,4 +953,79 @@ def PyBytesWriter_Format(
     On success, return ``0``.
     On error, set an exception and return ``-1``.
     """
+    ...
+
+
+# ---------------------------------------------------------------------------
+# Escapes
+#
+# The C functions the bodies above call directly, as C.<name>(...) (their C
+# call templates are in Tools/clinic/libclinic/pyspec/runtime.py): one stub
+# per escape, named like it, with its facts in the vocabulary of the catalog.
+# Argument Clinic derives the facts of the bodies from them (the call table
+# of the tier-2 optimizer, see call_table.py), and the catalog derives
+# whether a body runs Python code.  @helper marks a C function outside the
+# C API of bytesobject.c (static, or defined in another file): the catalog
+# skips it.  New[bytes] means a new reference to an exact bytes object.
+
+from libclinic.pyspec.runtime import helper  # noqa: E402
+
+
+def lookup_special(obj: object, name: object
+                   ) -> RunsPython[New[object], 'obj']:
+    """_PyObject_LookupSpecial(): NULL without an exception if the type of
+    obj has no such attribute; calls the __get__ of the attribute found."""
+    ...
+
+
+@helper
+def PyUnicode_AsEncodedString(unicode: object, encoding: cstr, errors: cstr
+                              ) -> RunsPython[New[object]]:
+    """Runs the codec, which may return an instance of a bytes subclass."""
+    ...
+
+
+@helper
+def PyNumber_AsSsize_t(o: object, exc: object
+                       ) -> RunsPython[OnError[Py_ssize_t, -1], 'o']:
+    ...
+
+
+@helper
+def _PyBytes_FromSize(size: Py_ssize_t, use_calloc: int) -> New[bytes]:
+    ...
+
+
+@helper
+def _PyBytes_FromBuffer(x: object) -> RunsPython[New[bytes], 'x']:
+    ...
+
+
+@helper
+def _PyBytes_FromSequence_lock_held(x: object) -> New[bytes]:
+    """NULL without an exception: an item is not an int that fits in a
+    Py_ssize_t; the caller falls back to iteration.  Only exact ints are
+    converted, so no __index__ runs."""
+    ...
+
+
+@helper
+def _PyBytes_FromIterator(it: object, x: object) -> RunsPython[New[bytes]]:
+    """Calls __next__ and the __index__ of the items."""
+    ...
+
+
+def bytes_subtype_new(type: pointer('PyTypeObject'), tmp: object
+                      ) -> RunsPython[New[object]]:
+    """An instance of the subtype."""
+    ...
+
+
+def bytes_copy(b: object) -> New[bytes]:
+    """An exact bytes copy of a bytes (or bytes subclass) instance."""
+    ...
+
+
+def bytes_from_hex(string: object) -> RunsPython[New[bytes], 'string']:
+    """_PyBytes_FromHex(string, 0): a str, or the buffer of string."""
     ...

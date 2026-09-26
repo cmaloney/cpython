@@ -15,7 +15,11 @@ extern "C" {
  * of the type with positional, object-typed arguments only, and facts
  * about their results derived from the spec code.  The tier-2 optimizer
  * uses them to replace _CALL_BUILTIN_CLASS by a direct call and to type
- * or fold the result.  The data is static: no startup cost. */
+ * or fold the result.  The table also has the facts of the other methods
+ * of the type the spec implements, keyed by their ml_meth.  Every fact
+ * holds only for the exact argument type of its entry (a subclass
+ * instance matches the generic entry).  The data is static: no startup
+ * cost. */
 
 /* The call may execute arbitrary Python code (__bytes__, __index__,
  * iterators, codecs, ...). */
@@ -34,23 +38,36 @@ typedef struct {
     /* Py_CONSTANT_* the call always returns, without side effects and
        without raising; -1 if none. */
     int8_t result_const;
-    /* For nargs == 1: the exact type of the argument this entry is
-       specialized for, or NULL for any argument. */
+    /* Index of the argument the call always returns (a new reference to
+       that very object), or -1.  E.g. 0 for bytes(b) and b.__bytes__()
+       when type(b) is exactly bytes. */
+    int8_t result_alias;
+    /* The exact type of the first argument this entry is specialized
+       for, or NULL for any argument. */
     PyTypeObject *arg_type;
     /* The exact type of every result, or NULL when unknown (e.g. a
        subclass instance may be returned). */
     PyTypeObject *result_type;
-    /* Returns a new reference, or NULL with an exception set. */
+    /* Calls of the type: the function to call; returns a new reference,
+     * or NULL with an exception set.
+     * Methods: the ml_meth of the method, which identifies it. */
     union {
         _PySpecFunc0 f0;
         _PySpecFunc1 f1;
+        PyCFunction meth;
     } func;
 } _PySpecCall;
 
 typedef struct {
     PyTypeObject *type;
+    /* Calls of the type (tp_new): positional arguments only. */
     Py_ssize_t ncalls;
     const _PySpecCall *calls;
+    /* Methods and class methods implemented by the spec.  The arguments
+       are self and the others for a method, and the others for a class
+       method (the class is the type); nargs counts them. */
+    Py_ssize_t nmethods;
+    const _PySpecCall *methods;
 } _PySpecCallTable;
 
 /* Generated into Objects/clinic/bytesobject_pyspec.c.h. */
@@ -80,6 +97,42 @@ _PySpec_FindCall(PyTypeObject *tp, int nargs, PyTypeObject *arg_type)
     for (Py_ssize_t i = 0; i < table->ncalls; i++) {
         const _PySpecCall *call = &table->calls[i];
         if (call->nargs != nargs) {
+            continue;
+        }
+        if (call->arg_type == NULL) {
+            generic = call;
+        }
+        else if (call->arg_type == arg_type) {
+            return call;
+        }
+    }
+    return generic;
+}
+
+/* Call func, from an entry without _PySpec_MAY_RUN_PYTHON: it runs no
+ * Python code, so the cases generator treats this call as not escaping
+ * (Tools/cases_generator/analyzer.py). */
+static inline PyObject *
+_PySpec_CallNoPython1(_PySpecFunc1 func, PyObject *arg)
+{
+    return func(arg);
+}
+
+/* The facts of method meth (the ml_meth of a method of tp) called with
+ * nargs arguments, the first of exact type arg_type (NULL when unknown);
+ * an entry specialized for arg_type is preferred over the generic one. */
+static inline const _PySpecCall *
+_PySpec_FindMethod(PyTypeObject *tp, PyCFunction meth, int nargs,
+                   PyTypeObject *arg_type)
+{
+    const _PySpecCallTable *table = _PySpec_GetCallTable(tp);
+    if (table == NULL) {
+        return NULL;
+    }
+    const _PySpecCall *generic = NULL;
+    for (Py_ssize_t i = 0; i < table->nmethods; i++) {
+        const _PySpecCall *call = &table->methods[i];
+        if (call->func.meth != meth || call->nargs != nargs) {
             continue;
         }
         if (call->arg_type == NULL) {

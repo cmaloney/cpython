@@ -3307,7 +3307,17 @@ class TestUopsOptimization(unittest.TestCase):
                 self.assertIsNotNone(ex)
                 uops = get_opnames(ex)
                 self.assertIn("_GUARD_TYPE", uops)
-                self.assertIn("_CALL_BUILTIN_CLASS_1_INLINE", uops)
+                # bytes(bytearray) and bytes(memoryview) run no Python
+                # code (derived from the spec): their call does not
+                # escape.
+                if isinstance(source, (bytearray, memoryview)):
+                    self.assertIn("_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON",
+                                  uops)
+                    self.assertNotIn("_CALL_BUILTIN_CLASS_1_INLINE", uops)
+                else:
+                    self.assertIn("_CALL_BUILTIN_CLASS_1_INLINE", uops)
+                    self.assertNotIn("_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON",
+                                     uops)
                 self.assertNotIn("_CALL_BUILTIN_CLASS", uops)
                 self.assertNotIn("_CALL_ISINSTANCE", uops)
                 self.assertNotIn("_GUARD_BINARY_OP_EXTEND", uops)
@@ -3344,6 +3354,132 @@ class TestUopsOptimization(unittest.TestCase):
         per_round = 3 * 7 + 2 + 4 + 5
         self.assertEqual(res, per_round * TIER2_THRESHOLD)
         self.assertRaises(TypeError, testfunc, 1, ["abc"])
+
+    def test_call_builtin_class_pyspec_alias(self):
+        # bytes(b) of an exact bytes b is b itself, derived from the spec
+        # (bytes.__new__ -> lookup_special __bytes__ -> bytes.__bytes__,
+        # "return self" when type(self) is bytes): the call is removed.
+        # The borrowed argument is made a strong reference in the result
+        # slot, and the class takes its slot: both pops are free.
+        def testfunc(n, b):
+            x = 0
+            for _ in range(n):
+                r = bytes(b)
+                if r is b:
+                    x += 1
+            return x
+
+        b = b"abc"
+        res = testfunc(TIER2_THRESHOLD, b)
+        self.assertEqual(res, TIER2_THRESHOLD)
+        ex = get_first_executor(testfunc)
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_GUARD_TYPE", uops)
+        self.assertNotIn("_CALL_BUILTIN_CLASS", uops)
+        self.assertNotIn("_CALL_BUILTIN_CLASS_1_INLINE", uops)
+        self.assertNotIn("_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON", uops)
+        i = uops.index("_MAKE_HEAP_SAFE")
+        self.assertEqual(uops[i + 1:i + 4],
+                         ["_SWAP_3", "_POP_TOP_NOP", "_POP_TOP_NOP"])
+
+    def test_call_builtin_class_pyspec_alias_subclass(self):
+        # A bytes subclass instance does not get the facts of exact bytes:
+        # bytes() calls the generic C function, which returns an exact
+        # bytes copy (the alias would be wrong).  This is the case
+        # _CALL_STR_1 gets wrong for str subclasses.
+        class Sub(bytes):
+            pass
+
+        def testfunc(n, b):
+            x = 0
+            for _ in range(n):
+                r = bytes(b)
+                if r is not b and type(r) is bytes:
+                    x += 1
+            return x
+
+        res = testfunc(TIER2_THRESHOLD, Sub(b"abc"))
+        self.assertEqual(res, TIER2_THRESHOLD)
+        ex = get_first_executor(testfunc)
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_CALL_BUILTIN_CLASS_1_INLINE", uops)
+        self.assertNotIn("_MAKE_HEAP_SAFE", uops)
+        self.assertNotIn("_SWAP_3", uops)
+
+        # Nor after the trace was built for exact bytes.
+        def testfunc2(n, values):
+            x = 0
+            for i in range(n):
+                v = values[i % len(values)]
+                r = bytes(v)
+                x += (r is v) + 2 * (type(r) is bytes)
+            return x
+
+        values = [b"ab"] * 7 + [Sub(b"cd")]
+        res = testfunc2(TIER2_THRESHOLD * len(values), values)
+        self.assertEqual(res, (3 * 7 + 2) * TIER2_THRESHOLD)
+
+    def test_call_builtin_class_pyspec_alias_owned_arg(self):
+        # A strong (not borrowed) argument moves to the result slot: no
+        # incref, no decref, no call.
+        def testfunc(n):
+            x = 0
+            for i in range(n):
+                r = bytes(bytes(i & 1))
+                x += len(r)
+            return x
+
+        res, ex = self._run_with_optimizer(testfunc, TIER2_THRESHOLD)
+        self.assertEqual(res, sum(i & 1 for i in range(TIER2_THRESHOLD)))
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        # The inner bytes(int) is called; the outer one is removed.
+        self.assertEqual(uops.count("_CALL_BUILTIN_CLASS_1_INLINE"), 1)
+        self.assertNotIn("_MAKE_HEAP_SAFE", uops)
+        self.assertIn("_SWAP_3", uops)
+
+    def test_call_method_descriptor_noargs_pyspec_alias(self):
+        # b.__bytes__() of an exact bytes b is b (bytes.__bytes__ is
+        # implemented by the spec): no call.
+        def testfunc(n, b):
+            x = 0
+            for _ in range(n):
+                r = b.__bytes__()
+                if r is b:
+                    x += 1
+            return x
+
+        b = b"abc"
+        res = testfunc(TIER2_THRESHOLD, b)
+        self.assertEqual(res, TIER2_THRESHOLD)
+        ex = get_first_executor(testfunc)
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertNotIn("_CALL_METHOD_DESCRIPTOR_NOARGS", uops)
+        self.assertNotIn("_CALL_METHOD_DESCRIPTOR_NOARGS_INLINE", uops)
+        i = uops.index("_COPY_1")
+        self.assertEqual(uops[i + 1:i + 3], ["_MAKE_HEAP_SAFE", "_SWAP_3"])
+
+    def test_call_method_descriptor_noargs_pyspec_subclass(self):
+        # bytes.__bytes__ of a subclass instance is an exact copy.
+        class Sub(bytes):
+            __slots__ = ()
+
+        def testfunc(n, b):
+            x = 0
+            for _ in range(n):
+                r = bytes.__bytes__(b)
+                if r is not b and type(r) is bytes:
+                    x += 1
+            return x
+
+        res = testfunc(TIER2_THRESHOLD, Sub(b"abc"))
+        self.assertEqual(res, TIER2_THRESHOLD)
+        ex = get_first_executor(testfunc)
+        if ex is not None:
+            self.assertNotIn("_COPY_1", get_opnames(ex))
 
     def test_call_builtin_class_pyspec_constant(self):
         # bytes() is the empty bytes singleton: the call is folded away,

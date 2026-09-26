@@ -1831,16 +1831,6 @@ static PyBufferProcs bytes_as_buffer = {
 };
 
 
-static PyObject *
-bytes___bytes___impl(PyBytesObject *self)
-{
-    if (PyBytes_CheckExact(self)) {
-        return Py_NewRef(self);
-    }
-    else {
-        return PyBytes_FromStringAndSize(self->ob_sval, Py_SIZE(self));
-    }
-}
 
 
 #define LEFTSTRIP 0
@@ -2289,15 +2279,6 @@ bytes_splitlines_impl(PyBytesObject *self, int keepends)
         );
 }
 
-static PyObject *
-bytes_fromhex_impl(PyTypeObject *type, PyObject *string)
-{
-    PyObject *result = _PyBytes_FromHex(string, 0);
-    if (type != &PyBytes_Type && result != NULL) {
-        Py_SETREF(result, PyObject_CallOneArg((PyObject *)type, result));
-    }
-    return result;
-}
 
 PyObject*
 _PyBytes_FromHex(PyObject *string, int use_bytearray)

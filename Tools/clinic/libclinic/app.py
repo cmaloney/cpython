@@ -112,6 +112,8 @@ impl_definition block
         self._pyspec_read = False
         # C basenames of the clinic functions implemented by spec methods.
         self.pyspec_c_basenames: dict[str, str] = {}
+        # C type of the self (or class) parameter of the other spec methods.
+        self.pyspec_self_ctypes: dict[str, str] = {}
 
         self.line_prefix = self.line_suffix = ''
 
@@ -340,7 +342,8 @@ impl_definition block
         stem = os.path.splitext(basename)[0]
         spec_name = f"{os.path.basename(dirname)}/pyspec/{stem}.py"
         try:
-            text = emit.generate(spec, spec_name, self.pyspec_c_basenames)
+            text = emit.generate(spec, spec_name, self.pyspec_c_basenames,
+                                 self.pyspec_self_ctypes)
         except (emit.SpecError, frontend.SpecError) as exc:
             fail(f"{spec.filename}: {exc}")
         output = frontend.output_path(self.filename)
