@@ -7340,6 +7340,32 @@ class BytesSpecFactsTest(TestCase):
         self.assertIsNone(facts.result_type)
         self.assertTrue(facts.runs_python)
 
+        class H(bytes):
+            def __new__(cls, value):
+                return 42
+        self.assertEqual(H.fromhex('4142'), 42)
+
+    def test_fromhex_table(self):
+        # Sub.fromhex shares the ml_meth of bytes.fromhex, and the table is
+        # keyed by it: the generic entry of the class method, which
+        # _PySpec_FindMethod() returns for a subclass, holds for any
+        # class; the entries for an argument type are for exactly bytes.
+        path = os.path.join(test_tools.basepath, 'Objects', 'clinic',
+                            'bytesobject_pyspec.c.h')
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        entries = re.findall(r'/\* (bytes\.fromhex\(\w+\)[^:]*): ([^*]*) \*/'
+                             r'\s*\{([^}]*)\}', text)
+        self.assertGreater(len(entries), 1)
+        for comment, described, body in entries:
+            with self.subTest(comment=comment):
+                if '.arg_type = NULL' in body:
+                    self.assertEqual(comment, 'bytes.fromhex(x)')
+                    self.assertIn('.result_type = NULL', body)
+                    self.assertIn('_PySpec_MAY_RUN_PYTHON', body)
+                else:
+                    self.assertTrue(comment.endswith(', on exactly bytes'))
+
     def test_builtin_type_facts(self):
         # The evaluator's facts about builtin types (partial_eval.py
         # BUILTIN_TYPES, and the spec class for bytes) agree with the

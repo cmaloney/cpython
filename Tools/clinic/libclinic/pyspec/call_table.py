@@ -49,9 +49,9 @@ import builtins
 from . import emit, partial_eval, runtime
 from .partial_eval import NOTNULL, NULL, Value
 
-# Exact argument types tried for one-argument calls.
+# Exact argument types tried for one-argument calls: the common ones.
 CANDIDATE_TYPES = [bytes, bytearray, memoryview, list, tuple, int, str,
-                   range, dict, float]
+                   range]
 
 # C type objects of the candidates and of result types.
 TYPE_OBJECTS = {
@@ -63,8 +63,6 @@ TYPE_OBJECTS = {
     'int': '&PyLong_Type',
     'str': '&PyUnicode_Type',
     'range': '&PyRange_Type',
-    'dict': '&PyDict_Type',
-    'float': '&PyFloat_Type',
 }
 
 # Keep a type-specialized variant when its residual has at most this
@@ -475,7 +473,8 @@ def generate_calls(generator, description):
 def generate_methods(generator, type_name, descriptions):
     """The facts of the methods and class methods of a type implemented by
     the spec: per method, a generic entry, and an entry per exact type of
-    the first argument whose facts differ from it.
+    the first argument whose facts differ from it (for a class method,
+    called on exactly the type).
 
     The arguments are those the C function sees besides the class: for a
     method, self and the others; for a class method, the others (the class
@@ -496,14 +495,21 @@ def generate_methods(generator, type_name, descriptions):
         if any(p.optional or p.ctype != emit.OBJECT for p in params):
             continue
         env = {p.name: NOTNULL for p in params}
+        env[first.name] = NOTNULL
         if 'classmethod' in decorators:
-            env[first.name] = Value(type_value)
+            # The generic entry holds for any class (a subclass shares
+            # the ml_meth); the others only when the class is the type
+            # (_PySpec_FindMethod() checks the class the method is bound
+            # to).
+            typed_base = env | {first.name: Value(type_value)}
             args = params
             candidates = CANDIDATE_TYPES
+            on = f', on exactly {type_name}'
         else:
-            env[first.name] = NOTNULL
+            typed_base = env
             args = [first, *params]
             candidates = [type_value]
+            on = ''
         if not args:
             continue
         arg_names = [a.name for a in args]
@@ -511,15 +517,15 @@ def generate_methods(generator, type_name, descriptions):
         generic = partial_eval.specialize(spec, name, env)
         generic_facts = analyzer.facts(generic, _type_env(env), arg_names)
         for tp in candidates:
-            typed_env = env | {args[0].name: tp}
+            typed_env = typed_base | {args[0].name: tp}
             residual = partial_eval.specialize(spec, name, typed_env)
             facts = analyzer.facts(residual, _type_env(typed_env),
                                    arg_names)
             if facts.key() != generic_facts.key():
                 entries.append((name, len(args), tp.__name__, facts,
-                                arg_names, meth))
+                                arg_names, meth, on))
         entries.append((name, len(args), None, generic_facts, arg_names,
-                        meth))
+                        meth, ''))
 
     table = f'{type_name}_spec_methods'
     out = [
@@ -529,9 +535,9 @@ def generate_methods(generator, type_name, descriptions):
         'Include/internal/pycore_pyspec.h). */',
         f'static const _PySpecCall {table}[] = {{',
     ]
-    for name, nargs, arg_type, facts, arg_names, meth in entries:
+    for name, nargs, arg_type, facts, arg_names, meth, on in entries:
         shown = [arg_type or 'x'] + ['_'] * (nargs - 1)
-        comment = f'{name}({", ".join(shown)})'
+        comment = f'{name}({", ".join(shown)}){on}'
         out += _entry(comment, nargs, facts, None, arg_type,
                       ('meth', meth), arg_names)
     out += ['};', '']

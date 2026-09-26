@@ -65,7 +65,9 @@ typedef struct {
     const _PySpecCall *calls;
     /* Methods and class methods implemented by the spec.  The arguments
        are self and the others for a method, and the others for a class
-       method (the class is the type); nargs counts them. */
+       method; nargs counts them.  The generic entry of a class method
+       holds for any class, the others only for the type itself (see
+       _PySpec_FindMethod()). */
     Py_ssize_t nmethods;
     const _PySpecCall *methods;
 } _PySpecCallTable;
@@ -118,16 +120,38 @@ _PySpec_CallNoPython1(_PySpecFunc1 func, PyObject *arg)
     return func(arg);
 }
 
+/* Whether meth (an ml_meth of tp) is a class method of tp. */
+static inline int
+_PySpec_IsClassMethod(PyTypeObject *tp, PyCFunction meth)
+{
+    for (PyMethodDef *def = tp->tp_methods; def && def->ml_name; def++) {
+        if (def->ml_meth == meth) {
+            return (def->ml_flags & METH_CLASS) != 0;
+        }
+    }
+    return 0;
+}
+
 /* The facts of method meth (the ml_meth of a method of tp) called with
  * nargs arguments, the first of exact type arg_type (NULL when unknown);
- * an entry specialized for arg_type is preferred over the generic one. */
+ * an entry specialized for arg_type is preferred over the generic one.
+ *
+ * self is the object the method is bound to, or NULL when not known (or
+ * for a method called through its descriptor).  A subclass shares the
+ * ml_meth of a class method: Sub.fromhex is bytes_fromhex bound to Sub,
+ * and calls Sub(result).  So the entries of a class method specialized
+ * for arg_type hold only when self is exactly tp; otherwise only the
+ * generic entry, derived for any class, is returned. */
 static inline const _PySpecCall *
-_PySpec_FindMethod(PyTypeObject *tp, PyCFunction meth, int nargs,
-                   PyTypeObject *arg_type)
+_PySpec_FindMethod(PyTypeObject *tp, PyCFunction meth, PyObject *self,
+                   int nargs, PyTypeObject *arg_type)
 {
     const _PySpecCallTable *table = _PySpec_GetCallTable(tp);
     if (table == NULL) {
         return NULL;
+    }
+    if (self != (PyObject *)tp && _PySpec_IsClassMethod(tp, meth)) {
+        arg_type = NULL;
     }
     const _PySpecCall *generic = NULL;
     for (Py_ssize_t i = 0; i < table->nmethods; i++) {

@@ -5030,7 +5030,7 @@
                 && sym_is_not_null(self_or_null)) {
                 PyMethodDescrObject *method = (PyMethodDescrObject *)callable_o;
                 spec = _PySpec_FindMethod(method->d_common.d_type,
-                                      method->d_method->ml_meth, 1,
+                                      method->d_method->ml_meth, NULL, 1,
                                       sym_get_type(self_or_null));
                 if (spec != NULL && spec->arg_type != NULL &&
                     !sym_matches_type(self_or_null, spec->arg_type)) {
