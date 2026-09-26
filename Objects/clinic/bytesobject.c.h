@@ -1362,7 +1362,7 @@ exit:
 }
 
 static PyObject *
-bytes_new_impl(PyTypeObject *type, PyObject *x, const char *encoding,
+bytes_new_impl(PyTypeObject *type, PyObject *source, const char *encoding,
                const char *errors);
 
 static PyObject *
@@ -1400,7 +1400,7 @@ bytes_new_helper(PyTypeObject *type, PyObject *const *args,
     PyObject *argsbuf[3];
     PyObject * const *fastargs;
     Py_ssize_t noptargs = nargs + nkw - 0;
-    PyObject *x = NULL;
+    PyObject *source = NULL;
     const char *encoding = NULL;
     const char *errors = NULL;
 
@@ -1413,7 +1413,7 @@ bytes_new_helper(PyTypeObject *type, PyObject *const *args,
         goto skip_optional_pos;
     }
     if (fastargs[0]) {
-        x = fastargs[0];
+        source = fastargs[0];
         if (!--noptargs) {
             goto skip_optional_pos;
         }
@@ -1450,7 +1450,7 @@ bytes_new_helper(PyTypeObject *type, PyObject *const *args,
         goto exit;
     }
 skip_optional_pos:
-    return_value = bytes_new_impl(type, x, encoding, errors);
+    return_value = bytes_new_impl(type, source, encoding, errors);
 
 exit:
     return return_value;
@@ -1469,13 +1469,13 @@ static PyObject *
 bytes_new_nargs0(void);
 
 static PyObject *
-bytes_new_nargs1(PyObject *x);
+bytes_new_nargs1(PyObject *source);
 
 static PyObject *
-bytes_new_nargs2(PyObject *x, const char *encoding);
+bytes_new_nargs2(PyObject *source, const char *encoding);
 
 static PyObject *
-bytes_new_nargs3(PyObject *x, const char *encoding, const char *errors);
+bytes_new_nargs3(PyObject *source, const char *encoding, const char *errors);
 
 static PyObject *
 bytes_vectorcall(PyObject *type, PyObject *const *args,
@@ -1483,7 +1483,7 @@ bytes_vectorcall(PyObject *type, PyObject *const *args,
 {
     PyObject *return_value = NULL;
     Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
-    PyObject *x = NULL;
+    PyObject *source = NULL;
     const char *encoding = NULL;
     const char *errors = NULL;
 
@@ -1500,9 +1500,9 @@ bytes_vectorcall(PyObject *type, PyObject *const *args,
         return_value = bytes_new_nargs0();
         goto exit;
     }
-    x = args[0];
+    source = args[0];
     if (nargs < 2) {
-        return_value = bytes_new_nargs1(x);
+        return_value = bytes_new_nargs1(source);
         goto exit;
     }
     if (!PyUnicode_Check(args[1])) {
@@ -1519,7 +1519,7 @@ bytes_vectorcall(PyObject *type, PyObject *const *args,
         goto exit;
     }
     if (nargs < 3) {
-        return_value = bytes_new_nargs2(x, encoding);
+        return_value = bytes_new_nargs2(source, encoding);
         goto exit;
     }
     if (!PyUnicode_Check(args[2])) {
@@ -1535,9 +1535,9 @@ bytes_vectorcall(PyObject *type, PyObject *const *args,
         PyErr_SetString(PyExc_ValueError, "embedded null character");
         goto exit;
     }
-    return_value = bytes_new_nargs3(x, encoding, errors);
+    return_value = bytes_new_nargs3(source, encoding, errors);
 
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=39809dbde6ac2b23 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=2e445a3719bd169d input=a9049054013a1b77]*/

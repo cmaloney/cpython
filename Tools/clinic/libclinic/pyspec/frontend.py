@@ -9,8 +9,8 @@ named T.  A method is written like the clinic block it replaces:
 
 * parameters are clinic parameter lines: the converter is the annotation,
   then the default; ``/`` and ``*`` as in clinic (and Python).  The
-  pseudo-argument ``c_name='x'`` of the converter is clinic's
-  ``name as x``.  The first parameter of a method or a class method
+  pseudo-argument ``c_param='x'`` of the converter is clinic's
+  ``name as x`` (the name of the C parameter).  The first parameter of a method or a class method
   (``self``, ``cls``), when not annotated, is clinic's implicit one;
 * ``@classmethod`` and ``@staticmethod`` as in Python (``__new__`` is
   implicitly a class method, like in Python);
@@ -33,11 +33,9 @@ the function line only (``bytes.split``).  clinic_input() turns the spec
 method into the rest of the block, and clinic writes the impl head into
 the block's output, as usual.  A missing block is an error.
 
-The C basename of a spec method is clinic's default, except that
-``T.__new__`` is named ``T_new`` (clinic's default would be ``T``), as 16
-of the 23 ``__new__`` of Objects/ are named with an ``as`` clause.
-``T.__init__`` keeps clinic's default, ``T___init__``, which 3 of the 4
-``__init__`` of Objects/ use.
+The C basename of a spec method is clinic's default (``T`` for
+``T.__new__``, ``T___init__`` for ``T.__init__``, ``T_meth`` otherwise);
+``@c_name("x")`` gives another, as ``as x`` does in a block.
 
 Top-level functions are C functions named like the function.  A body of
 ``...`` (or only a docstring) describes a hand-written C function; a real
@@ -667,22 +665,23 @@ class Spec:
         return text
 
     def _converter(self, arg: ast.arg) -> tuple[str, str | None]:
-        """The clinic converter of *arg* and its c_name, if any."""
+        """The clinic converter of *arg* and its C parameter name
+        (``c_param``), if any."""
         annotation = arg.annotation
         assert annotation is not None
         if isinstance(annotation, ast.Call):
-            c_names = [kw for kw in annotation.keywords
-                       if kw.arg == 'c_name']
-            if c_names:
-                value = c_names[0].value
+            c_params = [kw for kw in annotation.keywords
+                        if kw.arg == 'c_param']
+            if c_params:
+                value = c_params[0].value
                 if not (isinstance(value, ast.Constant)
                         and isinstance(value.value, str)):
-                    raise self.error(value, "c_name must be a string")
+                    raise self.error(value, "c_param must be a string")
                 args = [self._segment(a, 'converter')
                         for a in annotation.args]
                 args += [self._segment(kw, 'converter')
                          for kw in annotation.keywords
-                         if kw.arg != 'c_name']
+                         if kw.arg != 'c_param']
                 func = self._segment(annotation.func, 'converter')
                 converter = f'{func}({", ".join(args)})' if args else func
                 return converter, value.value
@@ -693,10 +692,10 @@ class Spec:
         if arg.annotation is None:
             raise self.error(arg, f"parameter {arg.arg!r} needs a converter "
                              "as its annotation")
-        converter, c_name = self._converter(arg)
+        converter, c_param = self._converter(arg)
         line = prefix + arg.arg
-        if c_name is not None:
-            line += f' as {c_name}'
+        if c_param is not None:
+            line += f' as {c_param}'
         line += f': {converter}'
         if default is not None:
             line += f' = {self._segment(default, "default")}'

@@ -58,9 +58,10 @@ class bytes:
       - an integer
     """
 
+    @c_name("bytes_new")
     def __new__(
         cls,
-        source: object(c_name='x') = NULL,
+        source: object = NULL,
         encoding: str = NULL,
         errors: str = NULL,
     ):
@@ -157,7 +158,7 @@ class bytes:
     @text_signature("($self, suffix[, start[, end]], /)")
     def endswith(
         self,
-        suffix: object(c_name='subobj'),
+        suffix: object(c_param='subobj'),
         start: slice_index(accept={int, NoneType}, c_default='0') = None,
         end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
         /,
@@ -450,7 +451,7 @@ class bytes:
     @text_signature("($self, prefix[, start[, end]], /)")
     def startswith(
         self,
-        prefix: object(c_name='subobj'),
+        prefix: object(c_param='subobj'),
         start: slice_index(accept={int, NoneType}, c_default='0') = None,
         end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
         /,
@@ -483,7 +484,7 @@ class bytes:
         self,
         table: object,
         /,
-        delete: object(c_name='deletechars', c_default="NULL") = b'',
+        delete: object(c_param='deletechars', c_default="NULL") = b'',
     ):
         """Return a copy with each character mapped by the given translation table.
 

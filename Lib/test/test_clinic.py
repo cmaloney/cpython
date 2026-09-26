@@ -5853,7 +5853,7 @@ class PyspecStubTest(PyspecTestBase):
         spec = """
             class bytes:
                 @critical_section
-                def meth(self, a: object, /, b: int(c_name='bb') = 0, *,
+                def meth(self, a: object, /, b: int(c_param='bb') = 0, *,
                          c: str(accept={str, NoneType}) = None):
                     '''Summary line.
 
@@ -5951,7 +5951,7 @@ class PyspecStubTest(PyspecTestBase):
     def test_new(self):
         self.check("""
             class bytes:
-                def __new__(cls, a: object(c_name='x') = NULL):
+                def __new__(cls, a: object(c_param='x') = NULL):
                     ...
         """, "bytes.__new__ as bytes_new\n", """
             @classmethod
@@ -6218,15 +6218,25 @@ class PyspecStubTest(PyspecTestBase):
         self.assertIs(pyspec_runtime.text_signature("($self)")(f), f)
         self.assertIs(pyspec_runtime.critical_section("a", "b")(f), f)
 
-    def test_new_c_basename(self):
-        # The default C basename of T.__new__ is T_new; an explicit one is
-        # kept.  T.__init__ keeps clinic's default, T___init__.
+    def test_c_basename(self):
+        # One rule: clinic's default C basename (T for T.__new__,
+        # T___init__ for T.__init__), or the one @c_name gives.
         spec = """
             class bytes:
                 def __new__(cls, a: object = NULL):
                     ...
         """
         self.check(spec, "bytes.__new__\n", """
+            @classmethod
+            bytes.__new__
+                a: object = NULL
+        """)
+        self.check("""
+            class bytes:
+                @c_name("bytes_new")
+                def __new__(cls, a: object = NULL):
+                    ...
+        """, "bytes.__new__\n", """
             @classmethod
             bytes.__new__ as bytes_new
                 a: object = NULL
@@ -6426,7 +6436,7 @@ class PyspecTypeTest(PyspecTestBase):
                 .tp_doc = bytes__doc__,
                 .tp_richcompare = bytes_richcompare,
                 .tp_methods = bytes_methods,
-                .tp_new = bytes_new,
+                .tp_new = bytes,
                 .tp_vectorcall = bytes_vectorcall,
             };
             """), header)
