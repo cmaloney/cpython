@@ -25,6 +25,9 @@ class bytes "PyBytesObject *" "&PyBytes_Type"
 [clinic start generated code]*/
 /*[clinic end generated code: output=da39a3ee5e6b4b0d input=7a238f965d64892b]*/
 
+/* The methods of bytes are declared in Objects/pyspec/bytesobject.py.
+   Argument Clinic generates their argument parsing and the prototype of
+   each bytes_<name>_impl() defined below into clinic/bytesobject.c.h. */
 #include "clinic/bytesobject.c.h"
 
 #define PyBytesObject_SIZE _PyBytesObject_SIZE
@@ -1827,13 +1830,8 @@ static PyBufferProcs bytes_as_buffer = {
 };
 
 
-/*[clinic input]
-bytes.__bytes__
-[clinic start generated code]*/
-
 static PyObject *
 bytes___bytes___impl(PyBytesObject *self)
-/*[clinic end generated code: output=63a306a9bc0caac5 input=54e1d9883c2b4b67]*/
 {
     if (PyBytes_CheckExact(self)) {
         return Py_NewRef(self);
@@ -1848,13 +1846,8 @@ bytes___bytes___impl(PyBytesObject *self)
 #define RIGHTSTRIP 1
 #define BOTHSTRIP 2
 
-/*[clinic input]
-bytes.split
-[clinic start generated code]*/
-
 static PyObject *
 bytes_split_impl(PyBytesObject *self, PyObject *sep, Py_ssize_t maxsplit)
-/*[clinic end generated code: output=52126b5844c1d8ef input=2b78f90beeb7a053]*/
 {
     Py_ssize_t len = PyBytes_GET_SIZE(self), n;
     const char *s = PyBytes_AS_STRING(self), *sub;
@@ -1875,13 +1868,8 @@ bytes_split_impl(PyBytesObject *self, PyObject *sep, Py_ssize_t maxsplit)
     return list;
 }
 
-/*[clinic input]
-bytes.partition
-[clinic start generated code]*/
-
 static PyObject *
 bytes_partition_impl(PyBytesObject *self, Py_buffer *sep)
-/*[clinic end generated code: output=f532b392a17ff695 input=4d81cdfb3317ffe0]*/
 {
     return stringlib_partition(
         (PyObject*) self,
@@ -1890,13 +1878,8 @@ bytes_partition_impl(PyBytesObject *self, Py_buffer *sep)
         );
 }
 
-/*[clinic input]
-bytes.rpartition
-[clinic start generated code]*/
-
 static PyObject *
 bytes_rpartition_impl(PyBytesObject *self, Py_buffer *sep)
-/*[clinic end generated code: output=191b114cbb028e50 input=cc9f61ac5feb4dbf]*/
 {
     return stringlib_rpartition(
         (PyObject*) self,
@@ -1905,13 +1888,8 @@ bytes_rpartition_impl(PyBytesObject *self, Py_buffer *sep)
         );
 }
 
-/*[clinic input]
-bytes.rsplit
-[clinic start generated code]*/
-
 static PyObject *
 bytes_rsplit_impl(PyBytesObject *self, PyObject *sep, Py_ssize_t maxsplit)
-/*[clinic end generated code: output=ba698d9ea01e1c8f input=f7b1498f94dc207c]*/
 {
     Py_ssize_t len = PyBytes_GET_SIZE(self), n;
     const char *s = PyBytes_AS_STRING(self), *sub;
@@ -1933,13 +1911,8 @@ bytes_rsplit_impl(PyBytesObject *self, PyObject *sep, Py_ssize_t maxsplit)
 }
 
 
-/*[clinic input]
-bytes.join
-[clinic start generated code]*/
-
 static PyObject *
 bytes_join_impl(PyBytesObject *self, PyObject *iterable_of_bytes)
-/*[clinic end generated code: output=0687abb94d7d438e input=a1064da39a65068e]*/
 {
     return stringlib_bytes_join((PyObject*)self, iterable_of_bytes);
 }
@@ -1960,53 +1933,33 @@ PyBytes_Join(PyObject *sep, PyObject *iterable)
     return stringlib_bytes_join(sep, iterable);
 }
 
-/*[clinic input]
-bytes.find
-[clinic start generated code]*/
-
 static PyObject *
 bytes_find_impl(PyBytesObject *self, PyObject *sub, Py_ssize_t start,
                 Py_ssize_t end)
-/*[clinic end generated code: output=d5961a1c77b472a1 input=5e804e58bae1db0d]*/
 {
     return _Py_bytes_find(PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
                           sub, start, end);
 }
 
-/*[clinic input]
-bytes.index
-[clinic start generated code]*/
-
 static PyObject *
 bytes_index_impl(PyBytesObject *self, PyObject *sub, Py_ssize_t start,
                  Py_ssize_t end)
-/*[clinic end generated code: output=0da25cc74683ba42 input=56e9d17ab609989b]*/
 {
     return _Py_bytes_index(PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
                            sub, start, end);
 }
 
-/*[clinic input]
-bytes.rfind
-[clinic start generated code]*/
-
 static PyObject *
 bytes_rfind_impl(PyBytesObject *self, PyObject *sub, Py_ssize_t start,
                  Py_ssize_t end)
-/*[clinic end generated code: output=51b60fa4ad011c09 input=7002006916cd46f9]*/
 {
     return _Py_bytes_rfind(PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
                            sub, start, end);
 }
 
-/*[clinic input]
-bytes.rindex
-[clinic start generated code]*/
-
 static PyObject *
 bytes_rindex_impl(PyBytesObject *self, PyObject *sub, Py_ssize_t start,
                   Py_ssize_t end)
-/*[clinic end generated code: output=42bf674e0a0aabf6 input=ea266a98ddd82fb3]*/
 {
     return _Py_bytes_rindex(PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
                             sub, start, end);
@@ -2091,62 +2044,37 @@ do_argstrip(PyBytesObject *self, int striptype, PyObject *bytes)
     return do_strip(self, striptype);
 }
 
-/*[clinic input]
-bytes.strip
-[clinic start generated code]*/
-
 static PyObject *
 bytes_strip_impl(PyBytesObject *self, PyObject *bytes)
-/*[clinic end generated code: output=c7c228d3bd104a1b input=37958bb203b12b01]*/
 {
     return do_argstrip(self, BOTHSTRIP, bytes);
 }
 
-/*[clinic input]
-bytes.lstrip
-[clinic start generated code]*/
-
 static PyObject *
 bytes_lstrip_impl(PyBytesObject *self, PyObject *bytes)
-/*[clinic end generated code: output=28602e586f524e82 input=5199da37da3bce8b]*/
 {
     return do_argstrip(self, LEFTSTRIP, bytes);
 }
 
-/*[clinic input]
-bytes.rstrip
-[clinic start generated code]*/
-
 static PyObject *
 bytes_rstrip_impl(PyBytesObject *self, PyObject *bytes)
-/*[clinic end generated code: output=547e3815c95447da input=53023c29add90977]*/
 {
     return do_argstrip(self, RIGHTSTRIP, bytes);
 }
 
 
-/*[clinic input]
-bytes.count
-[clinic start generated code]*/
-
 static PyObject *
 bytes_count_impl(PyBytesObject *self, PyObject *sub, Py_ssize_t start,
                  Py_ssize_t end)
-/*[clinic end generated code: output=9848140b9be17d0f input=e5404a6484893af5]*/
 {
     return _Py_bytes_count(PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
                            sub, start, end);
 }
 
 
-/*[clinic input]
-bytes.translate
-[clinic start generated code]*/
-
 static PyObject *
 bytes_translate_impl(PyBytesObject *self, PyObject *table,
                      PyObject *deletechars)
-/*[clinic end generated code: output=43be3437f1956211 input=caabc5d481419d02]*/
 {
     const char *input;
     char *output;
@@ -2261,26 +2189,16 @@ bytes_translate_impl(PyBytesObject *self, PyObject *table,
 }
 
 
-/*[clinic input]
-bytes.maketrans
-[clinic start generated code]*/
-
 static PyObject *
 bytes_maketrans_impl(Py_buffer *frm, Py_buffer *to)
-/*[clinic end generated code: output=a36f6399d4b77f6f input=8206156c906586c0]*/
 {
     return _Py_bytes_maketrans(frm, to);
 }
 
 
-/*[clinic input]
-bytes.replace
-[clinic start generated code]*/
-
 static PyObject *
 bytes_replace_impl(PyBytesObject *self, Py_buffer *old, Py_buffer *new,
                    Py_ssize_t count)
-/*[clinic end generated code: output=994fa588b6b9c104 input=f6ccb28df37c8c3a]*/
 {
     return stringlib_replace((PyObject *)self,
                              (const char *)old->buf, old->len,
@@ -2289,13 +2207,8 @@ bytes_replace_impl(PyBytesObject *self, Py_buffer *old, Py_buffer *new,
 
 /** End DALKE **/
 
-/*[clinic input]
-bytes.removeprefix
-[clinic start generated code]*/
-
 static PyObject *
 bytes_removeprefix_impl(PyBytesObject *self, Py_buffer *prefix)
-/*[clinic end generated code: output=f006865331a06ab6 input=28855ba6ad958c07]*/
 {
     const char *self_start = PyBytes_AS_STRING(self);
     Py_ssize_t self_len = PyBytes_GET_SIZE(self);
@@ -2317,13 +2230,8 @@ bytes_removeprefix_impl(PyBytesObject *self, Py_buffer *prefix)
     return PyBytes_FromStringAndSize(self_start, self_len);
 }
 
-/*[clinic input]
-bytes.removesuffix
-[clinic start generated code]*/
-
 static PyObject *
 bytes_removesuffix_impl(PyBytesObject *self, Py_buffer *suffix)
-/*[clinic end generated code: output=d887d308e3242eeb input=7f94a621e5927f14]*/
 {
     const char *self_start = PyBytes_AS_STRING(self);
     Py_ssize_t self_len = PyBytes_GET_SIZE(self);
@@ -2346,53 +2254,33 @@ bytes_removesuffix_impl(PyBytesObject *self, Py_buffer *suffix)
     return PyBytes_FromStringAndSize(self_start, self_len);
 }
 
-/*[clinic input]
-bytes.startswith
-[clinic start generated code]*/
-
 static PyObject *
 bytes_startswith_impl(PyBytesObject *self, PyObject *subobj,
                       Py_ssize_t start, Py_ssize_t end)
-/*[clinic end generated code: output=b1e8da1cbd528e8c input=c54ae23053f02ce8]*/
 {
     return _Py_bytes_startswith(PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
                                 subobj, start, end);
 }
 
-/*[clinic input]
-bytes.endswith
-[clinic start generated code]*/
-
 static PyObject *
 bytes_endswith_impl(PyBytesObject *self, PyObject *subobj, Py_ssize_t start,
                     Py_ssize_t end)
-/*[clinic end generated code: output=038b633111f3629d input=bfaf5129e342cda4]*/
 {
     return _Py_bytes_endswith(PyBytes_AS_STRING(self), PyBytes_GET_SIZE(self),
                               subobj, start, end);
 }
 
 
-/*[clinic input]
-bytes.decode
-[clinic start generated code]*/
-
 static PyObject *
 bytes_decode_impl(PyBytesObject *self, const char *encoding,
                   const char *errors)
-/*[clinic end generated code: output=5649a53dde27b314 input=49a07cd0fd6bb117]*/
 {
     return PyUnicode_FromEncodedObject((PyObject*)self, encoding, errors);
 }
 
 
-/*[clinic input]
-bytes.splitlines
-[clinic start generated code]*/
-
 static PyObject *
 bytes_splitlines_impl(PyBytesObject *self, int keepends)
-/*[clinic end generated code: output=3484149a5d880ffb input=86b958250366bc79]*/
 {
     return stringlib_splitlines(
         (PyObject*) self, PyBytes_AS_STRING(self),
@@ -2400,13 +2288,8 @@ bytes_splitlines_impl(PyBytesObject *self, int keepends)
         );
 }
 
-/*[clinic input]
-bytes.fromhex
-[clinic start generated code]*/
-
 static PyObject *
 bytes_fromhex_impl(PyTypeObject *type, PyObject *string)
-/*[clinic end generated code: output=0973acc63661bb2e input=c08418a83b24de18]*/
 {
     PyObject *result = _PyBytes_FromHex(string, 0);
     if (type != &PyBytes_Type && result != NULL) {
@@ -2528,13 +2411,8 @@ _PyBytes_FromHex(PyObject *string, int use_bytearray)
     return NULL;
 }
 
-/*[clinic input]
-bytes.hex
-[clinic start generated code]*/
-
 static PyObject *
 bytes_hex_impl(PyBytesObject *self, PyObject *sep, Py_ssize_t bytes_per_sep)
-/*[clinic end generated code: output=588821f02cb9d8f5 input=ade1b01474b78b41]*/
 {
     const char *argbuf = PyBytes_AS_STRING(self);
     Py_ssize_t arglen = PyBytes_GET_SIZE(self);
@@ -2634,11 +2512,6 @@ static PyObject *_PyBytes_FromIterator(PyObject *it, PyObject *x);
    bytes_vectorcall() and PyBytes_FromObject() are generated from
    Objects/pyspec/bytesobject.py by Argument Clinic. */
 #include "clinic/bytesobject_pyspec.c.h"
-
-/*[clinic input]
-bytes.__new__
-[clinic start generated code]*/
-/*[clinic end generated code: output=da39a3ee5e6b4b0d input=b39ff265a4f043e1]*/
 
 static PyObject*
 _PyBytes_FromBuffer(PyObject *x)

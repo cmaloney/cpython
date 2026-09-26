@@ -29,9 +29,11 @@ named T.  A method is written like the clinic block it replaces:
 * a body of ``...`` (or only a docstring) means the C impl is
   hand-written.  A real body implements the function: see emit.py.
 
-The .c file keeps, per function, a clinic block with the function line
-only (``bytes.split``); clinic_input() turns the spec method into the rest
-of the block.  The C basename of a spec method is clinic's default, except
+A block in the .c file is optional for a spec method; it holds the
+function line only (``bytes.split``), and clinic_input() turns the spec
+method into the rest of the block.  Without a block, clinic generates the
+method at the end of the file (see Clinic.parse_spec_methods()) and the
+head of its impl definition is written by hand.  The C basename of a spec method is clinic's default, except
 that ``T.__new__`` and ``T.__init__`` are named ``T_new`` and ``T_init``,
 as most hand-written ``as`` clauses of Objects/ name them (clinic's
 default would be ``T`` and ``T___init__``).
@@ -332,6 +334,18 @@ class Spec:
     def has_method(self, name: str) -> bool:
         return name in self.clones or (
             '.' in name and name in self.functions)
+
+    def methods(self, cls_name: str) -> list[str]:
+        """Names of the methods and clones of class *cls_name*, in order."""
+        names = []
+        for stmt in self.classes[cls_name].body:
+            match stmt:
+                case ast.FunctionDef(name=name):
+                    names.append(name)
+                case ast.Assign(targets=[ast.Name(name)]) \
+                        if f'{cls_name}.{name}' in self.clones:
+                    names.append(name)
+        return names
 
     def decorator_lineno(self, name: str, decorator: str) -> int:
         """Line of decorator *decorator* of method (or clone) *name*."""

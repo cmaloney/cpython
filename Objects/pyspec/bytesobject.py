@@ -1,10 +1,12 @@
 """The bytes type, written as Python: the spec of Objects/bytesobject.c.
 
 Argument Clinic reads this file while processing bytesobject.c (see
-Tools/clinic/libclinic/pyspec/).  The methods of ``class bytes`` give the
-parameters and docstrings of the clinic blocks of bytesobject.c, which only
-name the function.  Methods with a body of ``...`` are implemented in C by
-hand.  bytes.__new__ is implemented here: clinic generates bytes_new_impl()
+Tools/clinic/libclinic/pyspec/).  Each method of ``class bytes`` is a
+clinic function (parameters, docstring and clinic decorators);
+bytesobject.c has no block for them, only the ``class bytes`` directive.
+Methods with a body of ``...`` are implemented in C by hand: bytesobject.c
+defines their bytes_<name>_impl(), declared in
+Objects/clinic/bytesobject.c.h.  bytes.__new__ is implemented here: clinic generates bytes_new_impl()
 and, for its vectorcall, bytes_new_nargsN() -- the method partially
 evaluated for exactly bytes and N positional arguments -- into
 Objects/clinic/bytesobject_pyspec.c.h.  Top-level functions are C
