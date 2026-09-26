@@ -615,6 +615,14 @@ class DSLParser:
         if cls is None or cls.name not in spec.classes:
             return unchanged
         name = f'{cls.name}.{meth}'
+        if name in spec.functions or name in spec.shared:
+            try:
+                kind = spec.method_kind(name)
+            except frontend.SpecError as exc:
+                fail(str(exc))
+            if kind != frontend.CLINIC:
+                fail(f"{names!r} is not a clinic function: it is a "
+                     f"{kind} of {spec.filename}; remove its block")
         if not spec.has_method(name):
             fail(f"{names!r} has no parameters or docstring, and class "
                  f"{cls.name} in {spec.filename} has no method {meth!r} "
@@ -635,6 +643,17 @@ class DSLParser:
         if suffix.startswith(' -> ') and '->' in function_line:
             fail(f"{names!r}: the return converter is written in "
                  f"{spec.filename}")
+        try:
+            c_name, _ = spec.c_name(name)
+        except frontend.SpecError as exc:
+            fail(str(exc))
+        if c_name is not None:
+            if ' as ' in function_line:
+                fail(f"{names!r}: the C name is written in "
+                     f"{spec.filename} (@c_name)")
+            left, arrow, right = function_line.partition('->')
+            function_line = (f'{left.rstrip()} as {c_name}'
+                             + (f' {arrow}{right}' if arrow else ''))
         if ' as ' not in function_line and meth == '__new__':
             # The C basename of T.__new__ is T_new (see frontend).
             left, arrow, right = function_line.partition('->')

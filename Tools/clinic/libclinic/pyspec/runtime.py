@@ -62,6 +62,19 @@ permit_long_docstring_body = permit_long_summary = _clinic_decorator
 setter = text_signature = vectorcall = _clinic_decorator
 
 
+def c_name(*args, **kwargs):
+    """``@c_name("x")`` / ``@c_name(slot="x")``: the C function of a
+    method (see frontend.py).  An identity decorator for Python."""
+    return lambda func: func
+
+
+def static_type(**members):
+    """``@static_type(tp_member="C expression", ...)``: clinic generates
+    the static PyTypeObject of the class (see typeobj.py).  An identity
+    decorator for Python."""
+    return lambda cls: cls
+
+
 def isinstance(obj, cls):
     """PyXxx_Check(): looks at the real type only, never at __class__."""
     return issubclass(type(obj), cls)
@@ -477,6 +490,9 @@ def load(path):
         tree = ast.parse(f.read(), path)
     classes = {node.name for node in tree.body
                if isinstance(node, ast.ClassDef)}
+    # Specs imported by this one (``from stringlib.pyspec import ctype``)
+    # are found relative to the directory of the C file.
+    base = os.path.dirname(os.path.dirname(os.path.abspath(path)))
 
     class SpecCalls(ast.NodeTransformer):
         def visit_Attribute(self, node):
@@ -493,7 +509,11 @@ def load(path):
     stem = os.path.splitext(os.path.basename(path))[0]
     module = types.ModuleType(f'_pyspec_{stem}')
     module.__file__ = path
-    exec(compile(tree, path, 'exec'), module.__dict__)
+    sys.path.insert(0, base)
+    try:
+        exec(compile(tree, path, 'exec'), module.__dict__)
+    finally:
+        sys.path.remove(base)
     functions = {}
     for node in tree.body:
         if isinstance(node, ast.FunctionDef):
@@ -501,7 +521,10 @@ def load(path):
         elif isinstance(node, ast.ClassDef):
             spec_class = getattr(module, node.name)
             setattr(module, f'_spec_{node.name}', spec_class)
-            setattr(module, node.name, getattr(builtins, node.name))
+            # A class that is not a builtin (bytes_iterator) stays the
+            # spec class.
+            setattr(module, node.name,
+                    getattr(builtins, node.name, spec_class))
             for item in node.body:
                 if isinstance(item, ast.FunctionDef):
                     functions[f'{node.name}.{item.name}'] = (

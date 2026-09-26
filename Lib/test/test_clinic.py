@@ -41,7 +41,8 @@ with test_tools.imports_under_tool('clinic'):
     from libclinic.pyspec import runtime as pyspec_runtime
     from libclinic.pyspec import (call_table as pyspec_call_table,
                                   frontend as pyspec_frontend,
-                                  partial_eval as pyspec_partial_eval)
+                                  partial_eval as pyspec_partial_eval,
+                                  slots as pyspec_slots)
 
 
 def repeat_fn(*functions):
@@ -6359,7 +6360,277 @@ class PyspecNoBlockTest(PyspecTestBase):
                       cm.exception.message)
 
 
-BYTES_SPEC = os.path.join(test_tools.basepath, 'Objects', 'pyspec',
+class PyspecTypeTest(PyspecTestBase):
+    """@static_type: clinic generates the type object of a spec class, its
+    method table and slot tables (libclinic/pyspec/typeobj.py)."""
+
+    CLASS = """
+        /*[clinic input]
+        class bytes "PyBytesObject *" "&PyBytes_Type"
+        class myiter "myiterobject *" "&MyIter_Type"
+        [clinic start generated code]*/
+    """
+
+    SPEC = """
+        @static_type(tp_basicsize="PyBytesObject_SIZE",
+                     tp_itemsize="sizeof(char)",
+                     tp_flags="Py_TPFLAGS_BYTES_SUBCLASS")
+        class bytes:
+            '''Doc of
+              bytes.'''
+
+            def __new__(cls, a: object, /):
+                return a
+
+            def meth(self, a: object, /):
+                '''Meth.'''
+                ...
+
+            @c_name(METH_NOARGS="bytes_getnewargs")
+            def __getnewargs__(self, /):
+                ...
+
+            @c_name(METH_O="bytes_other")
+            def other(self, x, /):
+                '''Other(x)'''
+                ...
+
+            def __repr__(self, /): ...
+            def __lt__(self, value, /): ...
+            def __le__(self, value, /): ...
+            def __eq__(self, value, /): ...
+            def __ne__(self, value, /): ...
+            def __gt__(self, value, /): ...
+            def __ge__(self, value, /): ...
+
+            @c_name(mp_length="bytes_length", sq_length="bytes_length")
+            def __len__(self, /): ...
+
+            @c_name(sq_repeat="bytes_rep")
+            def __mul__(self, value, /): ...
+            def __rmul__(self, value, /): ...
+
+            @c_name("bytes_mod")
+            def __mod__(self, value, /): ...
+            def __rmod__(self, value, /): ...
+
+        @final
+        @static_type(tp_traverse="myiter_traverse")
+        class myiter:
+            @c_name("PyObject_SelfIter")
+            def __iter__(self, /): ...
+
+            def __next__(self, /): ...
+    """
+
+    def types_header(self, spec, text=None):
+        self.generate(spec, text or self.CLASS)
+        with open(os.path.join(self.tmp_dir, 'clinic', 'foo_types.c.h'),
+                  encoding='utf-8') as f:
+            return f.read()
+
+    def test_type_objects(self):
+        header = self.types_header(self.SPEC)
+        self.assertIn('PyDoc_STRVAR(bytes__doc__,\n'
+                      '"Doc of\\n"\n"  bytes.");', header)
+        self.assertIn('PyDoc_STRVAR(bytes_other__doc__,\n"Other(x)");',
+                      header)
+        self.assertIn(dedent("""\
+            static PyMethodDef bytes_methods[] = {
+                BYTES_METH_METHODDEF
+                {"__getnewargs__", bytes_getnewargs, METH_NOARGS, NULL},
+                {"other", bytes_other, METH_O, bytes_other__doc__},
+                {NULL, NULL}  /* sentinel */
+            };
+            """), header)
+        self.assertIn(dedent("""\
+            static PyNumberMethods bytes_as_number = {
+                .nb_remainder = bytes_mod,
+            };
+
+            static PySequenceMethods bytes_as_sequence = {
+                .sq_length = bytes_length,
+                .sq_repeat = bytes_rep,
+            };
+
+            static PyMappingMethods bytes_as_mapping = {
+                .mp_length = bytes_length,
+            };
+            """), header)
+        self.assertIn(dedent("""\
+            PyTypeObject PyBytes_Type = {
+                PyVarObject_HEAD_INIT(&PyType_Type, 0)
+                .tp_name = "bytes",
+                .tp_basicsize = PyBytesObject_SIZE,
+                .tp_itemsize = sizeof(char),
+                .tp_repr = bytes_repr,
+                .tp_as_number = &bytes_as_number,
+                .tp_as_sequence = &bytes_as_sequence,
+                .tp_as_mapping = &bytes_as_mapping,
+                .tp_flags = Py_TPFLAGS_DEFAULT |
+                    Py_TPFLAGS_BASETYPE |
+                    Py_TPFLAGS_BYTES_SUBCLASS,
+                .tp_doc = bytes__doc__,
+                .tp_richcompare = bytes_richcompare,
+                .tp_methods = bytes_methods,
+                .tp_new = bytes_new,
+                .tp_vectorcall = bytes_vectorcall,
+            };
+            """), header)
+        # @final: no Py_TPFLAGS_BASETYPE; tp_traverse: Py_TPFLAGS_HAVE_GC.
+        # The default size is that of the C type of the class directive.
+        # A type object not named Py* is static.
+        self.assertIn(dedent("""\
+            static PyTypeObject MyIter_Type = {
+                PyVarObject_HEAD_INIT(&PyType_Type, 0)
+                .tp_name = "myiter",
+                .tp_basicsize = sizeof(myiterobject),
+                .tp_flags = Py_TPFLAGS_DEFAULT |
+                    Py_TPFLAGS_HAVE_GC,
+                .tp_traverse = myiter_traverse,
+                .tp_iter = PyObject_SelfIter,
+                .tp_iternext = myiter_iternext,
+            };"""), header)
+
+    def check_error(self, spec, errmsg):
+        with self.assertRaisesRegex(ClinicError, re.escape(errmsg)):
+            self.types_header(spec)
+
+    def test_partial_group(self):
+        self.check_error("""
+            @static_type()
+            class bytes:
+                def __lt__(self, value, /): ...
+                def __gt__(self, value, /): ...
+        """, "tp_richcompare also implements __le__, __eq__, __ne__, "
+             "__ge__: declare them too")
+        self.check_error("""
+            @static_type()
+            class bytes:
+                def __mod__(self, value, /): ...
+        """, "nb_remainder also implements __rmod__: declare it too")
+
+    def test_several_slots(self):
+        self.check_error("""
+            @static_type()
+            class bytes:
+                def __len__(self, /): ...
+        """, "several slots can implement __len__ (mp_length, sq_length); "
+             "name them")
+        self.check_error("""
+            @static_type()
+            class bytes:
+                @c_name(nb_add="bytes_add")
+                def __len__(self, /): ...
+        """, "nb_add is not a slot of __len__")
+
+    def test_slot_signature(self):
+        self.check_error("""
+            @static_type()
+            class bytes:
+                def __repr__(self): ...
+        """, "bytes.__repr__($self): the signature of tp_repr is "
+             "__repr__($self, /)")
+        self.check_error("""
+            @static_type()
+            class bytes:
+                def __contains__(self, value, /): ...
+        """, "the signature of sq_contains is __contains__($self, key, /)")
+        self.check_error("""
+            @static_type()
+            class bytes:
+                def __repr__(self, /):
+                    '''Doc.'''
+        """, "a slot has no docstring")
+        self.check_error("""
+            @static_type()
+            class bytes:
+                def __repr__(self, /):
+                    return 'x'
+        """, "bytes.__repr__ is a slot implemented in C")
+
+    def test_pycfunction(self):
+        self.check_error("""
+            @static_type()
+            class bytes:
+                @c_name(METH_O="f")
+                def meth(self, /): ...
+        """, "bytes.meth: a METH_O function takes (self, arg, /)")
+        self.check_error("""
+            @static_type()
+            class bytes:
+                @c_name(METH_VARARGS="f")
+                def meth(self, /): ...
+        """, "@c_name with a keyword names a slot")
+
+    def test_static_type_members(self):
+        self.check_error("""
+            @static_type(tp_nosuch="x")
+            class bytes:
+                pass
+        """, "'tp_nosuch' is not a member of PyTypeObject")
+        self.check_error("""
+            @static_type(tp_repr="x")
+            class bytes:
+                pass
+        """, "tp_repr is derived from the spec")
+
+    def test_slot_block_rejected(self):
+        with self.assertRaisesRegex(ClinicError,
+                                    "'bytes.__repr__' is not a clinic "
+                                    "function: it is a slot"):
+            self.generate(self.SPEC, dedent(self.CLASS) + "/*[clinic input]\n"
+                          "bytes.__repr__\n"
+                          "[clinic start generated code]*/\n")
+
+    def test_c_name_is_clinic_as(self):
+        spec = """
+            class bytes:
+                @c_name("bytes_m")
+                def meth(self, a: object, /):
+                    ...
+        """
+        self.generate(spec, self.CLASS)
+        with open(os.path.join(self.tmp_dir, 'clinic', 'foo.c.h'),
+                  encoding='utf-8') as f:
+            self.assertIn('#define BYTES_M_METHODDEF', f.read())
+        with self.assertRaisesRegex(ClinicError, "the C name is written in"):
+            self.generate(spec, dedent(self.CLASS) + "/*[clinic input]\n"
+                          "bytes.meth as bytes_x\n"
+                          "[clinic start generated code]*/\n")
+
+    def test_shared_methods(self):
+        os.mkdir(os.path.join(self.tmp_dir, 'shared'))
+        with open(os.path.join(self.tmp_dir, 'shared', 'm.py'), 'w',
+                  encoding='utf-8') as f:
+            f.write(dedent('''
+                class B:
+                    @c_name("stringlib_center")
+                    def center(self, width: Py_ssize_t, /):
+                        """Center."""
+                        ...
+
+                    @c_name(METH_NOARGS="stringlib_lower")
+                    def lower(self, /):
+                        """B.lower() -> copy of B"""
+                        ...
+            '''))
+        # Imports are relative to the directory of the C file.
+        header = self.types_header("""
+            from shared import m
+
+            @static_type()
+            class bytes:
+                center = m.B.center
+                lower = m.B.lower
+        """)
+        self.assertIn('    STRINGLIB_CENTER_METHODDEF\n'
+                      '    {"lower", stringlib_lower, METH_NOARGS, '
+                      'bytes_lower__doc__},\n', header)
+        self.assertIn('"B.lower() -> copy of B"', header)
+
+
+BYTES_SPEC =os.path.join(test_tools.basepath, 'Objects', 'pyspec',
                           'bytesobject.py')
 
 
@@ -6587,6 +6858,89 @@ class BytesSpecTest(TestCase):
                                    'bytesobject_pyspec.c.h'})
         self.assertEqual([change.filename for change in writer.changes], [],
                          'run "make clinic"')
+
+
+class PyspecSlotdefsTest(TestCase):
+    """slotdefs[] of Objects/typeobject.c, as Argument Clinic reads it
+    (libclinic/pyspec/slots.py)."""
+
+    def test_wrappers(self):
+        # Every wrapper of the static builtin types is described by the
+        # slotdefs entry clinic parsed: same text signature and doc.
+        expected = {}
+        for slotdef in pyspec_slots.slotdefs():
+            expected.setdefault(slotdef.name, set()).add(
+                (slotdef.signature, slotdef.doc.partition('\n--\n\n')[2]))
+        import builtins
+        tps = [tp for tp in vars(builtins).values() if isinstance(tp, type)]
+        tps += [type(iter(b'')), types.FunctionType, types.MethodType,
+                types.GeneratorType, types.CoroutineType, property,
+                types.MappingProxyType, types.SimpleNamespace]
+        seen = 0
+        for tp in tps:
+            for name, value in vars(tp).items():
+                if not isinstance(value, types.WrapperDescriptorType) \
+                        or name in ('__new__', '__init__'):
+                    continue
+                with self.subTest(type=tp, name=name):
+                    self.assertIn((value.__text_signature__, value.__doc__),
+                                  expected[name])
+                    seen += 1
+        self.assertGreater(seen, 100)
+
+    # typeobj.rst's slot tables and slotdefs disagree on these (slot,
+    # dunder) pairs.
+    ONLY_IN_RST = {
+        # Attributes, not slots.
+        ('tp_name', '__name__'), ('tp_doc', '__doc__'),
+        ('tp_base', '__base__'), ('tp_dict', '__dict__'),
+        ('tp_bases', '__bases__'), ('tp_mro', '__mro__'),
+        ('tp_subclasses', '__subclasses__'),
+        # Deprecated slots: no wrapper.
+        ('tp_getattr', '__getattribute__'), ('tp_getattr', '__getattr__'),
+        ('tp_setattr', '__setattr__'), ('tp_setattr', '__delattr__'),
+        # Defining __getattr__ fills tp_getattro, but tp_getattro never
+        # creates a __getattr__ wrapper.
+        ('tp_getattro', '__getattr__'),
+        # tp_new has its own wrapper (tp_new_wrapper), not a slotdef one.
+        ('tp_new', '__new__'),
+    }
+    ONLY_IN_SLOTDEFS = {
+        # Reflected operators missing from the tables.
+        ('nb_floor_divide', '__rfloordiv__'),
+        ('nb_true_divide', '__rtruediv__'),
+        ('sq_repeat', '__rmul__'),
+    }
+
+    def test_typeobj_rst(self):
+        path = os.path.join(test_tools.basepath, 'Doc', 'c-api',
+                            'typeobj.rst')
+        with open(path, encoding='utf-8') as f:
+            rst = f.read()
+        cells = {}
+        slot = None
+        for line in rst.splitlines():
+            line = line.strip()
+            if not line.startswith('|'):
+                if not line.startswith('+'):
+                    slot = None
+                continue
+            row = [c.strip() for c in line.strip('|').split('|')]
+            m = re.search(r':c:member:`~Py\w+\.(\w+)`', row[0])
+            if m:
+                slot = m.group(1)
+            elif row[0]:
+                slot = None
+            if slot and len(row) > 2:
+                cells[slot] = cells.get(slot, '') + row[2]
+        in_rst = set()
+        for slot, text in cells.items():
+            text = text.replace('\\ ', '').replace('\\', '')
+            for name in re.findall(r'__\w+?__', text):
+                in_rst.add((slot, name))
+        in_slotdefs = {(s.slot, s.name) for s in pyspec_slots.slotdefs()}
+        self.assertEqual(in_rst - in_slotdefs, self.ONLY_IN_RST)
+        self.assertEqual(in_slotdefs - in_rst, self.ONLY_IN_SLOTDEFS)
 
 
 class BytesOverridingDunderBytes(bytes):
