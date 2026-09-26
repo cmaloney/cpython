@@ -6991,6 +6991,13 @@ class BytesSpecTest(TestCase):
         new = self.spec['bytes.__new__']
         self.assertEqual(new(BytesSubclass, [1]), BytesSubclass([1]))
         self.assertIs(type(new(BytesSubclass, [1])), BytesSubclass)
+        sources = [b'ab', BytesSubclass(b'cd'), BytesOverridingDunderBytes(),
+                   HasBytes(), BadBytes(), bytearray(b'x'), [1, 2], 3, 's']
+        for source in sources:
+            with self.subTest(source=source):
+                expected = self.outcome(BytesSubclass, (source,), {})
+                actual = self.outcome(new, (BytesSubclass, source), {})
+                self.assertEqual(actual, expected)
 
     def test_identity(self):
         b = b'abc'
@@ -7267,6 +7274,21 @@ class BytesSpecFactsTest(TestCase):
         b = BytesOverridingDunderBytes(b'x')
         self.assertIs(type(bytes(b)), BytesSubclass)
         self.assertIsNot(bytes(BytesSubclass(b'x')), b)
+
+    def test_bytes_of_unknown(self):
+        # For an argument of unknown type, the __bytes__ lookup is
+        # versioned for exact bytes, where it is known to find
+        # bytes.__bytes__, which returns its argument: no lookup, no call.
+        # The other types are not exactly bytes: the later test of
+        # PyBytes_FromObject() is gone.
+        residual, _ = self.new_facts(None)
+        first = residual[0]
+        self.assertEqual(ast.unparse(first.test), 'type(source) is bytes')
+        self.assertEqual(ast.unparse(ast.Module(first.body, [])),
+                         'return source')
+        code = ast.unparse(ast.Module(first.orelse, []))
+        self.assertIn('lookup_special', code)
+        self.assertNotIn('is bytes', code)
 
     def test_bytes_of_other_types(self):
         for arg_type in (bytearray, memoryview):

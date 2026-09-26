@@ -57,47 +57,52 @@ bytes_new_impl(PyTypeObject *cls, PyObject *source, const char *encoding, const 
         PyErr_SetString(PyExc_TypeError, "errors without a string argument");
         return NULL;
     }
-    func = _PyObject_LookupSpecial(source, &_Py_ID(__bytes__));
-    if (func == NULL && PyErr_Occurred()) {
-        return NULL;
+    if (PyBytes_CheckExact(source)) {
+        return Py_NewRef(source);
     }
-    if (func != NULL) {
-        result = _PyObject_CallNoArgs(func);
-        if (result == NULL) {
-            Py_XDECREF(func);
+    else {
+        func = _PyObject_LookupSpecial(source, &_Py_ID(__bytes__));
+        if (func == NULL && PyErr_Occurred()) {
             return NULL;
         }
-        if (!PyBytes_Check(result)) {
-            PyErr_Format(PyExc_TypeError, "%T.__bytes__() must return a bytes, not %T", source, result);
-            Py_XDECREF(result);
-            Py_XDECREF(func);
-            return NULL;
-        }
-        Py_XDECREF(func);
-        return result;
-    }
-    if (PyUnicode_Check(source)) {
-        PyErr_SetString(PyExc_TypeError, "string argument without an encoding");
-        return NULL;
-    }
-    if (_PyIndex_Check(source)) {
-        size = PyNumber_AsSsize_t(source, PyExc_OverflowError);
-        if (size == -1 && PyErr_Occurred()) {
-            if (PyErr_ExceptionMatches(PyExc_TypeError)) {
-                PyErr_Clear();
-                return PyBytes_FromObject(source);
-            }
-            else {
+        if (func != NULL) {
+            result = _PyObject_CallNoArgs(func);
+            if (result == NULL) {
+                Py_XDECREF(func);
                 return NULL;
             }
+            if (!PyBytes_Check(result)) {
+                PyErr_Format(PyExc_TypeError, "%T.__bytes__() must return a bytes, not %T", source, result);
+                Py_XDECREF(result);
+                Py_XDECREF(func);
+                return NULL;
+            }
+            Py_XDECREF(func);
+            return result;
         }
-        if (size < 0) {
-            PyErr_SetString(PyExc_ValueError, "negative count");
+        if (PyUnicode_Check(source)) {
+            PyErr_SetString(PyExc_TypeError, "string argument without an encoding");
             return NULL;
         }
-        return _PyBytes_FromSize(size, 1);
+        if (_PyIndex_Check(source)) {
+            size = PyNumber_AsSsize_t(source, PyExc_OverflowError);
+            if (size == -1 && PyErr_Occurred()) {
+                if (PyErr_ExceptionMatches(PyExc_TypeError)) {
+                    PyErr_Clear();
+                    return PyBytes_FromObject(source);
+                }
+                else {
+                    return NULL;
+                }
+            }
+            if (size < 0) {
+                PyErr_SetString(PyExc_ValueError, "negative count");
+                return NULL;
+            }
+            return _PyBytes_FromSize(size, 1);
+        }
+        return PyBytes_FromObject(source);
     }
-    return PyBytes_FromObject(source);
 }
 
 static PyObject *
@@ -234,38 +239,39 @@ bytes_new_nargs0(void)
 }
 
 /* bytes_new() for exactly bytes with 1 positional argument(s):
- * if (func := C.lookup_special(source, '__bytes__')) is not NULL:
- *     result = func()
- *     if not isinstance(result, bytes):
- *         raise TypeError(f'{fqname(type(source))}.__bytes__() must return a bytes, not {fqname(type(result))}')
- *     return result
- * if isinstance(source, str):
- *     raise TypeError('string argument without an encoding')
- * if hasattr(type(source), '__index__'):
- *     try:
- *         size = C.PyNumber_AsSsize_t(source, OverflowError)
- *     except TypeError:
- *         return PyBytes_FromObject(source)
- *     if size < 0:
- *         raise ValueError('negative count')
- *     return C._PyBytes_FromSize(size, True)
  * if type(source) is bytes:
  *     return source
- * if hasattr(type(source), '__buffer__'):
- *     return C._PyBytes_FromBuffer(source)
- * if not isinstance(source, str):
- *     if type(source) is list:
- *         return bytes_from_iterator_list(source)
- *     elif type(source) is tuple:
- *         return bytes_from_iterator_tuple(source)
- *     else:
+ * else:
+ *     if (func := C.lookup_special(source, '__bytes__')) is not NULL:
+ *         result = func()
+ *         if not isinstance(result, bytes):
+ *             raise TypeError(f'{fqname(type(source))}.__bytes__() must return a bytes, not {fqname(type(result))}')
+ *         return result
+ *     if isinstance(source, str):
+ *         raise TypeError('string argument without an encoding')
+ *     if hasattr(type(source), '__index__'):
  *         try:
- *             it_1 = iter(source)
+ *             size = C.PyNumber_AsSsize_t(source, OverflowError)
  *         except TypeError:
- *             pass
+ *             return PyBytes_FromObject(source)
+ *         if size < 0:
+ *             raise ValueError('negative count')
+ *         return C._PyBytes_FromSize(size, True)
+ *     if hasattr(type(source), '__buffer__'):
+ *         return C._PyBytes_FromBuffer(source)
+ *     if not isinstance(source, str):
+ *         if type(source) is list:
+ *             return bytes_from_iterator_list(source)
+ *         elif type(source) is tuple:
+ *             return bytes_from_iterator_tuple(source)
  *         else:
- *             return bytes_from_iterator(it_1, source)
- * raise TypeError(f"cannot convert '{tp_name(type(source))}' object to bytes")
+ *             try:
+ *                 it_1 = iter(source)
+ *             except TypeError:
+ *                 pass
+ *             else:
+ *                 return bytes_from_iterator(it_1, source)
+ *     raise TypeError(f"cannot convert '{tp_name(type(source))}' object to bytes")
  */
 static PyObject *
 bytes_new_nargs1(PyObject *source)
@@ -275,82 +281,84 @@ bytes_new_nargs1(PyObject *source)
     Py_ssize_t size;
     PyObject *it_1 = NULL;
 
-    func = _PyObject_LookupSpecial(source, &_Py_ID(__bytes__));
-    if (func == NULL && PyErr_Occurred()) {
-        return NULL;
-    }
-    if (func != NULL) {
-        result = _PyObject_CallNoArgs(func);
-        if (result == NULL) {
-            Py_XDECREF(func);
-            return NULL;
-        }
-        if (!PyBytes_Check(result)) {
-            PyErr_Format(PyExc_TypeError, "%T.__bytes__() must return a bytes, not %T", source, result);
-            Py_XDECREF(result);
-            Py_XDECREF(func);
-            return NULL;
-        }
-        Py_XDECREF(func);
-        return result;
-    }
-    if (PyUnicode_Check(source)) {
-        PyErr_SetString(PyExc_TypeError, "string argument without an encoding");
-        return NULL;
-    }
-    if (_PyIndex_Check(source)) {
-        size = PyNumber_AsSsize_t(source, PyExc_OverflowError);
-        if (size == -1 && PyErr_Occurred()) {
-            if (PyErr_ExceptionMatches(PyExc_TypeError)) {
-                PyErr_Clear();
-                return PyBytes_FromObject(source);
-            }
-            else {
-                return NULL;
-            }
-        }
-        if (size < 0) {
-            PyErr_SetString(PyExc_ValueError, "negative count");
-            return NULL;
-        }
-        return _PyBytes_FromSize(size, 1);
-    }
     if (PyBytes_CheckExact(source)) {
         return Py_NewRef(source);
     }
-    if (PyObject_CheckBuffer(source)) {
-        return _PyBytes_FromBuffer(source);
-    }
-    if (!PyUnicode_Check(source)) {
-        if (PyList_CheckExact(source)) {
-            return bytes_from_iterator_list(source);
+    else {
+        func = _PyObject_LookupSpecial(source, &_Py_ID(__bytes__));
+        if (func == NULL && PyErr_Occurred()) {
+            return NULL;
         }
-        else {
-            if (PyTuple_CheckExact(source)) {
-                return bytes_from_iterator_tuple(source);
+        if (func != NULL) {
+            result = _PyObject_CallNoArgs(func);
+            if (result == NULL) {
+                Py_XDECREF(func);
+                return NULL;
             }
-            else {
-                it_1 = PyObject_GetIter(source);
-                if (it_1 == NULL) {
-                    if (PyErr_ExceptionMatches(PyExc_TypeError)) {
-                        PyErr_Clear();
-                    }
-                    else {
-                        return NULL;
-                    }
+            if (!PyBytes_Check(result)) {
+                PyErr_Format(PyExc_TypeError, "%T.__bytes__() must return a bytes, not %T", source, result);
+                Py_XDECREF(result);
+                Py_XDECREF(func);
+                return NULL;
+            }
+            Py_XDECREF(func);
+            return result;
+        }
+        if (PyUnicode_Check(source)) {
+            PyErr_SetString(PyExc_TypeError, "string argument without an encoding");
+            return NULL;
+        }
+        if (_PyIndex_Check(source)) {
+            size = PyNumber_AsSsize_t(source, PyExc_OverflowError);
+            if (size == -1 && PyErr_Occurred()) {
+                if (PyErr_ExceptionMatches(PyExc_TypeError)) {
+                    PyErr_Clear();
+                    return PyBytes_FromObject(source);
                 }
                 else {
-                    {
-                        PyObject *_return_value = bytes_from_iterator(it_1, source);
-                        Py_XDECREF(it_1);
-                        return _return_value;
+                    return NULL;
+                }
+            }
+            if (size < 0) {
+                PyErr_SetString(PyExc_ValueError, "negative count");
+                return NULL;
+            }
+            return _PyBytes_FromSize(size, 1);
+        }
+        if (PyObject_CheckBuffer(source)) {
+            return _PyBytes_FromBuffer(source);
+        }
+        if (!PyUnicode_Check(source)) {
+            if (PyList_CheckExact(source)) {
+                return bytes_from_iterator_list(source);
+            }
+            else {
+                if (PyTuple_CheckExact(source)) {
+                    return bytes_from_iterator_tuple(source);
+                }
+                else {
+                    it_1 = PyObject_GetIter(source);
+                    if (it_1 == NULL) {
+                        if (PyErr_ExceptionMatches(PyExc_TypeError)) {
+                            PyErr_Clear();
+                        }
+                        else {
+                            return NULL;
+                        }
+                    }
+                    else {
+                        {
+                            PyObject *_return_value = bytes_from_iterator(it_1, source);
+                            Py_XDECREF(it_1);
+                            return _return_value;
+                        }
                     }
                 }
             }
         }
+        PyErr_Format(PyExc_TypeError, "cannot convert '%.200s' object to bytes", Py_TYPE(source)->tp_name);
+        return NULL;
     }
-    PyErr_Format(PyExc_TypeError, "cannot convert '%.200s' object to bytes", Py_TYPE(source)->tp_name);
-    return NULL;
 }
 
 /* bytes_new() for exactly bytes with 2 positional argument(s):

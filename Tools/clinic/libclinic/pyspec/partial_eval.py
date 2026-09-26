@@ -645,6 +645,18 @@ class Evaluator:
                         break
             bound = (self.bind_special(stmt.test, env, depth)
                      if isinstance(stmt, ast.If) else None)
+            specials = (self.pure_specials(stmt.test)
+                        if isinstance(stmt, ast.If) and bound is None
+                        else None)
+            if specials and specials[1] and self.can_version(env,
+                                                             specials[0]):
+                # The lookup and the call are known for these exact types:
+                # versioned, as for iteration.
+                versioned = self.version(specials[0], [stmt, *stmts[i:]],
+                                         env, depth, inline, specials[1])
+                if versioned is not None:
+                    out += versioned
+                    break
             if bound is not None:
                 target, method, value = bound
                 env = env | {target: method}
@@ -725,27 +737,52 @@ class Evaluator:
     @staticmethod
     def can_version(env, name):
         value = env.get(name)
-        return not (value == NULL or isinstance(value, (type, Value, IterOf,
-                                                        Other)))
+        return not (value == NULL or isinstance(value, (type, Value, IterOf)))
 
-    def version(self, name, tail, env, depth, inline):
+    def version(self, name, tail, env, depth, inline, types=None):
         """*tail*, which starts iterating *name* (of unknown type),
         specialized for each exact type of VERSIONED_ITERABLES that gives
-        an index loop, and kept generic for the other types, as a chain of
-        ``if type(name) is K:``; None if no type gives an index loop."""
+        an index loop (or for each of *types*), and kept generic for the
+        other types, as a chain of ``if type(name) is K:``; None if no
+        type gives an index loop."""
+        known = env.get(name)
+        excluded = known.types if isinstance(known, Other) else ()
         branches = []
-        for tp in VERSIONED_ITERABLES:
+        for tp in types or VERSIONED_ITERABLES:
+            if tp in excluded:
+                continue
             residual = self.block(copy.deepcopy(tail), env | {name: tp},
                                   depth, True)
-            if name in _index_loops(self.spec, residual):
+            if types or name in _index_loops(self.spec, residual):
                 branches.append((tp, residual))
         if not branches:
             return None
-        other = Other(tp for tp, _ in branches)
+        other = Other([*excluded, *(tp for tp, _ in branches)])
         out = self.block(tail, env | {name: other}, depth, inline)
         for tp, residual in reversed(branches):
             out = [ast.If(_type_test(name, tp), residual, out)]
         return out
+
+    def pure_specials(self, test):
+        """(x, the types whose special method the test looks up is pure
+        on x: see bind_special()) for ``if (v := C.lookup_special(x,
+        "name")) is [not] NULL``; else None."""
+        match test:
+            case ast.Compare(
+                    left=ast.NamedExpr(value=ast.Call(
+                        func=ast.Attribute(ast.Name('C'), 'lookup_special'),
+                        args=[ast.Name(obj), ast.Constant(str())])),
+                    comparators=[ast.Name('NULL')]):
+                pass
+            case _:
+                return None
+        types = []
+        for cls_name in self.spec.classes:
+            tp = getattr(builtins, cls_name, None)
+            if (isinstance(tp, type) and self.facts.spec_class(tp)
+                    and self.bind_special(test, {obj: tp}, 0) is not None):
+                types.append(tp)
+        return obj, types
 
     def loop(self, stmt, env, depth, inline):
         """``for item in it:``, specialized: see the module docstring.
