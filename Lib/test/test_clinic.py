@@ -5754,6 +5754,27 @@ class PyspecTest(PyspecTestBase):
         self.generate(spec.replace("class bytes", "class bytearray")
                       .replace("return a", "..."), block)
 
+    def test_nothing_written_on_error(self):
+        # An error in the last stage (the emitter) leaves every generated
+        # file as it was: clinic writes all or nothing.
+        block = """
+            /*[clinic input]
+            class bytes "PyObject *" "&PyBytes_Type"
+            bytes.__new__ as foo_new
+            [clinic start generated code]*/
+        """
+        spec = self.SPEC.replace("return a", "return len(a) == 0")
+        with self.assertRaisesRegex(ClinicError, "unsupported return"):
+            self.generate(spec, block)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, 'clinic',
+                                                     'foo.c.h')))
+        self.assertFalse(os.path.exists(self.output_path))
+        # Once fixed, both are written.
+        self.generate(self.SPEC, block)
+        self.assertTrue(os.path.exists(os.path.join(self.tmp_dir, 'clinic',
+                                                    'foo.c.h')))
+        self.assertTrue(os.path.exists(self.output_path))
+
     def test_not_new(self):
         block = self.BLOCK.replace("bytes.__new__ as foo_new",
                                    "bytes.__init__ as foo_init")

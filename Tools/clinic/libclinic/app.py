@@ -213,6 +213,8 @@ impl_definition block
         # is rendered when the whole file is parsed.
         self.language.render_properties(self)
 
+        # (filename, text) of the files generated besides the C file.
+        outputs: list[tuple[str, str]] = []
         # these are destinations not buffers
         for name, destination in self.destinations.items():
             if destination.type == 'suppress':
@@ -254,12 +256,15 @@ impl_definition block
 
                     printer_2 = BlockPrinter(self.language)
                     printer_2.print_block(block, header_includes=includes)
-                    self.writer.write(destination.filename,
-                                      printer_2.f.getvalue())
+                    outputs.append((destination.filename,
+                                    printer_2.f.getvalue()))
                     continue
 
-        self.write_pyspec_output()
-        self.write_type_objects()
+        outputs += self.pyspec_outputs()
+        # Nothing is written unless every output could be generated (the
+        # caller writes the C file itself last).
+        for filename, text in outputs:
+            self.writer.write(filename, text)
         return printer.f.getvalue()
 
     @property
@@ -307,36 +312,38 @@ impl_definition block
             found += self._clinic_classes(module, f'{prefix}{name}.')
         return found
 
-    def write_pyspec_output(self) -> None:
-        """Write the C generated from the implemented spec functions."""
+    def pyspec_outputs(self) -> list[tuple[str, str]]:
+        """(filename, text) of the C generated from the spec: the
+        implemented spec functions and the static types."""
         spec = self.pyspec
-        if spec is None or not spec.implemented_functions():
-            return
+        if spec is None:
+            return []
         # Name the spec the same way whatever the current directory.
         dirname, basename = os.path.split(os.path.abspath(self.filename))
         stem = os.path.splitext(basename)[0]
         spec_name = f"{os.path.basename(dirname)}/pyspec/{stem}.py"
-        try:
-            text = emit.generate(spec, spec_name, self.pyspec_c_basenames,
-                                 self.pyspec_self_ctypes)
-        except emit.SpecError as exc:
-            raise frontend.SpecError(exc.message, filename=spec.filename,
-                                     lineno=exc.lineno) from None
-        output = frontend.output_path(self.filename)
-        try:
-            self.writer.makedirs(os.path.dirname(output))
-        except FileExistsError:
-            pass
-        self.writer.write(output, text + "\n")
+        outputs = []
+        if spec.implemented_functions():
+            try:
+                text = emit.generate(spec, spec_name,
+                                     self.pyspec_c_basenames,
+                                     self.pyspec_self_ctypes)
+            except emit.SpecError as exc:
+                raise frontend.SpecError(exc.message, filename=spec.filename,
+                                         lineno=exc.lineno) from None
+            outputs.append((frontend.output_path(self.filename), text + "\n"))
+        text = self.type_objects(spec, spec_name)
+        if text is not None:
+            outputs.append((typeobj.output_path(self.filename), text + "\n"))
+        for filename, _ in outputs:
+            try:
+                self.writer.makedirs(os.path.dirname(filename))
+            except FileExistsError:
+                pass
+        return outputs
 
-    def write_type_objects(self) -> None:
-        """Write the static types of the spec (see pyspec/typeobj.py)."""
-        spec = self.pyspec
-        if spec is None:
-            return
-        dirname, basename = os.path.split(os.path.abspath(self.filename))
-        stem = os.path.splitext(basename)[0]
-        spec_name = f"{os.path.basename(dirname)}/pyspec/{stem}.py"
+    def type_objects(self, spec: frontend.Spec, spec_name: str) -> str | None:
+        """The static types of the spec (see pyspec/typeobj.py)."""
         clinic_classes = self._clinic_classes(self, '')
         classes = {path: (cls.typedef, cls.type_object)
                    for path, cls in clinic_classes}
@@ -345,15 +352,7 @@ impl_definition block
                 f.c_basename,
                 f.c_basename_vectorcall if f.vectorcall else None)
             for path, cls in clinic_classes for f in cls.functions}
-        text = typeobj.generate(spec, spec_name, classes, functions)
-        if text is None:
-            return
-        output = typeobj.output_path(self.filename)
-        try:
-            self.writer.makedirs(os.path.dirname(output))
-        except FileExistsError:
-            pass
-        self.writer.write(output, text + "\n")
+        return typeobj.generate(spec, spec_name, classes, functions)
 
     def _module_and_class(
         self, fields: Sequence[str]
