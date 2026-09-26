@@ -16,6 +16,13 @@ Every implemented spec function becomes a C function:
     starting with Py or _Py are defined non-static (their public or
     internal header declares them); everything else is static.
 
+Functions whose body is only a docstring and/or ``...`` are stubs
+(frontend.is_stub()) and are never lowered to C.
+
+For a __new__ implemented by the spec, call_table.py then adds
+type-specialized variants of NAME_nargs1() and the call table the tier-2
+optimizer reads (Include/internal/pycore_pyspec.h).
+
 The accepted Python subset is small on purpose; anything else is an error.
 
 Statements:
@@ -39,7 +46,7 @@ Py_XDECREF at every exit except the one returning it.
 import ast
 import builtins
 
-from . import frontend, partial_eval, runtime
+from . import call_table, frontend, partial_eval, runtime
 from .partial_eval import NOTNULL, NULL, Value
 from .runtime import (ContextEscape, Escape, ERR_MINUS1, ERR_NULL,
                       ERR_NULL_OR_MISSING, RaiseEscape)
@@ -637,6 +644,8 @@ class Generator:
         for description in descriptions:
             if description.new_type is not None:
                 out += self.generate_arities(description)
+        # The call table of the tier-2 optimizer: see call_table.py.
+        out += call_table.generate(self, descriptions)
         return '\n'.join(out)
 
     def generate_arities(self, description):

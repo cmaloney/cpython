@@ -3257,6 +3257,112 @@ class TestUopsOptimization(unittest.TestCase):
         self.assertIn("_CALL_BUILTIN_CLASS", uops)
         self.assertNotIn("_GUARD_CALLABLE_BUILTIN_CLASS", uops)
 
+    def test_call_builtin_class_pyspec_direct_call(self):
+        # bytes() has a pyspec call table: the call goes directly to the
+        # C function for one argument.  __bytes__ may return a subclass,
+        # so the result type is not known exactly.
+        class Sub(bytes):
+            pass
+
+        class C:
+            def __bytes__(self):
+                return Sub(b"ab")
+
+        def testfunc(n):
+            x = 0
+            c = C()
+            for _ in range(n):
+                b = bytes(c)
+                if type(b) is bytes:
+                    x += 1
+            return x
+
+        res, ex = self._run_with_optimizer(testfunc, TIER2_THRESHOLD)
+        self.assertEqual(res, 0)
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_CALL_BUILTIN_CLASS_1_INLINE", uops)
+        self.assertNotIn("_CALL_BUILTIN_CLASS", uops)
+        self.assertNotIn("_GUARD_TYPE", uops)
+        self.assertIn("_CALL_TYPE_1", uops)
+
+    def test_call_builtin_class_pyspec_typed_variant(self):
+        # The recorded argument type has its own entry: it is guarded and
+        # the result is known to be exactly bytes, removing the
+        # isinstance() call and the guard of b + b.
+        def testfunc(n, source):
+            x = 0
+            for _ in range(n):
+                b = bytes(source)
+                if isinstance(b, bytes):
+                    x += len(b + b)
+            return x
+
+        for source in (bytearray(b"abc"), memoryview(b"abc"), [1, 2, 3],
+                       (1, 2, 3), range(3), 3):
+            with self.subTest(source=source), clear_executors(testfunc):
+                res = testfunc(TIER2_THRESHOLD, source)
+                self.assertEqual(res, 6 * TIER2_THRESHOLD)
+                ex = get_first_executor(testfunc)
+                self.assertIsNotNone(ex)
+                uops = get_opnames(ex)
+                self.assertIn("_GUARD_TYPE", uops)
+                self.assertIn("_CALL_BUILTIN_CLASS_1_INLINE", uops)
+                self.assertNotIn("_CALL_BUILTIN_CLASS", uops)
+                self.assertNotIn("_CALL_ISINSTANCE", uops)
+                self.assertNotIn("_GUARD_BINARY_OP_EXTEND", uops)
+
+    def test_call_builtin_class_pyspec_known_arg_type(self):
+        # The argument type is already known: no guard is needed.
+        def testfunc(n):
+            x = 0
+            for i in range(n):
+                b = bytes(i & 3)
+                if isinstance(b, bytes):
+                    x += len(b)
+            return x
+
+        res, ex = self._run_with_optimizer(testfunc, TIER2_THRESHOLD)
+        self.assertEqual(res, sum(i & 3 for i in range(TIER2_THRESHOLD)))
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_CALL_BUILTIN_CLASS_1_INLINE", uops)
+        self.assertNotIn("_GUARD_TYPE", uops)
+        self.assertNotIn("_CALL_ISINSTANCE", uops)
+
+    def test_call_builtin_class_pyspec_guard_fails(self):
+        # Speculating on the recorded argument type stays correct when
+        # the type changes.
+        def testfunc(n, sources):
+            x = 0
+            for i in range(n):
+                x += len(bytes(sources[i % len(sources)]))
+            return x
+
+        sources = [bytearray(b"abc")] * 7 + [[1, 2], b"xyzw", 5]
+        res = testfunc(TIER2_THRESHOLD * len(sources), sources)
+        per_round = 3 * 7 + 2 + 4 + 5
+        self.assertEqual(res, per_round * TIER2_THRESHOLD)
+        self.assertRaises(TypeError, testfunc, 1, ["abc"])
+
+    def test_call_builtin_class_pyspec_constant(self):
+        # bytes() is the empty bytes singleton: the call is folded away,
+        # and so is len() of it.
+        def testfunc(n):
+            x = 0
+            for _ in range(n):
+                b = bytes()
+                x += len(b) + 1
+            return x
+
+        res, ex = self._run_with_optimizer(testfunc, TIER2_THRESHOLD)
+        self.assertEqual(res, TIER2_THRESHOLD)
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertNotIn("_CALL_BUILTIN_CLASS", uops)
+        self.assertNotIn("_CALL_BUILTIN_CLASS_0_INLINE", uops)
+        self.assertNotIn("_CALL_LEN", uops)
+
     def test_call_builtin_o(self):
         def testfunc(n):
             x = 0

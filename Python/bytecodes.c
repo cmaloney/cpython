@@ -4859,8 +4859,41 @@ dummy_func(
             PyStackRef_CLOSE(temp);
         }
 
+        /* Direct calls of a C function from a pyspec call table
+         * (Include/internal/pycore_pyspec.h), for a builtin class called
+         * with 0 or 1 positional object arguments and a NULL self_or_null.
+         * The optimizer replaces _CALL_BUILTIN_CLASS by them. */
+        tier2 op(_CALL_BUILTIN_CLASS_0_INLINE, (func/4, callable, self_or_null -- callable, self_or_null)) {
+            assert(sizeof(_PySpecFunc0) == sizeof(uintptr_t));
+            STAT_INC(CALL, hit);
+            volatile _PySpecFunc0 func_v = (_PySpecFunc0)func;
+            PyObject *res_o = func_v();
+            assert((res_o != NULL) ^ (_PyErr_Occurred(tstate) != NULL));
+            if (res_o == NULL) {
+                ERROR_NO_POP();
+            }
+            _PyStackRef temp = callable;
+            callable = PyStackRef_FromPyObjectSteal(res_o);
+            PyStackRef_CLOSE(temp);
+        }
+
+        tier2 op(_CALL_BUILTIN_CLASS_1_INLINE, (func/4, callable, self_or_null, arg -- callable, self_or_null, arg)) {
+            assert(sizeof(_PySpecFunc1) == sizeof(uintptr_t));
+            STAT_INC(CALL, hit);
+            volatile _PySpecFunc1 func_v = (_PySpecFunc1)func;
+            PyObject *res_o = func_v(PyStackRef_AsPyObjectBorrow(arg));
+            assert((res_o != NULL) ^ (_PyErr_Occurred(tstate) != NULL));
+            if (res_o == NULL) {
+                ERROR_NO_POP();
+            }
+            _PyStackRef temp = callable;
+            callable = PyStackRef_FromPyObjectSteal(res_o);
+            PyStackRef_CLOSE(temp);
+        }
+
         macro(CALL_BUILTIN_CLASS) =
             _RECORD_CALLABLE +
+            _RECORD_ARG0_TYPE +
             unused/1 +
             unused/2 +
             _GUARD_CALLABLE_BUILTIN_CLASS +
@@ -6424,6 +6457,13 @@ dummy_func(
 
         tier2 op(_RECORD_CALLABLE, (func, self, args[oparg] -- func, self, args[oparg])) {
             RECORD_VALUE(PyStackRef_AsPyObjectBorrow(func));
+        }
+
+        /* The type of the first argument of a call (none for no argument). */
+        tier2 op(_RECORD_ARG0_TYPE, (callable, self_or_null, args[oparg] -- callable, self_or_null, args[oparg])) {
+            if (oparg > 0) {
+                RECORD_VALUE(Py_TYPE(PyStackRef_AsPyObjectBorrow(args[0])));
+            }
         }
 
         tier2 op(_RECORD_CALLABLE_KW, (func, self, args[oparg], kwnames -- func, self, args[oparg], kwnames)) {

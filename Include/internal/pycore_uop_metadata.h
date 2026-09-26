@@ -325,6 +325,8 @@ const uint32_t _PyUop_Flags[MAX_UOP_ID+1] = {
     [_EXIT_INIT_CHECK] = HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
     [_GUARD_CALLABLE_BUILTIN_CLASS] = HAS_ARG_FLAG | HAS_EXIT_FLAG,
     [_CALL_BUILTIN_CLASS] = HAS_ARG_FLAG | HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
+    [_CALL_BUILTIN_CLASS_0_INLINE] = HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
+    [_CALL_BUILTIN_CLASS_1_INLINE] = HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
     [_GUARD_CALLABLE_BUILTIN_O] = HAS_ARG_FLAG | HAS_EXIT_FLAG,
     [_CALL_BUILTIN_O] = HAS_ARG_FLAG | HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
     [_GUARD_CALLABLE_BUILTIN_FAST] = HAS_ARG_FLAG | HAS_EXIT_FLAG,
@@ -427,6 +429,7 @@ const uint32_t _PyUop_Flags[MAX_UOP_ID+1] = {
     [_RECORD_3OS_GEN_FUNC] = HAS_RECORDS_VALUE_FLAG,
     [_RECORD_4OS] = HAS_RECORDS_VALUE_FLAG,
     [_RECORD_CALLABLE] = HAS_ARG_FLAG | HAS_RECORDS_VALUE_FLAG,
+    [_RECORD_ARG0_TYPE] = HAS_ARG_FLAG | HAS_RECORDS_VALUE_FLAG,
     [_RECORD_CALLABLE_KW] = HAS_ARG_FLAG | HAS_RECORDS_VALUE_FLAG,
     [_RECORD_BOUND_METHOD] = HAS_ARG_FLAG | HAS_RECORDS_VALUE_FLAG,
     [_RECORD_CODE] = HAS_RECORDS_VALUE_FLAG,
@@ -3055,6 +3058,24 @@ const _PyUopCachingInfo _PyUop_Caching[MAX_UOP_ID+1] = {
             { -1, -1, -1 },
         },
     },
+    [_CALL_BUILTIN_CLASS_0_INLINE] = {
+        .best = { 2, 2, 2, 2 },
+        .entries = {
+            { -1, -1, -1 },
+            { -1, -1, -1 },
+            { 2, 2, _CALL_BUILTIN_CLASS_0_INLINE_r22 },
+            { -1, -1, -1 },
+        },
+    },
+    [_CALL_BUILTIN_CLASS_1_INLINE] = {
+        .best = { 3, 3, 3, 3 },
+        .entries = {
+            { -1, -1, -1 },
+            { -1, -1, -1 },
+            { -1, -1, -1 },
+            { 3, 3, _CALL_BUILTIN_CLASS_1_INLINE_r33 },
+        },
+    },
     [_GUARD_CALLABLE_BUILTIN_O] = {
         .best = { 0, 0, 0, 0 },
         .entries = {
@@ -4577,6 +4598,8 @@ const uint16_t _PyUop_Uncached[MAX_UOP_REGS_ID+1] = {
     [_EXIT_INIT_CHECK_r10] = _EXIT_INIT_CHECK,
     [_GUARD_CALLABLE_BUILTIN_CLASS_r00] = _GUARD_CALLABLE_BUILTIN_CLASS,
     [_CALL_BUILTIN_CLASS_r00] = _CALL_BUILTIN_CLASS,
+    [_CALL_BUILTIN_CLASS_0_INLINE_r22] = _CALL_BUILTIN_CLASS_0_INLINE,
+    [_CALL_BUILTIN_CLASS_1_INLINE_r33] = _CALL_BUILTIN_CLASS_1_INLINE,
     [_GUARD_CALLABLE_BUILTIN_O_r00] = _GUARD_CALLABLE_BUILTIN_O,
     [_CALL_BUILTIN_O_r03] = _CALL_BUILTIN_O,
     [_GUARD_CALLABLE_BUILTIN_FAST_r00] = _GUARD_CALLABLE_BUILTIN_FAST,
@@ -4977,6 +5000,10 @@ const char *const _PyOpcode_uop_name[MAX_UOP_REGS_ID+1] = {
     [_BUILD_TUPLE_r01] = "_BUILD_TUPLE_r01",
     [_CALL_BUILTIN_CLASS] = "_CALL_BUILTIN_CLASS",
     [_CALL_BUILTIN_CLASS_r00] = "_CALL_BUILTIN_CLASS_r00",
+    [_CALL_BUILTIN_CLASS_0_INLINE] = "_CALL_BUILTIN_CLASS_0_INLINE",
+    [_CALL_BUILTIN_CLASS_0_INLINE_r22] = "_CALL_BUILTIN_CLASS_0_INLINE_r22",
+    [_CALL_BUILTIN_CLASS_1_INLINE] = "_CALL_BUILTIN_CLASS_1_INLINE",
+    [_CALL_BUILTIN_CLASS_1_INLINE_r33] = "_CALL_BUILTIN_CLASS_1_INLINE_r33",
     [_CALL_BUILTIN_FAST] = "_CALL_BUILTIN_FAST",
     [_CALL_BUILTIN_FAST_r00] = "_CALL_BUILTIN_FAST_r00",
     [_CALL_BUILTIN_FAST_WITH_KEYWORDS] = "_CALL_BUILTIN_FAST_WITH_KEYWORDS",
@@ -5944,6 +5971,7 @@ const char *const _PyOpcode_uop_name[MAX_UOP_REGS_ID+1] = {
     [_PY_FRAME_KW_r11] = "_PY_FRAME_KW_r11",
     [_RECORD_3OS_GEN_FUNC] = "_RECORD_3OS_GEN_FUNC",
     [_RECORD_4OS] = "_RECORD_4OS",
+    [_RECORD_ARG0_TYPE] = "_RECORD_ARG0_TYPE",
     [_RECORD_BOUND_METHOD] = "_RECORD_BOUND_METHOD",
     [_RECORD_CALLABLE] = "_RECORD_CALLABLE",
     [_RECORD_CALLABLE_KW] = "_RECORD_CALLABLE_KW",
@@ -6746,6 +6774,10 @@ int _PyUop_num_popped(int opcode, int oparg)
             return 0;
         case _CALL_BUILTIN_CLASS:
             return 0;
+        case _CALL_BUILTIN_CLASS_0_INLINE:
+            return 0;
+        case _CALL_BUILTIN_CLASS_1_INLINE:
+            return 0;
         case _GUARD_CALLABLE_BUILTIN_O:
             return 0;
         case _CALL_BUILTIN_O:
@@ -6949,6 +6981,8 @@ int _PyUop_num_popped(int opcode, int oparg)
         case _RECORD_4OS:
             return 0;
         case _RECORD_CALLABLE:
+            return 0;
+        case _RECORD_ARG0_TYPE:
             return 0;
         case _RECORD_CALLABLE_KW:
             return 0;

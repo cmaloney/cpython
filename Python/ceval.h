@@ -30,6 +30,7 @@
 #include "pycore_optimizer.h"     // _PyUOpExecutor_Type
 #include "pycore_pyatomic_ft_wrappers.h" // FT_ATOMIC_*
 #include "pycore_pyerrors.h"      // _PyErr_GetRaisedException()
+#include "pycore_pyspec.h"        // _PySpecFunc1
 #include "pycore_pystate.h"       // _PyInterpreterState_GET()
 #include "pycore_range.h"         // _PyRangeIterObject
 #include "pycore_setobject.h"     // _PySet_Update()

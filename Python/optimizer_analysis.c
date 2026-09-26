@@ -19,6 +19,7 @@
 #include "pycore_opcode_utils.h"
 #include "pycore_pystate.h"       // _PyInterpreterState_GET()
 #include "pycore_pyatomic_ft_wrappers.h" // FT_ATOMIC_*
+#include "pycore_pyspec.h"        // _PySpec_FindCall()
 #include "pycore_tstate.h"        // _PyThreadStateImpl
 #include "pycore_uop_metadata.h"
 #include "pycore_long.h"
