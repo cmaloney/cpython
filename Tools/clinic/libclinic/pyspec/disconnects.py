@@ -686,19 +686,13 @@ def _docstrings(srcdir, rel):
     if rel.endswith('.py'):
         out = []
         def visit(node, prefix):
-            for prev, child in zip([None] + node.body, node.body):
+            for child in node.body:
                 if isinstance(child, (ast.FunctionDef, ast.ClassDef)):
                     doc = ast.get_docstring(child)
                     if doc:
                         out.append((f'{prefix}{child.name}', doc))
                     if isinstance(child, ast.ClassDef):
                         visit(child, f'{child.name}.')
-                elif (isinstance(prev, ast.Assign)      # a clone's docstring
-                        and isinstance(child, ast.Expr)
-                        and isinstance(child.value, ast.Constant)
-                        and isinstance(child.value.value, str)):
-                    out.append((f'{prefix}{prev.targets[0].id}',
-                                child.value.value))
         visit(ast.parse(text), '')
         return out
     out = []
