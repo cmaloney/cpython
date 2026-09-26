@@ -5766,8 +5766,13 @@ class PyspecTest(PyspecTestBase):
             [clinic start generated code]*/
         """
         spec = self.SPEC.replace("return a", "return len(a) == 0")
-        with self.assertRaisesRegex(ClinicError, "unsupported return"):
+        with self.assertRaises(ClinicError) as cm:
             self.generate(spec, block)
+        # "Unsupported" errors point at the list of what is supported.
+        self.assertEqual(cm.exception.message, "unsupported return "
+                         "len(a) == 0; see Objects/pyspec/README.rst")
+        self.assertEqual((cm.exception.filename, cm.exception.lineno),
+                         (self.spec_path, 5))
         self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, 'clinic',
                                                      'foo.c.h')))
         self.assertFalse(os.path.exists(self.output_path))

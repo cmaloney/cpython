@@ -330,7 +330,10 @@ impl_definition block
                                            self.pyspec_c_basenames,
                                            self.pyspec_self_ctypes))
             except emit.SpecError as exc:
-                raise frontend.SpecError(exc.message, filename=spec.filename,
+                message = exc.message
+                if message.startswith('unsupported'):
+                    message += f"; see {frontend.README}"
+                raise frontend.SpecError(message, filename=spec.filename,
                                          lineno=exc.lineno) from None
         types = self.type_objects(spec)
         if types is not None:

@@ -1,5 +1,8 @@
 """Read a pyspec file: the Python side of Argument Clinic functions.
 
+(For contributors: Objects/pyspec/README.rst.  This docstring is about the
+implementation.)
+
 For Objects/foo.c the spec is Objects/pyspec/foo.py, ordinary Python in
 the style of a typeshed stub.  It is read with the ast module; clinic never
 executes it.
