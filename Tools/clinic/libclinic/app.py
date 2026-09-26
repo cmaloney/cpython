@@ -207,12 +207,14 @@ impl_definition block
                 parser.parse(block)
             printer.print_block(block)
 
-        self.parse_spec_methods()
+        self.check_spec_blocks()
 
         # The entry of an attribute is composed of all its accessors, so it
         # is rendered when the whole file is parsed.
         self.language.render_properties(self)
 
+        # (filename, text) of the files generated besides the C file.
+        outputs: list[tuple[str, str]] = []
         # these are destinations not buffers
         for name, destination in self.destinations.items():
             if destination.type == 'suppress':
@@ -254,12 +256,15 @@ impl_definition block
 
                     printer_2 = BlockPrinter(self.language)
                     printer_2.print_block(block, header_includes=includes)
-                    self.writer.write(destination.filename,
-                                      printer_2.f.getvalue())
+                    outputs.append((destination.filename,
+                                    printer_2.f.getvalue()))
                     continue
 
-        self.write_pyspec_output()
-        self.write_type_objects()
+        outputs += self.pyspec_outputs()
+        # Nothing is written unless every output could be generated (the
+        # caller writes the C file itself last).
+        for filename, text in outputs:
+            self.writer.write(filename, text)
         return printer.f.getvalue()
 
     @property
@@ -272,45 +277,29 @@ impl_definition block
                 try:
                     self._pyspec = frontend.Spec.load(path)
                 except SyntaxError as exc:
-                    fail(f"{path}: {exc}")
+                    raise frontend.SpecError(exc.msg, filename=path,
+                                             lineno=exc.lineno) from None
         return self._pyspec
 
-    def parse_spec_methods(self) -> None:
-        """Generate the spec methods which have no clinic block in the file.
-
-        Every method of a spec class declared in the file (``class T``
-        directive) is a clinic function: a block holding only its function
-        line is optional.  Without one, the method is generated after the
-        blocks of the file, in the order of the spec, and its impl
-        definition head, which clinic would write into the block, is
-        written by hand.  The compiler checks that head against the impl
-        prototype of the generated file.
-        """
+    def check_spec_blocks(self) -> None:
+        """Every clinic function of a spec class declared in the file
+        (``class T`` directive) has a one-line block, ``T.meth``, above its
+        impl: clinic writes the impl head there."""
         spec = self.pyspec
-        parser = self.parsers.get('clinic')
-        if spec is None or not isinstance(parser, DSLParser):
+        if spec is None:
             return
         for path, cls in self._clinic_classes(self, ''):
             if cls.name not in spec.classes:
                 continue
             declared = {f.name for f in cls.functions}
-            try:
-                methods = spec.methods(cls.name)
-            except frontend.SpecError as exc:
-                fail(str(exc))
-            for meth in methods:
-                # A clone needs its target first: the order of the spec
-                # is that of the method table, not of clinic.
-                todo = [meth]
-                while (clone := spec.clones.get(f'{cls.name}.{todo[-1]}')) \
-                        and clone.target not in declared \
-                        and clone.target not in todo:
-                    todo.append(clone.target)
-                for name in reversed(todo):
-                    if name not in declared:
-                        self._parse_spec_method(parser, spec, cls.name,
-                                                path, name)
-                        declared.add(name)
+            for meth in spec.methods(cls.name):
+                if meth not in declared:
+                    raise spec.error(
+                        spec.functions[f'{cls.name}.{meth}'],
+                        f"{path}.{meth} has no clinic block in "
+                        f"{self.filename}; put this block above its "
+                        f"impl:\n/*[clinic input]\n{path}.{meth}\n"
+                        "[clinic start generated code]*/")
 
     def _clinic_classes(self, parent: Any, prefix: str
                         ) -> list[tuple[str, Class]]:
@@ -323,58 +312,45 @@ impl_definition block
             found += self._clinic_classes(module, f'{prefix}{name}.')
         return found
 
-    def _parse_spec_method(self, parser: DSLParser, spec: frontend.Spec,
-                           cls_name: str, path: str, meth: str) -> None:
-        # The impl definition head is hand-written: drop it.
-        buffers = self.destination_buffers
-        impl_definition = buffers['impl_definition']
-        buffers['impl_definition'] = self.get_destination_buffer('suppress')
-        block = Block(f'{path}.{meth}\n', dsl_name='clinic')
-        name = f'{cls_name}.{meth}'
-        node = spec.functions.get(name) or spec.clones[name]
-        try:
-            parser.parse(block)
-            if ''.join(block.output).strip():
-                fail(f"{path}.{meth} has no clinic block in "
-                     f"{self.filename}, so its generated code, except the "
-                     "impl definition, must go to a file destination; "
-                     "use the default 'output preset' or give it a block")
-        except libclinic.ClinicError as exc:
-            exc.filename = spec.filename
-            exc.lineno = node.lineno
-            raise
-        finally:
-            buffers['impl_definition'] = impl_definition
-
-    def write_pyspec_output(self) -> None:
-        """Write the C generated from the implemented spec functions."""
+    def pyspec_outputs(self) -> list[tuple[str, str]]:
+        """(filename, text) of the C generated from the spec, if any:
+        clinic/<stem>_pyspec.c.h holds the implemented spec functions, then
+        the static types.  The C file includes it once, at its end."""
         spec = self.pyspec
-        if spec is None or not spec.implemented_functions():
-            return
+        if spec is None:
+            return []
         # Name the spec the same way whatever the current directory.
         dirname, basename = os.path.split(os.path.abspath(self.filename))
         stem = os.path.splitext(basename)[0]
         spec_name = f"{os.path.basename(dirname)}/pyspec/{stem}.py"
-        try:
-            text = emit.generate(spec, spec_name, self.pyspec_c_basenames,
-                                 self.pyspec_self_ctypes)
-        except (emit.SpecError, frontend.SpecError) as exc:
-            fail(f"{spec.filename}: {exc}")
+        parts = []
+        if spec.implemented_functions():
+            try:
+                parts.append(emit.generate(spec, spec_name,
+                                           self.pyspec_c_basenames,
+                                           self.pyspec_self_ctypes))
+            except emit.SpecError as exc:
+                message = exc.message
+                if message.startswith('unsupported'):
+                    message += f"; see {frontend.README}"
+                raise frontend.SpecError(message, filename=spec.filename,
+                                         lineno=exc.lineno) from None
+        types = self.type_objects(spec)
+        if types is not None:
+            if not parts:
+                parts.append(typeobj.header(spec_name))
+            parts.append(types)
+        if not parts:
+            return []
         output = frontend.output_path(self.filename)
         try:
             self.writer.makedirs(os.path.dirname(output))
         except FileExistsError:
             pass
-        self.writer.write(output, text + "\n")
+        return [(output, "\n\n".join(parts) + "\n")]
 
-    def write_type_objects(self) -> None:
-        """Write the static types of the spec (see pyspec/typeobj.py)."""
-        spec = self.pyspec
-        if spec is None:
-            return
-        dirname, basename = os.path.split(os.path.abspath(self.filename))
-        stem = os.path.splitext(basename)[0]
-        spec_name = f"{os.path.basename(dirname)}/pyspec/{stem}.py"
+    def type_objects(self, spec: frontend.Spec) -> str | None:
+        """The static types of the spec (see pyspec/typeobj.py)."""
         clinic_classes = self._clinic_classes(self, '')
         classes = {path: (cls.typedef, cls.type_object)
                    for path, cls in clinic_classes}
@@ -383,18 +359,7 @@ impl_definition block
                 f.c_basename,
                 f.c_basename_vectorcall if f.vectorcall else None)
             for path, cls in clinic_classes for f in cls.functions}
-        try:
-            text = typeobj.generate(spec, spec_name, classes, functions)
-        except (emit.SpecError, frontend.SpecError) as exc:
-            fail(str(exc))
-        if text is None:
-            return
-        output = typeobj.output_path(self.filename)
-        try:
-            self.writer.makedirs(os.path.dirname(output))
-        except FileExistsError:
-            pass
-        self.writer.write(output, text + "\n")
+        return typeobj.generate(spec, classes, functions)
 
     def _module_and_class(
         self, fields: Sequence[str]

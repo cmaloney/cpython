@@ -528,17 +528,24 @@ class DSLParser:
         line_numbers = list(range(
             self.clinic.block_parser.block_start_line_number,
             self.clinic.block_parser.block_start_line_number + len(lines)))
+        # Where each line is written: the C file, or the spec for the
+        # lines taken from it.
+        locations = [(self.clinic.filename, n) for n in line_numbers]
         index = 0
         while index < len(lines):
             line_number = line_numbers[index]
             self.line_number = line_number
+            location = locations[index]
             try:
                 if index == stub:
                     # The lines from the spec replace the function line;
-                    # they are reported at its line number.
+                    # clinic counts them at its line number.
                     spec_lines = self.spec_input(lines[index], lines[:index])
-                    lines[index:index + 1] = spec_lines
+                    lines[index:index + 1] = [l for l, _ in spec_lines]
                     line_numbers[index:index + 1] = [line_number] * len(spec_lines)
+                    locations[index:index + 1] = [
+                        loc or location for _, loc in spec_lines]
+                    location = locations[index]
                 line = lines[index]
                 index += 1
                 if '\t' in line:
@@ -546,21 +553,16 @@ class DSLParser:
                          line_number=block_start)
                 self.state(line)
             except ClinicError as exc:
-                exc.lineno = line_number
-                if self.spec_function is not None:
-                    exc.message += self.spec_note()
-                    exc.args = (exc.message,)
-                exc.filename = self.clinic.filename
+                self.locate(exc, location)
                 raise
 
-        self.do_post_block_processing_cleanup(line_number)
         try:
+            self.do_post_block_processing_cleanup(line_number)
             block.output.extend(
                 self.clinic.language.render(self.clinic, block.signatures))
         except ClinicError as exc:
-            if exc.lineno is None:
-                exc.lineno = line_number
-            exc.filename = self.clinic.filename
+            self.locate(exc, (self.clinic.filename, line_number),
+                        keep_lineno=True)
             raise
 
         if self.preserve_output:
@@ -592,19 +594,21 @@ class DSLParser:
             return None
         return stub
 
-    def spec_input(self, function_line: str, head: list[str]) -> list[str]:
+    def spec_input(self, function_line: str, head: list[str]
+                   ) -> list[tuple[str, tuple[str, int] | None]]:
         """Complete a one-line block from the spec method it names.
 
         If the function is a method of a class of the spec (for
         Objects/foo.c, Objects/pyspec/foo.py), return the lines replacing
         *function_line*: the Python decorators, the function line, and the
-        parameters, docstring or clone taken from the spec.  See
+        parameters and docstring taken from the spec.  See
         libclinic.pyspec.frontend.  Otherwise, return [function_line].
+        Each line comes with its location in the spec (None: the C file).
 
         *head* holds the lines of the block before the function line.  The
         checksum of the block is still computed on the input in the C file.
         """
-        unchanged = [function_line]
+        unchanged = [(function_line, None)]
         spec = self.clinic.pyspec
         if spec is None:
             return unchanged
@@ -616,10 +620,7 @@ class DSLParser:
             return unchanged
         name = f'{cls.name}.{meth}'
         if name in spec.functions or name in spec.shared:
-            try:
-                kind = spec.method_kind(name)
-            except frontend.SpecError as exc:
-                fail(str(exc))
+            kind = spec.method_kind(name)
             if kind != frontend.CLINIC:
                 fail(f"{names!r} is not a clinic function: it is a "
                      f"{kind} of {spec.filename}; remove its block")
@@ -631,22 +632,17 @@ class DSLParser:
             if self.valid_line(line) and line.lstrip().startswith('@'):
                 fail(f"{names!r}: {shlex.split(line)[0]} of a spec method "
                      f"is written in {spec.filename}")
-        try:
-            spec_decorators, suffix, rest = spec.clinic_input(name, prefix)
-        except frontend.SpecError as exc:
-            fail(str(exc))
-        self.spec_function = name
-        for line in spec_decorators:
+        spec_decorators, suffix, rest = spec.clinic_input(name)
+        for line, lineno in spec_decorators:
             decorator = line.split()[0]
             if decorator not in self.directives:
-                fail(f"{names!r}: unknown clinic decorator {decorator}")
+                raise frontend.SpecError(
+                    f"{names!r}: unknown clinic decorator {decorator}",
+                    filename=spec.filename, lineno=lineno)
         if suffix.startswith(' -> ') and '->' in function_line:
             fail(f"{names!r}: the return converter is written in "
                  f"{spec.filename}")
-        try:
-            c_name, _ = spec.c_name(name)
-        except frontend.SpecError as exc:
-            fail(str(exc))
+        c_name, _ = spec.c_name(name)
         if c_name is not None:
             if ' as ' in function_line:
                 fail(f"{names!r}: the C name is written in "
@@ -654,25 +650,33 @@ class DSLParser:
             left, arrow, right = function_line.partition('->')
             function_line = (f'{left.rstrip()} as {c_name}'
                              + (f' {arrow}{right}' if arrow else ''))
-        if ' as ' not in function_line and meth == '__new__':
-            # The C basename of T.__new__ is T_new (see frontend).
-            left, arrow, right = function_line.partition('->')
-            c_basename = '_'.join([*prefix.split('.'), 'new'])
-            function_line = (f'{left.rstrip()} as {c_basename}'
-                             + (f' {arrow}{right}' if arrow else ''))
+        self.spec_function = name
         indent = function_line[:len(function_line) - len(function_line.lstrip())]
-        return [*spec_decorators,
-                function_line.rstrip() + suffix,
-                *[indent + line if line else line for line in rest]]
+        where = spec.filename
+        return [*[(line, (where, lineno)) for line, lineno in spec_decorators],
+                (function_line.rstrip() + suffix,
+                 (where, spec.functions[name].lineno)),
+                *[(indent + line if line else line, (where, lineno))
+                  for line, lineno in rest]]
 
-    def spec_note(self) -> str:
+    def locate(self, exc: ClinicError, location: tuple[str, int], *,
+               keep_lineno: bool = False) -> None:
+        """Say where *exc* happened, unless it already says so.
+
+        An error of a function taken from the spec, but not of one of its
+        lines (checks of the whole function), is reported at its def.
+        """
+        if exc.filename is not None:
+            return
         spec = self.clinic.pyspec
-        assert spec is not None and self.spec_function is not None
-        node = spec.functions.get(self.spec_function)
-        lineno = (node.lineno if node is not None
-                  else spec.clones[self.spec_function].lineno)
-        return (f"\n(in the clinic input taken from {self.spec_function} in "
-                f"{spec.filename}:{lineno})")
+        if (self.spec_function is not None and spec is not None
+                and location[0] == self.clinic.filename):
+            location = (spec.filename,
+                        spec.functions[self.spec_function].lineno)
+            keep_lineno = False
+        exc.filename = location[0]
+        if not (keep_lineno and exc.lineno is not None):
+            exc.lineno = location[1]
 
     def decorator_location(self, name: str, lineno: int | None
                            ) -> tuple[str | None, int | None]:
@@ -1796,10 +1800,7 @@ class DSLParser:
         if func.kind in (CALLABLE, CLASS_METHOD) and func.cls is not None:
             self.check_pyspec_method(lineno)
             return
-        try:
-            description = spec.describe(name)
-        except frontend.SpecError as exc:
-            fail(str(exc), line_number=lineno)
+        description = spec.describe(name)
         where = f"{name}() in {spec.filename}"
         if func.kind is not METHOD_NEW:
             fail(f"{where}: a spec can only implement __new__, methods and "
@@ -1858,10 +1859,7 @@ class DSLParser:
         assert isinstance(conv, self_converter)
         self_ctype = (conv.specified_type or conv.type
                       or correct_name_for_self(func)[0])
-        try:
-            description = emit.describe_method(spec, name, self_ctype)
-        except frontend.SpecError as exc:
-            fail(str(exc), line_number=lineno)
+        description = emit.describe_method(spec, name, self_ctype)
         spec_params = description.parameters[1:]
         if len(params) != len(spec_params):
             fail(f"{where} takes {len(spec_params)} parameters after self, "

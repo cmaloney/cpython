@@ -1,26 +1,24 @@
 """The bytes type, written as Python: the spec of Objects/bytesobject.c.
 
 Argument Clinic reads this file while processing bytesobject.c (see
-Tools/clinic/libclinic/pyspec/).  Each method of ``class bytes`` is a
-clinic function (parameters, docstring and clinic decorators);
-bytesobject.c has no block for them, only the ``class bytes`` directive.
-Methods with a body of ``...`` are implemented in C by hand: bytesobject.c
-defines their bytes_<name>_impl(), declared in
-Objects/clinic/bytesobject.c.h.  bytes.__new__ is implemented here: clinic generates bytes_new_impl()
-and, for its vectorcall, bytes_new_nargsN() -- the method partially
-evaluated for exactly bytes and N positional arguments -- into
-Objects/clinic/bytesobject_pyspec.c.h.  Top-level functions are C
-functions of the same name.
+Objects/pyspec/README.rst).  Each method of ``class bytes`` is a clinic
+function (parameters, docstring and clinic decorators); bytesobject.c has
+a one-line block for it (``bytes.split``) above its impl.  Methods with a
+body of ``...`` are implemented in C by hand.  The others are implemented
+here: clinic generates bytes_new_impl() and, for its vectorcall,
+bytes_new_nargsN() -- the method partially evaluated for exactly bytes
+and N positional arguments -- into Objects/clinic/bytesobject_pyspec.c.h.
+Top-level functions are C functions of the same name.
 
 The classes are the whole types: ``@static_type`` makes clinic generate
 PyBytes_Type and PyBytesIter_Type, their method tables and slot tables,
-into Objects/clinic/bytesobject_types.c.h.  Dunders are slots (C functions
+at the end of Objects/clinic/bytesobject_pyspec.c.h.  Dunders are slots (C functions
 with the slot's signature), ``@c_name(METH_NOARGS=...)`` methods are
 hand-written PyCFunctions, and ``center = transmogrify.B.center`` shares
 a method with bytearray (see libclinic/pyspec/frontend.py).
 
 Lib/test/test_clinic.py runs this file as Python and compares it with the
-interpreter's bytes().
+interpreter on the cases of bytesobject_cases.py.
 """
 
 from typing import final
@@ -64,9 +62,10 @@ class bytes:
       - an integer
     """
 
+    @c_name("bytes_new")
     def __new__(
         cls,
-        source: object(c_name='x') = NULL,
+        source: object = NULL,
         encoding: str = NULL,
         errors: str = NULL,
     ):
@@ -125,26 +124,21 @@ class bytes:
 
     @permit_long_summary
     @text_signature("($self, sub[, start[, end]], /)")
-    def find(
+    def count(
         self,
         sub: object,
         start: slice_index(accept={int, NoneType}, c_default='0') = None,
         end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
         /,
     ):
-        """Return the lowest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+        """Return the number of non-overlapping occurrences of subsection 'sub' in bytes B[start:end].
 
           start
             Optional start position. Default: start of the bytes.
           end
             Optional stop position. Default: end of the bytes.
-
-        Return -1 on failure.
         """
         ...
-
-    count = permit_long_summary(find)
-    """Return the number of non-overlapping occurrences of subsection 'sub' in bytes B[start:end]."""
 
     def decode(
         self,
@@ -168,7 +162,7 @@ class bytes:
     @text_signature("($self, suffix[, start[, end]], /)")
     def endswith(
         self,
-        suffix: object(c_name='subobj'),
+        suffix: object(c_param='subobj'),
         start: slice_index(accept={int, NoneType}, c_default='0') = None,
         end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
         /,
@@ -185,6 +179,26 @@ class bytes:
         ...
 
     expandtabs = transmogrify.B.expandtabs
+
+    @permit_long_summary
+    @text_signature("($self, sub[, start[, end]], /)")
+    def find(
+        self,
+        sub: object,
+        start: slice_index(accept={int, NoneType}, c_default='0') = None,
+        end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
+        /,
+    ):
+        """Return the lowest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+
+          start
+            Optional start position. Default: start of the bytes.
+          end
+            Optional stop position. Default: end of the bytes.
+
+        Return -1 on failure.
+        """
+        ...
 
     @classmethod
     def fromhex(cls, string: object, /):
@@ -220,11 +234,25 @@ class bytes:
         """
         ...
 
-    index = permit_long_summary(find)
-    """Return the lowest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+    @permit_long_summary
+    @text_signature("($self, sub[, start[, end]], /)")
+    def index(
+        self,
+        sub: object,
+        start: slice_index(accept={int, NoneType}, c_default='0') = None,
+        end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
+        /,
+    ):
+        """Return the lowest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
 
-    Raise ValueError if the subsection is not found.
-    """
+          start
+            Optional start position. Default: start of the bytes.
+          end
+            Optional stop position. Default: end of the bytes.
+
+        Raise ValueError if the subsection is not found.
+        """
+        ...
 
     isalnum = ctype.B.isalnum
 
@@ -321,17 +349,45 @@ class bytes:
         """
         ...
 
-    rfind = permit_long_summary(find)
-    """Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+    @permit_long_summary
+    @text_signature("($self, sub[, start[, end]], /)")
+    def rfind(
+        self,
+        sub: object,
+        start: slice_index(accept={int, NoneType}, c_default='0') = None,
+        end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
+        /,
+    ):
+        """Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
 
-    Return -1 on failure.
-    """
+          start
+            Optional start position. Default: start of the bytes.
+          end
+            Optional stop position. Default: end of the bytes.
 
-    rindex = permit_long_summary(find)
-    """Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+        Return -1 on failure.
+        """
+        ...
 
-    Raise ValueError if the subsection is not found.
-    """
+    @permit_long_summary
+    @text_signature("($self, sub[, start[, end]], /)")
+    def rindex(
+        self,
+        sub: object,
+        start: slice_index(accept={int, NoneType}, c_default='0') = None,
+        end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
+        /,
+    ):
+        """Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start,end].
+
+          start
+            Optional start position. Default: start of the bytes.
+          end
+            Optional stop position. Default: end of the bytes.
+
+        Raise ValueError if the subsection is not found.
+        """
+        ...
 
     rjust = transmogrify.B.rjust
 
@@ -349,6 +405,30 @@ class bytes:
         ...
 
     @permit_long_summary
+    def rsplit(self, sep: object = None, maxsplit: Py_ssize_t = -1):
+        """Return a list of the sections in the bytes, using sep as the delimiter.
+
+          sep
+            The delimiter according which to split the bytes.
+            None (the default value) means split on ASCII whitespace
+            characters (space, tab, return, newline, formfeed, vertical tab).
+          maxsplit
+            Maximum number of splits to do.
+            -1 (the default value) means no limit.
+
+        Splitting is done starting at the end of the bytes and working to
+        the front.
+        """
+        ...
+
+    def rstrip(self, bytes: object = None, /):
+        """Strip trailing bytes contained in the argument.
+
+        If the argument is omitted or None, strip trailing ASCII whitespace.
+        """
+        ...
+
+    @permit_long_summary
     def split(self, sep: object = None, maxsplit: Py_ssize_t = -1):
         """Return a list of the sections in the bytes, using sep as the delimiter.
 
@@ -359,20 +439,6 @@ class bytes:
           maxsplit
             Maximum number of splits to do.
             -1 (the default value) means no limit.
-        """
-        ...
-
-    rsplit = permit_long_summary(split)
-    """Return a list of the sections in the bytes, using sep as the delimiter.
-
-    Splitting is done starting at the end of the bytes and working to
-    the front.
-    """
-
-    def rstrip(self, bytes: object = None, /):
-        """Strip trailing bytes contained in the argument.
-
-        If the argument is omitted or None, strip trailing ASCII whitespace.
         """
         ...
 
@@ -389,7 +455,7 @@ class bytes:
     @text_signature("($self, prefix[, start[, end]], /)")
     def startswith(
         self,
-        prefix: object(c_name='subobj'),
+        prefix: object(c_param='subobj'),
         start: slice_index(accept={int, NoneType}, c_default='0') = None,
         end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
         /,
@@ -422,7 +488,7 @@ class bytes:
         self,
         table: object,
         /,
-        delete: object(c_name='deletechars', c_default="NULL") = b'',
+        delete: object(c_param='deletechars', c_default="NULL") = b'',
     ):
         """Return a copy with each character mapped by the given translation table.
 

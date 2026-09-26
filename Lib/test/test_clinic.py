@@ -9,9 +9,10 @@ from test.support import os_helper
 from test.support.os_helper import TESTFN, unlink, rmtree
 from textwrap import dedent
 from unittest import TestCase
-import array
 import ast
 import difflib
+import importlib
+import importlib.machinery
 import inspect
 import os.path
 import re
@@ -42,7 +43,8 @@ with test_tools.imports_under_tool('clinic'):
     from libclinic.pyspec import (call_table as pyspec_call_table,
                                   frontend as pyspec_frontend,
                                   partial_eval as pyspec_partial_eval,
-                                  slots as pyspec_slots)
+                                  slots as pyspec_slots,
+                                  typeobj as pyspec_typeobj)
 
 
 def repeat_fn(*functions):
@@ -3405,12 +3407,8 @@ class ClinicParserTest(TestCase):
             self.parse(block)
         # The line numbers are off; this is a known limitation.
         expected = dedent("""\
-            Warning:
-            Non-ascii characters are not allowed in docstrings: 'á'
-
-            Warning:
-            Non-ascii characters are not allowed in docstrings: 'ü', 'á', 'ß'
-
+            warning: Non-ascii characters are not allowed in docstrings: 'á'
+            warning: Non-ascii characters are not allowed in docstrings: 'ü', 'á', 'ß'
         """)
         self.assertEqual(stdout.getvalue(), expected)
 
@@ -5549,6 +5547,15 @@ class PyspecTestBase(TestCase):
         with self.assertRaisesRegex(ClinicError, re.escape(errmsg)):
             self.generate(spec, block)
 
+    def expect_located_failure(self, spec, block, errmsg, lineno):
+        """An error *errmsg* at line *lineno* of the spec."""
+        with self.assertRaises(ClinicError) as cm:
+            self.generate(spec, block)
+        exc = cm.exception
+        self.assertEqual((exc.filename, exc.lineno, exc.message),
+                         (self.spec_path, lineno, errmsg))
+        return exc
+
 
 class PyspecTest(PyspecTestBase):
     """A spec method with a body implements a clinic __new__."""
@@ -5723,7 +5730,9 @@ class PyspecTest(PyspecTestBase):
         self.assertIn("PyObject_CallOneArg((PyObject *)cls, result);",
                       output)
 
-    def test_body_without_block(self):
+    def test_missing_block(self):
+        # Every clinic function of a spec class declared in the C file has
+        # a one-line block above its impl, where clinic writes the head.
         block = self.BLOCK.replace("bytes.__new__ as foo_new",
                                    "bytes.__bytes__")
         spec = """
@@ -5734,13 +5743,44 @@ class PyspecTest(PyspecTestBase):
                 def __bytes__(self):
                     ...
         """
-        # Without a block, a spec method is generated after the blocks of
-        # the file (see PyspecNoBlockTest), but not with "output preset
-        # block".
-        self.expect_failure(spec, block, "bytes.__new__ has no clinic block "
-                            f"in {self.filename}, so its generated code, "
-                            "except the impl definition, must go to a file "
-                            "destination")
+        with self.assertRaises(ClinicError) as cm:
+            self.generate(spec, block)
+        self.assertEqual(cm.exception.message,
+                         f"bytes.__new__ has no clinic block in "
+                         f"{self.filename}; put this block above its impl:\n"
+                         "/*[clinic input]\nbytes.__new__\n"
+                         "[clinic start generated code]*/")
+        self.assertEqual(cm.exception.filename, self.spec_path)
+        self.assertEqual(cm.exception.lineno, 3)
+        # Classes the C file does not declare are not generated.
+        self.generate(spec.replace("class bytes", "class bytearray")
+                      .replace("return a", "..."), block)
+
+    def test_nothing_written_on_error(self):
+        # An error in the last stage (the emitter) leaves every generated
+        # file as it was: clinic writes all or nothing.
+        block = """
+            /*[clinic input]
+            class bytes "PyObject *" "&PyBytes_Type"
+            bytes.__new__ as foo_new
+            [clinic start generated code]*/
+        """
+        spec = self.SPEC.replace("return a", "return len(a) == 0")
+        with self.assertRaises(ClinicError) as cm:
+            self.generate(spec, block)
+        # "Unsupported" errors point at the list of what is supported.
+        self.assertEqual(cm.exception.message, "unsupported return "
+                         "len(a) == 0; see Objects/pyspec/README.rst")
+        self.assertEqual((cm.exception.filename, cm.exception.lineno),
+                         (self.spec_path, 5))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, 'clinic',
+                                                     'foo.c.h')))
+        self.assertFalse(os.path.exists(self.output_path))
+        # Once fixed, both are written.
+        self.generate(self.SPEC, block)
+        self.assertTrue(os.path.exists(os.path.join(self.tmp_dir, 'clinic',
+                                                    'foo.c.h')))
+        self.assertTrue(os.path.exists(self.output_path))
 
     def test_not_new(self):
         block = self.BLOCK.replace("bytes.__new__ as foo_new",
@@ -5820,7 +5860,7 @@ class PyspecStubTest(PyspecTestBase):
         spec = """
             class bytes:
                 @critical_section
-                def meth(self, a: object, /, b: int(c_name='bb') = 0, *,
+                def meth(self, a: object, /, b: int(c_param='bb') = 0, *,
                          c: str(accept={str, NoneType}) = None):
                     '''Summary line.
 
@@ -5889,9 +5929,8 @@ class PyspecStubTest(PyspecTestBase):
         """)
 
     def test_class_and_static_methods(self):
-        # Each spec has only the method under test: the output of a spec
-        # method without a block cannot go to the block (see
-        # PyspecNoBlockTest).
+        # Each spec has only the method under test: each spec method needs
+        # a block.
         self.check("""
             class bytes:
                 @classmethod
@@ -5919,7 +5958,7 @@ class PyspecStubTest(PyspecTestBase):
     def test_new(self):
         self.check("""
             class bytes:
-                def __new__(cls, a: object(c_name='x') = NULL):
+                def __new__(cls, a: object(c_param='x') = NULL):
                     ...
         """, "bytes.__new__ as bytes_new\n", """
             @classmethod
@@ -5948,7 +5987,9 @@ class PyspecStubTest(PyspecTestBase):
             bytes.meth -> Py_ssize_t
         """)
 
-    def test_clone(self):
+    def test_same_signature_as_clone(self):
+        # Python has no clones: a method with the signature of another is
+        # a full def, and clinic generates what it does for a clone.
         spec = """
             class bytes:
                 def meth(self, a: object = None, /):
@@ -5959,11 +6000,15 @@ class PyspecStubTest(PyspecTestBase):
                     '''
                     ...
 
-                other = meth
-                '''Other summary.
+                def other(self, a: object = None, /):
+                    '''Other summary.
 
-                More.
-                '''
+                      a
+                        Doc of a.
+
+                    More.
+                    '''
+                    ...
         """
         output = self.check(spec, """
             bytes.meth
@@ -6098,36 +6143,20 @@ class PyspecStubTest(PyspecTestBase):
                 /
         """)
 
-    def test_decorated_clone(self):
-        # A decorated clone is written as the call the decorator is.
-        long_summary = "Other " + "x" * 80
-        spec = f"""
-            class bytes:
-                def meth(self, a: object = None, /):
-                    '''Summary.'''
-                    ...
+    def test_no_clones(self):
+        for clone in ("other = meth", "other = permit_long_summary(meth)"):
+            spec = f"""
+                class bytes:
+                    def meth(self, a: object = None, /):
+                        '''Summary.'''
+                        ...
 
-                other = permit_long_summary(meth)
-                '''{long_summary}'''
-        """
-        self.check(spec, """
-            bytes.meth
-            [clinic start generated code]*/
-            /*[clinic input]
-            bytes.other
-        """, f"""
-            bytes.meth
-                a: object = None
-                /
-
-            Summary.
-            [clinic start generated code]*/
-            /*[clinic input]
-            @permit_long_summary
-            bytes.other = bytes.meth
-
-            {long_summary}
-        """)
+                    {clone}
+            """
+            with self.subTest(clone=clone):
+                self.expect_failure(spec, self.block("bytes.meth\n"),
+                                    "Python has no clones: write other as "
+                                    "a full def")
 
     def test_unneeded_permit_long_summary(self):
         # The warning points at the decorator in the spec.
@@ -6138,8 +6167,10 @@ class PyspecStubTest(PyspecTestBase):
                     '''Summary.'''
                     ...
 
-                other = permit_long_summary(meth)
-                '''Other.'''
+                @permit_long_summary
+                def other(self, /):
+                    '''Other.'''
+                    ...
         """
         with support.captured_stdout() as stdout:
             self.generate(spec, self.block(
@@ -6147,12 +6178,12 @@ class PyspecStubTest(PyspecTestBase):
                 "[clinic start generated code]*/\n"
                 "/*[clinic input]\n"
                 "bytes.other\n"))
-        self.assertIn(f"Warning in file {self.spec_path!r} on line 3:\n"
-                      "Remove the @permit_long_summary decorator from "
-                      "'bytes.meth'!", stdout.getvalue())
-        self.assertIn(f"Warning in file {self.spec_path!r} on line 8:\n"
-                      "Remove the @permit_long_summary decorator from "
-                      "'bytes.other'!", stdout.getvalue())
+        self.assertIn(f"{self.spec_path}:3: warning: Remove the "
+                      "@permit_long_summary decorator from 'bytes.meth'!",
+                      stdout.getvalue())
+        self.assertIn(f"{self.spec_path}:8: warning: Remove the "
+                      "@permit_long_summary decorator from 'bytes.other'!",
+                      stdout.getvalue())
 
     def test_unknown_clinic_decorator(self):
         spec = """
@@ -6161,10 +6192,11 @@ class PyspecStubTest(PyspecTestBase):
                 def meth(self, a: object):
                     ...
         """
-        self.expect_failure(spec, self.block("bytes.meth\n"),
-                            "'bytes.meth': unknown clinic decorator "
-                            "@nosuchdecorator\n(in the clinic input taken "
-                            f"from bytes.meth in {self.spec_path}:4)")
+        # Errors in the input taken from the spec are reported at the line
+        # of the spec it comes from.
+        self.expect_located_failure(spec, self.block("bytes.meth\n"),
+                                    "'bytes.meth': unknown clinic decorator "
+                                    "@nosuchdecorator", 3)
 
     def test_clinic_decorator_non_constant_argument(self):
         spec = """
@@ -6193,15 +6225,25 @@ class PyspecStubTest(PyspecTestBase):
         self.assertIs(pyspec_runtime.text_signature("($self)")(f), f)
         self.assertIs(pyspec_runtime.critical_section("a", "b")(f), f)
 
-    def test_new_c_basename(self):
-        # The default C basename of T.__new__ is T_new; an explicit one is
-        # kept.  T.__init__ keeps clinic's default, T___init__.
+    def test_c_basename(self):
+        # One rule: clinic's default C basename (T for T.__new__,
+        # T___init__ for T.__init__), or the one @c_name gives.
         spec = """
             class bytes:
                 def __new__(cls, a: object = NULL):
                     ...
         """
         self.check(spec, "bytes.__new__\n", """
+            @classmethod
+            bytes.__new__
+                a: object = NULL
+        """)
+        self.check("""
+            class bytes:
+                @c_name("bytes_new")
+                def __new__(cls, a: object = NULL):
+                    ...
+        """, "bytes.__new__\n", """
             @classmethod
             bytes.__new__ as bytes_new
                 a: object = NULL
@@ -6250,114 +6292,33 @@ class PyspecStubTest(PyspecTestBase):
     def test_clinic_error_names_spec(self):
         spec = """
             class bytes:
-                def meth(self, a: nosuchconverter):
+                def meth(self,
+                         a: nosuchconverter):
+                    '''Doc.'''
                     ...
         """
-        self.expect_failure(spec, self.block("bytes.meth\n"),
-                            "'nosuchconverter' is not a valid converter\n"
-                            "(in the clinic input taken from bytes.meth in "
-                            f"{self.spec_path}:3)")
-
-
-class PyspecNoBlockTest(PyspecTestBase):
-    """A spec method needs no block in the C file."""
-
-    CLASS = """
-        /*[clinic input]
-        class bytes "PyBytesObject *" "&PyBytes_Type"
-        [clinic start generated code]*/
-        /*[clinic end generated code: output=da39a3ee5e6b4b0d input=7a238f965d64892b]*/
-    """
-
-    SPEC = """
-        class bytes:
-            def __new__(cls, a: object, /):
-                return a
-
-            @permit_long_summary
-            def meth(self, a: object, /):
-                '''Summary line which is longer than the eighty characters of a summary.'''
-                ...
-
-            other = meth
-            '''Other summary.'''
-    """
-
-    def generate_file(self, spec, text):
-        """Generated (C file, .c.h, _pyspec.c.h) of the C file *text*."""
-        generated = self.generate(spec, dedent(text))
-        with open(os.path.join(self.tmp_dir, 'clinic', 'foo.c.h'),
-                  encoding='utf-8') as f:
-            header = f.read()
-        with open(self.output_path, encoding='utf-8') as f:
-            pyspec_header = f.read()
-        return generated, header, pyspec_header
-
-    @staticmethod
-    def block(line):
-        return ("/*[clinic input]\n" + line
-                + "\n[clinic start generated code]*/\n")
-
-    def test_no_block(self):
-        generated, header, pyspec_header = self.generate_file(
-            self.SPEC, self.CLASS)
-        # The C file is unchanged: it only holds the impl definitions.
-        self.assertEqual(generated, dedent(self.CLASS))
-        self.assertIn("static PyObject *\n"
-                      "bytes_meth_impl(PyBytesObject *self, PyObject *a);\n",
-                      header)
-        self.assertIn('#define BYTES_OTHER_METHODDEF', header)
-        self.assertIn('bytes_new_impl(PyTypeObject *cls, PyObject *a);',
-                      pyspec_header)
-
-        # The same as with one-line blocks, in the order of the spec.
-        blocks = "".join(self.block(f"bytes.{name}")
-                         for name in ("__new__", "meth", "other"))
-        _, header_blocks, pyspec_blocks = self.generate_file(
-            self.SPEC, dedent(self.CLASS) + blocks)
-        self.assertEqual(header, header_blocks)
-        self.assertEqual(pyspec_header, pyspec_blocks)
-
-    def test_mixed(self):
-        # Methods with a block come first, then the others in the order
-        # of the spec.
-        _, header, _ = self.generate_file(
-            self.SPEC, dedent(self.CLASS) + self.block("bytes.meth"))
-        blocks = "".join(self.block(f"bytes.{name}")
-                         for name in ("meth", "__new__", "other"))
-        generated, header_blocks, _ = self.generate_file(
-            self.SPEC, dedent(self.CLASS) + blocks)
-        self.assertEqual(header, header_blocks)
-        self.assertIn("bytes_meth_impl(PyBytesObject *self, PyObject *a)\n"
-                      "/*[clinic end generated code:", generated)
-
-    def test_class_not_declared(self):
-        # Only classes declared in the C file are generated.
-        spec = """
-            class bytearray:
-                def meth(self, a: object, /):
-                    ...
-        """
-        self.generate(spec, dedent(self.CLASS) + "/*[clinic input]\n"
-                      "bytes.meth\n\nDoc.\n[clinic start generated code]*/\n")
-        with open(os.path.join(self.tmp_dir, 'clinic', 'foo.c.h'),
-                  encoding='utf-8') as f:
-            header = f.read()
-        self.assertIn("bytes_meth_impl(PyBytesObject *self);", header)
-        self.assertNotIn("bytearray", header)
-
-    def test_error_names_spec(self):
+        exc = self.expect_located_failure(
+            spec, self.block("bytes.meth\n"),
+            "'nosuchconverter' is not a valid converter", 4)
+        self.assertEqual(exc.report(),
+                         f"{self.spec_path}:4: error: 'nosuchconverter' is "
+                         "not a valid converter\n")
+        # A check of the whole function is reported at its def.
         spec = """
             class bytes:
-                def meth(self, a: nosuchconverter, /):
-                    ...
+                @critical_section
+                def meth(self, a: object, /):
+                    return a
         """
-        with self.assertRaises(ClinicError) as cm:
-            self.generate(spec, dedent(self.CLASS))
-        self.assertEqual(cm.exception.filename, self.spec_path)
-        self.assertEqual(cm.exception.lineno, 3)
-        self.assertIn("'nosuchconverter' is not a valid converter",
-                      cm.exception.message)
+        self.expect_located_failure(
+            spec, self.block("bytes.meth\n"), f"bytes.meth() in "
+            f"{self.spec_path}: a spec cannot be used with @critical_section",
+            4)
+        # So is a syntax error.
+        self.expect_located_failure("class bytes:\n  def f(self):\n"
+                                    "    return (\n",
+                                    self.block("bytes.meth\n"),
+                                    "'(' was never closed", 3)
 
 
 class PyspecTypeTest(PyspecTestBase):
@@ -6368,6 +6329,16 @@ class PyspecTypeTest(PyspecTestBase):
         /*[clinic input]
         class bytes "PyBytesObject *" "&PyBytes_Type"
         class myiter "myiterobject *" "&MyIter_Type"
+        [clinic start generated code]*/
+    """
+
+    # The blocks of the clinic functions of SPEC.
+    BLOCKS = CLASS + """
+        /*[clinic input]
+        bytes.__new__
+        [clinic start generated code]*/
+        /*[clinic input]
+        bytes.meth
         [clinic start generated code]*/
     """
 
@@ -6425,12 +6396,11 @@ class PyspecTypeTest(PyspecTestBase):
 
     def types_header(self, spec, text=None):
         self.generate(spec, text or self.CLASS)
-        with open(os.path.join(self.tmp_dir, 'clinic', 'foo_types.c.h'),
-                  encoding='utf-8') as f:
+        with open(self.output_path, encoding='utf-8') as f:
             return f.read()
 
     def test_type_objects(self):
-        header = self.types_header(self.SPEC)
+        header = self.types_header(self.SPEC, self.BLOCKS)
         self.assertIn('PyDoc_STRVAR(bytes__doc__,\n'
                       '"Doc of\\n"\n"  bytes.");', header)
         self.assertIn('PyDoc_STRVAR(bytes_other__doc__,\n"Other(x)");',
@@ -6473,7 +6443,7 @@ class PyspecTypeTest(PyspecTestBase):
                 .tp_doc = bytes__doc__,
                 .tp_richcompare = bytes_richcompare,
                 .tp_methods = bytes_methods,
-                .tp_new = bytes_new,
+                .tp_new = bytes,
                 .tp_vectorcall = bytes_vectorcall,
             };
             """), header)
@@ -6563,6 +6533,93 @@ class PyspecTypeTest(PyspecTestBase):
                 def meth(self, /): ...
         """, "@c_name with a keyword names a slot")
 
+    def test_decorators_of_c_methods(self):
+        # A slot or a hand-written PyCFunction takes only @c_name (and a
+        # PyCFunction @classmethod): nothing is silently ignored.
+        self.check_error("""
+            @static_type()
+            class bytes:
+                @cname("bytes_r")
+                def __repr__(self, /): ...
+        """, "bytes.__repr__: a slot takes only @c_name, not "
+             "@cname('bytes_r')")
+        self.check_error("""
+            @static_type()
+            class bytes:
+                @permit_long_summary
+                @c_name(METH_NOARGS="f")
+                def meth(self, /): ...
+        """, "bytes.meth: a PyCFunction takes only @c_name and "
+             "@classmethod, not @permit_long_summary")
+        self.check_error("""
+            @static_type()
+            class bytes:
+                @staticmethod
+                @c_name(METH_O="f")
+                def meth(x, /): ...
+        """, "not @staticmethod")
+        # @classmethod is METH_CLASS.
+        header = self.types_header("""
+            @static_type()
+            class bytes:
+                @classmethod
+                @c_name(METH_O="Py_GenericAlias")
+                def __class_getitem__(cls, item, /):
+                    '''See PEP 585'''
+                    ...
+        """)
+        self.assertIn('    {"__class_getitem__", Py_GenericAlias, '
+                      'METH_O | METH_CLASS, bytes___class_getitem____doc__},',
+                      header)
+
+    def test_accessors(self):
+        # tp_getset is not generated yet.
+        self.check_error("""
+            @static_type()
+            class bytes:
+                @getter
+                def nbytes(self): ...
+        """, "bytes.nbytes: accessors (@getter, @setter) of a @static_type "
+             "class are not supported yet")
+        self.check_error("""
+            class bytes:
+                @getter
+                def nbytes(self): ...
+                @setter
+                def nbytes(self): ...
+        """, "bytes.nbytes is defined twice (accessors are not supported "
+             "yet")
+
+    def test_class_body(self):
+        # A spec class holds a docstring, defs, shared methods and pass:
+        # anything else is an error, not ignored.
+        for stmt in ("x = 1", "if True: pass", "center: int",
+                     "center = tm.B.center"):
+            with self.subTest(stmt=stmt):
+                self.check_error(f"""
+                    @static_type()
+                    class bytes:
+                        {stmt}
+                """, "unsupported statement in spec class bytes: "
+                     if not stmt.startswith("center =") else
+                     "tm is not a spec imported with 'from <package> "
+                     "import tm'")
+        self.check_error("""
+            import transmogrify as tm
+        """, "import a spec as 'from stringlib.pyspec import "
+             "transmogrify'")
+        self.check_error("""
+            class bytes:
+                def meth(self, /):
+                    pass
+        """, "bytes.meth: use ... as the body of a function implemented "
+             "in C, not pass")
+        self.check_error("""
+            class bytes:
+                def meth(self, /): ...
+                def meth(self, /): ...
+        """, "bytes.meth is defined twice")
+
     def test_static_type_members(self):
         self.check_error("""
             @static_type(tp_nosuch="x")
@@ -6581,12 +6638,15 @@ class PyspecTypeTest(PyspecTestBase):
                 pass
         """)
         self.assertIn('    .tp_new = PyType_GenericNew,\n', header)
-        self.check_error("""
-            @static_type(tp_new="PyType_GenericNew")
-            class bytes:
-                def __new__(cls, a: object, /):
-                    return a
-        """, "tp_new is already the clinic function")
+        with self.assertRaisesRegex(ClinicError,
+                                    "tp_new is already the clinic function"):
+            self.types_header("""
+                @static_type(tp_new="PyType_GenericNew")
+                class bytes:
+                    def __new__(cls, a: object, /):
+                        return a
+            """, dedent(self.CLASS) + "/*[clinic input]\nbytes.__new__\n"
+                 "[clinic start generated code]*/\n")
 
     def test_slot_block_rejected(self):
         with self.assertRaisesRegex(ClinicError,
@@ -6603,7 +6663,11 @@ class PyspecTypeTest(PyspecTestBase):
                 def meth(self, a: object, /):
                     ...
         """
-        self.generate(spec, self.CLASS)
+        generated = self.generate(spec, dedent(self.CLASS)
+                                  + "/*[clinic input]\nbytes.meth\n"
+                                  "[clinic start generated code]*/\n")
+        self.assertIn('bytes_m_impl(PyBytesObject *self, PyObject *a)\n'
+                      '/*[clinic end generated code:', generated)
         with open(os.path.join(self.tmp_dir, 'clinic', 'foo.c.h'),
                   encoding='utf-8') as f:
             self.assertIn('#define BYTES_M_METHODDEF', f.read())
@@ -6641,405 +6705,147 @@ class PyspecTypeTest(PyspecTestBase):
                       '    {"lower", stringlib_lower, METH_NOARGS, '
                       'bytes_lower__doc__},\n', header)
         self.assertIn('"B.lower() -> copy of B"', header)
-
-
-BYTES_SPEC =os.path.join(test_tools.basepath, 'Objects', 'pyspec',
-                          'bytesobject.py')
-
-
-class HasBytes:
-    def __bytes__(self):
-        return b'hb'
-
-
-class BadBytes:
-    def __bytes__(self):
-        return 'nope'
-
-
-class RaisingBytes:
-    def __bytes__(self):
-        raise KeyError('boom')
-
-
-class IndexOnly:
-    def __init__(self, value):
-        self.value = value
-
-    def __index__(self):
-        return self.value
-
-
-class IndexRaisesTypeError:
-    def __index__(self):
-        raise TypeError('no')
-
-    def __iter__(self):
-        return iter([7])
-
-
-class IndexIsNone:
-    __index__ = None
-
-    def __iter__(self):
-        return iter([66])
-
-
-class ClassLiesStr:
-    __class__ = property(lambda self: str)
-
-    def __iter__(self):
-        return iter([65])
-
-
-class IterOnly:
-    def __iter__(self):
-        return iter([1, 2, 3])
-
-
-class IterRaises:
-    def __iter__(self):
-        raise KeyError('iter')
-
-
-class GetItemSequence:
-    def __getitem__(self, i):
-        if i < 3:
-            return i
-        raise IndexError
-
-
-class BytesSubclass(bytes):
-    pass
-
-
-class StrWithBytes(str):
-    def __bytes__(self):
-        return b'swb'
-
-
-class IntSubclass(int):
-    pass
-
-
-def generator():
-    yield 1
-    yield 2
-
-
-def generator_raises():
-    yield 1
-    raise KeyError('mid-way')
-
-
-class IteratorRaises:
-    """Raises from __next__ after two items."""
-
-    def __init__(self):
-        self.n = 0
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        self.n += 1
-        if self.n > 2:
-            raise KeyError('mid-way')
-        return self.n
-
-
-class OddIterator:
-    """An iterator whose __iter__ does not return itself: iteration only
-    calls __next__, and never __iter__ again."""
-
-    def __init__(self):
-        self.n = 0
-
-    def __iter__(self):
-        return iter([99])
-
-    def __next__(self):
-        self.n += 1
-        if self.n > 2:
-            raise StopIteration
-        return self.n
-
-
-class IterReturnsOdd:
-    def __iter__(self):
-        return OddIterator()
-
-
-class LengthHint:
-    """Iterates [1, 2]; __length_hint__ gives *hint* (or raises it)."""
-
-    def __init__(self, hint):
-        self.hint = hint
-
-    def __iter__(self):
-        return iter([1, 2])
-
-    def __length_hint__(self):
-        if isinstance(self.hint, BaseException):
-            raise self.hint
-        return self.hint
-
-
-class LenLies:
-    """__len__ says 5; iteration yields 2 items."""
-
-    def __len__(self):
-        return 5
-
-    def __iter__(self):
-        return iter([1, 2])
-
-
-class IntSubclassWithIndex(int):
-    """An int: its __index__ is not called."""
-
-    def __index__(self):
-        return 7
-
-
-class IndexMutates:
-    """__index__ calls mutate(items) on the list being converted."""
-
-    def __init__(self, items, mutate, value=2):
-        self.items = items
-        self.mutate = mutate
-        self.value = value
-
-    def __index__(self):
-        self.mutate(self.items)
-        return self.value
-
-
-def list_mutated_by_index(mutate):
-    items = [1]
-    items += [IndexMutates(items, mutate), 3]
-    return items
-
-
-class ListSubclass(list):
-    pass
+        # A typo names the method that is missing.
+        self.check_error("""
+            from shared import m
+
+            class bytes:
+                center = m.B.centre
+        """, "m.B has no method 'centre'")
+        self.check_error("""
+            from shared import m
+
+            class bytes:
+                centre = m.B.center
+        """, "a shared method keeps its name: write "
+             "center = m.B.center")
+        self.check_error("""
+            from shared import nosuchmodule
+        """, "nosuchmodule.py not found")
+
+
+PYSPEC_DIRS = [os.path.join(test_tools.basepath, 'Objects', 'pyspec'),
+               os.path.join(test_tools.basepath, 'Objects', 'stringlib',
+                            'pyspec')]
+BYTES_SPEC = os.path.join(PYSPEC_DIRS[0], 'bytesobject.py')
+
+
+def load_cases(spec_path):
+    """The module <stem>_cases.py next to the spec *spec_path*, or None."""
+    path = spec_path.removesuffix('.py') + '_cases.py'
+    if not os.path.exists(path):
+        return None
+    name = '_pyspec_cases_' + os.path.basename(path).removesuffix('.py')
+    loader = importlib.machinery.SourceFileLoader(name, path)
+    module = types.ModuleType(name)
+    module.__file__ = path
+    loader.exec_module(module)
+    return module
+
+
+def spec_files():
+    """(spec, the C file it describes) of every spec in the tree: for
+    Objects/pyspec/foo.py, Objects/foo.c (or Objects/foo.h)."""
+    for dirname in PYSPEC_DIRS:
+        for name in sorted(os.listdir(dirname)):
+            if not name.endswith('.py') or name.endswith('_cases.py'):
+                continue
+            stem = name.removesuffix('.py')
+            parent = os.path.dirname(dirname)
+            c_files = [os.path.join(parent, stem + ext)
+                       for ext in ('.c', '.h')]
+            c_files = [path for path in c_files if os.path.exists(path)]
+            yield os.path.join(dirname, name), (c_files or [None])[0]
+
+
+# The cases of the bytes spec, whose classes BytesSpecFactsTest uses too.
+BYTES_CASES = load_cases(BYTES_SPEC) if os.path.exists(BYTES_SPEC) else None
 
 
 @unittest.skipUnless(os.path.exists(BYTES_SPEC), 'needs the source tree')
-class BytesSpecTest(TestCase):
-    """Objects/pyspec/bytesobject.py, run as Python, matches bytes()."""
+class PyspecFilesTest(TestCase):
+    """Every spec file (Objects/pyspec/*.py, Objects/stringlib/pyspec/*.py):
 
-    # Each case is a function returning fresh (args, kwargs): iterators
-    # are consumed by the first call.
-    CASES = [
-        lambda: ((), {}),
-        lambda: ((b'ab',), {}),
-        lambda: ((BytesSubclass(b'x'),), {}),
-        lambda: ((bytearray(b'x'),), {}),
-        lambda: ((memoryview(b'xy'),), {}),
-        lambda: ((memoryview(b'abcd')[::2],), {}),
-        lambda: ((array.array('h', [1, 2]),), {}),
-        lambda: (([1, 2],), {}),
-        lambda: (((1, 2),), {}),
-        lambda: (([],), {}),
-        lambda: (([1, 300],), {}),
-        lambda: (([1, -1],), {}),
-        lambda: (([1, 'a'],), {}),
-        lambda: (([True, 2],), {}),
-        lambda: (([IntSubclass(5)],), {}),
-        lambda: (([IndexOnly(3)],), {}),
-        lambda: (([IndexOnly(300)],), {}),
-        lambda: (([2**70],), {}),
-        lambda: ((3,), {}),
-        lambda: ((0,), {}),
-        lambda: ((True,), {}),
-        lambda: ((IntSubclass(2),), {}),
-        lambda: ((-1,), {}),
-        lambda: ((2**70,), {}),
-        lambda: ((IndexOnly(2),), {}),
-        lambda: ((IndexOnly(-2),), {}),
-        lambda: ((IndexRaisesTypeError(),), {}),
-        lambda: ((IndexIsNone(),), {}),
-        lambda: ((ClassLiesStr(),), {}),
-        lambda: (('s',), {}),
-        lambda: (('s', 'utf-8'), {}),
-        lambda: (('s', 'ascii', 'strict'), {}),
-        lambda: (('\xe9', 'ascii', 'replace'), {}),
-        lambda: (('\xe9', 'ascii'), {}),
-        lambda: (('s', 'no-such-codec'), {}),
-        lambda: ((StrWithBytes('q'),), {}),
-        lambda: ((StrWithBytes('q'), 'ascii'), {}),
-        lambda: ((b'x', 'utf-8'), {}),
-        lambda: ((b'x',), {'errors': 'strict'}),
-        lambda: (('s',), {'errors': 'strict'}),
-        lambda: (('s',), {'encoding': 'ascii'}),
-        lambda: ((), {'source': [1]}),
-        lambda: ((), {'encoding': 'utf-8'}),
-        lambda: ((), {'errors': 'strict'}),
-        lambda: ((HasBytes(),), {}),
-        lambda: ((BadBytes(),), {}),
-        lambda: ((RaisingBytes(),), {}),
-        lambda: ((IterOnly(),), {}),
-        lambda: ((IterRaises(),), {}),
-        lambda: ((GetItemSequence(),), {}),
-        lambda: ((generator(),), {}),
-        lambda: ((iter([5, 6]),), {}),
-        lambda: (({1: 2},), {}),
-        lambda: (({3},), {}),
-        lambda: ((range(3),), {}),
-        lambda: ((object(),), {}),
-        lambda: ((types.SimpleNamespace(),), {}),
-        lambda: ((1.5,), {}),
-        lambda: ((None,), {}),
-        # Iterables, including lists and tuples, which Argument Clinic
-        # iterates by index with a fast path for exact ints.
-        lambda: ((generator_raises(),), {}),
-        lambda: ((IteratorRaises(),), {}),
-        lambda: ((IterReturnsOdd(),), {}),
-        lambda: ((iter(range(3)),), {}),
-        lambda: ((iter([1, IndexOnly(2), 3]),), {}),
-        lambda: (({IndexOnly(3), IndexOnly(3)},), {}),
-        lambda: ((frozenset([IndexOnly(4)]),), {}),
-        lambda: (({IndexOnly(300)},), {}),
-        lambda: ((range(256),), {}),
-        lambda: ((range(250, 260),), {}),
-        lambda: ((range(-1, 3),), {}),
-        lambda: ((range(2**70, 2**70 + 1),), {}),
-        lambda: ((b'ab',), {}),
-        lambda: (({'a': 1},), {}),
-        lambda: (([True, False, 1],), {}),
-        lambda: (((True, 2),), {}),
-        lambda: (([IntSubclassWithIndex(5)],), {}),
-        lambda: (((IntSubclass(255), IntSubclass(256)),), {}),
-        lambda: (([-2**70],), {}),
-        lambda: (((2**70,),), {}),
-        lambda: (((1, 2**64, 'a'),), {}),
-        lambda: ((iter([2**64]),), {}),
-        lambda: ((['a', 300],), {}),
-        lambda: (([300, 'a'],), {}),
-        lambda: (((1, IndexRaisesTypeError()),), {}),
-        lambda: (([1, IndexOnly(-1)],), {}),
-        lambda: ((tuple(range(256)),), {}),
-        lambda: ((list(range(300)),), {}),
-        lambda: ((list(range(200)) * 3,), {}),
-        lambda: ((ListSubclass([1, 2]),), {}),
-        lambda: ((list_mutated_by_index(list.clear),), {}),
-        lambda: ((list_mutated_by_index(lambda l: l.append(4)),), {}),
-        lambda: ((list_mutated_by_index(lambda l: l.pop()),), {}),
-        lambda: ((list_mutated_by_index(
-            lambda l: l.insert(0, 9) if len(l) < 4 else None),), {}),
-        lambda: ((list_mutated_by_index(lambda l: l.append('x')),), {}),
-        lambda: ((LengthHint(KeyError('hint')),), {}),
-        lambda: ((LengthHint('x'),), {}),
-        lambda: ((LengthHint(-1),), {}),
-        lambda: ((LengthHint(0),), {}),
-        lambda: ((LengthHint(1000),), {}),
-        lambda: ((LengthHint(2**70),), {}),
-        lambda: ((LengthHint(NotImplemented),), {}),
-        lambda: ((LenLies(),), {}),
-        # Argument count and converter errors come from the clinic parser,
-        # which the spec does not model.
-    ]
+    * what clinic generates from it is up to date;
+    * run as Python, its functions behave like the interpreter's on the
+      CASES of <stem>_cases.py, next to the spec;
+    * its @static_type classes are the interpreter's TYPES.
 
-    @classmethod
-    def setUpClass(cls):
-        cls.spec = pyspec_runtime.load(BYTES_SPEC)
+    A new spec adds data (a <stem>_cases.py), not a test class.
+    """
+    maxDiff = None
+
+    REBUILD = ("the spec and the interpreter differ: if the spec changed, "
+               "run \"make clinic\", rebuild Python (make) and rerun")
+
+    def test_up_to_date(self):
+        for spec_path, c_file in spec_files():
+            if c_file is None:
+                continue
+            with self.subTest(spec=spec_path):
+                writer = libclinic.FileWriter(dry_run=True)
+                parse_file(c_file, limited_capi=False, writer=writer)
+                self.assertEqual([change.filename
+                                  for change in writer.changes], [],
+                                 'run "make clinic"')
 
     @staticmethod
     def outcome(func, args, kwargs):
+        """What calling func does: its exception, or its result, which is
+        (the index of) one of the arguments or not."""
         try:
             result = func(*args, **kwargs)
         except Exception as exc:
             return ('raises', type(exc), str(exc))
-        return ('returns', type(result), result)
+        same = [i for i, arg in enumerate(args) if arg is result]
+        return ('returns', type(result), result, same)
 
-    def bytes_new(self, *args, **kwargs):
-        return self.spec['bytes.__new__'](bytes, *args, **kwargs)
+    def interpreter_function(self, cases, name):
+        """What the interpreter runs for spec function *name*."""
+        cls, _, meth = name.rpartition('.')
+        if cls:
+            # The descriptor: called with self (or cls) first.
+            return vars(cases.TYPES[cls])[meth]
+        module, _, func = cases.C_FUNCTIONS[name].rpartition('.')
+        try:
+            return getattr(importlib.import_module(module), func)
+        except ImportError:
+            return None
 
     def test_cases(self):
-        for make_case in self.CASES:
-            args, kwargs = make_case()
-            with self.subTest(args=args, kwargs=kwargs):
-                expected = self.outcome(bytes, args, kwargs)
-                args, kwargs = make_case()
-                actual = self.outcome(self.bytes_new, args, kwargs)
-                self.assertEqual(actual, expected)
+        for spec_path, _ in spec_files():
+            cases = load_cases(spec_path)
+            if cases is None:
+                continue
+            spec = pyspec_runtime.load(spec_path)
+            for name, calls in cases.CASES.items():
+                interpreter = self.interpreter_function(cases, name)
+                if interpreter is None:
+                    continue        # e.g. no _testlimitedcapi
+                for make_call in calls:
+                    args, kwargs = make_call()
+                    with self.subTest(func=name, args=args, kwargs=kwargs):
+                        expected = self.outcome(interpreter, args, kwargs)
+                        args, kwargs = make_call()
+                        actual = self.outcome(spec[name], args, kwargs)
+                        self.assertEqual(actual, expected, self.REBUILD)
 
-    def test_subclass(self):
-        new = self.spec['bytes.__new__']
-        self.assertEqual(new(BytesSubclass, [1]), BytesSubclass([1]))
-        self.assertIs(type(new(BytesSubclass, [1])), BytesSubclass)
+    def test_types(self):
+        for spec_path, _ in spec_files():
+            spec = pyspec_frontend.Spec.load(spec_path)
+            static = [name for name in spec.classes
+                      if pyspec_typeobj.static_type(spec, name) is not None]
+            if not static:
+                continue
+            cases = load_cases(spec_path)
+            for cls_name in static:
+                with self.subTest(spec=spec_path, cls=cls_name):
+                    self.assertIsNotNone(
+                        cases, f"add TYPES to the _cases.py of {spec_path}")
+                    self.check_type(spec, cls_name, cases.TYPES[cls_name])
 
-    def test_identity(self):
-        b = b'abc'
-        self.assertIs(bytes(b), b)
-        self.assertIs(self.bytes_new(b), b)
-        self.assertIs(self.spec['PyBytes_FromObject'](b), b)
-
-    def test_dunder_bytes(self):
-        # bytes.__bytes__: an exact bytes returns itself, a subclass
-        # instance gets an exact copy.
-        spec_bytes = self.spec['bytes.__bytes__']
-        b = b'abc'
-        self.assertIs(b.__bytes__(), b)
-        self.assertIs(spec_bytes(b), b)
-        for value in (BytesSubclass(b'xy'), BytesSubclass()):
-            for func in (bytes.__bytes__, spec_bytes):
-                with self.subTest(value=value, func=func):
-                    result = func(value)
-                    self.assertIs(type(result), bytes)
-                    self.assertEqual(result, value)
-                    self.assertIsNot(result, value)
-
-    def test_fromhex(self):
-        spec_fromhex = self.spec['bytes.fromhex']
-        cases = ['', '00ff', ' 0a 1B ', 'abc', 'zz', b'00ff',
-                 bytearray(b'0a'), memoryview(b'ab'), 1, None]
-        for cls in (bytes, BytesSubclass):
-            for string in cases:
-                with self.subTest(cls=cls, string=string):
-                    expected = self.outcome(cls.fromhex, (string,), {})
-                    actual = self.outcome(spec_fromhex, (cls, string), {})
-                    self.assertEqual(actual, expected)
-
-    def test_up_to_date(self):
-        # Argument Clinic generates Objects/clinic/bytesobject.c.h and
-        # Objects/clinic/bytesobject_pyspec.c.h from bytesobject.c and
-        # the spec.
-        filename = os.path.join(test_tools.basepath, 'Objects',
-                                'bytesobject.c')
-        writer = libclinic.FileWriter(dry_run=True)
-        parse_file(filename, limited_capi=False, writer=writer)
-        written = {os.path.basename(name) for name, _ in writer.files}
-        self.assertEqual(written, {'bytesobject.c', 'bytesobject.c.h',
-                                   'bytesobject_pyspec.c.h',
-                                   'bytesobject_types.c.h'})
-        self.assertEqual([change.filename for change in writer.changes], [],
-                         'run "make clinic"')
-
-    def test_transmogrify_up_to_date(self):
-        # The clinic functions of Objects/stringlib/transmogrify.h come
-        # from Objects/stringlib/pyspec/transmogrify.py.
-        filename = os.path.join(test_tools.basepath, 'Objects', 'stringlib',
-                                'transmogrify.h')
-        writer = libclinic.FileWriter(dry_run=True)
-        parse_file(filename, limited_capi=False, writer=writer)
-        self.assertEqual([change.filename for change in writer.changes], [],
-                         'run "make clinic"')
-
-
-@unittest.skipUnless(os.path.exists(BYTES_SPEC), 'needs the source tree')
-class BytesSpecTypeTest(TestCase):
-    """The classes of the bytes spec are the types bytes and
-    bytes_iterator: clinic generates their type objects
-    (Objects/clinic/bytesobject_types.c.h)."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.spec = pyspec_frontend.Spec.load(BYTES_SPEC)
-
-    def check_type(self, cls_name, tp):
-        spec = self.spec
+    def check_type(self, spec, cls_name, tp):
+        """The type generated from class *cls_name* is *tp*."""
         methods, slots, docs = [], set(), {}
         for meth in spec.entries(cls_name):
             name = f'{cls_name}.{meth}'
@@ -7063,44 +6869,25 @@ class BytesSpecTypeTest(TestCase):
         others = [name for name, value in vars(tp).items()
                   if name not in wrappers and name not in ('__doc__',
                                                            '__new__')]
-        # The method table is in the order of the spec.
-        self.assertEqual(others, methods)
+        # The method table, hence __dict__, is in the order of the spec.
+        self.assertEqual(others, methods, self.REBUILD)
         # The slots of the spec are the wrappers of the type.
-        self.assertEqual(wrappers, slots)
+        self.assertEqual(wrappers, slots, self.REBUILD)
         # Hand-written PyCFunctions: the docstring as is.
         for meth, doc in docs.items():
-            with self.subTest(meth=meth):
-                self.assertEqual(getattr(tp, meth).__doc__, doc)
-        # tp_doc is the class docstring.
+            self.assertEqual(getattr(tp, meth).__doc__, doc, self.REBUILD)
+        # tp_doc is the class docstring, as is.
         node = spec.classes[cls_name]
         doc = ast.get_docstring(node, clean=False)
         if doc is not None:
-            doc = '\n'.join(spec._clean_docstring(doc,
-                                                  node.body[0].col_offset))
-        self.assertEqual(tp.__doc__, doc)
-
-    def test_bytes(self):
-        self.check_type('bytes', bytes)
-        self.assertIsNone(bytes.__text_signature__)
-        self.assertTrue(bytes.__flags__ & (1 << 10))   # Py_TPFLAGS_BASETYPE
-
-    def test_bytes_iterator(self):
-        tp = type(iter(b''))
-        self.assertEqual(tp.__name__, 'bytes_iterator')
-        self.check_type('bytes_iterator', tp)
-        self.assertIsNone(tp.__doc__)
-        self.assertFalse(tp.__flags__ & (1 << 10))  # @final
-        self.assertTrue(tp.__flags__ & (1 << 14))   # Py_TPFLAGS_HAVE_GC
-
-    def test_iterator_next_facts(self):
-        # bytes_iterator.__next__ -> New[int]: an exact int, and (no
-        # RunsPython) never runs Python code.
-        facts = pyspec_runtime.stub_facts(
-            self.spec.functions['bytes_iterator.__next__'])
-        self.assertIs(facts.result_type, int)
-        self.assertIs(facts.runs_python, False)
-        for value in iter(bytes(range(256))):
-            self.assertIs(type(value), int)
+            doc = '\n'.join(spec._clean_docstring(node.body[0], doc))
+        self.assertEqual(tp.__doc__, doc, self.REBUILD)
+        # Flags: @final, and tp_traverse makes a GC type.
+        members = pyspec_typeobj.static_type(spec, cls_name)
+        final = pyspec_typeobj._is_final(node)
+        self.assertEqual(bool(tp.__flags__ & (1 << 10)), not final)
+        self.assertEqual(bool(tp.__flags__ & (1 << 14)),
+                         'tp_traverse' in members)
 
 
 class PyspecSlotdefsTest(TestCase):
@@ -7130,11 +6917,6 @@ class PyspecSlotdefsTest(TestCase):
                                   expected[name])
                     seen += 1
         self.assertGreater(seen, 100)
-
-
-class BytesOverridingDunderBytes(bytes):
-    def __bytes__(self):
-        return BytesSubclass(b'sub')
 
 
 @unittest.skipUnless(os.path.exists(BYTES_SPEC), 'needs the source tree')
@@ -7179,7 +6961,8 @@ class BytesSpecFactsTest(TestCase):
         # type holds.  The call table only has entries for exact static
         # types; the generic entry, used for a subclass, has the same
         # facts.  (_CALL_STR_1 claims an exact str for str subclasses.)
-        for arg_type in (BytesSubclass, BytesOverridingDunderBytes, None):
+        for arg_type in (BYTES_CASES.BytesSubclass,
+                         BYTES_CASES.BytesOverridingDunderBytes, None):
             with self.subTest(arg_type=arg_type):
                 residual, facts = self.new_facts(arg_type)
                 self.assertIsNone(facts.alias)
@@ -7188,9 +6971,9 @@ class BytesSpecFactsTest(TestCase):
                 self.assertIn('lookup_special',
                               ast.unparse(ast.Module(residual, [])))
         # What the interpreter does.
-        b = BytesOverridingDunderBytes(b'x')
-        self.assertIs(type(bytes(b)), BytesSubclass)
-        self.assertIsNot(bytes(BytesSubclass(b'x')), b)
+        b = BYTES_CASES.BytesOverridingDunderBytes(b'x')
+        self.assertIs(type(bytes(b)), BYTES_CASES.BytesSubclass)
+        self.assertIsNot(bytes(BYTES_CASES.BytesSubclass(b'x')), b)
 
     def test_bytes_of_other_types(self):
         for arg_type in (bytearray, memoryview):
@@ -7217,7 +7000,7 @@ class BytesSpecFactsTest(TestCase):
                 _, facts = self.new_facts(arg_type)
                 self.assertIs(facts.result_type, bytes)
                 self.assertTrue(facts.runs_python)
-        self.assertEqual(bytes({IndexOnly(3)}), b'\x03')
+        self.assertEqual(bytes({BYTES_CASES.IndexOnly(3)}), b'\x03')
         # A list or a tuple is iterated by index, without an iterator,
         # and ints take a fast path: the old hand-written
         # _PyBytes_FromSequence_lock_held(), derived.
@@ -7259,13 +7042,13 @@ class BytesSpecFactsTest(TestCase):
         self.assertIs(facts.result_type, bytes)
         self.assertFalse(facts.runs_python)
         # A subclass instance gets an exact copy: exact type, no alias.
-        for self_type in (BytesSubclass, None):
+        for self_type in (BYTES_CASES.BytesSubclass, None):
             with self.subTest(self_type=self_type):
                 _, facts = self.dunder_bytes_facts(self_type)
                 self.assertIsNone(facts.alias)
                 self.assertIs(facts.result_type, bytes)
                 self.assertFalse(facts.runs_python)
-        b = BytesSubclass(b'x')
+        b = BYTES_CASES.BytesSubclass(b'x')
         self.assertIs(type(b.__bytes__()), bytes)
         self.assertIsNot(b.__bytes__(), b)
 
@@ -7285,6 +7068,16 @@ class BytesSpecFactsTest(TestCase):
         _, facts = self.facts('bytes.fromhex', env, ['string'])
         self.assertIsNone(facts.result_type)
         self.assertTrue(facts.runs_python)
+
+    def test_iterator_next_facts(self):
+        # bytes_iterator.__next__ -> New[int]: an exact int, and (no
+        # RunsPython) never runs Python code.
+        facts = pyspec_runtime.stub_facts(
+            self.spec.functions['bytes_iterator.__next__'])
+        self.assertIs(facts.result_type, int)
+        self.assertIs(facts.runs_python, False)
+        for value in iter(bytes(range(256))):
+            self.assertIs(type(value), int)
 
     def test_escape_stubs(self):
         # Every escape a body calls has a stub in the spec giving its

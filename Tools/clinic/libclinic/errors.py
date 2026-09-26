@@ -13,14 +13,12 @@ class ClinicError(Exception):
         super().__init__(self.message)
 
     def report(self, *, warn_only: bool = False) -> str:
-        msg = "Warning" if warn_only else "Error"
-        if self.filename is not None:
-            msg += f" in file {self.filename!r}"
-        if self.lineno is not None:
-            msg += f" on line {self.lineno}"
-        msg += ":\n"
-        msg += f"{self.message}\n"
-        return msg
+        """The message as compilers print it: ``path:line: error: msg``."""
+        where = [str(x) for x in (self.filename, self.lineno)
+                 if x is not None]
+        kind = "warning" if warn_only else "error"
+        return ": ".join([":".join(where), kind] if where
+                         else [kind]) + f": {self.message}\n"
 
 
 class ParseError(ClinicError):
@@ -54,7 +52,7 @@ def warn_or_fail(
     if fail:
         raise error
     else:
-        print(error.report(warn_only=True))
+        print(error.report(warn_only=True), end="")
 
 
 def warn(

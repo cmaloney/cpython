@@ -19,8 +19,9 @@ For Objects/foo.c, Objects/pyspec/foo.py is its spec:
                 Objects/typeobject.c
   typeobj       generates the static type objects of the @static_type
                 classes, with their method and slot tables
-                (Objects/clinic/foo_types.c.h)
 
 Argument Clinic uses all of this while processing foo.c: `make clinic`
-regenerates Objects/clinic/foo_pyspec.c.h and foo_types.c.h too.
+regenerates Objects/clinic/foo_pyspec.c.h too (the implemented functions,
+then the type objects), which foo.c includes at its end.  See
+Objects/pyspec/README.rst.
 """
