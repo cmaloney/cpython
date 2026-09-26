@@ -78,6 +78,7 @@ TYPE_CHECK = {
 
 TYPE_CHECK_EXACT = {name: check + 'Exact'
                     for name, check in TYPE_CHECK.items()}
+TYPE_CHECK_EXACT['bool'] = 'PyBool_Check'   # bool has no subclasses
 
 SLOT_CHECK = {
     '__index__': '_PyIndex_Check({0})',

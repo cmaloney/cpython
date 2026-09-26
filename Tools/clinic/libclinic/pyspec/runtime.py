@@ -213,6 +213,13 @@ def _as_ssize_t(o, exc):
     raise exc(f"cannot fit '{tp_name(type(o))}' into an index-sized integer")
 
 
+# PyNumber_AsSsize_t() of an exact int or bool: a compact one is read
+# inline, without a call.
+_AS_SSIZE_T_INT = ('(_PyLong_IsCompact((PyLongObject *){0}) '
+                   '? _PyLong_CompactValue((PyLongObject *){0}) '
+                   ': PyNumber_AsSsize_t({0}, {1}))')
+
+
 class C:
     lookup_special = escape(
         '_PyObject_LookupSpecial({0}, &_Py_ID({id1}))',
@@ -223,13 +230,11 @@ class C:
         lambda s, encoding, errors: str.encode(
             s, encoding, 'strict' if errors is NULL else errors))
 
-    # An exact int needs no __index__: a compact one is read inline.
+    # An exact int (or bool) needs no __index__: see _AS_SSIZE_T_INT.
     PyNumber_AsSsize_t = escape(
         'PyNumber_AsSsize_t({0}, {1})',
         returns='Py_ssize_t', error=ERR_MINUS1,
-        exact={int: '(_PyLong_IsCompact((PyLongObject *){0}) '
-                    '? _PyLong_CompactValue((PyLongObject *){0}) '
-                    ': PyNumber_AsSsize_t({0}, {1}))'})(_as_ssize_t)
+        exact={int: _AS_SSIZE_T_INT, bool: _AS_SSIZE_T_INT})(_as_ssize_t)
 
     PyObject_LengthHint = escape(
         'PyObject_LengthHint({0}, {1})',

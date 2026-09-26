@@ -174,11 +174,21 @@ PyBytes_FromObject(PyObject *x)
                     }
                 }
                 else {
-                    value_1 = PyNumber_AsSsize_t(item_1, NULL);
-                    Py_DECREF(item_1);
-                    if (value_1 == -1 && PyErr_Occurred()) {
-                        PyBytesWriter_Discard(writer_1.writer);
-                        return NULL;
+                    if (PyBool_Check(item_1)) {
+                        value_1 = (_PyLong_IsCompact((PyLongObject *)item_1) ? _PyLong_CompactValue((PyLongObject *)item_1) : PyNumber_AsSsize_t(item_1, NULL));
+                        Py_DECREF(item_1);
+                        if (value_1 == -1 && PyErr_Occurred()) {
+                            PyBytesWriter_Discard(writer_1.writer);
+                            return NULL;
+                        }
+                    }
+                    else {
+                        value_1 = PyNumber_AsSsize_t(item_1, NULL);
+                        Py_DECREF(item_1);
+                        if (value_1 == -1 && PyErr_Occurred()) {
+                            PyBytesWriter_Discard(writer_1.writer);
+                            return NULL;
+                        }
                     }
                 }
                 if ((value_1 < 0) || (value_1 >= 256)) {
@@ -212,10 +222,19 @@ PyBytes_FromObject(PyObject *x)
                         }
                     }
                     else {
-                        value_2 = PyNumber_AsSsize_t(item_2, NULL);
-                        if (value_2 == -1 && PyErr_Occurred()) {
-                            PyBytesWriter_Discard(writer_2.writer);
-                            return NULL;
+                        if (PyBool_Check(item_2)) {
+                            value_2 = (_PyLong_IsCompact((PyLongObject *)item_2) ? _PyLong_CompactValue((PyLongObject *)item_2) : PyNumber_AsSsize_t(item_2, NULL));
+                            if (value_2 == -1 && PyErr_Occurred()) {
+                                PyBytesWriter_Discard(writer_2.writer);
+                                return NULL;
+                            }
+                        }
+                        else {
+                            value_2 = PyNumber_AsSsize_t(item_2, NULL);
+                            if (value_2 == -1 && PyErr_Occurred()) {
+                                PyBytesWriter_Discard(writer_2.writer);
+                                return NULL;
+                            }
                         }
                     }
                     if ((value_2 < 0) || (value_2 >= 256)) {
@@ -287,11 +306,21 @@ bytes_from_iterator(PyObject *it, PyObject *x)
             }
         }
         else {
-            value = PyNumber_AsSsize_t(item, NULL);
-            Py_DECREF(item);
-            if (value == -1 && PyErr_Occurred()) {
-                PyBytesWriter_Discard(writer.writer);
-                return NULL;
+            if (PyBool_Check(item)) {
+                value = (_PyLong_IsCompact((PyLongObject *)item) ? _PyLong_CompactValue((PyLongObject *)item) : PyNumber_AsSsize_t(item, NULL));
+                Py_DECREF(item);
+                if (value == -1 && PyErr_Occurred()) {
+                    PyBytesWriter_Discard(writer.writer);
+                    return NULL;
+                }
+            }
+            else {
+                value = PyNumber_AsSsize_t(item, NULL);
+                Py_DECREF(item);
+                if (value == -1 && PyErr_Occurred()) {
+                    PyBytesWriter_Discard(writer.writer);
+                    return NULL;
+                }
             }
         }
         if ((value < 0) || (value >= 256)) {
@@ -343,6 +372,8 @@ bytes_new_nargs0(void)
  *         for item_2 in source:
  *             if type(item_2) is int:
  *                 value_2 = C.PyNumber_AsSsize_t(item_2, NULL)
+ *             elif type(item_2) is bool:
+ *                 value_2 = C.PyNumber_AsSsize_t(item_2, NULL)
  *             else:
  *                 value_2 = C.PyNumber_AsSsize_t(item_2, NULL)
  *             if value_2 < 0 or value_2 >= 256:
@@ -354,6 +385,8 @@ bytes_new_nargs0(void)
  *         writer_3 = C.bytes_appender(size_3)
  *         for item_3 in source:
  *             if type(item_3) is int:
+ *                 value_3 = C.PyNumber_AsSsize_t(item_3, NULL)
+ *             elif type(item_3) is bool:
  *                 value_3 = C.PyNumber_AsSsize_t(item_3, NULL)
  *             else:
  *                 value_3 = C.PyNumber_AsSsize_t(item_3, NULL)
@@ -459,11 +492,21 @@ bytes_new_nargs1(PyObject *source)
                     }
                 }
                 else {
-                    value_2 = PyNumber_AsSsize_t(item_2, NULL);
-                    Py_DECREF(item_2);
-                    if (value_2 == -1 && PyErr_Occurred()) {
-                        PyBytesWriter_Discard(writer_2.writer);
-                        return NULL;
+                    if (PyBool_Check(item_2)) {
+                        value_2 = (_PyLong_IsCompact((PyLongObject *)item_2) ? _PyLong_CompactValue((PyLongObject *)item_2) : PyNumber_AsSsize_t(item_2, NULL));
+                        Py_DECREF(item_2);
+                        if (value_2 == -1 && PyErr_Occurred()) {
+                            PyBytesWriter_Discard(writer_2.writer);
+                            return NULL;
+                        }
+                    }
+                    else {
+                        value_2 = PyNumber_AsSsize_t(item_2, NULL);
+                        Py_DECREF(item_2);
+                        if (value_2 == -1 && PyErr_Occurred()) {
+                            PyBytesWriter_Discard(writer_2.writer);
+                            return NULL;
+                        }
                     }
                 }
                 if ((value_2 < 0) || (value_2 >= 256)) {
@@ -497,10 +540,19 @@ bytes_new_nargs1(PyObject *source)
                         }
                     }
                     else {
-                        value_3 = PyNumber_AsSsize_t(item_3, NULL);
-                        if (value_3 == -1 && PyErr_Occurred()) {
-                            PyBytesWriter_Discard(writer_3.writer);
-                            return NULL;
+                        if (PyBool_Check(item_3)) {
+                            value_3 = (_PyLong_IsCompact((PyLongObject *)item_3) ? _PyLong_CompactValue((PyLongObject *)item_3) : PyNumber_AsSsize_t(item_3, NULL));
+                            if (value_3 == -1 && PyErr_Occurred()) {
+                                PyBytesWriter_Discard(writer_3.writer);
+                                return NULL;
+                            }
+                        }
+                        else {
+                            value_3 = PyNumber_AsSsize_t(item_3, NULL);
+                            if (value_3 == -1 && PyErr_Occurred()) {
+                                PyBytesWriter_Discard(writer_3.writer);
+                                return NULL;
+                            }
                         }
                     }
                     if ((value_3 < 0) || (value_3 >= 256)) {
@@ -596,6 +648,8 @@ bytes_new_nargs1_bytearray(PyObject *source)
  * for item_2 in source:
  *     if type(item_2) is int:
  *         value_2 = C.PyNumber_AsSsize_t(item_2, NULL)
+ *     elif type(item_2) is bool:
+ *         value_2 = C.PyNumber_AsSsize_t(item_2, NULL)
  *     else:
  *         value_2 = C.PyNumber_AsSsize_t(item_2, NULL)
  *     if value_2 < 0 or value_2 >= 256:
@@ -636,11 +690,21 @@ bytes_new_nargs1_list(PyObject *source)
             }
         }
         else {
-            value_2 = PyNumber_AsSsize_t(item_2, NULL);
-            Py_DECREF(item_2);
-            if (value_2 == -1 && PyErr_Occurred()) {
-                PyBytesWriter_Discard(writer_2.writer);
-                return NULL;
+            if (PyBool_Check(item_2)) {
+                value_2 = (_PyLong_IsCompact((PyLongObject *)item_2) ? _PyLong_CompactValue((PyLongObject *)item_2) : PyNumber_AsSsize_t(item_2, NULL));
+                Py_DECREF(item_2);
+                if (value_2 == -1 && PyErr_Occurred()) {
+                    PyBytesWriter_Discard(writer_2.writer);
+                    return NULL;
+                }
+            }
+            else {
+                value_2 = PyNumber_AsSsize_t(item_2, NULL);
+                Py_DECREF(item_2);
+                if (value_2 == -1 && PyErr_Occurred()) {
+                    PyBytesWriter_Discard(writer_2.writer);
+                    return NULL;
+                }
             }
         }
         if ((value_2 < 0) || (value_2 >= 256)) {
@@ -662,6 +726,8 @@ bytes_new_nargs1_list(PyObject *source)
  * writer_2 = C.bytes_appender(size_2)
  * for item_2 in source:
  *     if type(item_2) is int:
+ *         value_2 = C.PyNumber_AsSsize_t(item_2, NULL)
+ *     elif type(item_2) is bool:
  *         value_2 = C.PyNumber_AsSsize_t(item_2, NULL)
  *     else:
  *         value_2 = C.PyNumber_AsSsize_t(item_2, NULL)
@@ -695,10 +761,19 @@ bytes_new_nargs1_tuple(PyObject *source)
             }
         }
         else {
-            value_2 = PyNumber_AsSsize_t(item_2, NULL);
-            if (value_2 == -1 && PyErr_Occurred()) {
-                PyBytesWriter_Discard(writer_2.writer);
-                return NULL;
+            if (PyBool_Check(item_2)) {
+                value_2 = (_PyLong_IsCompact((PyLongObject *)item_2) ? _PyLong_CompactValue((PyLongObject *)item_2) : PyNumber_AsSsize_t(item_2, NULL));
+                if (value_2 == -1 && PyErr_Occurred()) {
+                    PyBytesWriter_Discard(writer_2.writer);
+                    return NULL;
+                }
+            }
+            else {
+                value_2 = PyNumber_AsSsize_t(item_2, NULL);
+                if (value_2 == -1 && PyErr_Occurred()) {
+                    PyBytesWriter_Discard(writer_2.writer);
+                    return NULL;
+                }
             }
         }
         if ((value_2 < 0) || (value_2 >= 256)) {
@@ -835,6 +910,8 @@ bytes_new_nargs1_range(PyObject *source)
  * for item_2 in it_1:
  *     if type(item_2) is int:
  *         value_2 = C.PyNumber_AsSsize_t(item_2, NULL)
+ *     elif type(item_2) is bool:
+ *         value_2 = C.PyNumber_AsSsize_t(item_2, NULL)
  *     else:
  *         value_2 = C.PyNumber_AsSsize_t(item_2, NULL)
  *     if value_2 < 0 or value_2 >= 256:
@@ -884,12 +961,23 @@ bytes_new_nargs1_dict(PyObject *source)
             }
         }
         else {
-            value_2 = PyNumber_AsSsize_t(item_2, NULL);
-            Py_DECREF(item_2);
-            if (value_2 == -1 && PyErr_Occurred()) {
-                Py_XDECREF(it_1);
-                PyBytesWriter_Discard(writer_2.writer);
-                return NULL;
+            if (PyBool_Check(item_2)) {
+                value_2 = (_PyLong_IsCompact((PyLongObject *)item_2) ? _PyLong_CompactValue((PyLongObject *)item_2) : PyNumber_AsSsize_t(item_2, NULL));
+                Py_DECREF(item_2);
+                if (value_2 == -1 && PyErr_Occurred()) {
+                    Py_XDECREF(it_1);
+                    PyBytesWriter_Discard(writer_2.writer);
+                    return NULL;
+                }
+            }
+            else {
+                value_2 = PyNumber_AsSsize_t(item_2, NULL);
+                Py_DECREF(item_2);
+                if (value_2 == -1 && PyErr_Occurred()) {
+                    Py_XDECREF(it_1);
+                    PyBytesWriter_Discard(writer_2.writer);
+                    return NULL;
+                }
             }
         }
         if ((value_2 < 0) || (value_2 >= 256)) {
