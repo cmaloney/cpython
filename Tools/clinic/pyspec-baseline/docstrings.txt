@@ -16,6 +16,7 @@ Objects/bytes_methods.c:_Py_lower__doc__ = Objects/stringlib/pyspec/ctype.py:B.l
 Objects/bytes_methods.c:_Py_swapcase__doc__ = Objects/stringlib/pyspec/ctype.py:B.swapcase
 Objects/bytes_methods.c:_Py_title__doc__ = Objects/stringlib/pyspec/ctype.py:B.title
 Objects/bytes_methods.c:_Py_upper__doc__ = Objects/stringlib/pyspec/ctype.py:B.upper
+Objects/clinic/bytearrayobject.c.h:bytearray_count__doc__ = Objects/pyspec/bytesobject.py:bytes.count
 Objects/clinic/bytearrayobject.c.h:bytearray_lstrip__doc__ = Objects/pyspec/bytesobject.py:bytes.lstrip
 Objects/clinic/bytearrayobject.c.h:bytearray_maketrans__doc__ = Objects/pyspec/bytesobject.py:bytes.maketrans
 Objects/clinic/bytearrayobject.c.h:bytearray_reduce__doc__ = Objects/clinic/bytearrayobject.c.h:bytearray_reduce_ex__doc__ = Objects/pyspec/bytesobject.py:bytes_iterator.__reduce__

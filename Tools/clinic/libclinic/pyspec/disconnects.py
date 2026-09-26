@@ -543,8 +543,7 @@ def spec_signatures(srcdir, tp):
             node = spec.imported(shared.module).functions[
                 f'{shared.cls}.{shared.meth}']
         else:
-            clone = spec.clones.get(full)
-            node = spec.functions[f'{tp}.{clone.target}' if clone else full]
+            node = spec.functions[full]
         out[meth] = signature_of_def(node)
     return out
 
