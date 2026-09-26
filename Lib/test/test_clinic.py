@@ -10,6 +10,7 @@ from test.support.os_helper import TESTFN, unlink, rmtree
 from textwrap import dedent
 from unittest import TestCase
 import array
+import ast
 import difflib
 import inspect
 import os.path
@@ -38,6 +39,9 @@ with test_tools.imports_under_tool('clinic'):
     from libclinic.dsl_parser import DSLParser
     from libclinic.cli import parse_file, Clinic
     from libclinic.pyspec import runtime as pyspec_runtime
+    from libclinic.pyspec import (call_table as pyspec_call_table,
+                                  frontend as pyspec_frontend,
+                                  partial_eval as pyspec_partial_eval)
 
 
 def repeat_fn(*functions):
@@ -6295,6 +6299,136 @@ class BytesSpecTest(TestCase):
                                    'bytesobject_pyspec.c.h'})
         self.assertEqual([change.filename for change in writer.changes], [],
                          'run "make clinic"')
+
+
+class BytesOverridingDunderBytes(bytes):
+    def __bytes__(self):
+        return BytesSubclass(b'sub')
+
+
+@unittest.skipUnless(os.path.exists(BYTES_SPEC), 'needs the source tree')
+class BytesSpecFactsTest(TestCase):
+    """Facts of the tier-2 call table, derived from the bytes spec by
+    partial evaluation (Tools/clinic/libclinic/pyspec/call_table.py), and
+    the conditions under which they hold."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.spec = pyspec_frontend.Spec.load(BYTES_SPEC)
+
+    def facts(self, name, env, args):
+        residual = pyspec_partial_eval.specialize(self.spec, name, env)
+        types = {k: v for k, v in env.items() if isinstance(v, type)}
+        analyzer = pyspec_call_table.Analyzer(self.spec)
+        return residual, analyzer.facts(residual, types, args)
+
+    def new_facts(self, arg_type):
+        pe = pyspec_partial_eval
+        env = {'cls': pe.Value(bytes), 'source': arg_type or pe.NOTNULL,
+               'encoding': pe.NULL, 'errors': pe.NULL}
+        return self.facts('bytes.__new__', env, ['source'])
+
+    def dunder_bytes_facts(self, self_type):
+        env = {'self': self_type or pyspec_partial_eval.NOTNULL}
+        return self.facts('bytes.__bytes__', env, ['self'])
+
+    def test_bytes_of_exact_bytes(self):
+        # bytes.__new__ -> lookup_special(__bytes__) -> bytes.__bytes__,
+        # which is "return self" for exact bytes: bytes(b) is b.
+        residual, facts = self.new_facts(bytes)
+        self.assertEqual(ast.unparse(ast.Module(residual, [])),
+                         'return source')
+        self.assertEqual(facts.alias, 0)
+        self.assertIs(facts.result_type, bytes)
+        self.assertFalse(facts.runs_python)
+
+    def test_bytes_of_subclass(self):
+        # A subclass (a heap type) may override __bytes__, even later:
+        # the lookup is not decided, and neither the alias nor the exact
+        # type holds.  The call table only has entries for exact static
+        # types; the generic entry, used for a subclass, has the same
+        # facts.  (_CALL_STR_1 claims an exact str for str subclasses.)
+        for arg_type in (BytesSubclass, BytesOverridingDunderBytes, None):
+            with self.subTest(arg_type=arg_type):
+                residual, facts = self.new_facts(arg_type)
+                self.assertIsNone(facts.alias)
+                self.assertIsNone(facts.result_type)
+                self.assertTrue(facts.runs_python)
+                self.assertIn('lookup_special',
+                              ast.unparse(ast.Module(residual, [])))
+        # What the interpreter does.
+        b = BytesOverridingDunderBytes(b'x')
+        self.assertIs(type(bytes(b)), BytesSubclass)
+        self.assertIsNot(bytes(BytesSubclass(b'x')), b)
+
+    def test_bytes_of_other_types(self):
+        for arg_type in (bytearray, memoryview):
+            with self.subTest(arg_type=arg_type):
+                _, facts = self.new_facts(arg_type)
+                self.assertIsNone(facts.alias)
+                self.assertIs(facts.result_type, bytes)
+                self.assertFalse(facts.runs_python)
+        _, facts = self.new_facts(list)
+        self.assertIsNone(facts.alias)
+        self.assertTrue(facts.runs_python)
+
+    def test_dunder_bytes(self):
+        _, facts = self.dunder_bytes_facts(bytes)
+        self.assertEqual(facts.alias, 0)
+        self.assertIs(facts.result_type, bytes)
+        self.assertFalse(facts.runs_python)
+        # A subclass instance gets an exact copy: exact type, no alias.
+        for self_type in (BytesSubclass, None):
+            with self.subTest(self_type=self_type):
+                _, facts = self.dunder_bytes_facts(self_type)
+                self.assertIsNone(facts.alias)
+                self.assertIs(facts.result_type, bytes)
+                self.assertFalse(facts.runs_python)
+        b = BytesSubclass(b'x')
+        self.assertIs(type(b.__bytes__()), bytes)
+        self.assertIsNot(b.__bytes__(), b)
+
+    def test_fromhex(self):
+        pe = pyspec_partial_eval
+        env = {'cls': pe.Value(bytes), 'string': str}
+        _, facts = self.facts('bytes.fromhex', env, ['string'])
+        self.assertIs(facts.result_type, bytes)
+        self.assertFalse(facts.runs_python)
+        # Any argument: __buffer__ of a Python class may run.
+        env['string'] = pe.NOTNULL
+        _, facts = self.facts('bytes.fromhex', env, ['string'])
+        self.assertIs(facts.result_type, bytes)
+        self.assertTrue(facts.runs_python)
+        # A subclass: cls(result) runs Python code and returns anything.
+        env['cls'] = pe.NOTNULL
+        _, facts = self.facts('bytes.fromhex', env, ['string'])
+        self.assertIsNone(facts.result_type)
+        self.assertTrue(facts.runs_python)
+
+    def test_escape_stubs(self):
+        # Every escape a body calls has a stub in the spec giving its
+        # facts, and its error convention agrees with the one runtime.py
+        # lowers.
+        escapes = set()
+        for name in self.spec.implemented_functions():
+            for node in ast.walk(self.spec.functions[name]):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == 'C'):
+                    escapes.add(node.func.attr)
+        self.assertIn('bytes_copy', escapes)
+        for name in sorted(escapes):
+            with self.subTest(escape=name):
+                escape = getattr(pyspec_runtime.C, name)
+                if not isinstance(escape, pyspec_runtime.Escape):
+                    continue        # raise escapes
+                self.assertIn(name, self.spec.functions)
+                stub = pyspec_runtime.stub_facts(self.spec.functions[name])
+                error = {pyspec_runtime.ERR_NULL: 'NULL',
+                         pyspec_runtime.ERR_NULL_OR_MISSING: 'NULL',
+                         pyspec_runtime.ERR_MINUS1: -1}[escape.error]
+                self.assertIn(error, stub.errors)
 
 
 class VectorcallFunctionalTest(unittest.TestCase):

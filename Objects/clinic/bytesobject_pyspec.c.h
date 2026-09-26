@@ -334,39 +334,12 @@ bytes_new_nargs3(PyObject *source, const char *encoding, const char *errors)
 }
 
 /* bytes_new() for exactly bytes with 1 positional argument of exact type bytes
- * (result type not known exactly; may run Python code):
- * if (func := C.lookup_special(source, '__bytes__')) is not NULL:
- *     result = func()
- *     if not isinstance(result, bytes):
- *         raise TypeError(f'{fqname(type(source))}.__bytes__() must return a bytes, not {fqname(type(result))}')
- *     return result
+ * (result is argument 0 (source); result is exactly bytes; runs no Python code):
  * return source
  */
 static PyObject *
 bytes_new_nargs1_bytes(PyObject *source)
 {
-    PyObject *result = NULL;
-    PyObject *func = NULL;
-
-    func = _PyObject_LookupSpecial(source, &_Py_ID(__bytes__));
-    if (func == NULL && PyErr_Occurred()) {
-        return NULL;
-    }
-    if (func != NULL) {
-        result = _PyObject_CallNoArgs(func);
-        if (result == NULL) {
-            Py_XDECREF(func);
-            return NULL;
-        }
-        if (!PyBytes_Check(result)) {
-            PyErr_Format(PyExc_TypeError, "%T.__bytes__() must return a bytes, not %T", source, result);
-            Py_XDECREF(result);
-            Py_XDECREF(func);
-            return NULL;
-        }
-        Py_XDECREF(func);
-        return result;
-    }
     return Py_NewRef(source);
 }
 
@@ -516,17 +489,19 @@ static const _PySpecCall bytes_new_spec_calls[] = {
         .nargs = 0,
         .flags = 0,
         .result_const = Py_CONSTANT_EMPTY_BYTES,
+        .result_alias = -1,
         .arg_type = NULL,
         .result_type = &PyBytes_Type,
         .func.f0 = bytes_new_nargs0,
     },
-    /* bytes(bytes): result type not known exactly; may run Python code */
+    /* bytes(bytes): result is argument 0 (source); result is exactly bytes; runs no Python code */
     {
         .nargs = 1,
-        .flags = _PySpec_MAY_RUN_PYTHON,
+        .flags = 0,
         .result_const = -1,
+        .result_alias = 0,
         .arg_type = &PyBytes_Type,
-        .result_type = NULL,
+        .result_type = &PyBytes_Type,
         .func.f1 = bytes_new_nargs1_bytes,
     },
     /* bytes(bytearray): result is exactly bytes; runs no Python code */
@@ -534,6 +509,7 @@ static const _PySpecCall bytes_new_spec_calls[] = {
         .nargs = 1,
         .flags = 0,
         .result_const = -1,
+        .result_alias = -1,
         .arg_type = &PyByteArray_Type,
         .result_type = &PyBytes_Type,
         .func.f1 = bytes_new_nargs1_bytearray,
@@ -543,6 +519,7 @@ static const _PySpecCall bytes_new_spec_calls[] = {
         .nargs = 1,
         .flags = 0,
         .result_const = -1,
+        .result_alias = -1,
         .arg_type = &PyMemoryView_Type,
         .result_type = &PyBytes_Type,
         .func.f1 = bytes_new_nargs1_bytearray,
@@ -552,6 +529,7 @@ static const _PySpecCall bytes_new_spec_calls[] = {
         .nargs = 1,
         .flags = _PySpec_MAY_RUN_PYTHON,
         .result_const = -1,
+        .result_alias = -1,
         .arg_type = &PyList_Type,
         .result_type = &PyBytes_Type,
         .func.f1 = bytes_new_nargs1_list,
@@ -561,6 +539,7 @@ static const _PySpecCall bytes_new_spec_calls[] = {
         .nargs = 1,
         .flags = _PySpec_MAY_RUN_PYTHON,
         .result_const = -1,
+        .result_alias = -1,
         .arg_type = &PyTuple_Type,
         .result_type = &PyBytes_Type,
         .func.f1 = bytes_new_nargs1_list,
@@ -570,6 +549,7 @@ static const _PySpecCall bytes_new_spec_calls[] = {
         .nargs = 1,
         .flags = _PySpec_MAY_RUN_PYTHON,
         .result_const = -1,
+        .result_alias = -1,
         .arg_type = &PyLong_Type,
         .result_type = &PyBytes_Type,
         .func.f1 = bytes_new_nargs1_int,
@@ -579,6 +559,7 @@ static const _PySpecCall bytes_new_spec_calls[] = {
         .nargs = 1,
         .flags = _PySpec_ALWAYS_RAISES,
         .result_const = -1,
+        .result_alias = -1,
         .arg_type = &PyUnicode_Type,
         .result_type = NULL,
         .func.f1 = bytes_new_nargs1_str,
@@ -588,6 +569,7 @@ static const _PySpecCall bytes_new_spec_calls[] = {
         .nargs = 1,
         .flags = _PySpec_MAY_RUN_PYTHON,
         .result_const = -1,
+        .result_alias = -1,
         .arg_type = &PyRange_Type,
         .result_type = &PyBytes_Type,
         .func.f1 = bytes_new_nargs1_range,
@@ -597,6 +579,7 @@ static const _PySpecCall bytes_new_spec_calls[] = {
         .nargs = 1,
         .flags = _PySpec_MAY_RUN_PYTHON,
         .result_const = -1,
+        .result_alias = -1,
         .arg_type = &PyDict_Type,
         .result_type = &PyBytes_Type,
         .func.f1 = bytes_new_nargs1_range,
@@ -606,6 +589,7 @@ static const _PySpecCall bytes_new_spec_calls[] = {
         .nargs = 1,
         .flags = _PySpec_MAY_RUN_PYTHON,
         .result_const = -1,
+        .result_alias = -1,
         .arg_type = &PyFloat_Type,
         .result_type = &PyBytes_Type,
         .func.f1 = bytes_new_nargs1_range,
@@ -615,9 +599,145 @@ static const _PySpecCall bytes_new_spec_calls[] = {
         .nargs = 1,
         .flags = _PySpec_MAY_RUN_PYTHON,
         .result_const = -1,
+        .result_alias = -1,
         .arg_type = NULL,
         .result_type = NULL,
         .func.f1 = bytes_new_nargs1,
+    },
+};
+
+/* Facts of the bytes methods implemented by the spec, for the tier-2
+ * optimizer, keyed by ml_meth (see Include/internal/pycore_pyspec.h). */
+static const _PySpecCall bytes_spec_methods[] = {
+    /* bytes.__bytes__(bytes): result is argument 0 (self); result is exactly bytes; runs no Python code */
+    {
+        .nargs = 1,
+        .flags = 0,
+        .result_const = -1,
+        .result_alias = 0,
+        .arg_type = &PyBytes_Type,
+        .result_type = &PyBytes_Type,
+        .func.meth = (PyCFunction)bytes___bytes__,
+    },
+    /* bytes.__bytes__(x): result is exactly bytes; runs no Python code */
+    {
+        .nargs = 1,
+        .flags = 0,
+        .result_const = -1,
+        .result_alias = -1,
+        .arg_type = NULL,
+        .result_type = &PyBytes_Type,
+        .func.meth = (PyCFunction)bytes___bytes__,
+    },
+    /* bytes.fromhex(bytes): result is exactly bytes; runs no Python code */
+    {
+        .nargs = 1,
+        .flags = 0,
+        .result_const = -1,
+        .result_alias = -1,
+        .arg_type = &PyBytes_Type,
+        .result_type = &PyBytes_Type,
+        .func.meth = (PyCFunction)bytes_fromhex,
+    },
+    /* bytes.fromhex(bytearray): result is exactly bytes; runs no Python code */
+    {
+        .nargs = 1,
+        .flags = 0,
+        .result_const = -1,
+        .result_alias = -1,
+        .arg_type = &PyByteArray_Type,
+        .result_type = &PyBytes_Type,
+        .func.meth = (PyCFunction)bytes_fromhex,
+    },
+    /* bytes.fromhex(memoryview): result is exactly bytes; runs no Python code */
+    {
+        .nargs = 1,
+        .flags = 0,
+        .result_const = -1,
+        .result_alias = -1,
+        .arg_type = &PyMemoryView_Type,
+        .result_type = &PyBytes_Type,
+        .func.meth = (PyCFunction)bytes_fromhex,
+    },
+    /* bytes.fromhex(list): result is exactly bytes; runs no Python code */
+    {
+        .nargs = 1,
+        .flags = 0,
+        .result_const = -1,
+        .result_alias = -1,
+        .arg_type = &PyList_Type,
+        .result_type = &PyBytes_Type,
+        .func.meth = (PyCFunction)bytes_fromhex,
+    },
+    /* bytes.fromhex(tuple): result is exactly bytes; runs no Python code */
+    {
+        .nargs = 1,
+        .flags = 0,
+        .result_const = -1,
+        .result_alias = -1,
+        .arg_type = &PyTuple_Type,
+        .result_type = &PyBytes_Type,
+        .func.meth = (PyCFunction)bytes_fromhex,
+    },
+    /* bytes.fromhex(int): result is exactly bytes; runs no Python code */
+    {
+        .nargs = 1,
+        .flags = 0,
+        .result_const = -1,
+        .result_alias = -1,
+        .arg_type = &PyLong_Type,
+        .result_type = &PyBytes_Type,
+        .func.meth = (PyCFunction)bytes_fromhex,
+    },
+    /* bytes.fromhex(str): result is exactly bytes; runs no Python code */
+    {
+        .nargs = 1,
+        .flags = 0,
+        .result_const = -1,
+        .result_alias = -1,
+        .arg_type = &PyUnicode_Type,
+        .result_type = &PyBytes_Type,
+        .func.meth = (PyCFunction)bytes_fromhex,
+    },
+    /* bytes.fromhex(range): result is exactly bytes; runs no Python code */
+    {
+        .nargs = 1,
+        .flags = 0,
+        .result_const = -1,
+        .result_alias = -1,
+        .arg_type = &PyRange_Type,
+        .result_type = &PyBytes_Type,
+        .func.meth = (PyCFunction)bytes_fromhex,
+    },
+    /* bytes.fromhex(dict): result is exactly bytes; runs no Python code */
+    {
+        .nargs = 1,
+        .flags = 0,
+        .result_const = -1,
+        .result_alias = -1,
+        .arg_type = &PyDict_Type,
+        .result_type = &PyBytes_Type,
+        .func.meth = (PyCFunction)bytes_fromhex,
+    },
+    /* bytes.fromhex(float): result is exactly bytes; runs no Python code */
+    {
+        .nargs = 1,
+        .flags = 0,
+        .result_const = -1,
+        .result_alias = -1,
+        .arg_type = &PyFloat_Type,
+        .result_type = &PyBytes_Type,
+        .func.meth = (PyCFunction)bytes_fromhex,
+    },
+    /* bytes.fromhex(x): result is exactly bytes; may run Python code */
+    {
+        .nargs = 1,
+        .flags = _PySpec_MAY_RUN_PYTHON,
+        .result_const = -1,
+        .result_alias = -1,
+        .arg_type = NULL,
+        .result_type = &PyBytes_Type,
+        .func.meth = (PyCFunction)bytes_fromhex,
     },
 };
 
@@ -625,5 +745,7 @@ const _PySpecCallTable _PySpec_bytes_calls = {
     .type = &PyBytes_Type,
     .ncalls = Py_ARRAY_LENGTH(bytes_new_spec_calls),
     .calls = bytes_new_spec_calls,
+    .nmethods = Py_ARRAY_LENGTH(bytes_spec_methods),
+    .methods = bytes_spec_methods,
 };
 

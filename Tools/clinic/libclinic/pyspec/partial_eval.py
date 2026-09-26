@@ -24,6 +24,23 @@ class Value:
         self.obj = obj
 
 
+class Bound:
+    """The name refers to a spec method bound to an argument, whose call
+    evaluates to *value* (an ast node) without side effects.
+
+    ``(func := C.lookup_special(x, "__bytes__")) is not NULL`` binds func
+    when the exact type of x is a static type whose __bytes__ is a spec
+    method, and that method, partially evaluated for x, is just
+    ``return self`` (or a constant): ``result = func()`` then becomes
+    ``result`` is x.  A static type cannot change, so the lookup is
+    decided by the type alone; a heap type (e.g. a subclass) is not.
+    """
+
+    def __init__(self, name, value):
+        self.name = name
+        self.value = value
+
+
 MAX_INLINE_DEPTH = 8
 
 
@@ -155,10 +172,75 @@ class _Rename(ast.NodeTransformer):
         return ast.copy_location(new, node)
 
 
+def _is_static_type(tp):
+    return isinstance(tp, type) and not tp.__flags__ & (1 << 9)
+
+
+def _pure_value(residual, param):
+    """The value of a residual that is just ``return <param or constant>``
+    (the parameter as ast.Name), or None."""
+    match residual:
+        case [ast.Return(value=ast.Name(name) as value)] if name == param:
+            return value
+        case [ast.Return(value=ast.Constant() as value)]:
+            return value
+    return None
+
+
 class Evaluator:
     def __init__(self, spec):
         self.spec = spec
         self._suffix = itertools.count(1)
+
+    def special_method(self, tp, name):
+        """The spec method (name) that C.lookup_special(x, name) finds for
+        an object x of exact type tp, or None when not known statically."""
+        if not _is_static_type(tp):
+            return None
+        for klass in tp.__mro__:
+            if name in klass.__dict__:
+                spec_name = f'{klass.__name__}.{name}'
+                node = self.spec.functions.get(spec_name)
+                if (klass is getattr(builtins, klass.__name__, None)
+                        and self.spec.implemented(spec_name)
+                        and not node.decorator_list):
+                    return spec_name
+                return None
+        return None
+
+    def bind_special(self, test, env, depth):
+        """For ``if (v := C.lookup_special(x, "name")) is [not] NULL``
+        that finds a spec method whose call on x is pure: (v, Bound, is the
+        test true).  Otherwise None."""
+        match test:
+            case ast.Compare(
+                    left=ast.NamedExpr(
+                        target=ast.Name(target),
+                        value=ast.Call(
+                            func=ast.Attribute(ast.Name('C'),
+                                               'lookup_special'),
+                            args=[ast.Name(obj) as obj_node,
+                                  ast.Constant(str() as name)])),
+                    ops=[ast.Is() | ast.IsNot() as op],
+                    comparators=[ast.Name('NULL')]):
+                pass
+            case _:
+                return None
+        tp = env.get(obj)
+        if not isinstance(tp, type) or depth >= MAX_INLINE_DEPTH:
+            return None
+        spec_name = self.special_method(tp, name)
+        if spec_name is None:
+            return None
+        self_param = self.spec.params(spec_name)[0]
+        residual = Evaluator(self.spec).block(self.spec.body(spec_name),
+                                              {self_param: tp}, depth + 1)
+        value = _pure_value(residual, self_param)
+        if value is None:
+            return None
+        if isinstance(value, ast.Name):
+            value = copy.copy(obj_node)
+        return target, Bound(spec_name, value), isinstance(op, ast.IsNot)
 
     def _is_spec_call(self, node):
         return (isinstance(node, ast.Call)
@@ -177,8 +259,29 @@ class Evaluator:
 
     def block(self, stmts, env, depth=0, inline=True):
         out = []
-        for i, stmt in enumerate(stmts):
-            if isinstance(stmt, ast.If):
+        stmts = list(stmts)
+        i = 0
+        while i < len(stmts):
+            stmt = stmts[i]
+            i += 1
+            match stmt:
+                case ast.Assign(targets=[ast.Name(target)],
+                                value=ast.Call(func=ast.Name(func), args=[]))\
+                        if isinstance(env.get(func), Bound):
+                    # result = func() of a pure bound spec method: result
+                    # is its value from here on.
+                    rename = _Rename({target: env[func].value})
+                    stmts[i:] = [rename.visit(copy.deepcopy(s))
+                                 for s in stmts[i:]]
+                    continue
+            bound = (self.bind_special(stmt.test, env, depth)
+                     if isinstance(stmt, ast.If) else None)
+            if bound is not None:
+                target, method, value = bound
+                env = env | {target: method}
+                out += self.block(stmt.body if value else stmt.orelse, env,
+                                  depth, inline)
+            elif isinstance(stmt, ast.If):
                 value = evaluate(stmt.test, env)
                 if value is True:
                     left = getattr(stmt.test, 'left', None)
