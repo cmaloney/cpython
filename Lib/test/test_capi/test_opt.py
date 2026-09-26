@@ -67,7 +67,10 @@ def get_all_executors(func):
 
 def iter_opnames(ex):
     for item in ex:
-        yield item[0]
+        # Debug builds check the optimizer's result facts at run time
+        # with _ASSERT_RESULT_* uops; release builds have none.
+        if not item[0].startswith("_ASSERT_RESULT_"):
+            yield item[0]
 
 
 def get_opnames(ex):
@@ -3309,8 +3312,7 @@ class TestUopsOptimization(unittest.TestCase):
                 self.assertIn("_GUARD_TYPE", uops)
                 # bytes(bytearray), bytes(memoryview) and bytes(range)
                 # run no Python code (derived from the spec: a range
-                # yields exact ints, which need no __index__): their call
-                # does not escape.
+                # yields exact ints, which need no __index__).
                 if isinstance(source, (bytearray, memoryview, range)):
                     self.assertIn("_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON",
                                   uops)
