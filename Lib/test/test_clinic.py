@@ -5592,12 +5592,15 @@ class VectorcallFunctionalTest(unittest.TestCase):
             return cls, partial(cls.__new__, cls)
 
         def through_init(cls):
-            # Not subclassable, and tp_new is PyType_GenericNew, so reach
-            # tp_init through the __init__ slot wrapper on an instance.
+            # tp_new is PyType_GenericNew (or does no argument parsing), so
+            # reach tp_init through the __init__ slot wrapper on an instance.
             return cls, partial(cls.__init__, cls(1))
 
         entry_points = [
-            through_new(enumerate),   # the only non-test @vectorcall function
+            # Non-test @vectorcall functions.
+            through_new(enumerate),
+            through_new(bytes),
+            through_init(bytearray),
             through_new(ac_tester.VcNew),
             through_new(ac_tester.VcNewBase),
             through_new(ac_tester.VcKwOnly),

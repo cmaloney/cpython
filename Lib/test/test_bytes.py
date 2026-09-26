@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import copy
+lazy import codecs
 import functools
 import pickle
 import tempfile
@@ -1706,6 +1707,31 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
         bytes_header_size = sys.getsizeof(b'')
         self.assertEqual(ba.__alloc__(), 499 + bytes_header_size)
 
+    def test_take_bytes_hash(self):
+        # gh-158219: Ensure `bytearray` resets hash when adopting an encoded
+        # bytes.
+
+        def encode(string, errors='strict'):
+            encoded = string.encode('utf-8')
+            hash(encoded)   # a codec may hash its own output
+            return encoded, len(string)
+
+        def hashing_codec(name):
+            if name != 'test_take_bytes_hash':
+                return None
+            return codecs.CodecInfo(encode, None, name=name)
+
+        codecs.register(hashing_codec)
+        self.addCleanup(codecs.unregister, hashing_codec)
+
+        ba = bytearray('hello', 'test_take_bytes_hash')
+
+        # Object should be same bytes and hash should include mutation.
+        ba[0] = ord('H')
+        taken = ba.take_bytes()
+        self.assertEqual(taken, b'Hello')
+        self.assertEqual(hash(taken), hash(b'Hello'))
+
     def test_take_bytes_reentrant_resize(self):
         # gh-153570: n.__index__() can resize the bytearray, so take_bytes()
         # must re-read the size afterwards.  It cached the size before the
@@ -2358,6 +2384,150 @@ class ByteArrayTest(BaseBytesTest, unittest.TestCase):
         with memoryview(a):
             self.assertRaises(BufferError, a.__init__, "x", "ascii")
         self.assertEqual(a, b"")
+
+
+class UniqueTemporaryZeroCopyTest(unittest.TestCase):
+    # bytes() and bytearray() hand the buffer over instead of copying it
+    # when the source is a unique temporary, which only the tp_vectorcall
+    # entry point can see: tp_new and tp_init hold the argument in an args
+    # tuple, a second reference.
+    #
+    # bytearray uses a bytes object as its buffer, so the hand-over is
+    # bytearray adopting the argument (bytearray(bytes)) or taking its own
+    # buffer object out (bytes(bytearray), as take_bytes() does).
+
+    SIZE = 1 << 20
+
+    def make_bytes(self, size=None):
+        """Return a fresh bytes object as a unique temporary."""
+        return bytes(size if size is not None else self.SIZE)
+
+    def make_bytearray(self, size=None):
+        """Return a fresh bytearray as a unique temporary."""
+        return bytearray(size if size is not None else self.SIZE)
+
+    def peak(self, func):
+        tracemalloc = import_helper.import_module('tracemalloc')
+        if tracemalloc.is_tracing():
+            self.skipTest('tracemalloc is already tracing')
+        tracemalloc.start()
+        try:
+            func()
+            return tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+    def assert_no_copy(self, zero_copy, copies):
+        """zero_copy must peak near one buffer, copies near two.
+
+        The `copies` control is measured too, so a run where tracemalloc
+        cannot tell the two apart fails instead of passing vacuously.
+        """
+        self.assertLess(self.peak(zero_copy), 1.5 * self.SIZE)
+        self.assertGreater(self.peak(copies), 1.5 * self.SIZE)
+
+    def test_bytearray_from_unique_bytes_no_copy(self):
+        def zero_copy():
+            bytearray(self.make_bytes())
+
+        def copies():
+            # A named local is not a unique temporary, so this still copies.
+            b = self.make_bytes()
+            bytearray(b)
+
+        self.assert_no_copy(zero_copy, copies)
+
+    def test_bytes_from_unique_bytearray_no_copy(self):
+        def zero_copy():
+            bytes(self.make_bytearray())
+
+        def copies():
+            ba = self.make_bytearray()
+            bytes(ba)
+
+        self.assert_no_copy(zero_copy, copies)
+
+    def test_values(self):
+        for size in (0, 1, 2, 17, 1000, 4096):
+            with self.subTest(size=size):
+                want = bytes(size)
+                self.assertEqual(bytearray(self.make_bytes(size)), want)
+                self.assertEqual(bytes(self.make_bytearray(size)), want)
+
+    def test_adopted_buffer_is_still_mutable(self):
+        # The bytearray owns the adopted bytes outright, so the usual
+        # resize, grow and shrink paths have to keep working on it.
+        ba = bytearray(self.make_bytes(8))
+        ba += b'xyz'
+        self.assertEqual(ba, bytes(8) + b'xyz')
+
+        ba = bytearray(self.make_bytes(8))
+        del ba[2:5]
+        self.assertEqual(ba, bytes(5))
+
+        ba = bytearray(self.make_bytes(8))
+        ba[0] = 1
+        ba.clear()
+        self.assertEqual(ba, b'')
+
+    def test_taken_buffer_hash_not_stale(self):
+        # Adopting the argument makes an immutable bytes mutable, so a hash
+        # it cached beforehand has to be forgotten: take_bytes() can hand
+        # that same object back out after the bytearray has changed it.
+        def hashed_bytes():
+            b = bytes(bytearray(range(16)))
+            hash(b)
+            return b
+
+        ba = bytearray(hashed_bytes())
+        ba[0] = 0xff
+        taken = ba.take_bytes()
+        # Built by concatenation so it is a different object with no cached
+        # hash; bytes(taken) would just return taken, stale hash included.
+        expected = bytes([0xff]) + bytes(range(1, 16))
+        self.assertEqual(taken, expected)
+        self.assertEqual(hash(taken), hash(expected))
+
+    def test_bytes_from_exported_bytearray(self):
+        # A bytearray with buffer exports cannot give its buffer away; it
+        # has to be copied, not rejected.
+        holder = []
+
+        def exported():
+            ba = bytearray(range(16))
+            holder.append(memoryview(ba))
+            return ba
+
+        self.assertEqual(bytes(exported()), bytes(range(16)))
+        self.assertEqual(holder[0].tobytes(), bytes(range(16)))
+
+    def test_offset_bytearray(self):
+        # A bytearray whose data does not start at the beginning of its
+        # buffer has to be realigned before the buffer can be handed over.
+        def offset():
+            ba = bytearray(range(16))
+            del ba[:5]
+            return ba
+
+        self.assertEqual(bytes(offset()), bytes(range(5, 16)))
+
+    def test_slot_paths_unaffected(self):
+        # tp_new/tp_init never see a unique temporary, and subclasses do not
+        # inherit tp_vectorcall, so these all copy.
+        self.assertEqual(bytes.__new__(bytes, self.make_bytearray(8)),
+                         bytes(8))
+        ba = bytearray()
+        ba.__init__(self.make_bytes(8))
+        self.assertEqual(ba, bytes(8))
+
+        class MyBytes(bytes):
+            pass
+
+        class MyByteArray(bytearray):
+            pass
+
+        self.assertEqual(MyBytes(self.make_bytearray(8)), bytes(8))
+        self.assertEqual(MyByteArray(self.make_bytes(8)), bytes(8))
 
 
 class AssortedBytesTest(unittest.TestCase):

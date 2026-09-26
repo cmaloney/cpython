@@ -1,0 +1,5 @@
+``bytearray(b)`` no longer copies ``b`` when it is a unique temporary
+:class:`bytes`, and ``bytes(ba)`` no longer copies ``ba`` when it is a unique
+temporary :class:`bytearray`; the buffer is handed over instead.  For example
+``bytearray(f.read())`` and ``bytes(bytearray(data))`` now allocate one buffer
+rather than two.

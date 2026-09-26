@@ -76,6 +76,20 @@ _Py_COMP_DIAG_IGNORE_DEPR_DECLS
 _Py_COMP_DIAG_POP
 }
 
+void
+_PyBytes_ClearHash(PyObject *op)
+{
+    // Safety check.
+    assert(PyBytes_Check(op));
+    assert(!_Py_IsImmortal(op));
+
+    // Clear before checking mutability.
+    set_ob_shash(_PyBytes_CAST(op), -1);
+
+    // Comprehensive checks: These require the hash is `-1`.
+    assert(_PyBytes_IsMutable(op));
+}
+
 
 /*
    For PyBytes_FromString(), the parameter 'str' points to a null-terminated
@@ -2865,6 +2879,7 @@ static PyObject *
 bytes_subtype_new(PyTypeObject *, PyObject *);
 
 /*[clinic input]
+@vectorcall
 @classmethod
 bytes.__new__ as bytes_new
 
@@ -2877,7 +2892,7 @@ bytes.__new__ as bytes_new
 static PyObject *
 bytes_new_impl(PyTypeObject *type, PyObject *x, const char *encoding,
                const char *errors)
-/*[clinic end generated code: output=1e0c471be311a425 input=f0a966d19b7262b4]*/
+/*[clinic end generated code: output=1e0c471be311a425 input=b0248d22e221a095]*/
 {
     PyObject *bytes;
     PyObject *func;
@@ -2948,6 +2963,19 @@ bytes_new_impl(PyTypeObject *type, PyObject *x, const char *encoding,
             }
             bytes = _PyBytes_FromSize(size, 1);
         }
+    }
+    /* Take the buffer of a unique temporary bytearray rather than copying
+       it.  The caller holds the only reference and cannot use it again, so
+       nothing can observe that the bytearray is left empty.  Only the
+       vectorcall reaches this: tp_new holds `x` in an args tuple, which is
+       a second reference. */
+    else if (PyByteArray_CheckExact(x)
+             && PyUnstable_Object_IsUniqueReferencedTemporary(x))
+    {
+        /* A buffer export holds a reference to the bytearray, so a unique
+           temporary has none and take_bytes() can always hand over. */
+        assert(((PyByteArrayObject *)x)->ob_exports == 0);
+        bytes = PyObject_CallMethodNoArgs(x, &_Py_ID(take_bytes));
     }
     else {
         bytes = PyBytes_FromObject(x);
@@ -3263,6 +3291,7 @@ PyTypeObject PyBytes_Type = {
     bytes_alloc,                                /* tp_alloc */
     bytes_new,                                  /* tp_new */
     PyObject_Free,                              /* tp_free */
+    .tp_vectorcall = bytes_vectorcall,
     .tp_version_tag = _Py_TYPE_VERSION_BYTES,
     ._tp_iteritem = bytes_iteritem,
 };
@@ -3346,6 +3375,10 @@ _PyBytes_IsMutable(PyObject *self)
         unsigned char ch = PyBytes_AS_STRING(self)[0];
         assert(self != (PyObject*)CHARACTER(ch));
     }
+
+    // There should not be a computed hash. Mutations to the bytes mean the hash
+    // needs to be recalculated (gh-158219).
+    assert(get_ob_shash((PyBytesObject *)self) == -1);
     return 1;
 }
 #endif

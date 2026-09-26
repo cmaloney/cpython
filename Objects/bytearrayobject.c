@@ -61,6 +61,12 @@ bytearray_reinit_from_bytes(PyByteArrayObject *self, Py_ssize_t size)
     /* Only the empty bytes may be immortal. */
     assert((alloc == 0) == _Py_IsImmortal(self->ob_bytes_object));
 
+    /* Bytes may be uniquely referenced with a hash set. Clear the hash so after
+       mutation it will be recomputed (gh-158219). */
+    if (!_Py_IsImmortal(self->ob_bytes_object)) {
+        _PyBytes_ClearHash(self->ob_bytes_object);
+    }
+
     self->ob_bytes = self->ob_start = PyBytes_AS_STRING(self->ob_bytes_object);
     Py_SET_SIZE(self, size);
     FT_ATOMIC_STORE_SSIZE_RELAXED(self->ob_alloc, alloc);
@@ -972,6 +978,7 @@ bytearray_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 }
 
 /*[clinic input]
+@vectorcall
 bytearray.__init__
 
     source as arg: object = NULL
@@ -983,7 +990,7 @@ bytearray.__init__
 static int
 bytearray___init___impl(PyByteArrayObject *self, PyObject *arg,
                         const char *encoding, const char *errors)
-/*[clinic end generated code: output=4ce1304649c2f8b3 input=1141a7122eefd7b9]*/
+/*[clinic end generated code: output=4ce1304649c2f8b3 input=24ddb84055f432dd]*/
 {
     Py_ssize_t count;
     PyObject *it;
@@ -1074,6 +1081,26 @@ bytearray___init___impl(PyByteArrayObject *self, PyObject *arg,
             }
             return 0;
         }
+    }
+
+    /* Take a unique temporary bytes over as the buffer rather than copying
+       it.  The caller holds the only reference and cannot use it again, so
+       nothing can observe that the bytes and the bytearray now share
+       storage.  Only the vectorcall reaches this: tp_new and tp_init hold
+       `arg` in an args tuple, which is a second reference. */
+    if (PyBytes_CheckExact(arg) && PyBytes_GET_SIZE(arg) > 0
+        && PyUnstable_Object_IsUniqueReferencedTemporary(arg))
+    {
+        /* Only the empty bytes may be the immortal one, and ob_alloc == 0
+           has to mean exactly that, so an empty source keeps the
+           already-set-up empty buffer instead of replacing it. */
+        Py_ssize_t size = PyBytes_GET_SIZE(arg);
+        /* Borrow until reinit has cleared the hash: _PyBytes_ClearHash()
+           asserts the bytes has a single reference, the caller's. */
+        self->ob_bytes_object = arg;
+        bytearray_reinit_from_bytes(self, size);
+        Py_INCREF(arg);
+        return 0;
     }
 
     /* Use the buffer API */
@@ -3009,6 +3036,7 @@ PyTypeObject PyByteArray_Type = {
     PyType_GenericAlloc,                /* tp_alloc */
     bytearray_new,                      /* tp_new */
     PyObject_Free,                      /* tp_free */
+    .tp_vectorcall = bytearray_vectorcall,
     .tp_version_tag = _Py_TYPE_VERSION_BYTEARRAY,
 };
 
