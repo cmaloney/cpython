@@ -10,8 +10,7 @@ does a fixed one that is still listed.
 
 capi        For each C API function of a type: the headers (Include/), the
             C definitions, Doc/c-api/*.rst, Doc/data/refcounts.dat,
-            Misc/stable_abi.toml, Doc/data/threadsafety.dat, and the facts
-            no other file has (Objects/pyspec/capi/<C file stem>.py).
+            Misc/stable_abi.toml and Doc/data/threadsafety.dat.
 docs        The ``.. method:: bytes.x(...)`` and ``.. class::`` lines of
             Doc/builtins/stdtypes.rst vs the runtime signatures (the
             spec's for ``__new__``).
@@ -239,23 +238,6 @@ def parse_refcounts(srcdir):
     return out
 
 
-def load_facts(srcdir, cfile):
-    """(path, facts) of Objects/pyspec/capi/<stem>.py: facts is {name:
-    runs Python, or 'both' if in both sets}, or None without the file."""
-    stem = os.path.splitext(os.path.basename(cfile))[0]
-    rel = f'Objects/pyspec/capi/{stem}.py'
-    if not os.path.exists(os.path.join(srcdir, rel)):
-        return rel, None
-    facts = {}
-    for node in ast.parse(_read(srcdir, rel)).body:
-        if isinstance(node, ast.Assign):
-            runs = {'RUNS_PYTHON': True, 'NO_PYTHON': False}[
-                node.targets[0].id]
-            for name in ast.literal_eval(node.value):
-                facts[name] = 'both' if name in facts else runs
-    return rel, facts
-
-
 # ---------------------------------------------------------------------------
 # Dimension: C API
 
@@ -275,9 +257,6 @@ def capi(srcdir):
         listed = set(docs) | set(refcounts) | threadsafety | set(stable_abi)
         names = set(cdefs) | {n for n in listed
                               if n.startswith(config['prefixes'])}
-        spec = frontend.Spec.load(frontend.spec_path(
-            os.path.join(srcdir, cfile)))
-        facts_path, facts = load_facts(srcdir, cfile)
 
         def add(name, message):
             out.append(f'{name}: {message}')
@@ -332,20 +311,6 @@ def capi(srcdir):
             if name in threadsafety and not doc:
                 add(name, 'in Doc/data/threadsafety.dat but not documented '
                           'with .. c:function::')
-            # Facts only Objects/pyspec/capi/ has.
-            if cdef is None:
-                continue
-            if spec is not None and (spec.implemented(name) or name in
-                                     spec.c_implemented_functions()):
-                if facts and name in facts:
-                    add(name, f'implemented in the spec: remove it from '
-                              f'{facts_path}')
-            elif facts is None or name not in facts:
-                add(name, f'no "runs Python" fact in {facts_path}')
-            elif facts[name] == 'both':
-                add(name, f'both RUNS_PYTHON and NO_PYTHON in {facts_path}')
-        for name in sorted(set(facts or ()) - set(cdefs)):
-            add(name, f'in {facts_path} but not defined in {cfile}')
     return sorted(out)
 
 
@@ -787,11 +752,10 @@ SLOT_CALLS = {
     'PyIter_Next': '__next__',
 }
 
-# Audited: C functions without a spec (and not static in the file of the
-# function checked, which is read) that run no Python code, besides the
-# NO_PYTHON sets of Objects/pyspec/capi/.  Errors, memory, the objects of
-# exact builtin types; a fatal error does not return; tp_alloc has no
-# special method (Python code cannot define it).
+# Audited: C functions without a spec (and not in the file of the function
+# checked, which is read) that run no Python code.  Errors, memory, the
+# objects of exact builtin types; a fatal error does not return; tp_alloc
+# has no special method (Python code cannot define it).
 NO_PYTHON = {
     'PyErr_Format', 'PyErr_SetString', 'PyErr_NoMemory', 'PyErr_Clear',
     'PyErr_Occurred', 'PyErr_GivenExceptionMatches', '_PyErr_Format',
@@ -823,14 +787,11 @@ def _blank(match):
         '\n' * text.count('\n')
 
 
-def _c_function(lexer, text, name, static=False):
+def _c_function(lexer, text, name):
     """The tokens of the body of the C function *name* in *text*, or
-    None.  With *static*, only a static function."""
+    None."""
     # Its name, after its return type (on this line or the one before).
     for match in re.finditer(rf'^[^;{{}}()=\n]*?\b{name}\(', text, re.M):
-        head = text[text.rfind('\n', 0, match.start() - 1):match.end()]
-        if static and 'static' not in head:
-            continue
         depth, body = 0, []
         for tkn in lexer.tokenize(text[match.end() - len(name) - 1:]):
             if tkn.kind == 'SEMI' and not depth:
@@ -899,9 +860,9 @@ def _spec_files(srcdir):
 
 def c_calls(srcdir):
     """For each @c_implemented function: every call in its C (and in the
-    static functions of its file it calls) that may run Python code is
-    one its Python reference makes, a calls(x, "__name__") of the special
-    method it invokes, or covered by runs_python()."""
+    functions of its file it calls) that may run Python code is one its
+    Python reference makes, a calls(x, "__name__") of the special method
+    it invokes, or covered by runs_python()."""
     sys.path.insert(0, os.path.join(srcdir, 'Tools', 'cases_generator'))
     try:
         import analyzer, lexer, parsing
@@ -915,10 +876,6 @@ def c_calls(srcdir):
     specs = [frontend.load_imported(path) for path in _spec_files(srcdir)]
     implemented = {name for spec in specs
                    for name in spec.c_implemented_functions()}
-    no_python = set(NO_PYTHON)
-    for rel in ('Objects/bytesobject.c', 'Objects/bytearrayobject.c'):
-        found = load_facts(srcdir, rel)[1] or {}
-        no_python |= {name for name, runs in found.items() if not runs}
     out = []
     for spec in specs:
         rel = os.path.relpath(spec.filename, srcdir).replace(os.sep, '/')
@@ -951,40 +908,37 @@ def c_calls(srcdir):
                         specials.add(f'__{f}__')
                     case ast.Call(func=ast.Name(f)):
                         called.add(f)
-            # The calls of the C function and of the static functions of
-            # its file it calls.
-            calls, todo, seen = set(), [body], set()
+            # The calls of the C function, and of the functions of its file
+            # it calls (read in turn) unless accounted for.
+            todo, seen, calls = [body], set(), set()
             while todo:
                 for callee in _escaping_calls(analyzer, parsing, todo.pop(),
                                               dunders):
-                    inner = (None if callee in implemented else
-                             _c_function(lexer, text, callee, static=True))
-                    if inner is None:
-                        calls.add(callee)
-                    elif callee not in seen:
-                        seen.add(callee)
-                        todo.append(inner)
-            for callee in sorted(calls):
-                need = dunders.get(callee, {SLOT_CALLS.get(callee)})
-                if (callee in called or callee in no_python
-                        or 'runs_python' in called or need & specials):
-                    continue
-                if callee in implemented:
-                    # Its own facts; whether its C agrees is its own check.
-                    found = spec.resolve(callee) or next(
-                        (s.resolve(callee) for s in specs
-                         if s.resolve(callee)), None)
-                    if found and not facts.analyzer(found[0]).reference_facts(
-                            callee, {}).runs_python:
+                    calls.add(callee)
+                    need = dunders.get(callee, {SLOT_CALLS.get(callee)})
+                    if (callee in called or callee in NO_PYTHON
+                            or 'runs_python' in called or need & specials
+                            or callee in seen):
                         continue
-                    out.append(f'{where}: calls {callee}(), which may run '
-                               'Python code, and its reference does not')
-                    continue
-                what = ' or '.join(f'calls(x, "{d}")' for d in sorted(
-                    need - {None}))
-                out.append(f'{where}: calls {callee}(), which may run Python '
-                           f'code: account for it with {what or "runs_python()"}'
-                           f'{" or runs_python()" if what else ""}')
+                    seen.add(callee)
+                    if callee in implemented:
+                        # Its facts; whether its C agrees is its own check.
+                        found = next(s.resolve(callee) for s in specs
+                                     if s.resolve(callee))
+                        if not facts.analyzer(found[0]).reference_facts(
+                                callee, {}).runs_python:
+                            continue
+                        out.append(f'{where}: calls {callee}(), which may '
+                                   'run Python code, and its reference does '
+                                   'not')
+                    elif (inner := _c_function(lexer, text, callee)):
+                        todo.append(inner)
+                    else:
+                        what = ''.join(f'calls(x, "{d}") or '
+                                       for d in sorted(need - {None}))
+                        out.append(f'{where}: calls {callee}(), which may '
+                                   'run Python code: account for it with '
+                                   f'{what}runs_python()')
             # A reference that cannot fail: the C cannot either.
             returns = frontend.c_signature(node)[1] if '.' not in name \
                 else 'void'

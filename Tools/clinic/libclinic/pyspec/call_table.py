@@ -8,9 +8,8 @@ generate() here, which adds to the same generated file (Argument Clinic
 writes it; there is no separate command):
 
 * NAME_nargs1_T(): NAME_nargs1 partially evaluated for an argument of
-  exact type T, for T from a fixed list of common builtin types
-  (builtin_types.CANDIDATES).  No annotation chooses them: a variant is kept only
-  when its residual code is much smaller than the generic one
+  exact type T, for the candidates of builtin_types.py.  A variant is kept
+  only when its residual code is much smaller than the generic one
   (KEEP_RATIO); variants with identical code share one C function, and a
   variant that would only call a shared specialization
   (partial_eval.Specialization, e.g. bytes_from_iterator_list()) is that

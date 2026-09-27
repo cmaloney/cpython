@@ -123,15 +123,7 @@ class SignatureTest(unittest.TestCase):
                          "(string=?, /, encoding=?, errors='strict')")
 
 
-class CAPIFactsTest(unittest.TestCase):
-
-    def test_facts(self):
-        path, facts = disconnects.load_facts(SRCDIR, 'Objects/bytesobject.c')
-        self.assertEqual(path, 'Objects/pyspec/capi/bytesobject.py')
-        self.assertIs(facts['PyBytes_Join'], True)
-        self.assertIs(facts['PyBytes_Size'], False)
-        # Derived from its spec body, not declared.
-        self.assertNotIn('PyBytes_FromObject', facts)
+class CAPITest(unittest.TestCase):
 
     def test_parse_c(self):
         self.assertEqual(

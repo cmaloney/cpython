@@ -639,8 +639,7 @@ def bytes_from_iterator(it: object, x: object):
 # The C functions of bytesobject.c the bodies above call.  Each is
 # @c_implemented: its C is the authority; the body is its Python
 # reference, run when the spec runs as Python and read for the facts of
-# the calls (see Objects/pyspec/README.rst).  The facts of the C API of
-# bytesobject.c are in Objects/pyspec/capi/bytesobject.py.
+# the calls (see Objects/pyspec/README.rst).
 
 
 @c_implemented

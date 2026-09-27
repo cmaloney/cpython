@@ -2,15 +2,9 @@
 # stable_abi.toml, threadsafety.dat and Objects/pyspec/capi/.
 # Checked by Lib/test/test_pyspec_catalog.py: this list may only shrink.
 # Fixed one?  Delete its line.  Keep the lines sorted.
-PyByteArray_AsString: no "runs Python" fact in Objects/pyspec/capi/bytearrayobject.py
 PyByteArray_Check: documented but has no entry in Doc/data/threadsafety.dat
 PyByteArray_CheckExact: documented but has no entry in Doc/data/threadsafety.dat
-PyByteArray_Concat: no "runs Python" fact in Objects/pyspec/capi/bytearrayobject.py
-PyByteArray_FromObject: no "runs Python" fact in Objects/pyspec/capi/bytearrayobject.py
-PyByteArray_FromStringAndSize: no "runs Python" fact in Objects/pyspec/capi/bytearrayobject.py
 PyByteArray_Resize: documented but has no entry in Doc/data/threadsafety.dat
-PyByteArray_Resize: no "runs Python" fact in Objects/pyspec/capi/bytearrayobject.py
-PyByteArray_Size: no "runs Python" fact in Objects/pyspec/capi/bytearrayobject.py
 PyBytesWriter_Create: documented but has no entry in Doc/data/threadsafety.dat
 PyBytesWriter_Discard: documented but has no entry in Doc/data/threadsafety.dat
 PyBytesWriter_Finish: documented but has no entry in Doc/data/threadsafety.dat
