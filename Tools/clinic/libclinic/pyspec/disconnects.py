@@ -791,12 +791,15 @@ def _blank(match):
 def _c_function(lexer, text, name):
     """The tokens of the body of the C function *name* in *text*, or
     None."""
-    # Its name, after its return type (on this line or the one before).
+    # Its name, after its return type (on this line or the one before),
+    # then its parameters and ``{``.
     for match in re.finditer(rf'^[^;{{}}()=\n]*?\b{name}\(', text, re.M):
-        depth, body = 0, []
+        parens, depth, body = 0, 0, []
         for tkn in lexer.tokenize(text[match.end() - len(name) - 1:]):
-            if tkn.kind == 'SEMI' and not depth:
-                break           # a declaration
+            if not body and parens == 0 and tkn.kind not in (
+                    'IDENTIFIER', 'LPAREN', 'LBRACE'):
+                break           # a declaration or a call
+            parens += {'LPAREN': 1, 'RPAREN': -1}.get(tkn.kind, 0)
             depth += {'LBRACE': 1, 'RBRACE': -1}.get(tkn.kind, 0)
             if depth or body:
                 body.append(tkn)
