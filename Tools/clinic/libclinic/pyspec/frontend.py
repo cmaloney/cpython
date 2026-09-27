@@ -53,25 +53,11 @@ Python.pyspec.errors import PyErr_BadInternalCall``).
 
 Decorators
 ----------
-The rule is: any clinic decorator may be written on a spec method as a
-Python decorator with the same name and arguments, and runtime.py defines
-each as an identity decorator.  This is the whole rule, because:
-
-* a clinic decorator already is a per-function fact written above the
-  function line, and a Python decorator is written in the same place with
-  the same shape (``@name`` or ``@name(args)``), so the translation is
-  mechanical both ways and needs no table of meanings in the frontend:
-  clinic itself validates the names and arguments, as it does in a .c
-  file;
-* none of them changes what the function does when called from Python:
-  they choose how clinic renders C (text signature, calling convention,
-  locking, accessor kind) or silence a docstring lint.  An identity
-  decorator is therefore the exact Python meaning, and the spec stays an
-  ordinary, runnable Python file.  (``@classmethod`` and ``@staticmethod``
-  are the two that do change the Python meaning; they are Python's own.)
-
-A decorator's arguments must be string or integer constants, since a
-clinic decorator line only holds words.
+Any clinic decorator may be written on a spec method as a Python
+decorator with the same name and arguments (string or integer constants),
+which runtime.py defines as an identity decorator: it only chooses how
+clinic renders C, and clinic validates it as in a .c file.
+(``@classmethod`` and ``@staticmethod`` are Python's own.)
 
 C names: @c_name
 ----------------
@@ -206,12 +192,6 @@ class SpecFunction:
     parameters: list[SpecParameter]
     # For a __new__: the Python name of its class.
     new_type: str | None = None
-
-    @property
-    def type_object(self) -> str | None:
-        if self.new_type is None:
-            return None
-        return TYPE_OBJECTS[self.new_type]
 
 
 def spec_path(filename: str) -> str:

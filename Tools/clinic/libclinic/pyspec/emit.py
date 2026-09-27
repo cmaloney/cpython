@@ -187,12 +187,11 @@ class FunctionEmitter:
         object locals."""
         for block in reversed(self.finally_blocks):
             for stmt in block:
-                if not (isinstance(stmt, ast.Expr)
-                        and isinstance(stmt.value, ast.Call)):
-                    raise SpecError(stmt, 'a finally clause only calls C '
-                                    'functions that cannot fail')
-                expr, _, convention = self.lower_call(stmt.value)
-                if convention is not None:
+                expr = convention = None
+                if isinstance(stmt, ast.Expr) and isinstance(stmt.value,
+                                                             ast.Call):
+                    expr, _, convention = self.lower_call(stmt.value)
+                if expr is None or convention is not None:
                     raise SpecError(stmt, 'a finally clause only calls C '
                                     'functions that cannot fail')
                 self.emit(f'{expr};')

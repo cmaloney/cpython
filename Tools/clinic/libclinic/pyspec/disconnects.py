@@ -787,35 +787,25 @@ SLOT_CALLS = {
     'PyIter_Next': '__next__',
 }
 
-# Audited: C functions (without a spec) that run no Python code.
+# Audited: C functions without a spec (and not static in the file of the
+# function checked, which is read) that run no Python code, besides the
+# NO_PYTHON sets of Objects/pyspec/capi/.  Errors, memory, the objects of
+# exact builtin types; a fatal error does not return; tp_alloc has no
+# special method (Python code cannot define it).
 NO_PYTHON = {
-    # Errors: setting and reading the exception runs no Python code.
     'PyErr_Format', 'PyErr_SetString', 'PyErr_NoMemory', 'PyErr_Clear',
     'PyErr_Occurred', 'PyErr_GivenExceptionMatches', '_PyErr_Format',
-    '_PyErr_SetString', '_PyErr_Clear', 'null_error',
-    '_PyThreadState_GET',
-    # Memory and objects of exact builtin types.
-    'memcpy', 'PyLong_AsSsize_t', '_PyLong_IsNegative', '_PyLong_Copy',
-    'PyBuffer_ToContiguous', 'PyBuffer_FillInfo', 'PyBytes_FromStringAndSize',
+    '_PyErr_SetString', '_PyErr_Clear', '_PyThreadState_GET', 'memcpy',
+    'memset', 'PyMem_Malloc', 'PyObject_Malloc', 'PyObject_Calloc',
+    'PyObject_Realloc', '_PyObject_InitVar', '_PyReftracerTrack',
+    '_Py_AddToAllObjects', '_Py_ForgetReference', '_Py_NewReferenceNoTotal',
+    '_Py_atomic_load_ssize_relaxed', '_Py_atomic_store_ssize_relaxed',
+    'PyLong_AsSsize_t', '_PyLong_IsNegative', '_PyLong_Copy',
     '_PyLong_FromUnsignedChar', '_PyType_LookupRef', '_PyObject_HasLen',
-    'PyBytesWriter_GetData', 'PyBytesWriter_Create', 'PyBytesWriter_Discard',
-    'PyBytesWriter_Finish', 'PyBytesWriter_FinishWithPointer',
-    '_PyBytesWriter_ResizeToAllocated',
-    '_PyBytesWriter_ResizeAndUpdatePointer', 'set_ob_shash',
-    'get_ob_shash', 'PyObject_Malloc', 'PyObject_Calloc',
-    '_PyObject_InitVar', '_Py_atomic_store_ssize_relaxed',
-    'PyMem_Malloc', 'PyObject_Realloc', 'memset', 'PyObject_CheckBuffer',
+    'PyObject_CheckBuffer', 'PyBuffer_ToContiguous', 'PyBuffer_FillInfo',
     'PyByteArray_FromStringAndSize', 'PyByteArray_Resize',
-    '_PyBytesWriter_GetData', '_PyReftracerTrack', '_Py_AddToAllObjects',
-    '_Py_ForgetReference', '_Py_NewReferenceNoTotal',
-    '_Py_atomic_load_ssize_relaxed',
-    # A fatal error does not return.
-    '_Py_FatalErrorFormat',
-    # tp_alloc has no special method: Python code cannot define it.
-    'tp_alloc',
-    # Releasing a reference (Py_DECREF and the other macros): the
-    # functions checked release only references they made or whose object
-    # their caller keeps alive: no finalizer runs.
+    '_PyBytesWriter_GetData',
+    '_Py_FatalErrorFormat', 'tp_alloc',
 }
 
 
@@ -833,42 +823,30 @@ def _blank(match):
         '\n' * text.count('\n')
 
 
-def _c_function(tokens, name, static=False):
-    """The tokens of the body of the C function *name* (file level
-    ``name(...) {...}``, and ``static`` with *static*), or None."""
-    depth, start, braces = 0, 0, []
-    for i, tkn in enumerate(tokens):
-        if tkn.kind == 'LBRACE':
-            # extern "C" { ... } (a header) is not a block.
-            braces.append(tokens[i - 2].text != 'extern')
-            depth += braces[-1]
-        elif tkn.kind == 'RBRACE' and braces:
-            depth -= braces.pop()
-        if depth == 0 and tkn.kind in ('SEMI', 'RBRACE'):
-            start = i
-        elif (depth == 0 and tkn.text == name and i + 1 < len(tokens)
-                and tokens[i + 1].kind == 'LPAREN'):
-            j, parens = i + 1, 0
-            while True:
-                parens += {'LPAREN': 1, 'RPAREN': -1}.get(tokens[j].kind, 0)
-                j += 1
-                if parens == 0:
-                    break
-            if j < len(tokens) and tokens[j].kind == 'LBRACE' and not (
-                    static and 'STATIC' not in {t.kind
-                                                for t in tokens[start:i]}):
-                end, braces = j, 0
-                while True:
-                    braces += {'LBRACE': 1, 'RBRACE': -1}.get(
-                        tokens[end].kind, 0)
-                    end += 1
-                    if braces == 0:
-                        return tokens[j:end]
+def _c_function(lexer, text, name, static=False):
+    """The tokens of the body of the C function *name* in *text*, or
+    None.  With *static*, only a static function."""
+    # Its name, after its return type (on this line or the one before).
+    for match in re.finditer(rf'^[^;{{}}()=\n]*?\b{name}\(', text, re.M):
+        head = text[text.rfind('\n', 0, match.start() - 1):match.end()]
+        if static and 'static' not in head:
+            continue
+        depth, body = 0, []
+        for tkn in lexer.tokenize(text[match.end() - len(name) - 1:]):
+            if tkn.kind == 'SEMI' and not depth:
+                break           # a declaration
+            depth += {'LBRACE': 1, 'RBRACE': -1}.get(tkn.kind, 0)
+            if depth or body:
+                body.append(tkn)
+            if body and not depth:
+                return body
     return None
 
 
 # A macro-style name (PyBytes_AS_STRING, Py_SET_SIZE, _PyBytes_CAST): an
-# accessor, or releasing a reference (Py_DECREF, see NO_PYTHON).
+# accessor, or the release of a reference (Py_DECREF): the functions
+# checked release only references they made or whose object their caller
+# keeps alive, so no finalizer runs.
 _ACCESSOR = re.compile(r'_?[A-Za-z]+_[A-Z0-9_]+')
 
 
@@ -950,14 +928,13 @@ def c_calls(srcdir):
         cfile = next((f for f in cfiles if os.path.exists(f)), None)
         if cfile is None:
             continue
-        tokens = list(lexer.tokenize(_LITERALS.sub(_blank, _read(
-            srcdir, cfile)), filename=cfile))
+        text = _LITERALS.sub(_blank, _read(srcdir, cfile))
         for name in spec.c_implemented_functions():
             node = spec.functions[name]
             positional, keywords = spec.c_name(name)
             c_name = positional or next(iter(keywords.values()), name)
             where = f'{rel}: {name}'
-            body = _c_function(tokens, c_name)
+            body = _c_function(lexer, text, c_name)
             if body is None:
                 out.append(f'{where}: no C function {c_name} in '
                            f'{os.path.relpath(cfile, srcdir)}')
@@ -980,8 +957,8 @@ def c_calls(srcdir):
             while todo:
                 for callee in _escaping_calls(analyzer, parsing, todo.pop(),
                                               dunders):
-                    inner = (None if callee in implemented
-                             else _c_function(tokens, callee, static=True))
+                    inner = (None if callee in implemented else
+                             _c_function(lexer, text, callee, static=True))
                     if inner is None:
                         calls.add(callee)
                     elif callee not in seen:
