@@ -34,7 +34,7 @@ import ast
 import builtins
 import weakref
 
-from . import builtin_types, frontend
+from . import builtin_types, frontend, partial_eval
 
 # Raises any exception.
 ANY = 'ANY'
@@ -44,25 +44,25 @@ PURE_BUILTINS = ('isinstance', 'hasattr', 'type', 'tp_name', 'fqname')
 
 
 class Facts:
-    """Facts about the results of a list of statements."""
+    """Facts about the results of a list of statements; with *worst*,
+    those of code about which nothing is known."""
 
-    def __init__(self):
+    def __init__(self, worst=False):
         # Per return: (exact type or None, index of the argument it
         # returns or None).
-        self.returns = []
-        self.returns_null = False
-        self.runs_python = False
-        self.raises = set()
-
-    def worst(self):
-        self.returns.append((None, None))
-        self.returns_null = self.runs_python = True
-        self.raises.add(ANY)
+        self.returns = [(None, None)] if worst else []
+        self.returns_null = worst
+        self.runs_python = worst
+        self.raises = {ANY} if worst else set()
 
     def add(self, other):
         """The effects of *other* (a call) happen here."""
         self.runs_python |= other.runs_python
         self.raises |= other.raises
+
+    def python(self):
+        """Python code may run here, and raise anything."""
+        self.add(Facts(worst=True))
 
     @property
     def always_raises(self):
@@ -71,27 +71,21 @@ class Facts:
     @property
     def result_type(self):
         types = {tp for tp, _ in self.returns}
-        if len(types) == 1 and None not in types:
-            return types.pop()
-        return None
+        return types.pop() if len(types) == 1 and None not in types else None
 
     @property
     def alias(self):
         aliases = {alias for _, alias in self.returns}
-        if len(aliases) == 1 and None not in aliases:
-            return aliases.pop()
-        return None
+        return (aliases.pop() if len(aliases) == 1 and None not in aliases
+                else None)
 
     def raises_any(self, names):
         """Whether it may raise an exception that ``except names`` (the
         names of builtin exception classes) catches."""
-        if ANY in self.raises:
-            return True
-        classes = [getattr(builtins, name, None) for name in names]
-        if None in classes:
-            return True
-        return any(issubclass(getattr(builtins, raised), tuple(classes))
-                   for raised in self.raises)
+        classes = tuple(getattr(builtins, name, None) for name in names)
+        return ANY in self.raises or None in classes or any(
+            issubclass(getattr(builtins, raised), classes)
+            for raised in self.raises)
 
     def key(self):
         return (self.runs_python, self.always_raises, self.result_type,
@@ -126,64 +120,57 @@ class Analyzer:
     def __init__(self, spec):
         self.spec = spec
         self.types = builtin_types.TypeFacts(spec)
-        self._function_facts = {}
-        self._callee_facts = {}
+        self._cache = {}
         self.params = []
         self.reference = False
+
+    def _cached(self, key, compute):
+        """compute(), once; the worst while computing (recursion)."""
+        if key not in self._cache:
+            self._cache[key] = Facts(worst=True)
+            self._cache[key] = compute()
+        return self._cache[key]
 
     # -- whole functions ----------------------------------------------------
 
     def function_facts(self, name, special=None):
         """Facts of spec function *name* for any arguments, or of the
         partial_eval.Specialization *special* for its facts."""
-        key = name if special is None else ('specialization', special.name)
-        if key not in self._function_facts:
-            # Recursion: assume the worst while analyzing.
-            self._function_facts[key] = worst = Facts()
-            worst.worst()
-            if special is None:
-                facts = self.facts(self.spec.body(name), {})
-            else:
-                facts = self.facts(special.body, special.env)
-            self._function_facts[key] = facts
-        return self._function_facts[key]
+        if special is None:
+            return self._cached(name, lambda: self.facts(
+                self.spec.body(name), {}))
+        return self._cached(('specialization', special.name),
+                            lambda: self.facts(special.body, special.env))
 
     def reference_facts(self, name, env):
         """Facts of @c_implemented function *name* of this spec, called
         with the facts *env* about its parameters: of its Python
         reference, partially evaluated for them."""
-        from . import partial_eval
         params = self.spec.params(name)
-        key = (name, tuple(partial_eval.fact_key(env.get(p))
-                           for p in params))
-        if key not in self._callee_facts:
-            self._callee_facts[key] = worst = Facts()
-            worst.worst()
+
+        def compute():
             residual = partial_eval.specialize(self.spec, name, env)
             saved, self.reference = self.reference, True
             try:
-                facts = self.facts(residual, env, params)
+                return self.facts(residual, env, params)
             finally:
                 self.reference = saved
-            self._callee_facts[key] = facts
-        return self._callee_facts[key]
+        return self._cached(
+            (name, *(partial_eval.fact_key(env.get(p)) for p in params)),
+            compute)
 
     def call_facts(self, call, env):
         """Facts of the call of a hand-written C function (@c_implemented,
         or a stub: worst), with the facts *env* of the caller; None when
         *call* is not one."""
-        from . import partial_eval
         found = self.spec.c_function(call)
         if found is None:
             return None
         spec, node = found
         if not frontend.is_c_implemented(node):
-            facts = Facts()
-            facts.worst()
-            return facts
-        params = spec.params(node.name)
+            return Facts(worst=True)
         callee_env = {}
-        for param, arg in zip(params, call.args):
+        for param, arg in zip(spec.params(node.name), call.args):
             fact = partial_eval.arg_fact(arg, env)
             if fact is not None:
                 callee_env[param] = fact
@@ -209,7 +196,6 @@ class Analyzer:
             self.statement(stmt, env, facts)
 
     def statement(self, stmt, env, facts):
-        from . import partial_eval
         match stmt:
             case ast.Pass() | ast.Expr(ast.Constant()):
                 pass
@@ -220,23 +206,26 @@ class Analyzer:
                 self.block(orelse, dict(else_env), facts)
             case ast.Assign(targets=[ast.Name(name)], value=value):
                 tp = self.value_type(value, env, facts)
+                env.pop(name, None)
                 if tp is not None:
                     env[name] = tp
-                else:
-                    env.pop(name, None)
             case ast.Return(value=ast.Name(partial_eval.FALLBACK)):
                 # A snapshot restarts: the caller returns another result.
                 pass
             case ast.Return(value=ast.Name('NULL')):
                 facts.returns_null = True
             case ast.Return(value=value):
-                facts.returns.append(self.value(value, env, facts))
+                alias = (self.params.index(value.id)
+                         if isinstance(value, ast.Name)
+                         and value.id in self.params else None)
+                facts.returns.append((self.value_type(value, env, facts),
+                                      alias))
+            case ast.Raise(exc=ast.Call() as call) \
+                    if self.spec.c_function(call):
+                self.call(call, env, facts)
             case ast.Raise(exc=exc):
                 # Building the message only formats type names.
-                if isinstance(exc, ast.Call) and self._c_call(exc):
-                    self.call(exc, env, facts)
-                else:
-                    facts.raises.add(_exception_name(exc, env))
+                facts.raises.add(_exception_name(exc, env))
             case ast.Try(body=body, handlers=handlers, orelse=orelse,
                          finalbody=finalbody):
                 self.block(body, env, facts)
@@ -251,18 +240,16 @@ class Analyzer:
             case ast.For(target=ast.Name(item), body=body):
                 # The partial evaluator marks the exact type of the
                 # iterated object when it knows it (see partial_eval.py).
-                iterable = getattr(stmt, 'pyspec_iterable', None)
-                known, item_type = self.iteration(iterable)
+                known, item_type = self.iteration(
+                    getattr(stmt, 'pyspec_iterable', None))
                 if not known:
-                    facts.runs_python = True
-                    facts.raises.add(ANY)
-                body_env = dict(env)
-                body_env[item] = item_type or partial_eval.NOTNULL
-                self.block(body, body_env, facts)
-            case _ if self.reference:
-                pass        # the model of a value: no effects
-            case _:
-                facts.worst()
+                    facts.python()
+                self.block(body, env | {
+                    item: item_type or partial_eval.NOTNULL}, facts)
+            case _ if not self.reference:
+                facts.python()
+                facts.returns.append((None, None))
+            # (In a Python reference: the model of a value, no effects.)
 
     def expression(self, node, env, facts):
         """Account for the calls a condition makes."""
@@ -280,28 +267,18 @@ class Analyzer:
     def iteration(self, tp):
         """(iterating an object of exact type tp runs no Python code, the
         exact type of the items or None)."""
-        from . import partial_eval
         if tp in partial_eval.SEQUENCES:
             return True, None
         special = self.types.special(tp, '__iter__') if tp else None
-        if special is None or special[0] is not None:
+        if special is None or special[0] is not None or special[1] in (
+                False, None, builtin_types.PYTHON):
             return False, None
-        item = special[1]
-        if item in (False, None, builtin_types.PYTHON):
-            return False, None
-        return True, (None if item is object else item)
+        return True, (None if special[1] is object else special[1])
 
     # -- values -------------------------------------------------------------
 
-    def value(self, node, env, facts):
-        """(exact type or None, argument index or None) of a returned
-        value."""
-        alias = None
-        if isinstance(node, ast.Name) and node.id in self.params:
-            alias = self.params.index(node.id)
-        return self.value_type(node, env, facts), alias
-
     def value_type(self, node, env, facts):
+        """The exact type of *node*, or None; its effects go to *facts*."""
         match node:
             case ast.Constant(value=value):
                 return type(value)
@@ -311,48 +288,31 @@ class Analyzer:
             case ast.Call():
                 return self.call(node, env, facts)
         if not self.reference:
-            facts.worst()
+            facts.python()
         return None
-
-    def _c_call(self, call):
-        return self.spec.c_function(call) is not None
 
     def call(self, node, env, facts):
         """Exact result type of call *node*; its effects go to *facts*."""
-        from . import partial_eval
-        func = node.func
         special = partial_eval.specialization_of(self.spec, node,
                                                  facts=True)
-        if special is not None:
-            facts.add(self.function_facts(special.callee, special))
-            return self.function_facts(special.callee, special).result_type
-        callee = self.call_facts(node, env)
+        callee = (self.function_facts(special.callee, special) if special
+                  else self.call_facts(node, env))
+        if callee is None and (name := self.spec.call_target(node.func)):
+            callee = self.function_facts(name)      # a spec function
         if callee is not None:
             facts.add(callee)
             return callee.result_type
-        callee_name = self.spec.call_target(func)
-        if callee_name is not None:
-            # An implemented spec function.
-            callee = self.function_facts(callee_name)
-            facts.add(callee)
-            return callee.result_type
-        name = func.id if isinstance(func, ast.Name) else None
-        args = node.args
-        match name, args:
+        name = node.func.id if isinstance(node.func, ast.Name) else None
+        match name, node.args:
             case 'exact', [ast.Name(tp_name), *_]:
                 facts.raises.add('MemoryError')
-                tp = builtin_types.by_name(tp_name)
-                return tp
+                return builtin_types.by_name(tp_name)
             case 'unknown', _:
                 facts.raises.add('MemoryError')
-                return None
             case 'runs_python', []:
-                facts.runs_python = True
-                facts.raises.add(ANY)
-                return None
+                facts.python()
             case 'calls', [obj, ast.Constant(str() as special)]:
                 facts.add(self.special_facts(obj, special, env))
-                return None
             case 'len', [ast.Name() as obj]:
                 row = builtin_types.TABLE.get(
                     partial_eval.exact_type(obj, env))
@@ -361,44 +321,30 @@ class Analyzer:
                 return int
             case 'iter', [ast.Name() as obj]:
                 tp = partial_eval.exact_type(obj, env)
-                known, _ = self.iteration(tp)
-                if known:
+                if self.iteration(tp)[0]:
                     facts.raises.add('MemoryError')
                 elif self.types.special(tp, '__iter__') == (None, False):
                     facts.raises.add('TypeError')
                 else:
                     facts.add(self.special_facts(obj, '__iter__', env))
-                return None
-        if name in PURE_BUILTINS or self.reference:
-            # In a Python reference, the model of a value.
-            return None
-        # A call of an object: a method found, cls(result), ...
-        facts.runs_python = True
-        facts.raises.add(ANY)
+            case _ if not (name in PURE_BUILTINS or self.reference):
+                # A call of an object: a method found, cls(result), ...
+                facts.python()
+            # (In a Python reference, other calls model a value.)
         return None
 
     def special_facts(self, obj, name, env):
         """Facts of invoking special method *name* of type(obj)."""
-        from . import partial_eval
-        facts = Facts()
         tp = partial_eval.exact_type(obj, env)
-        special = None if tp is None else self.types.special(tp, name)
-        match special:
-            case None:
-                facts.worst()
+        match None if tp is None else self.types.special(tp, name):
             case (None, False):
-                # The type has no such method: nothing is called.
-                pass
-            case (None, builtin_types.PYTHON):
-                facts.worst()
-            case (None, _):
+                return Facts()      # no such method: nothing is called
+            case (None, value) if value is not builtin_types.PYTHON:
+                facts = Facts()
                 facts.raises.add(ANY)
-            case (spec_name, None):
-                node = self.spec.functions[spec_name]
-                if frontend.is_c_implemented(node):
-                    params = self.spec.params(spec_name)
-                    facts.add(self.reference_facts(
-                        spec_name, {params[0]: tp}))
-                else:
-                    facts.worst()
-        return facts
+                return facts
+            case (spec_name, None) if frontend.is_c_implemented(
+                    self.spec.functions[spec_name]):
+                params = self.spec.params(spec_name)
+                return self.reference_facts(spec_name, {params[0]: tp})
+        return Facts(worst=True)
