@@ -6953,7 +6953,8 @@ class PyspecTypeTest(PyspecTestBase):
 
 PYSPEC_DIRS = [os.path.join(test_tools.basepath, 'Objects', 'pyspec'),
                os.path.join(test_tools.basepath, 'Objects', 'stringlib',
-                            'pyspec')]
+                            'pyspec'),
+               os.path.join(test_tools.basepath, 'Modules', 'pyspec')]
 BYTES_SPEC = os.path.join(PYSPEC_DIRS[0], 'bytesobject.py')
 
 
@@ -7007,7 +7008,8 @@ BYTES_CASES = load_cases(BYTES_SPEC) if os.path.exists(BYTES_SPEC) else None
 
 @unittest.skipUnless(os.path.exists(BYTES_SPEC), 'needs the source tree')
 class PyspecFilesTest(TestCase):
-    """Every spec file (Objects/pyspec/*.py, Objects/stringlib/pyspec/*.py):
+    """Every spec file (Objects/pyspec/*.py, Objects/stringlib/pyspec/*.py,
+    Modules/pyspec/*.py):
 
     * what clinic generates from it is up to date;
     * run as Python, its functions behave like the interpreter's on the
