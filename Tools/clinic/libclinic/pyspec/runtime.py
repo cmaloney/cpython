@@ -10,8 +10,8 @@ uses:
 * builtins with a fixed C meaning: ``NULL``, ``isinstance`` (the real
   type), ``iter`` (PyObject_GetIter()), ``tp_name`` and ``fqname`` (type
   names in error messages);
-* the Argument Clinic decorators, and ``@c_name`` and ``@static_type``
-  (frontend.py, typeobj.py): identity decorators for Python;
+* the Argument Clinic decorators, and ``@c_name`` (frontend.py,
+  typeobj.py): identity decorators for Python;
 * ``@c_implemented`` and a few primitives that say what plain Python
   cannot, placed where the effect happens, so that the control flow
   around them gives their conditions (see Objects/pyspec/README.rst):
@@ -74,15 +74,9 @@ setter = text_signature = vectorcall = _clinic_decorator
 
 def c_name(*args, **kwargs):
     """``@c_name("x")`` / ``@c_name(slot="x")``: the C function of a
-    method (see frontend.py).  An identity decorator for Python."""
+    method (see frontend.py); on a class, the prefix of its C tables
+    (typeobj.py).  An identity decorator for Python."""
     return lambda func: func
-
-
-def static_type(**members):
-    """``@static_type(tp_member="C expression", ...)``: clinic generates
-    the static PyTypeObject of the class (see typeobj.py).  An identity
-    decorator for Python."""
-    return lambda cls: cls
 
 
 def c_implemented(func):
@@ -179,6 +173,14 @@ def load(path):
     bases = [base, os.path.dirname(base)]
 
     class SpecCalls(ast.NodeTransformer):
+        def visit_ClassDef(self, node):
+            # Only the bodies of methods: a shared method of a class body
+            # (``__reduce__ = bytearray.__reduce__``) is the spec's.
+            node.body = [self.visit(stmt)
+                         if isinstance(stmt, ast.FunctionDef) else stmt
+                         for stmt in node.body]
+            return node
+
         def visit_FunctionDef(self, node):
             # The Python reference of a C function models it with the
             # builtins.

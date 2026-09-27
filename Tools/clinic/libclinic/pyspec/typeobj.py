@@ -1,35 +1,27 @@
-"""Generate the static type objects of a spec.
+"""Generate the method and slot tables of the types of a spec.
 
-For each class of the spec decorated with ``@static_type(...)``, Argument
-Clinic generates at the end of Objects/clinic/<stem>_pyspec.c.h (included
-at the end of the C file, after every function it names):
+For each class of the spec of a C file that the C file declares (``class
+bytes_iterator "striterobject *" "&PyBytesIter_Type"``; the spec of a
+header only declares methods other specs share), Argument Clinic
+generates at the end of Objects/clinic/<stem>_pyspec.c.h (included at the
+end of the C file, after every function it names):
 
-* the method table ``<class>_methods[]``: one entry per method of the
+* ``<prefix>_doc``: the class docstring;
+* the method table ``<prefix>_methods[]``: one entry per method of the
   class that is not a slot, in the order of the spec.  A clinic function
   is its ``*_METHODDEF`` macro; a hand-written PyCFunction
   (``@c_name(METH_NOARGS="f")``) is written out with its docstring; a
-  shared method is the entry the other spec declares;
-* the sub-tables ``<class>_as_number`` etc. holding the slots of the
-  dunders (see slots.py);
-* ``PyTypeObject <Name>_Type`` with designated initializers: a static,
-  immortal type, readied at startup like every static builtin type.
+  shared method is the entry the other spec declares (see
+  _shared_entry());
+* the sub-tables ``<prefix>_as_number`` etc. holding the slots of the
+  dunders (see slots.py).
 
-What each member of PyTypeObject comes from:
-
-  tp_name           the class name (or @static_type(tp_name=...))
-  tp_base           the base class, if any
-  tp_basicsize      sizeof(the C type of the class directive), or given
-  tp_doc            the class docstring, as is
-  tp_flags          Py_TPFLAGS_DEFAULT
-                    | Py_TPFLAGS_BASETYPE unless the class is @final
-                    | Py_TPFLAGS_HAVE_GC if tp_traverse is given
-                    | @static_type(tp_flags=...)
-  tp_new, tp_init, tp_vectorcall
-                    the clinic functions __new__ and __init__
-  tp_methods        the generated method table
-  dunder slots      the slots of the dunders of the class
-  anything else     @static_type(member=...), as a C expression; members
-                    left out are 0, inherited by PyType_Ready() as usual.
+The prefix is the class name, or the ``@c_name("striter")`` of the class.
+The PyTypeObject itself is written in C, after the include, and names
+these tables; its own slots (tp_repr, tp_iter...) are C functions it
+names.  The dunders of those slots are declared in the class all the
+same: test_clinic checks that the type has exactly the slot wrappers the
+class declares.
 """
 
 from __future__ import annotations
@@ -43,17 +35,6 @@ from libclinic.formatting import docstring_for_c_string
 from . import frontend, slots
 from .frontend import CLINIC, PYCFUNCTION, README, SHARED, SLOT, SpecError
 
-# Members of PyTypeObject that the spec derives; @static_type cannot set
-# them.  tp_new, tp_init and tp_vectorcall come from the clinic __new__ and
-# __init__, or from @static_type when they are not clinic functions
-# (tp_new = PyType_GenericNew).
-FROM_CLINIC = {'tp_new', 'tp_init', 'tp_vectorcall'}
-DERIVED = {
-    'tp_base', 'tp_doc', 'tp_methods',
-    'tp_as_async', 'tp_as_number', 'tp_as_sequence', 'tp_as_mapping',
-    'tp_as_buffer',
-} | {s.slot for s in slots.slotdefs() if s.subtable is None} - FROM_CLINIC
-
 SUBTABLE_ORDER = ['as_async', 'as_number', 'as_sequence', 'as_mapping',
                   'as_buffer']
 
@@ -64,57 +45,19 @@ C_DECORATORS = {
 }
 
 
-def object_h_path() -> str:
-    here = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(here, '..', '..', '..', '..', 'Include', 'cpython',
-                        'object.h')
-
-
-_members: list[str] | None = None
-
-
-def type_members() -> list[str]:
-    """The members of PyTypeObject, in order (Include/cpython/object.h)."""
-    global _members
-    if _members is None:
-        with open(object_h_path(), encoding='utf-8') as f:
-            source = f.read()
-        start = source.index('struct _typeobject {')
-        body = source[start:source.index('\n};', start)]
-        body = re.sub(r'/\*.*?\*/|//[^\n]*', '', body, flags=re.DOTALL)
-        body = body.partition('PyObject_VAR_HEAD')[2]
-        names = []
-        for decl in body.split(';'):
-            names += re.findall(r'(\w+)\s*(?:,|$)', decl.strip())
-        _members = names
-    return _members
-
-
-def static_type(spec: frontend.Spec, cls_name: str
-                ) -> dict[str, str] | None:
-    """The keywords of @static_type of class *cls_name*, or None."""
+def class_prefix(spec: frontend.Spec, cls_name: str) -> str:
+    """The C prefix of the tables of class *cls_name*: its
+    ``@c_name("x")``, else its name."""
     for decorator in spec.classes[cls_name].decorator_list:
         match decorator:
-            case ast.Call(func=ast.Name('static_type'), args=[],
-                          keywords=keywords):
-                members = {}
-                for kw in keywords:
-                    if not (isinstance(kw.value, ast.Constant)
-                            and isinstance(kw.value.value, str)):
-                        raise spec.error(kw, "the members of @static_type "
-                                         "are C expressions in strings")
-                    members[kw.arg] = kw.value.value
-                return members
-            case ast.Name('static_type') | ast.Call(
-                    func=ast.Name('static_type')):
-                raise spec.error(decorator, "write "
-                                 "@static_type(member=\"C expression\", ...)")
-    return None
-
-
-def _is_final(node: ast.ClassDef) -> bool:
-    return any(isinstance(d, ast.Name) and d.id == 'final'
-               for d in node.decorator_list)
+            case ast.Call(func=ast.Name('c_name'),
+                          args=[ast.Constant(str() as prefix)], keywords=[]):
+                return prefix
+            case _:
+                raise spec.error(decorator, f"class {cls_name}: a spec "
+                                 "class takes only @c_name(\"prefix\"), "
+                                 "the prefix of its C tables")
+    return cls_name
 
 
 def _text_signature(node: ast.FunctionDef) -> str:
@@ -167,34 +110,50 @@ def _c_stub(spec: frontend.Spec, name: str, kind: str) -> ast.FunctionDef:
     return node
 
 
-def _exported(name: str) -> bool:
-    return name.startswith(('Py', '_Py'))
+# ``critical_section(module.Class.meth)``: the C function calling a shared
+# method in a critical section on self, by calling convention: its
+# parameters after self, and the arguments it passes on.
+LOCKED_WRAPPERS = {
+    'METH_NOARGS': ('PyObject *Py_UNUSED(ignored)', 'NULL'),
+    'METH_O': ('PyObject *arg', 'arg'),
+    'METH_FASTCALL': ('PyObject *const *args, Py_ssize_t nargs',
+                      'args, nargs'),
+    'METH_FASTCALL|METH_KEYWORDS': (
+        'PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames',
+        'args, nargs, kwnames'),
+}
+
+_METHODDEF_FLAGS = r'\s*\\\n\s*\{"\w+",\s*[^,]+,\s*([\w|]+),'
+
+
+def _clinic_flags(spec: frontend.Spec, c_basename: str, error) -> str:
+    """The calling convention of clinic function *c_basename*, declared
+    by *spec*: the flags of the ``*_METHODDEF`` clinic generated for the
+    C file of *spec* (``stringlib/clinic/transmogrify.h.h``)."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(spec.filename)))
+    stem = os.path.splitext(os.path.basename(spec.filename))[0]
+    paths = [os.path.join(root, 'clinic', f'{stem}{ext}.h')
+             for ext in ('.c', '.h')]
+    macro = f'{c_basename.upper()}_METHODDEF'
+    for path in paths:
+        if os.path.exists(path):
+            with open(path, encoding='utf-8') as f:
+                m = re.search(rf'#define {macro}{_METHODDEF_FLAGS}',
+                              f.read())
+            if m:
+                return m.group(1)
+    raise error(f"no {macro} in {' or '.join(paths)}: run clinic on the "
+                f"C file of {spec.filename} first")
 
 
 class TypeGenerator:
     def __init__(self, spec: frontend.Spec, cls_name: str,
-                 members: dict[str, str],
-                 clinic_class: tuple[str, str],
                  functions: dict[str, tuple[str, str | None]]):
         self.spec = spec
         self.cls_name = cls_name
         self.node = spec.classes[cls_name]
-        self.members = members
-        self.c_type, type_object = clinic_class
-        if not type_object.startswith('&'):
-            raise self.error(f"class {cls_name}: the class directive needs "
-                             "the type object, e.g. \"&PyBytes_Type\"")
-        self.type_object = type_object[1:]
         self.functions = functions
-        self.prefix = cls_name.replace('.', '_')
-        for member in members:
-            if member not in type_members():
-                raise self.error(f"@static_type: {member!r} is not a "
-                                 "member of PyTypeObject")
-            if member in DERIVED:
-                raise self.error(f"@static_type: {member} is derived from "
-                                 "the spec; declare the method (or "
-                                 "docstring) instead")
+        self.prefix = class_prefix(spec, cls_name)
 
     def error(self, message: str) -> SpecError:
         """A SpecError at the class."""
@@ -202,10 +161,10 @@ class TypeGenerator:
 
     # -- methods -----------------------------------------------------------
 
-    def _pycfunction_entry(self, spec: frontend.Spec, name: str,
-                           meth: str) -> tuple[list[str], str]:
-        """(docstring definition, method table entry) of a hand-written
-        PyCFunction of *spec*."""
+    def _pycfunction(self, spec: frontend.Spec, name: str, meth: str
+                     ) -> tuple[list[str], str, str, str]:
+        """(docstring definition, C function, flags, docstring name) of a
+        hand-written PyCFunction of *spec*."""
         node = _c_stub(spec, name, 'PyCFunction')
         _, keywords = spec.c_name(name)
         (flag, c_func), = keywords.items()
@@ -228,7 +187,7 @@ class TypeGenerator:
         if doc is not None:
             doc_name = f'{self.prefix}_{meth}__doc__'
             docs = [f'PyDoc_STRVAR({doc_name},', _c_string(doc) + ');', '']
-        return docs, f'    {{"{meth}", {c_func}, {flag}, {doc_name}}},'
+        return docs, c_func, flag, doc_name
 
     def _clinic_entry(self, name: str) -> str:
         node = self.spec.functions[name]
@@ -239,22 +198,73 @@ class TypeGenerator:
                                   "of the C file") from None
         return f'    {c_basename.upper()}_METHODDEF'
 
-    def _shared_entry(self, name: str) -> tuple[list[str], str]:
-        shared = self.spec.shared[name]
-        other = self.spec.imported(shared.module)
-        other_name = f'{shared.cls}.{shared.meth}'
+    def _shared_entry(self, name: str, meth: str) -> tuple[list[str], str]:
+        """(docstrings and C functions to define first, method table
+        entry) of shared method *name*."""
+        spec = self.spec
+        if name in self.functions:
+            # It has a block in the C file: a clinic function of the class.
+            c_basename, _ = self.functions[name]
+            return [], f'    {c_basename.upper()}_METHODDEF'
+        shared = spec.shared[name]
+        other, other_name = spec.shared_source(name)
+
+        def error(message: str) -> SpecError:
+            return SpecError(message, filename=spec.filename,
+                             lineno=shared.lineno)
+
         kind = other.method_kind(other_name)
+        _, keywords = spec.c_name(name)
+        locked = spec.is_locked(name)
         if kind == PYCFUNCTION:
-            return self._pycfunction_entry(other, other_name, shared.meth)
-        if kind != CLINIC:
-            raise SpecError(f"{other_name} of {other.filename} is a {kind}; "
-                            "only methods can be shared",
-                            filename=self.spec.filename,
-                            lineno=shared.lineno)
-        c_basename, _ = other.c_name(other_name)
-        if c_basename is None:
-            c_basename = other_name.replace('.', '_')
-        return [], f'    {c_basename.upper()}_METHODDEF'
+            docs, c_func, flag, doc_name = self._pycfunction(
+                other, other_name, meth)
+        elif kind == CLINIC:
+            docs = []
+            if other is spec:
+                c_basename, _ = self.functions[other_name]
+            else:
+                c_basename = (other.c_name(other_name)[0]
+                              or other_name.replace('.', '_'))
+            if not keywords and not locked:
+                return [], f'    {c_basename.upper()}_METHODDEF'
+            c_func, doc_name = c_basename, f'{c_basename}__doc__'
+            flag = None if keywords else _clinic_flags(other, c_basename,
+                                                       error)
+        else:
+            raise error(f"{other_name} of {other.filename} is a {kind}; "
+                        "only methods can be shared")
+        if keywords:
+            (given, c_func), = keywords.items()
+            if given not in frontend.PYCFUNCTION_FLAGS or \
+                    flag not in (None, given):
+                raise error(f"{name}: write c_name({flag or 'METH_NOARGS'}"
+                            f"=\"f\")(...), the calling convention of "
+                            f"{other_name}")
+            if locked:
+                raise error(f"{name}: critical_section() generates the C "
+                            "function; remove c_name()")
+            flag = given
+        if locked:
+            if flag not in LOCKED_WRAPPERS:
+                raise error(f"{name}: critical_section() of a {flag} "
+                            "function is not supported")
+            params, call_args = LOCKED_WRAPPERS[flag]
+            wrapper = f'{self.prefix}_{meth}'
+            docs += ['static PyObject *',
+                     f'{wrapper}(PyObject *self, {params})',
+                     '{',
+                     '    PyObject *ret;',
+                     '    Py_BEGIN_CRITICAL_SECTION(self);',
+                     f'    ret = {c_func}(self, {call_args});',
+                     '    Py_END_CRITICAL_SECTION();',
+                     '    return ret;',
+                     '}',
+                     '']
+            c_func = wrapper
+        if flag not in ('METH_NOARGS', 'METH_O'):
+            c_func = f'_PyCFunction_CAST({c_func})'
+        return docs, f'    {{"{meth}", {c_func}, {flag}, {doc_name}}},'
 
     # -- slots -------------------------------------------------------------
 
@@ -331,57 +341,53 @@ class TypeGenerator:
         return {slot: c_name or f'{self.prefix}_{slot.split("_", 1)[1]}'
                 for slot, c_name in selected.items()}
 
-    # -- the type ----------------------------------------------------------
+    # -- the tables -------------------------------------------------------
 
     def generate(self) -> list[str]:
         spec = self.spec
-        members: dict[str, str] = {}
         docs: list[str] = []
         table: list[str] = []
         dunders: list[str] = []
         for meth in spec.entries(self.cls_name):
             name = f'{self.cls_name}.{meth}'
             kind = spec.method_kind(name)
+            node = spec.functions.get(name)
+            if node is not None and any(
+                    frontend.decorator_name(d) in ('getter', 'setter')
+                    for d in node.decorator_list):
+                raise spec.error(node, f"{name}: accessors (@getter, "
+                                 "@setter) are not supported yet; see "
+                                 f"{README}")
             if kind == SLOT:
                 dunders.append(meth)
             elif kind == PYCFUNCTION:
-                doc, entry = self._pycfunction_entry(spec, name, meth)
+                doc, c_func, flag, doc_name = self._pycfunction(spec, name,
+                                                                meth)
                 docs += doc
-                table.append(entry)
+                table.append(f'    {{"{meth}", {c_func}, {flag}, '
+                             f'{doc_name}}},')
             elif kind == SHARED:
-                doc, entry = self._shared_entry(name)
+                doc, entry = self._shared_entry(name, meth)
                 docs += doc
                 table.append(entry)
-            elif meth in ('__new__', '__init__'):
-                try:
-                    c_basename, vectorcall = self.functions[name]
-                except KeyError:
-                    raise spec.error(spec.functions[name], f"{name} is not "
-                                     "a clinic function of the C "
-                                     "file") from None
-                members['tp_new' if meth == '__new__' else 'tp_init'] = \
-                    c_basename
-                if vectorcall:
-                    members['tp_vectorcall'] = vectorcall
-            else:
+            elif meth not in ('__new__', '__init__'):
+                # (tp_new and tp_init: the C of the type names them.)
                 table.append(self._clinic_entry(name))
 
         out = [f'/* {self.cls_name} */', '']
         class_doc = frontend._docstring(self.node.body)
         if class_doc is not None:
-            doc_name = f'{self.prefix}__doc__'
             lines = spec._clean_docstring(self.node.body[0], class_doc)
-            out += [f'PyDoc_STRVAR({doc_name},',
+            out += [f'PyDoc_STRVAR({self.prefix}_doc,',
                     _c_string('\n'.join(lines)) + ');', '']
-            members['tp_doc'] = doc_name
         out += docs
 
         if table:
-            methods = f'{self.prefix}_methods'
-            out += [f'static PyMethodDef {methods}[] = {{', *table,
-                    '    {NULL, NULL}  /* sentinel */', '};', '']
-            members['tp_methods'] = methods
+            out += [f'static PyMethodDef {self.prefix}_methods[] = {{',
+                    *table, '    {NULL, NULL}  /* sentinel */', '};', '']
 
+        # The slots of the sub-tables; those of the type itself (subtable
+        # None) are named by its C.
         slot_funcs = self.resolve_slots(dunders)
         by_subtable: dict[str | None, dict[str, str]] = {}
         slotdefs = {s.slot: s for s in slots.slotdefs()}
@@ -390,47 +396,12 @@ class TypeGenerator:
         for subtable in SUBTABLE_ORDER:
             if subtable not in by_subtable:
                 continue
-            var = f'{self.prefix}_{subtable}'
             ctype = slots.SUBTABLES[subtable]
-            out.append(f'static {ctype} {var} = {{')
+            out.append(f'static {ctype} {self.prefix}_{subtable} = {{')
             for slot in _in_struct_order(by_subtable[subtable]):
                 out.append(f'    .{slot} = {by_subtable[subtable][slot]},')
             out += ['};', '']
-            members[f'tp_{subtable}'] = f'&{var}'
-        members |= by_subtable.get(None, {})
-
-        for base in self.node.bases:
-            if not (isinstance(base, ast.Name)
-                    and base.id in frontend.TYPE_OBJECTS):
-                raise self.error("the base of a static type is one of "
-                                 f"{sorted(frontend.TYPE_OBJECTS)}")
-            members['tp_base'] = frontend.TYPE_OBJECTS[base.id]
-        members.setdefault('tp_name', f'"{self.cls_name}"')
-        for member in FROM_CLINIC & members.keys() & self.members.keys():
-            raise self.error(f"@static_type: {member} is already the "
-                             "clinic function")
-        members |= {k: v for k, v in self.members.items()
-                    if k != 'tp_flags'}
-        if 'tp_basicsize' not in members:
-            members['tp_basicsize'] = \
-                f'sizeof({self.c_type.rstrip(" *")})'
-        flags = ['Py_TPFLAGS_DEFAULT']
-        if not _is_final(self.node):
-            flags.append('Py_TPFLAGS_BASETYPE')
-        if 'tp_traverse' in members:
-            flags.append('Py_TPFLAGS_HAVE_GC')
-        if 'tp_flags' in self.members:
-            flags.append(self.members['tp_flags'])
-        members['tp_flags'] = ' |\n        '.join(flags)
-
-        storage = '' if _exported(self.type_object) else 'static '
-        out.append(f'{storage}PyTypeObject {self.type_object} = {{')
-        out.append('    PyVarObject_HEAD_INIT(&PyType_Type, 0)')
-        for member in type_members():
-            if member in members:
-                out.append(f'    .{member} = {members[member]},')
-        out += ['};', '']
-        return out
+        return out if len(out) > 2 else []
 
 
 def _in_struct_order(slot_funcs: dict[str, str]) -> list[str]:
@@ -446,27 +417,19 @@ def header(spec_path: str) -> str:
             '[pyspec]*/')
 
 
-def generate(spec: frontend.Spec,
-             classes: dict[str, tuple[str, str]],
+def generate(spec: frontend.Spec, classes: set[str],
              functions: dict[str, tuple[str, str | None]]) -> str | None:
-    """The type objects of the @static_type classes of *spec*, or None.
+    """The tables of the classes of *spec*, the spec of a C file, that
+    the C file declares (clinic *classes*), or None.
 
-    *classes* maps the clinic classes of the C file to (C type, type
-    object); *functions* maps clinic functions ("bytes.split") to (C
-    basename, vectorcall C name or None).  They are the end of
+    *functions* maps the clinic functions of the C file ("bytes.split")
+    to (C basename, vectorcall C name or None).  They are the end of
     Objects/clinic/<stem>_pyspec.c.h.
     """
     out = []
     for cls_name in spec.classes:
-        members = static_type(spec, cls_name)
-        if members is None:
-            continue
-        if cls_name not in classes:
-            raise spec.error(spec.classes[cls_name], f"class {cls_name} "
-                             "needs a clinic class directive in the C file "
-                             "(its C type and type object)")
-        out += TypeGenerator(spec, cls_name, members, classes[cls_name],
-                             functions).generate()
+        if cls_name in classes:
+            out += TypeGenerator(spec, cls_name, functions).generate()
     if not out:
         return None
     while out[-1] == '':

@@ -51,19 +51,6 @@ extern PyObject* _Py_bytes_maketrans(Py_buffer *frm, Py_buffer *to);
 extern PyObject *_Py_bytes_repr(const char *, Py_ssize_t, int, const char *);
 
 /* Shared __doc__ strings. */
-extern const char _Py_isspace__doc__[];
-extern const char _Py_isalpha__doc__[];
-extern const char _Py_isalnum__doc__[];
-extern const char _Py_isascii__doc__[];
-extern const char _Py_isdigit__doc__[];
-extern const char _Py_islower__doc__[];
-extern const char _Py_isupper__doc__[];
-extern const char _Py_istitle__doc__[];
-extern const char _Py_lower__doc__[];
-extern const char _Py_upper__doc__[];
-extern const char _Py_title__doc__[];
-extern const char _Py_capitalize__doc__[];
-extern const char _Py_swapcase__doc__[];
 extern const char _Py_count__doc__[];
 extern const char _Py_find__doc__[];
 extern const char _Py_index__doc__[];

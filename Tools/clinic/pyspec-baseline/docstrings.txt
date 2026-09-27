@@ -1,26 +1,5 @@
 # Known disconnects: the same docstring written by hand in two places.
 # Checked by Lib/test/test_pyspec_catalog.py: this list may only shrink.
 # Fixed one?  Delete its line.  Keep the lines sorted.
-Objects/bytearrayobject.c:length_hint_doc = Objects/pyspec/bytesobject.py:bytes_iterator.__length_hint__
-Objects/bytearrayobject.c:setstate_doc = Objects/pyspec/bytesobject.py:bytes_iterator.__setstate__
-Objects/bytes_methods.c:_Py_capitalize__doc__ = Objects/stringlib/pyspec/ctype.py:B.capitalize
-Objects/bytes_methods.c:_Py_isalnum__doc__ = Objects/stringlib/pyspec/ctype.py:B.isalnum
-Objects/bytes_methods.c:_Py_isalpha__doc__ = Objects/stringlib/pyspec/ctype.py:B.isalpha
-Objects/bytes_methods.c:_Py_isascii__doc__ = Objects/stringlib/pyspec/ctype.py:B.isascii
-Objects/bytes_methods.c:_Py_isdigit__doc__ = Objects/stringlib/pyspec/ctype.py:B.isdigit
-Objects/bytes_methods.c:_Py_islower__doc__ = Objects/stringlib/pyspec/ctype.py:B.islower
-Objects/bytes_methods.c:_Py_isspace__doc__ = Objects/stringlib/pyspec/ctype.py:B.isspace
-Objects/bytes_methods.c:_Py_istitle__doc__ = Objects/stringlib/pyspec/ctype.py:B.istitle
-Objects/bytes_methods.c:_Py_isupper__doc__ = Objects/stringlib/pyspec/ctype.py:B.isupper
-Objects/bytes_methods.c:_Py_lower__doc__ = Objects/stringlib/pyspec/ctype.py:B.lower
-Objects/bytes_methods.c:_Py_swapcase__doc__ = Objects/stringlib/pyspec/ctype.py:B.swapcase
-Objects/bytes_methods.c:_Py_title__doc__ = Objects/stringlib/pyspec/ctype.py:B.title
-Objects/bytes_methods.c:_Py_upper__doc__ = Objects/stringlib/pyspec/ctype.py:B.upper
-Objects/clinic/bytearrayobject.c.h:bytearray_count__doc__ = Objects/pyspec/bytesobject.py:bytes.count
-Objects/clinic/bytearrayobject.c.h:bytearray_lstrip__doc__ = Objects/pyspec/bytesobject.py:bytes.lstrip
-Objects/clinic/bytearrayobject.c.h:bytearray_maketrans__doc__ = Objects/pyspec/bytesobject.py:bytes.maketrans
-Objects/clinic/bytearrayobject.c.h:bytearray_reduce__doc__ = Objects/clinic/bytearrayobject.c.h:bytearray_reduce_ex__doc__ = Objects/pyspec/bytesobject.py:bytes_iterator.__reduce__
-Objects/clinic/bytearrayobject.c.h:bytearray_replace__doc__ = Objects/pyspec/bytesobject.py:bytes.replace
-Objects/clinic/bytearrayobject.c.h:bytearray_rstrip__doc__ = Objects/pyspec/bytesobject.py:bytes.rstrip
-Objects/clinic/bytearrayobject.c.h:bytearray_strip__doc__ = Objects/pyspec/bytesobject.py:bytes.strip
-Objects/clinic/bytearrayobject.c.h:bytearray_translate__doc__ = Objects/pyspec/bytesobject.py:bytes.translate
+Objects/pyspec/bytearrayobject.py:bytearray.__reduce__ = Objects/pyspec/bytearrayobject.py:bytearray.__reduce_ex__ = Objects/pyspec/bytesobject.py:bytes_iterator.__reduce__
+Objects/pyspec/bytearrayobject.py:bytearray.lstrip = Objects/pyspec/bytesobject.py:bytes.lstrip

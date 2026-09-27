@@ -22,12 +22,11 @@ For Objects/foo.c, Objects/pyspec/foo.py is its spec:
                 against Tools/clinic/pyspec-baseline/
   slots         the dunder <-> slot table, read from slotdefs[] in
                 Objects/typeobject.c
-  typeobj       generates the static type objects of the @static_type
-                classes, with their method and slot tables
+  typeobj       generates the method and slot tables of the types of
+                a spec (their PyTypeObject is written in C)
 
 Argument Clinic uses all of this while processing foo.c: `make clinic`
 regenerates Objects/clinic/foo_pyspec.c.h too (the implemented functions
-and their call table, then the type objects), which foo.c includes at its
-end.  See
-Objects/pyspec/README.rst.
+and their call table, then the tables of the types), which foo.c
+includes at its end.  See Objects/pyspec/README.rst.
 """

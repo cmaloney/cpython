@@ -351,16 +351,19 @@ impl_definition block
         return [(output, "\n\n".join(parts) + "\n")]
 
     def type_objects(self, spec: frontend.Spec) -> str | None:
-        """The static types of the spec (see pyspec/typeobj.py)."""
+        """The method and slot tables of the types of the spec that the C
+        file declares (see pyspec/typeobj.py); a header declares no
+        type."""
+        if not self.filename.endswith('.c'):
+            return None
         clinic_classes = self._clinic_classes(self, '')
-        classes = {path: (cls.typedef, cls.type_object)
-                   for path, cls in clinic_classes}
         functions = {
             f'{path}.{f.name}': (
                 f.c_basename,
                 f.c_basename_vectorcall if f.vectorcall else None)
             for path, cls in clinic_classes for f in cls.functions}
-        return typeobj.generate(spec, classes, functions)
+        return typeobj.generate(spec, {path for path, _ in clinic_classes},
+                                functions)
 
     def _module_and_class(
         self, fields: Sequence[str]

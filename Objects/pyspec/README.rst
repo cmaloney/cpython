@@ -18,15 +18,19 @@ Files
 
 =====================================  ====================================
 ``Objects/pyspec/foo.py``              the spec: signatures, docstrings,
-                                       decorators, bodies, type objects
+                                       decorators, bodies, the methods
+                                       and slots of its types
 ``Objects/pyspec/foo_cases.py``        test data: ``CASES`` and ``TYPES``
 ``Objects/foo.c``                      one-line clinic block per spec
                                        method (``bytes.split``) above its
                                        impl, as with plain Argument Clinic
 ``Objects/clinic/foo.c.h``             generated: argument parsing
 ``Objects/clinic/foo_pyspec.c.h``      generated: the spec bodies, the
-                                       tier-2 call table, the type
-                                       objects; ``foo.c`` includes it last
+                                       tier-2 call table, the docstring,
+                                       method and slot tables of the
+                                       types; ``foo.c`` includes it last,
+                                       then defines the ``PyTypeObject``\ s
+                                       naming them
 =====================================  ====================================
 
 To do X, edit Y
@@ -66,10 +70,28 @@ Share a stringlib method    ``from stringlib.pyspec import transmogrify``,
                             then ``center = transmogrify.B.center`` in the
                             class; the method is declared once, in
                             ``Objects/stringlib/pyspec/transmogrify.py``.
-Declare a new type          ``@static_type(...)`` on its class, a
-                            ``class T "CType *" "&T_Type"`` directive in
-                            ``foo.c``, and the type in ``TYPES`` of
-                            ``foo_cases.py``.
+                            ``critical_section(transmogrify.B.center)``:
+                            clinic generates ``<class>_center()``, which
+                            calls it in a critical section on self.
+Declare a method like       ``strip = bytesobject.bytes.strip`` (after
+another type's              ``from pyspec import bytesobject``) and the
+                            block ``bytearray.strip`` in ``foo.c``: a
+                            clinic function of this class with the other's
+                            parameters, docstring and decorators; wrap it
+                            (``critical_section(...)``) to add
+                            ``@critical_section``.  A hand-written
+                            PyCFunction with another's docstring:
+                            ``m = c_name(METH_NOARGS="f")(T.m)``.
+Declare a new type          A class in the spec (its docstring, methods
+                            and dunders), a ``class T "CType *"
+                            "&T_Type"`` directive in ``foo.c``, and the
+                            type in ``TYPES`` of ``foo_cases.py``; write
+                            its ``PyTypeObject`` in C after the include of
+                            ``clinic/foo_pyspec.c.h``, naming
+                            ``T_doc``, ``T_methods``, ``T_as_number``...
+                            (``@c_name("prefix")`` on the class changes
+                            ``T``).  ``test_clinic`` checks that the slots
+                            it fills are the dunders of the class.
 Regenerate                  ``make clinic``, or
                             ``./python Tools/clinic/clinic.py Objects/foo.c``
 Test                        ``./python -m test test_clinic
@@ -98,8 +120,8 @@ Decorators
   implement (``@c_name(mp_length="f", sq_length="f")``).
 * ``@c_name(METH_NOARGS="f")``, ``@c_name(METH_O="f")``: a hand-written
   PyCFunction entry.
-* ``@static_type(member="C expression", ...)`` on a class: clinic generates
-  its static ``PyTypeObject``; ``@final``: not subclassable.
+* ``@c_name("prefix")`` on a class: the prefix of its generated tables
+  (``striter_methods``); the default is the class name.
 
 In a converter, ``c_param='x'`` names the C parameter (clinic's
 ``name as x``).
@@ -108,9 +130,11 @@ What a spec may contain
 -----------------------
 
 * A class body holds a docstring, ``def``\ s, shared methods
-  (``x = module.Class.x``) and ``pass``.  Two methods with the same
+  (``x = module.Class.x``, or ``Class.x`` of the same spec, possibly
+  wrapped in ``critical_section(...)`` or ``c_name(...)(...)``) and
+  ``pass``.  Two methods with the same
   signature are two full ``def``\ s: Python has no clones.
-  ``@getter``/``@setter`` are not supported in a ``@static_type`` class yet.
+  ``@getter``/``@setter`` are not supported in a class of a C file yet.
 * A C implementation is a body of ``...``, or only a docstring (not
   ``pass``): nothing is known about it, and a call of it may do anything.
 * A spec body may use: ``if``/``else``, ``return``, ``raise E("...")``,

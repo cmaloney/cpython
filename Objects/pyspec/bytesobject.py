@@ -14,9 +14,9 @@ functions of the same name: generated from their body, or, with
 reference.  The C functions of other files the bodies call are imported
 from the specs of those files.
 
-The classes are the whole types: ``@static_type`` makes clinic generate
-PyBytes_Type and PyBytesIter_Type, their method tables and slot tables,
-at the end of Objects/clinic/bytesobject_pyspec.c.h.  Dunders are slots
+The classes are the whole types: clinic generates their docstring, method
+tables and slot tables at the end of Objects/clinic/bytesobject_pyspec.c.h,
+which PyBytes_Type and PyBytesIter_Type (in C) name.  Dunders are slots
 (C functions with the slot's signature), ``@c_name(METH_NOARGS=...)``
 methods are hand-written PyCFunctions, and ``center =
 transmogrify.B.center`` shares a method with bytearray (see
@@ -27,7 +27,6 @@ interpreter on the cases of bytesobject_cases.py.
 """
 
 import types
-from typing import final
 
 from libclinic.pyspec.runtime import (
     NULL, PY_SSIZE_T_MAX, c_implemented, calls, exact, fqname, isinstance,
@@ -35,7 +34,7 @@ from libclinic.pyspec.runtime import (
 
 # Argument Clinic decorators (no-ops in Python).
 from libclinic.pyspec.runtime import permit_long_summary, text_signature
-from libclinic.pyspec.runtime import c_name, static_type
+from libclinic.pyspec.runtime import c_name
 
 # The C functions of other files the bodies call.
 from pyspec.abstract import PyNumber_AsSsize_t, PyObject_LengthHint
@@ -47,16 +46,6 @@ from Python.pyspec.errors import PyErr_BadInternalCall
 from stringlib.pyspec import ctype, transmogrify
 
 
-@static_type(
-    tp_basicsize="PyBytesObject_SIZE",
-    tp_itemsize="sizeof(char)",
-    tp_flags="Py_TPFLAGS_BYTES_SUBCLASS | _Py_TPFLAGS_MATCH_SELF",
-    tp_dealloc="bytes_dealloc",
-    tp_alloc="bytes_alloc",
-    tp_free="PyObject_Free",
-    tp_version_tag="_Py_TYPE_VERSION_BYTES",
-    _tp_iteritem="bytes_iteritem",
-)
 class bytes:
     """bytes(iterable_of_ints) -> bytes
     bytes(string, encoding[, errors]) -> bytes
@@ -563,10 +552,10 @@ class bytes:
     def __contains__(self, key, /): ...
 
 
-# iter(bytes).  No docstring: tp_doc is NULL.  The struct (striterobject),
-# its dealloc and traverse are C.
-@final
-@static_type(tp_dealloc="striter_dealloc", tp_traverse="striter_traverse")
+# iter(bytes).  No docstring: tp_doc is NULL.  PyBytesIter_Type, the
+# struct (striterobject), its dealloc and traverse are C; the method table
+# is striter_methods.
+@c_name("striter")
 class bytes_iterator:
     @c_name("PyObject_SelfIter")
     def __iter__(self, /): ...

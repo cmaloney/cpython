@@ -82,12 +82,19 @@ Methods that are not clinic functions (method_kind())
 * A hand-written PyCFunction: ``@c_name(METH_NOARGS="f")`` or
   ``@c_name(METH_O="f")``, parameters ``(self, /)`` or ``(self, arg, /)``
   unannotated, its docstring as is.
-* Shared: ``meth = module.Class.meth``, the entry another spec declares
-  (``from stringlib.pyspec import transmogrify``).
+* Shared: ``meth = module.Class.meth``, a method another spec declares
+  (``from stringlib.pyspec import transmogrify``), or ``Class.meth`` of
+  another class of this spec.  If the C file has a clinic block for it
+  (``bytearray.strip``), it is a clinic function of this class with the
+  parameters, docstring and decorators of that method; else its entry in
+  the method table is the other's.  It may be decorated by calls:
+  ``critical_section(...)`` (the clinic decorator; for an entry, clinic
+  generates ``<class>_<meth>()`` calling the other's C function in a
+  critical section on self) and ``c_name(METH_NOARGS="f")(...)`` (the
+  entry calls f, a PyCFunction, with the other's docstring).
 
-A class decorated with ``@static_type(...)`` has its PyTypeObject
-generated (typeobj.py); its keyword arguments are the members the spec
-cannot derive, as C expressions.
+For the classes of the spec of a C file, clinic generates the method and
+slot tables their PyTypeObject (written in C) names (typeobj.py).
 """
 
 
@@ -258,11 +265,18 @@ def c_signature(node: ast.FunctionDef) -> tuple[list[tuple[str, str]], str]:
 
 @dc.dataclass
 class Shared:
-    """``meth = module.Class.meth`` in a spec class."""
-    module: str
+    """``meth = module.Class.meth`` in a spec class (``Class.meth`` for a
+    class of the same spec), possibly decorated by calls:
+    ``critical_section(...)``, ``c_name(METH_NOARGS="f")(...)``."""
+    module: str | None
     cls: str
     meth: str
     lineno: int
+    decorators: list[ast.expr] = dc.field(default_factory=list)
+
+# The decorators a shared method may have (see "Methods that are not
+# clinic functions").
+SHARED_DECORATORS = ('critical_section', 'c_name')
 
 
 class Spec:
@@ -404,8 +418,6 @@ class Spec:
         """Only these statements may be in a spec class: a docstring,
         ``def``, ``meth = module.Class.meth`` and ``pass``."""
         self.classes[node.name] = node
-        static = any(decorator_name(d) == 'static_type'
-                     for d in node.decorator_list)
         for i, stmt in enumerate(node.body):
             match stmt:
                 case ast.Expr(ast.Constant(str())) if i == 0:
@@ -414,20 +426,10 @@ class Spec:
                     pass
                 case ast.FunctionDef(name=name):
                     self._add_function(f'{node.name}.{name}', stmt)
-                    for d in stmt.decorator_list:
-                        if static and decorator_name(d) in ('getter',
-                                                            'setter'):
-                            raise self.error(d, f"{node.name}.{name}: "
-                                             "accessors (@getter, @setter) "
-                                             "of a @static_type class are "
-                                             f"not supported yet; see "
-                                             f"{README}")
-                case ast.Assign(targets=[ast.Name(name)],
-                                value=ast.Attribute(
-                                    ast.Attribute(ast.Name(module), cls),
-                                    meth)):
-                    self._add_shared(node.name, stmt, name, module, cls,
-                                     meth)
+                case ast.Assign(targets=[ast.Name(name)], value=value) \
+                        if self._shared_source(value) is not None:
+                    self._add_shared(node.name, stmt, name,
+                                     *self._shared_source(value))
                 case ast.Assign(targets=[ast.Name(name)],
                                 value=ast.Name() | ast.Call()):
                     raise self.error(stmt, f"Python has no clones: write "
@@ -438,23 +440,71 @@ class Spec:
                                      f"spec class {node.name}: "
                                      f"{ast.unparse(stmt)!r}; see {README}")
 
+    def _shared_source(self, value: ast.expr
+                       ) -> tuple[str | None, str, str, list[ast.expr]] | None:
+        """(module or None, class, method, decorators) of the value of
+        ``meth = [decorator(...)(]module.Class.meth[)]``, or None."""
+        decorators = []
+        while (isinstance(value, ast.Call) and len(value.args) == 1
+               and not value.keywords):
+            decorators.append(value.func)
+            value = value.args[0]
+        match value:
+            case ast.Attribute(ast.Attribute(ast.Name(module), cls), meth):
+                return module, cls, meth, decorators
+            case ast.Attribute(ast.Name(cls), meth) if cls in self.classes:
+                return None, cls, meth, decorators
+        return None
+
     def _add_shared(self, cls_name: str, stmt: ast.stmt, name: str,
-                    module: str, cls: str, meth: str) -> None:
-        """``name = module.cls.meth``: a method shared with another spec."""
-        if module not in self.imports:
+                    module: str | None, cls: str, meth: str,
+                    decorators: list[ast.expr]) -> None:
+        """``name = module.cls.meth``: a method declared in another spec
+        (or another class of this one)."""
+        where = f'{module}.{cls}' if module else cls
+        if module is not None and module not in self.imports:
             raise self.error(stmt, f"{module} is not a spec imported with "
                              f"'from <package> import {module}'")
-        other = self.imported(module)
+        other = self.imported(module) if module else self
         if f'{cls}.{meth}' not in other.functions:
-            raise self.error(stmt, f"{module}.{cls} has no method {meth!r} "
+            raise self.error(stmt, f"{where} has no method {meth!r} "
                              f"({other.filename})")
         if meth != name:
             raise self.error(stmt, f"a shared method keeps its name: write "
-                             f"{meth} = {module}.{cls}.{meth}")
+                             f"{meth} = {where}.{meth}")
         if f'{cls_name}.{name}' in self.functions:
             raise self.error(stmt, f"{cls_name}.{name} is defined twice")
+        for decorator in decorators:
+            if decorator_name(decorator) not in SHARED_DECORATORS:
+                raise self.error(decorator, f"a shared method takes only "
+                                 f"{' and '.join(SHARED_DECORATORS)}, not "
+                                 f"{ast.unparse(decorator)}")
         self.shared[f'{cls_name}.{name}'] = Shared(module, cls, meth,
-                                                   stmt.lineno)
+                                                   stmt.lineno, decorators)
+
+    def shared_source(self, name: str) -> tuple[Spec, str]:
+        """(spec, "Class.meth") declaring shared method *name*."""
+        shared = self.shared[name]
+        other = self.imported(shared.module) if shared.module else self
+        return other, f'{shared.cls}.{shared.meth}'
+
+    def declaration(self, name: str) -> tuple[Spec, str]:
+        """(spec, "Class.meth") of the def declaring method *name*."""
+        if name in self.shared:
+            return self.shared_source(name)
+        return self, name
+
+    def shared_decorators(self, name: str) -> list[tuple[str, int]]:
+        """The clinic decorator lines of shared method *name*, with their
+        line in this spec: ``critical_section(...)``."""
+        return [(self._decorator_line(d), d.lineno)
+                for d in self.shared[name].decorators
+                if decorator_name(d) not in SPEC_DECORATORS]
+
+    def is_locked(self, name: str) -> bool:
+        """Whether shared method *name* is ``critical_section(...)``."""
+        return any(decorator_name(d) == 'critical_section'
+                   for d in self.shared[name].decorators)
 
     # -- implemented functions ---------------------------------------------
 
@@ -558,11 +608,15 @@ class Spec:
 
     def c_name(self, name: str) -> tuple[str | None, dict[str, str]]:
         """The arguments of @c_name of method *name*: (positional C name
-        or None, {slot or METH_ flag: C name})."""
-        node = self.functions.get(name)
-        if node is None:
+        or None, {slot or METH_ flag: C name}).  For a shared method, the
+        @c_name of this spec (``c_name(...)(module.Class.meth)``)."""
+        if name in self.shared:
+            decorators = self.shared[name].decorators
+        elif name in self.functions:
+            decorators = self.functions[name].decorator_list
+        else:
             return None, {}
-        for decorator in node.decorator_list:
+        for decorator in decorators:
             match decorator:
                 case ast.Call(func=ast.Name('c_name'), args=args,
                               keywords=keywords):
@@ -632,14 +686,6 @@ class Spec:
         """Names of the clinic functions of class *cls_name*, in order."""
         return [meth for meth in self.entries(cls_name)
                 if self.method_kind(f'{cls_name}.{meth}') == CLINIC]
-
-    def decorator_lineno(self, name: str, decorator: str) -> int:
-        """Line of decorator *decorator* of method *name*."""
-        node = self.functions[name]
-        for d in node.decorator_list:
-            if decorator_name(d) == decorator:
-                return d.lineno
-        return node.lineno
 
     def clinic_input(self, name: str
                      ) -> tuple[list[tuple[str, int]], str,

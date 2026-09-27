@@ -5,9 +5,10 @@ ctype.h is a C template included by bytesobject.c and bytearrayobject.c;
 PyCFunctions, not clinic functions: ``@c_name(METH_NOARGS="f")`` gives the
 C function and its calling convention, and the docstring is the __doc__ of
 the method as is.  No clinic runs on ctype.h: the spec of a type imports
-this module and shares its methods with ``isalnum = ctype.B.isalnum``.  The docstrings are also defined in
-Objects/bytes_methods.c (_Py_isalnum__doc__, ...), for the types that
-have no spec yet.
+this module and shares its methods with ``isalnum = ctype.B.isalnum``
+(bytes), or ``isalnum = critical_section(ctype.B.isalnum)`` (bytearray,
+which calls them in a critical section).  These are their only
+docstrings.
 """
 
 from libclinic.pyspec.runtime import c_name

@@ -1,5 +1,4 @@
 # Known disconnects: Doc/builtins/stdtypes.rst signatures vs the runtime
-# (the spec for bytes()).
+# (the spec for bytes() and bytearray()).
 # Checked by Lib/test/test_pyspec_catalog.py: this list may only shrink.
 # Fixed one?  Delete its line.  Keep the lines sorted.
-bytearray(): no runtime signature to compare with Doc/builtins/stdtypes.rst

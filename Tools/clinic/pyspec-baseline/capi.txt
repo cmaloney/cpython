@@ -2,9 +2,6 @@
 # stable_abi.toml, threadsafety.dat and Objects/pyspec/capi/.
 # Checked by Lib/test/test_pyspec_catalog.py: this list may only shrink.
 # Fixed one?  Delete its line.  Keep the lines sorted.
-PyByteArray_Check: documented but has no entry in Doc/data/threadsafety.dat
-PyByteArray_CheckExact: documented but has no entry in Doc/data/threadsafety.dat
-PyByteArray_Resize: documented but has no entry in Doc/data/threadsafety.dat
 PyBytesWriter_Create: documented but has no entry in Doc/data/threadsafety.dat
 PyBytesWriter_Discard: documented but has no entry in Doc/data/threadsafety.dat
 PyBytesWriter_Finish: documented but has no entry in Doc/data/threadsafety.dat

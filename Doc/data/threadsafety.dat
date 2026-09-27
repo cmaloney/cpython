@@ -169,6 +169,10 @@ _PyBytes_Resize:distinct:
 # Repr - atomic as bytes are immutable
 PyBytes_Repr:atomic:
 
+# Type checks - read ob_type pointer, always safe
+PyByteArray_Check:atomic:
+PyByteArray_CheckExact:atomic:
+
 # Creation from object - may call arbitrary code
 PyByteArray_FromObject:shared:
 
@@ -181,6 +185,10 @@ PyByteArray_Concat:shared:
 # Size - uses atomic load on free-threaded builds
 PyByteArray_Size:atomic:
 PyByteArray_GET_SIZE:atomic:
+
+# Resizing - in a critical section on the object; invalidates pointers
+# returned by PyByteArray_AsString()
+PyByteArray_Resize:shared:
 
 # Raw data - no locking; mutating it is unsafe if the bytearray object is shared between threads
 PyByteArray_AsString:compatible:
