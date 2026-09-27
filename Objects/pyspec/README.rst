@@ -121,6 +121,26 @@ What a spec may contain
   functions and ``T.meth(...)``.  See
   ``Tools/clinic/libclinic/pyspec/emit.py``.
 
+Conditional compilation
+-----------------------
+
+A spec has no ``#if``: as with plain Argument Clinic, the condition of a
+method is where its block is in the C file.
+
+* A method compiled under ``#if``: put its one-line block inside the
+  ``#if``.  Clinic wraps its generated code (and a spec body in
+  ``foo_pyspec.c.h``) in the condition, and defines an empty
+  ``*_METHODDEF`` when it is false, so a method table lists it
+  unconditionally.
+* A signature that depends on ``#if`` (the same method defined twice):
+  keep its full clinic blocks in the C file.  In the spec it is only
+  ``def meth(self): ...``, its place in a generated method table, or
+  absent.  Declaring it in both is an error.
+* A slot compiled under ``#if`` stays in a hand-written C sub-table and
+  is not declared in the spec.
+* The tests skip a method whose block is under an ``#if`` false in this
+  build.
+
 C functions: ``@c_implemented``
 -------------------------------
 
