@@ -97,7 +97,7 @@ leave the tree clean.  Parity with main: `transmogrify.h.h` identical;
 ## Open items
 1. Tool code is flat after P2 (5710 -> 5691 lines; the C-side check costs ~200).
    P2 deleted `Objects/pyspec/capi/bytesobject.py` (hand-written runs-Python name sets
-   nothing consumed): awaiting user confirmation.  The C-side check is per function,
+   nothing consumed); the user approved the deletion.  The C-side check is per function,
    not per path, and treats refcount releases as running no Python (audited
    assumption).  A JIT refleak in HelperTest with fresh functions per `-R` repetition
    was worked around, not investigated (maybe the same class as item 2's).  String
@@ -121,9 +121,7 @@ leave the tree clean.  Parity with main: `transmogrify.h.h` identical;
   `worktree-agent-*`.
 - Build dirs (outside the repo): `build-exp` (debug JIT, srcdir this checkout: use
   it), `build_perf_base_jit` (main, PGO+LTO JIT), `build-str1-dbg` (main, debug tier-2
-  interpreter).  Build dirs of agent worktrees (`build-A*`, `build-B`, `build-E*`,
-  `build-merge*`, `build-P2*`, `P2-perf/`, `A-perf/`, `build_review_pgo`) point at
-  removed worktrees or tmpfs copies: stale, safe to delete.
+  interpreter).  Stale build dirs of finished agents were deleted.
 - Regenerate with `Tools/clinic/clinic.py Objects/bytesobject.c
   Objects/stringlib/transmogrify.h Objects/bytearrayobject.c Objects/abstract.c
   Objects/typeobject.c Objects/unicodeobject.c` (not `--make` from a checkout containing
