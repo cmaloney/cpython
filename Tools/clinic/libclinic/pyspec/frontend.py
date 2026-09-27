@@ -217,6 +217,15 @@ def is_stub(node: ast.FunctionDef) -> bool:
                         and body[0].value.value is Ellipsis)
 
 
+def is_placeholder(node: ast.FunctionDef) -> bool:
+    """True for ``def meth(self): ...``: only the place of a method whose
+    signature depends on #if, which keeps its full clinic block in C."""
+    args = node.args
+    return (is_stub(node) and _docstring(node.body) is None
+            and len(args.posonlyargs + args.args) == 1
+            and not (args.vararg or args.kwonlyargs or args.kwarg))
+
+
 def decorator_name(decorator: ast.expr) -> str | None:
     """``name`` for ``@name`` and ``@name(...)``."""
     if isinstance(decorator, ast.Call):

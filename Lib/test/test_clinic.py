@@ -5743,6 +5743,41 @@ class PyspecTest(PyspecTestBase):
         self.assertIn("result = _PyBytes_FromHex(string, 0);\n"
                       "    if (result == NULL) {", output)
 
+    def test_body_in_ifdef(self):
+        # The generated impl is under the condition of its block, as the
+        # code clinic generates for the block is.
+        block = """
+            /*[clinic input]
+            output preset block
+            class bytes "PyBytesObject *" "&PyBytes_Type"
+            [clinic start generated code]*/
+            #if defined(CONDITION)
+            /*[clinic input]
+            bytes.meth
+            [clinic start generated code]*/
+            #endif
+        """
+        spec = """
+            class bytes:
+                def meth(self, a: object, /):
+                    "Doc."
+                    return a
+        """
+        self.generate(spec, block)
+        with open(self.output_path, encoding='utf-8') as f:
+            output = f.read()
+        self.assertIn("#if defined(CONDITION)\n"
+                      "static PyObject *bytes_meth_impl(PyBytesObject *self, "
+                      "PyObject *a);\n"
+                      "#endif /* defined(CONDITION) */\n", output)
+        self.assertIn("#if defined(CONDITION)\n"
+                      "static PyObject *\n"
+                      "bytes_meth_impl(PyBytesObject *self, PyObject *a)\n"
+                      "{\n"
+                      "    return Py_NewRef(a);\n"
+                      "}\n"
+                      "#endif /* defined(CONDITION) */\n", output)
+
     def test_c_implemented(self):
         # A @c_implemented function: C by hand, never generated.  Its
         # annotations are C types; the error check of a call comes from
@@ -6134,7 +6169,85 @@ class PyspecStubTest(PyspecTestBase):
         """
         self.expect_failure(spec, self.block("bytes.meth\n    a: object\n"),
                             f"'bytes.meth' is declared both here and in "
-                            f"{self.spec_path}")
+                            f"{self.spec_path}; a function whose signature "
+                            "depends on #if keeps its clinic input here, "
+                            "and is only 'def meth(self): ...' in the spec")
+
+    # Conditional compilation: as with plain clinic, the condition of a
+    # function is where its block is in the C file.
+
+    IFDEF = """
+        /*[clinic input]
+        output everything block
+        output methoddef_ifndef buffer
+        [clinic start generated code]*/
+        #ifdef CONDITION
+        /*[clinic input]
+        {}
+        [clinic start generated code]*/
+        #endif
+        /*[clinic input]
+        dump buffer
+        [clinic start generated code]*/
+    """
+
+    def test_stub_in_ifdef(self):
+        spec = """
+            class bytes:
+                def meth(self, a: object, /):
+                    "Doc."
+                    ...
+        """
+        full = "bytes.meth\n    a: object\n    /\n\nDoc."
+        os_helper.unlink(self.spec_path)
+        expected = self.output(self.generate(
+            None, dedent(self.CLASS) + dedent(self.IFDEF).format(full)))
+        actual = self.output(self.generate(
+            spec, dedent(self.CLASS) + dedent(self.IFDEF).format("bytes.meth")))
+        self.assertEqual(actual, expected)
+        self.assertIn("#if defined(CONDITION)\n", actual)
+        self.assertIn("#endif /* defined(CONDITION) */", actual)
+        # The METHODDEF fallback: a method table lists it unconditionally.
+        self.assertIn("#ifndef BYTES_METH_METHODDEF\n"
+                      "    #define BYTES_METH_METHODDEF\n"
+                      "#endif /* !defined(BYTES_METH_METHODDEF) */", actual)
+
+    def test_mixed_file(self):
+        # A signature that depends on #if keeps its full blocks, and is
+        # only ``def other(self): ...`` in the spec (its place in the
+        # class), or not in the spec; the other methods are one-line
+        # blocks.
+        spec = """
+            class bytes:
+                def meth(self, a: object, /):
+                    ...
+
+                def other(self):
+                    ...
+        """
+        generated = self.generate(spec, dedent(self.CLASS) + dedent("""
+            /*[clinic input]
+            bytes.meth
+            [clinic start generated code]*/
+            #ifdef CONDITION
+            /*[clinic input]
+            bytes.other
+                a: object
+                /
+            [clinic start generated code]*/
+            #else
+            /*[clinic input]
+            bytes.other
+
+            Doc.
+            [clinic start generated code]*/
+            #endif
+        """))
+        self.assertIn("bytes_meth_impl(PyBytesObject *self, PyObject *a)",
+                      generated)
+        self.assertIn("bytes_other_impl(PyBytesObject *self, PyObject *a)",
+                      generated)
+        self.assertIn("bytes_other_impl(PyBytesObject *self)", generated)
 
     def test_python_decorator_in_block(self):
         spec = """
@@ -6533,6 +6646,45 @@ class PyspecTypeTest(PyspecTestBase):
         with self.assertRaisesRegex(ClinicError, re.escape(errmsg)):
             self.types_header(spec)
 
+    def test_method_table_with_ifdef(self):
+        # The table lists every method unconditionally: clinic defines an
+        # empty *_METHODDEF for a method not compiled in.  A signature
+        # that depends on #if keeps its full blocks and is only placed in
+        # the class by ``def other(self): ...``.
+        spec = """
+            class bytes:
+                def meth(self, a: object, /):
+                    ...
+
+                def other(self):
+                    ...
+        """
+        header = self.types_header(spec, dedent(self.CLASS) + dedent("""
+            #ifdef CONDITION
+            /*[clinic input]
+            bytes.meth
+            [clinic start generated code]*/
+            /*[clinic input]
+            bytes.other
+                a: object
+                /
+            [clinic start generated code]*/
+            #else
+            /*[clinic input]
+            bytes.other
+
+            Doc.
+            [clinic start generated code]*/
+            #endif
+        """))
+        self.assertIn(dedent("""\
+            static PyMethodDef bytes_methods[] = {
+                BYTES_METH_METHODDEF
+                BYTES_OTHER_METHODDEF
+                {NULL, NULL}  /* sentinel */
+            };
+            """), header)
+
     def test_partial_group(self):
         self.check_error("""
             class bytes:
@@ -6874,7 +7026,8 @@ class PyspecTypeTest(PyspecTestBase):
 
 PYSPEC_DIRS = [os.path.join(test_tools.basepath, 'Objects', 'pyspec'),
                os.path.join(test_tools.basepath, 'Objects', 'stringlib',
-                            'pyspec')]
+                            'pyspec'),
+               os.path.join(test_tools.basepath, 'Modules', 'pyspec')]
 BYTES_SPEC = os.path.join(PYSPEC_DIRS[0], 'bytesobject.py')
 
 
@@ -6906,6 +7059,22 @@ def spec_files():
             yield os.path.join(dirname, name), (c_files or [None])[0]
 
 
+def compiled_out(c_file, types):
+    """The spec methods ("T.meth") of *c_file* not compiled in this build:
+    their clinic block is under #if (clinic's cpp.Monitor condition) and
+    the type types[T] does not define it (an inherited attribute of the
+    same name, e.g. object.__sizeof__, does not count)."""
+    clinic = Clinic(CLanguage(c_file), filename=c_file, limited_capi=False,
+                    writer=libclinic.FileWriter(dry_run=True))
+    with open(c_file, encoding='utf-8') as f:
+        clinic.parse(f.read())
+    return {f'{cls.name}.{func.name}'
+            for _, cls in clinic._clinic_classes(clinic, '')
+            for func in cls.functions
+            if func.condition and cls.name in types
+            and func.name not in vars(types[cls.name])}
+
+
 # The cases of the bytes spec, also used by BytesSpecFactsTest (its
 # classes) and test_pyspec_facts (its SOURCES).
 BYTES_CASES = load_cases(BYTES_SPEC) if os.path.exists(BYTES_SPEC) else None
@@ -6913,7 +7082,8 @@ BYTES_CASES = load_cases(BYTES_SPEC) if os.path.exists(BYTES_SPEC) else None
 
 @unittest.skipUnless(os.path.exists(BYTES_SPEC), 'needs the source tree')
 class PyspecFilesTest(TestCase):
-    """Every spec file (Objects/pyspec/*.py, Objects/stringlib/pyspec/*.py):
+    """Every spec file (Objects/pyspec/*.py, Objects/stringlib/pyspec/*.py,
+    Modules/pyspec/*.py):
 
     * what clinic generates from it is up to date;
     * run as Python, its functions behave like the interpreter's on the
@@ -6922,6 +7092,7 @@ class PyspecFilesTest(TestCase):
       their PyTypeObject is written in C, and the slots it fills are the
       dunders of the class.
 
+    A method whose block is under an #if false in this build is skipped.
     A new spec adds data (a <stem>_cases.py), not a test class.
     """
     maxDiff = None
@@ -6932,6 +7103,30 @@ class PyspecFilesTest(TestCase):
     def setUp(self):
         # Clinic on a C file registers the converters it defines.
         save_restore_converters(self)
+
+    def test_compiled_out(self):
+        # A method under an #if false in this build is skipped; one that
+        # is compiled in, or not under #if, is checked.
+        c_file = os.path.join(self.enterContext(os_helper.temp_dir()),
+                              'foo.c')
+        with open(c_file, 'w', encoding='utf-8') as f:
+            f.write(dedent("""
+                /*[clinic input]
+                class int "PyObject *" "&PyLong_Type"
+                [clinic start generated code]*/
+                #ifdef NEVER
+                /*[clinic input]
+                int.nope
+                [clinic start generated code]*/
+                /*[clinic input]
+                int.bit_length
+                [clinic start generated code]*/
+                #endif
+                /*[clinic input]
+                int.other
+                [clinic start generated code]*/
+            """))
+        self.assertEqual(compiled_out(c_file, {'int': int}), {'int.nope'})
 
     def test_up_to_date(self):
         for spec_path, c_file in spec_files():
@@ -6968,12 +7163,15 @@ class PyspecFilesTest(TestCase):
             return None
 
     def test_cases(self):
-        for spec_path, _ in spec_files():
+        for spec_path, c_file in spec_files():
             cases = load_cases(spec_path)
             if cases is None:
                 continue
             spec = pyspec_runtime.load(spec_path)
+            skip = compiled_out(c_file, cases.TYPES) if c_file else set()
             for name, calls in cases.CASES.items():
+                if name in skip:
+                    continue
                 interpreter = self.interpreter_function(cases, name)
                 if interpreter is None:
                     continue        # e.g. no _testlimitedcapi
@@ -6995,13 +7193,18 @@ class PyspecFilesTest(TestCase):
                 with self.subTest(spec=spec_path, cls=cls_name):
                     self.assertIsNotNone(
                         cases, f"add TYPES to the _cases.py of {spec_path}")
-                    self.check_type(spec, cls_name, cases.TYPES[cls_name])
+                    skip = compiled_out(c_file, cases.TYPES)
+                    self.check_type(spec, cls_name, cases.TYPES[cls_name],
+                                    skip)
 
-    def check_type(self, spec, cls_name, tp):
-        """The type generated from class *cls_name* is *tp*."""
+    def check_type(self, spec, cls_name, tp, skip=()):
+        """The type generated from class *cls_name* is *tp*, but for the
+        methods *skip* (not compiled in)."""
         methods, slots, docs = [], set(), {}
         for meth in spec.entries(cls_name):
             name = f'{cls_name}.{meth}'
+            if name in skip:
+                continue
             kind = spec.method_kind(name)
             if kind == pyspec_frontend.SLOT or meth == '__init__':
                 slots.add(meth)     # tp_init: a wrapper too
@@ -7019,12 +7222,20 @@ class PyspecFilesTest(TestCase):
                     if isinstance(value, types.WrapperDescriptorType)}
         # __hash__ is None: PyType_Ready() makes a type that defines
         # comparisons but no tp_hash unhashable.
+        # Getsets and members stay in the C tables of the type.
         others = [name for name, value in vars(tp).items()
                   if name not in wrappers and name not in ('__doc__',
+                                                           '__module__',
                                                            '__new__')
-                  and not (name == '__hash__' and value is None)]
+                  and not (name == '__hash__' and value is None)
+                  and not isinstance(value, (types.GetSetDescriptorType,
+                                             types.MemberDescriptorType))]
         # The method table, hence __dict__, is in the order of the spec.
         self.assertEqual(others, methods, self.REBUILD)
+        if not slots:
+            # The spec declares the methods only (e.g. mmap): the slots
+            # and tp_doc stay in C.
+            return
         # The slots of the spec are the wrappers of the type: the slots
         # its C PyTypeObject and the generated tables fill.
         self.assertEqual(wrappers, slots,
