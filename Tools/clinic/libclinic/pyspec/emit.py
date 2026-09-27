@@ -102,13 +102,9 @@ SLOT_CHECK = {
 }
 
 
-def type_check(name, exact):
-    """The C check of builtin type *name* (exactly with *exact*), or
-    None."""
-    row = builtin_types.TABLE.get(builtin_types.by_name(name))
-    if row is None:
-        return None
-    return row.check_exact if exact else row.check
+# The C checks of the builtin types: name -> (check, exact check).
+TYPE_CHECKS = {tp.__name__: (row.check, row.check_exact)
+               for tp, row in builtin_types.TABLE.items()}
 
 COMPARE_OPS = {ast.Lt: '<', ast.LtE: '<=', ast.Gt: '>', ast.GtE: '>=',
                ast.Eq: '==', ast.NotEq: '!='}
@@ -441,8 +437,8 @@ class FunctionEmitter:
             case ast.Compare(left=ast.Call(func=ast.Name('type'), args=[obj]),
                              ops=[ast.Is() | ast.IsNot() as op],
                              comparators=[ast.Name(cls)]) \
-                    if type_check(cls, True):
-                check = f'{type_check(cls, True)}({self.lower_value(obj)})'
+                    if TYPE_CHECKS.get(cls, (0, 0))[1]:
+                check = f'{TYPE_CHECKS[cls][1]}({self.lower_value(obj)})'
                 return f'!{check}' if isinstance(op, ast.IsNot) else check
             case ast.Compare(left=ast.Name(name),
                              ops=[ast.Is() | ast.IsNot() as op],
@@ -451,8 +447,9 @@ class FunctionEmitter:
                 equal = '!=' if isinstance(op, ast.IsNot) else '=='
                 return f'{name} {equal} {TYPE_OBJECTS[cls]}'
             case ast.Call(func=ast.Name('isinstance'),
-                          args=[obj, ast.Name(cls)]) if type_check(cls, False):
-                return f'{type_check(cls, False)}({self.lower_value(obj)})'
+                          args=[obj, ast.Name(cls)]) \
+                    if TYPE_CHECKS.get(cls, (0, 0))[0]:
+                return f'{TYPE_CHECKS[cls][0]}({self.lower_value(obj)})'
             case ast.Call(func=ast.Name('hasattr'),
                           args=[ast.Call(func=ast.Name('type'), args=[obj]),
                                 ast.Constant(str() as name)]) \

@@ -783,16 +783,9 @@ def specialization_of(spec, node, facts=False):
 
 def fact_key(fact):
     """A hashable form of a fact of an environment."""
-    match fact:
-        case type():
-            return fact.__name__
-        case Value():
-            return ('value', repr(fact.obj))
-        case IterOf():
-            return ('iter', fact.source, fact.tp.__name__)
-        case Other():
-            return ('other', tuple(tp.__name__ for tp in fact.types))
-    return fact
+    if isinstance(fact, (Value, IterOf, Other)):
+        return type(fact).__name__, repr(vars(fact))
+    return getattr(fact, '__name__', fact)
 
 
 def _has_loop(stmts):
