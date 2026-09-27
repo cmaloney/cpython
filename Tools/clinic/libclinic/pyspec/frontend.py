@@ -540,8 +540,12 @@ class Spec:
         return [name for name, node in self.functions.items()
                 if is_c_implemented(node)]
 
-    def describe(self, name: str) -> SpecFunction:
-        """The C signature of implemented spec function *name*."""
+    def describe(self, name: str,
+                 self_ctype: str | None = None) -> SpecFunction:
+        """The C signature of implemented spec function *name*: a
+        top-level function, a __new__, or, with *self_ctype* (the C type
+        of clinic's implicit self or class parameter, e.g.
+        "PyBytesObject *"), another method."""
         node = self.functions[name]
         args = node.args
         cls_name, _, meth = name.rpartition('.')
@@ -549,7 +553,7 @@ class Spec:
         def error(node: ast.AST, message: str) -> SpecError:
             return self.error(node, f"{name}(): {message}")
 
-        if cls_name and meth != '__new__':
+        if cls_name and meth != '__new__' and self_ctype is None:
             raise error(node, "a spec can only implement __new__")
         others = [args.vararg, *args.kwonlyargs, args.kwarg]
         for other in others:
@@ -562,14 +566,15 @@ class Spec:
         new_type = None
         for i, arg in enumerate(positional):
             if cls_name and i == 0:
-                if cls_name not in TYPE_OBJECTS:
-                    raise error(node, f"unknown type {cls_name!r}; known: "
-                                f"{sorted(TYPE_OBJECTS)}")
                 if arg.annotation is not None:
-                    raise error(arg, f"the class parameter {arg.arg!r} "
-                                "must not be annotated")
-                new_type = cls_name
-                parameters.append(SpecParameter(arg.arg, TYPE_CTYPE, False))
+                    raise error(arg, f"the self (or class) parameter "
+                                f"{arg.arg!r} must not be annotated")
+                if meth == '__new__':
+                    if cls_name not in TYPE_OBJECTS:
+                        raise error(node, f"unknown type {cls_name!r}; "
+                                    f"known: {sorted(TYPE_OBJECTS)}")
+                    new_type, self_ctype = cls_name, TYPE_CTYPE
+                parameters.append(SpecParameter(arg.arg, self_ctype, False))
                 continue
             match arg.annotation:
                 case ast.Name(conv) | ast.Call(func=ast.Name(conv)) \

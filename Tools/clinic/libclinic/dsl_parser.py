@@ -11,7 +11,7 @@ from types import FunctionType
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import libclinic
-from libclinic.pyspec import emit, frontend
+from libclinic.pyspec import frontend
 from libclinic import (
     ClinicError, VersionTuple,
     fail, warn, unspecified, unknown, NULL)
@@ -1860,7 +1860,7 @@ class DSLParser:
         assert isinstance(conv, self_converter)
         self_ctype = (conv.specified_type or conv.type
                       or correct_name_for_self(func)[0])
-        description = emit.describe_method(spec, name, self_ctype)
+        description = spec.describe(name, self_ctype)
         spec_params = description.parameters[1:]
         if len(params) != len(spec_params):
             fail(f"{where} takes {len(spec_params)} parameters after self, "

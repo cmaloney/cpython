@@ -914,8 +914,7 @@ class Generator:
             cls_name, _, meth = name.rpartition('.')
             if cls_name and meth != '__new__':
                 self.c_basename(name)       # used by a clinic block?
-                return describe_method(self.spec, name,
-                                       self.self_ctypes[name])
+                return self.spec.describe(name, self.self_ctypes[name])
             return self.spec.describe(name)
         except frontend.SpecError as exc:
             raise SpecError(self.spec.functions[name], str(exc)) from None
@@ -1052,50 +1051,6 @@ class Generator:
             out += emitter.function(f'{basename}_nargs{nargs}', residual)
             out.append('')
         return out
-
-
-def describe_method(spec, name, self_ctype):
-    """The C signature (frontend.SpecFunction) of implemented spec method
-    *name*, other than __new__: a method or class method whose first
-    parameter is clinic's implicit self (or class) parameter, of C type
-    *self_ctype* (from the clinic class, e.g. "PyBytesObject *").
-
-    The other parameters follow the rules of frontend.Spec.describe(),
-    which describes __new__ and top-level functions only.
-    """
-    node = spec.functions[name]
-    where = f"{name}()"     # the caller adds the location
-    args = node.args
-    for other in (args.vararg, *args.kwonlyargs, args.kwarg):
-        if other is not None:
-            raise frontend.SpecError(f"{where}: a spec needs positional "
-                                     f"parameters only; {other.arg!r} is "
-                                     "not")
-    positional = args.posonlyargs + args.args
-    if not positional or positional[0].annotation is not None:
-        raise frontend.SpecError(f"{where}: the first parameter must be "
-                                 "the unannotated self (or class)")
-    first_optional = len(positional) - len(args.defaults)
-    parameters = [frontend.SpecParameter(positional[0].arg, self_ctype,
-                                         False)]
-    for i, arg in enumerate(positional[1:], 1):
-        match arg.annotation:
-            case ast.Name(conv) | ast.Call(func=ast.Name(conv)) \
-                    if conv in frontend.SPEC_CTYPES:
-                ctype = frontend.SPEC_CTYPES[conv]
-            case _:
-                raise frontend.SpecError(
-                    f"{where}: parameter {arg.arg!r} needs an annotation "
-                    f"from {sorted(frontend.SPEC_CTYPES)}")
-        optional = i >= first_optional
-        if optional:
-            default = args.defaults[i - first_optional]
-            if not (isinstance(default, ast.Name) and default.id == 'NULL'):
-                raise frontend.SpecError(f"{where}: parameter {arg.arg!r} "
-                                         "may only default to NULL")
-        parameters.append(frontend.SpecParameter(arg.arg, ctype, optional))
-    return frontend.SpecFunction(name, spec.filename, node.lineno,
-                                 parameters)
 
 
 def generate(spec: frontend.Spec, spec_path: str,
