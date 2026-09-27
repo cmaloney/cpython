@@ -994,16 +994,19 @@ class Generator:
             what += (f', the snapshot: called in the critical section of '
                      f'{special.lock}, runs no Python code; FALLBACK '
                      '(Py_None) when that could run Python code')
-        code = ast.unparse(ast.Module(special.body, []))
-        emitter = FunctionEmitter(self, params)
-        return [
-            f'/* {what}:',
-            *[' * ' + line if line else ' *'
-              for line in code.replace('*/', '* /').splitlines()],
-            ' */',
-            *emitter.function(special.name, special.body),
-            '',
-        ]
+        return self.commented_function(what, special.name, special.body,
+                                       params)
+
+    def commented_function(self, title, c_name, stmts, params,
+                           known_null=()):
+        """The C function *c_name* lowered from *stmts*, after a comment:
+        *title* and the Python code."""
+        code = ast.unparse(ast.Module(stmts, [])).replace('*/', '* /')
+        emitter = FunctionEmitter(self, params, known_null)
+        return [f'/* {title}:',
+                *[' * ' + line if line else ' *'
+                  for line in code.splitlines()],
+                ' */', *emitter.function(c_name, stmts), '']
 
     def arities(self, description):
         """(facts, C name, given, missing parameters) of the NAME_nargsN()
@@ -1034,18 +1037,11 @@ class Generator:
             nargs = len(given)
             residual = partial_eval.specialize(self.spec, description.name,
                                                env)
-            emitter = FunctionEmitter(self,
-                                      [(p.name, p.ctype) for p in given],
-                                      known_null=[p.name for p in missing])
-            out += [f'/* {basename}() for exactly '
-                    f'{description.new_type} with {nargs} positional '
-                    'argument(s):',
-                    *[' * ' + line if line else ' *'
-                      for line in ast.unparse(ast.Module(residual, []))
-                      .replace('*/', '* /').splitlines()],
-                    ' */']
-            out += emitter.function(f'{basename}_nargs{nargs}', residual)
-            out.append('')
+            out += self.commented_function(
+                f'{basename}() for exactly {description.new_type} with '
+                f'{nargs} positional argument(s)',
+                f'{basename}_nargs{nargs}', residual,
+                [(p.name, p.ctype) for p in given], [p.name for p in missing])
         return out
 
 

@@ -166,9 +166,10 @@ def load(path):
     the spec has run, the global T is the builtin again: bodies compare
     with the real type.  Calls ``T.m(...)`` of spec methods call the spec
     method, as in the generated C (except in the Python reference of a
-    @c_implemented function, which uses the builtin).  The specs it imports (``from
-    pyspec.abstract import PyNumber_AsSsize_t``) are found relative to the
-    directory of the C file, or to the source root (frontend.py).
+    @c_implemented function, which uses the builtin).  The specs it
+    imports (``from pyspec.abstract import PyNumber_AsSsize_t``) are found
+    relative to the directory of the C file, or to the source root
+    (frontend.py).
     """
     with open(path, encoding='utf-8') as f:
         tree = ast.parse(f.read(), path)

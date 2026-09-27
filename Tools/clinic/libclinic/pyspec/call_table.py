@@ -320,17 +320,10 @@ def _just_calls(spec, residual, given):
 
 def _variant(generator, description, c_name, residual, given, missing, tp,
              facts, const):
-    emitter = emit.FunctionEmitter(
-        generator, [(p.name, p.ctype) for p in given],
-        known_null=[p.name for p in missing])
-    code = ast.unparse(ast.Module(residual, [])).replace('*/', '* /')
-    return [
-        f'/* {generator.c_basename(description.name)}() for exactly '
-        f'{description.new_type} with '
-        f'1 positional argument of exact type {tp.__name__}',
-        f' * ({_describe(facts, const, [p.name for p in given])}):',
-        *[' * ' + line if line else ' *' for line in code.splitlines()],
-        ' */',
-        *emitter.function(c_name, residual),
-        '',
-    ]
+    described = _describe(facts, const, [p.name for p in given])
+    return generator.commented_function(
+        f'{generator.c_basename(description.name)}() for exactly '
+        f'{description.new_type} with 1 positional argument of exact type '
+        f'{tp.__name__}\n * ({described})',
+        c_name, residual, [(p.name, p.ctype) for p in given],
+        [p.name for p in missing])
