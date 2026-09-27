@@ -973,17 +973,12 @@ bytearray_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 
 /*[clinic input]
 bytearray.__init__
-
-    source as arg: object = NULL
-    encoding: str = NULL
-    errors: str = NULL
-
 [clinic start generated code]*/
 
 static int
 bytearray___init___impl(PyByteArrayObject *self, PyObject *arg,
                         const char *encoding, const char *errors)
-/*[clinic end generated code: output=4ce1304649c2f8b3 input=1141a7122eefd7b9]*/
+/*[clinic end generated code: output=4ce1304649c2f8b3 input=0c52c064180b929c]*/
 {
     Py_ssize_t count;
     PyObject *it;
@@ -1316,56 +1311,36 @@ bytearray_dealloc(PyObject *op)
 
 
 /*[clinic input]
-@permit_long_summary
-@critical_section
-@text_signature "($self, sub[, start[, end]], /)"
 bytearray.find
-
-    sub: object
-    start: slice_index(accept={int, NoneType}, c_default='0') = None
-         Optional start position. Default: start of the bytes.
-    end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None
-         Optional stop position. Default: end of the bytes.
-    /
-
-Return the lowest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start:end].
-
-Return -1 on failure.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_find_impl(PyByteArrayObject *self, PyObject *sub, Py_ssize_t start,
                     Py_ssize_t end)
-/*[clinic end generated code: output=413e1cab2ae87da0 input=df3aa94840d893a7]*/
+/*[clinic end generated code: output=413e1cab2ae87da0 input=f13f79d2f8481649]*/
 {
     return _bytearray_with_buffer(self, _Py_bytes_find, sub, start, end);
 }
 
 /*[clinic input]
-@permit_long_summary
-@critical_section
-bytearray.count = bytearray.find
-
-Return the number of non-overlapping occurrences of subsection 'sub' in bytes B[start:end].
+bytearray.count
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_count_impl(PyByteArrayObject *self, PyObject *sub,
                      Py_ssize_t start, Py_ssize_t end)
-/*[clinic end generated code: output=a21ee2692e4f1233 input=e8fcdca8272857e0]*/
+/*[clinic end generated code: output=a21ee2692e4f1233 input=a1e4e796602f78bf]*/
 {
     return _bytearray_with_buffer(self, _Py_bytes_count, sub, start, end);
 }
 
 /*[clinic input]
 bytearray.clear
-
-Remove all items from the bytearray.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_clear_impl(PyByteArrayObject *self)
-/*[clinic end generated code: output=85c2fe6aede0956c input=ed6edae9de447ac4]*/
+/*[clinic end generated code: output=85c2fe6aede0956c input=59860be2c151e5a5]*/
 {
     if (PyByteArray_Resize((PyObject *)self, 0) < 0)
         return NULL;
@@ -1373,70 +1348,49 @@ bytearray_clear_impl(PyByteArrayObject *self)
 }
 
 /*[clinic input]
-@critical_section
 bytearray.copy
-
-Return a copy of B.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_copy_impl(PyByteArrayObject *self)
-/*[clinic end generated code: output=68cfbcfed484c132 input=b96f8b01f73851ad]*/
+/*[clinic end generated code: output=68cfbcfed484c132 input=9576e926725e7c1e]*/
 {
     return PyByteArray_FromStringAndSize(PyByteArray_AS_STRING((PyObject *)self),
                                          PyByteArray_GET_SIZE(self));
 }
 
 /*[clinic input]
-@permit_long_summary
-@critical_section
-bytearray.index = bytearray.find
-
-Return the lowest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start:end].
-
-Raise ValueError if the subsection is not found.
+bytearray.index
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_index_impl(PyByteArrayObject *self, PyObject *sub,
                      Py_ssize_t start, Py_ssize_t end)
-/*[clinic end generated code: output=067a1e78efc672a7 input=c37f177cfee19fe4]*/
+/*[clinic end generated code: output=067a1e78efc672a7 input=49f1aad507b9af26]*/
 {
     return _bytearray_with_buffer(self, _Py_bytes_index, sub, start, end);
 }
 
 /*[clinic input]
-@permit_long_summary
-@critical_section
-bytearray.rfind = bytearray.find
-
-Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start:end].
-
-Return -1 on failure.
+bytearray.rfind
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_rfind_impl(PyByteArrayObject *self, PyObject *sub,
                      Py_ssize_t start, Py_ssize_t end)
-/*[clinic end generated code: output=51bf886f932b283c input=1265b11c437d2750]*/
+/*[clinic end generated code: output=51bf886f932b283c input=77c6365c1ef9516c]*/
 {
     return _bytearray_with_buffer(self, _Py_bytes_rfind, sub, start, end);
 }
 
 /*[clinic input]
-@permit_long_summary
-@critical_section
-bytearray.rindex = bytearray.find
-
-Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start:end].
-
-Raise ValueError if the subsection is not found.
+bytearray.rindex
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_rindex_impl(PyByteArrayObject *self, PyObject *sub,
                       Py_ssize_t start, Py_ssize_t end)
-/*[clinic end generated code: output=38e1cf66bafb08b9 input=7d198b3d6b0a62ce]*/
+/*[clinic end generated code: output=38e1cf66bafb08b9 input=878030d05e85fd93]*/
 {
     return _bytearray_with_buffer(self, _Py_bytes_rindex, sub, start, end);
 }
@@ -1459,72 +1413,36 @@ bytearray_contains(PyObject *self, PyObject *arg)
 }
 
 /*[clinic input]
-@permit_long_summary
-@critical_section
-@text_signature "($self, prefix[, start[, end]], /)"
 bytearray.startswith
-
-    prefix as subobj: object
-        A bytes or a tuple of bytes to try.
-    start: slice_index(accept={int, NoneType}, c_default='0') = None
-        Optional start position. Default: start of the bytearray.
-    end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None
-        Optional stop position. Default: end of the bytearray.
-    /
-
-Return True if the bytearray starts with the specified prefix, False otherwise.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_startswith_impl(PyByteArrayObject *self, PyObject *subobj,
                           Py_ssize_t start, Py_ssize_t end)
-/*[clinic end generated code: output=a3d9b6d44d3662a6 input=93f9ffee684f109a]*/
+/*[clinic end generated code: output=a3d9b6d44d3662a6 input=58fdcaac2b4c7296]*/
 {
     return _bytearray_with_buffer(self, _Py_bytes_startswith, subobj, start, end);
 }
 
 /*[clinic input]
-@permit_long_summary
-@critical_section
-@text_signature "($self, suffix[, start[, end]], /)"
 bytearray.endswith
-
-    suffix as subobj: object
-        A bytes or a tuple of bytes to try.
-    start: slice_index(accept={int, NoneType}, c_default='0') = None
-         Optional start position. Default: start of the bytearray.
-    end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None
-         Optional stop position. Default: end of the bytearray.
-    /
-
-Return True if the bytearray ends with the specified suffix, False otherwise.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_endswith_impl(PyByteArrayObject *self, PyObject *subobj,
                         Py_ssize_t start, Py_ssize_t end)
-/*[clinic end generated code: output=e75ea8c227954caa input=d158b030a11d0b06]*/
+/*[clinic end generated code: output=e75ea8c227954caa input=d39f469d6495daf9]*/
 {
     return _bytearray_with_buffer(self, _Py_bytes_endswith, subobj, start, end);
 }
 
 /*[clinic input]
-@critical_section
-bytearray.removeprefix as bytearray_removeprefix
-
-    prefix: Py_buffer
-    /
-
-Return a bytearray with the given prefix string removed if present.
-
-If the bytearray starts with the prefix string, return
-bytearray[len(prefix):].  Otherwise, return a copy of the original
-bytearray.
+bytearray.removeprefix
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_removeprefix_impl(PyByteArrayObject *self, Py_buffer *prefix)
-/*[clinic end generated code: output=6cabc585e7f502e0 input=4323ba6d275fe7a8]*/
+/*[clinic end generated code: output=6cabc585e7f502e0 input=4dc321049eb2e291]*/
 {
     const char *self_start = PyByteArray_AS_STRING(self);
     Py_ssize_t self_len = PyByteArray_GET_SIZE(self);
@@ -1542,22 +1460,12 @@ bytearray_removeprefix_impl(PyByteArrayObject *self, Py_buffer *prefix)
 }
 
 /*[clinic input]
-@critical_section
-bytearray.removesuffix as bytearray_removesuffix
-
-    suffix: Py_buffer
-    /
-
-Return a bytearray with the given suffix string removed if present.
-
-If the bytearray ends with the suffix string and that suffix is not
-empty, return bytearray[:-len(suffix)].  Otherwise, return a copy of
-the original bytearray.
+bytearray.removesuffix
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_removesuffix_impl(PyByteArrayObject *self, Py_buffer *suffix)
-/*[clinic end generated code: output=2bc8cfb79de793d3 input=f71ba2e1a40c47dd]*/
+/*[clinic end generated code: output=2bc8cfb79de793d3 input=747713555f4ddcb9]*/
 {
     const char *self_start = PyByteArray_AS_STRING(self);
     Py_ssize_t self_len = PyByteArray_GET_SIZE(self);
@@ -1577,17 +1485,12 @@ bytearray_removesuffix_impl(PyByteArrayObject *self, Py_buffer *suffix)
 
 
 /*[clinic input]
-@critical_section
 bytearray.resize
-    size: Py_ssize_t
-        New size to resize to.
-    /
-Resize the internal buffer of bytearray to len.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_resize_impl(PyByteArrayObject *self, Py_ssize_t size)
-/*[clinic end generated code: output=f73524922990b2d9 input=116046316a2b5cfc]*/
+/*[clinic end generated code: output=f73524922990b2d9 input=1c850c11958d45da]*/
 {
     Py_ssize_t start_size = PyByteArray_GET_SIZE(self);
     int result = bytearray_resize_lock_held((PyObject *)self, size);
@@ -1603,17 +1506,12 @@ bytearray_resize_impl(PyByteArrayObject *self, Py_ssize_t size)
 
 
 /*[clinic input]
-@critical_section
 bytearray.take_bytes
-    n: object = None
-        Bytes to take, negative indexes from end. None indicates all bytes.
-    /
-Take *n* bytes from the bytearray and return them as a bytes object.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_take_bytes_impl(PyByteArrayObject *self, PyObject *n)
-/*[clinic end generated code: output=3147fbc0bbbe8d94 input=b15b5172cdc6deda]*/
+/*[clinic end generated code: output=3147fbc0bbbe8d94 input=9849f1091943a203]*/
 {
     Py_ssize_t to_take;
     Py_ssize_t size = Py_SIZE(self);
@@ -1690,26 +1588,13 @@ bytearray_take_bytes_impl(PyByteArrayObject *self, PyObject *n)
 
 
 /*[clinic input]
-@permit_long_summary
-@critical_section
 bytearray.translate
-
-    table: object
-        Translation table, which must be a bytes object of length 256.
-    /
-    delete as deletechars: object(c_default="NULL") = b''
-
-Return a copy with each character mapped by the given translation table.
-
-All characters occurring in the optional argument delete are
-removed.  The remaining characters are mapped through the given
-translation table.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_translate_impl(PyByteArrayObject *self, PyObject *table,
                          PyObject *deletechars)
-/*[clinic end generated code: output=b6a8f01c2a74e446 input=e30d2ae004365ed9]*/
+/*[clinic end generated code: output=b6a8f01c2a74e446 input=93d82658e7427068]*/
 {
     char *input, *output;
     const char *table_chars;
@@ -1797,52 +1682,25 @@ done:
 
 
 /*[clinic input]
-
-@permit_long_summary
-@staticmethod
 bytearray.maketrans
-
-    frm: Py_buffer
-    to: Py_buffer
-    /
-
-Return a translation table usable for the bytes or bytearray translate method.
-
-The returned table will be one where each byte in frm is mapped to
-the byte at the same position in to.
-
-The bytes objects frm and to must be of the same length.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_maketrans_impl(Py_buffer *frm, Py_buffer *to)
-/*[clinic end generated code: output=1df267d99f56b15e input=c2f5f6e7e6b0221d]*/
+/*[clinic end generated code: output=1df267d99f56b15e input=d6d1d7ebb5036bb1]*/
 {
     return _Py_bytes_maketrans(frm, to);
 }
 
 
 /*[clinic input]
-@critical_section
 bytearray.replace
-
-    old: Py_buffer
-    new: Py_buffer
-    /
-    count: Py_ssize_t = -1
-        Maximum number of occurrences to replace.
-        -1 (the default value) means replace all occurrences.
-
-Return a copy with all occurrences of substring old replaced by new.
-
-If count is given, only the first count occurrences are replaced.
-If count is not specified or -1, then all occurrences are replaced.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_replace_impl(PyByteArrayObject *self, Py_buffer *old,
                        Py_buffer *new, Py_ssize_t count)
-/*[clinic end generated code: output=d39884c4dc59412a input=e2591806f954aec3]*/
+/*[clinic end generated code: output=d39884c4dc59412a input=59b07bfaa6d0526d]*/
 {
     return stringlib_replace((PyObject *)self,
                              (const char *)old->buf, old->len,
@@ -1850,25 +1708,13 @@ bytearray_replace_impl(PyByteArrayObject *self, Py_buffer *old,
 }
 
 /*[clinic input]
-@permit_long_summary
-@critical_section
 bytearray.split
-
-    sep: object = None
-        The delimiter according which to split the bytearray.
-        None (the default value) means split on ASCII whitespace
-        characters (space, tab, return, newline, formfeed, vertical tab).
-    maxsplit: Py_ssize_t = -1
-        Maximum number of splits to do.
-        -1 (the default value) means no limit.
-
-Return a list of the sections in the bytearray, using sep as the delimiter.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_split_impl(PyByteArrayObject *self, PyObject *sep,
                      Py_ssize_t maxsplit)
-/*[clinic end generated code: output=833e2cf385d9a04d input=45605178023b52ac]*/
+/*[clinic end generated code: output=833e2cf385d9a04d input=07f2ff8afefb59ba]*/
 {
     PyObject *list = NULL;
 
@@ -1900,26 +1746,12 @@ done:
 }
 
 /*[clinic input]
-@critical_section
 bytearray.partition
-
-    sep: object
-    /
-
-Partition the bytearray into three parts using the given separator.
-
-This will search for the separator sep in the bytearray.  If the
-separator is found, returns a 3-tuple containing the part before the
-separator, the separator itself, and the part after it as new
-bytearray objects.
-
-If the separator is not found, returns a 3-tuple containing the copy
-of the original bytearray object and two empty bytearray objects.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_partition_impl(PyByteArrayObject *self, PyObject *sep)
-/*[clinic end generated code: output=b5fa1e03f10cfccb input=d76673ed03acf5dd]*/
+/*[clinic end generated code: output=b5fa1e03f10cfccb input=607806826f9d115e]*/
 {
     PyObject *bytesep, *result;
 
@@ -1939,27 +1771,12 @@ bytearray_partition_impl(PyByteArrayObject *self, PyObject *sep)
 }
 
 /*[clinic input]
-@critical_section
 bytearray.rpartition
-
-    sep: object
-    /
-
-Partition the bytearray into three parts using the given separator.
-
-This will search for the separator sep in the bytearray, starting at
-the end.  If the separator is found, returns a 3-tuple containing
-the part before the separator, the separator itself, and the part
-after it as new bytearray objects.
-
-If the separator is not found, returns a 3-tuple containing two
-empty bytearray objects and the copy of the original bytearray
-object.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_rpartition_impl(PyByteArrayObject *self, PyObject *sep)
-/*[clinic end generated code: output=0186ce7b1ef61289 input=b9216a2074174a36]*/
+/*[clinic end generated code: output=0186ce7b1ef61289 input=0aa58ba66e338e04]*/
 {
     PyObject *bytesep, *result;
 
@@ -1979,20 +1796,13 @@ bytearray_rpartition_impl(PyByteArrayObject *self, PyObject *sep)
 }
 
 /*[clinic input]
-@permit_long_summary
-@critical_section
-bytearray.rsplit = bytearray.split
-
-Return a list of the sections in the bytearray, using sep as the delimiter.
-
-Splitting is done starting at the end of the bytearray and working
-to the front.
+bytearray.rsplit
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_rsplit_impl(PyByteArrayObject *self, PyObject *sep,
                       Py_ssize_t maxsplit)
-/*[clinic end generated code: output=a55e0b5a03cb6190 input=e201671c9a0c19ee]*/
+/*[clinic end generated code: output=a55e0b5a03cb6190 input=d7955214eba57c92]*/
 {
     PyObject *list = NULL;
 
@@ -2024,15 +1834,12 @@ done:
 }
 
 /*[clinic input]
-@critical_section
 bytearray.reverse
-
-Reverse the order of the values in B in place.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_reverse_impl(PyByteArrayObject *self)
-/*[clinic end generated code: output=9f7616f29ab309d3 input=2f3d5ce3180ffc53]*/
+/*[clinic end generated code: output=9f7616f29ab309d3 input=4c523d7af4148e3a]*/
 {
     char swap, *head, *tail;
     Py_ssize_t i, j, n = Py_SIZE(self);
@@ -2059,21 +1866,12 @@ class bytesvalue_converter(CConverter):
 
 
 /*[clinic input]
-@critical_section
 bytearray.insert
-
-    index: Py_ssize_t
-        The index where the value is to be inserted.
-    item: bytesvalue
-        The item to be inserted.
-    /
-
-Insert a single item into the bytearray before the given index.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_insert_impl(PyByteArrayObject *self, Py_ssize_t index, int item)
-/*[clinic end generated code: output=76c775a70e7b07b7 input=b3e14ede546dd8cc]*/
+/*[clinic end generated code: output=76c775a70e7b07b7 input=1fdb9f2168c35290]*/
 {
     Py_ssize_t n = Py_SIZE(self);
     char *buf;
@@ -2095,100 +1893,13 @@ bytearray_insert_impl(PyByteArrayObject *self, Py_ssize_t index, int item)
     Py_RETURN_NONE;
 }
 
-static PyObject *
-bytearray_isalnum(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    PyObject *ret;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    ret = stringlib_isalnum(self, NULL);
-    Py_END_CRITICAL_SECTION();
-    return ret;
-}
-
-static PyObject *
-bytearray_isalpha(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    PyObject *ret;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    ret = stringlib_isalpha(self, NULL);
-    Py_END_CRITICAL_SECTION();
-    return ret;
-}
-
-static PyObject *
-bytearray_isascii(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    PyObject *ret;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    ret = stringlib_isascii(self, NULL);
-    Py_END_CRITICAL_SECTION();
-    return ret;
-}
-
-static PyObject *
-bytearray_isdigit(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    PyObject *ret;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    ret = stringlib_isdigit(self, NULL);
-    Py_END_CRITICAL_SECTION();
-    return ret;
-}
-
-static PyObject *
-bytearray_islower(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    PyObject *ret;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    ret = stringlib_islower(self, NULL);
-    Py_END_CRITICAL_SECTION();
-    return ret;
-}
-
-static PyObject *
-bytearray_isspace(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    PyObject *ret;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    ret = stringlib_isspace(self, NULL);
-    Py_END_CRITICAL_SECTION();
-    return ret;
-}
-
-static PyObject *
-bytearray_istitle(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    PyObject *ret;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    ret = stringlib_istitle(self, NULL);
-    Py_END_CRITICAL_SECTION();
-    return ret;
-}
-
-static PyObject *
-bytearray_isupper(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    PyObject *ret;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    ret = stringlib_isupper(self, NULL);
-    Py_END_CRITICAL_SECTION();
-    return ret;
-}
-
 /*[clinic input]
-@critical_section
 bytearray.append
-
-    item: bytesvalue
-        The item to be appended.
-    /
-
-Append a single item to the end of the bytearray.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_append_impl(PyByteArrayObject *self, int item)
-/*[clinic end generated code: output=a154e19ed1886cb6 input=a874689bac8bd352]*/
+/*[clinic end generated code: output=a154e19ed1886cb6 input=cdb8ae07c9948d08]*/
 {
     Py_ssize_t n = Py_SIZE(self);
 
@@ -2200,51 +1911,13 @@ bytearray_append_impl(PyByteArrayObject *self, int item)
     Py_RETURN_NONE;
 }
 
-static PyObject *
-bytearray_capitalize(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    PyObject *ret;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    ret = stringlib_capitalize(self, NULL);
-    Py_END_CRITICAL_SECTION();
-    return ret;
-}
-
-static PyObject *
-bytearray_center(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
-{
-    PyObject *ret;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    ret = stringlib_center(self, args, nargs);
-    Py_END_CRITICAL_SECTION();
-    return ret;
-}
-
-static PyObject *
-bytearray_expandtabs(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
-{
-    PyObject *ret;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    ret = stringlib_expandtabs(self, args, nargs, kwnames);
-    Py_END_CRITICAL_SECTION();
-    return ret;
-}
-
 /*[clinic input]
-@permit_long_summary
-@critical_section
 bytearray.extend
-
-    iterable_of_ints: object
-        The iterable of items to append.
-    /
-
-Append all the items from the iterator or sequence to the end of the bytearray.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_extend_impl(PyByteArrayObject *self, PyObject *iterable_of_ints)
-/*[clinic end generated code: output=2f25e0ce72b98748 input=aeed44b025146632]*/
+/*[clinic end generated code: output=2f25e0ce72b98748 input=88339cc2936ddeef]*/
 {
     PyObject *it, *item, *bytearray_obj;
     Py_ssize_t buf_size = 0, len = 0;
@@ -2343,22 +2016,12 @@ bytearray_extend_impl(PyByteArrayObject *self, PyObject *iterable_of_ints)
 }
 
 /*[clinic input]
-@critical_section
 bytearray.pop
-
-    index: Py_ssize_t = -1
-        The index from where to remove the item.
-        -1 (the default value) means remove the last item.
-    /
-
-Remove and return a single item from B.
-
-If no index argument is given, will pop the last item.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_pop_impl(PyByteArrayObject *self, Py_ssize_t index)
-/*[clinic end generated code: output=e0ccd401f8021da8 input=fc0fd8de4f97661c]*/
+/*[clinic end generated code: output=e0ccd401f8021da8 input=f1ebee2d2f2b83f6]*/
 {
     int value;
     Py_ssize_t n = Py_SIZE(self);
@@ -2388,19 +2051,12 @@ bytearray_pop_impl(PyByteArrayObject *self, Py_ssize_t index)
 }
 
 /*[clinic input]
-@critical_section
 bytearray.remove
-
-    value: bytesvalue
-        The value to remove.
-    /
-
-Remove the first occurrence of a value in the bytearray.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_remove_impl(PyByteArrayObject *self, int value)
-/*[clinic end generated code: output=d659e37866709c13 input=797588bc77f86afb]*/
+/*[clinic end generated code: output=d659e37866709c13 input=660ed2e1bcc8bcd0]*/
 {
     Py_ssize_t where, n = Py_SIZE(self);
     char *buf = PyByteArray_AS_STRING(self);
@@ -2463,143 +2119,51 @@ bytearray_strip_impl_helper(PyByteArrayObject* self, PyObject* bytes, int stript
 }
 
 /*[clinic input]
-@critical_section
 bytearray.strip
-
-    bytes: object = None
-    /
-
-Strip leading and trailing bytes contained in the argument.
-
-If the argument is omitted or None, strip leading and trailing ASCII
-whitespace.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_strip_impl(PyByteArrayObject *self, PyObject *bytes)
-/*[clinic end generated code: output=760412661a34ad5a input=f4ec5fa609df7d14]*/
+/*[clinic end generated code: output=760412661a34ad5a input=0f107db1fa376d79]*/
 {
     return bytearray_strip_impl_helper(self, bytes, BOTHSTRIP);
 }
 
-static PyObject *
-bytearray_swapcase(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    PyObject *ret;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    ret = stringlib_swapcase(self, NULL);
-    Py_END_CRITICAL_SECTION();
-    return ret;
-}
-
-static PyObject *
-bytearray_title(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    PyObject *ret;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    ret = stringlib_title(self, NULL);
-    Py_END_CRITICAL_SECTION();
-    return ret;
-}
-
-static PyObject *
-bytearray_upper(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    PyObject *ret;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    ret = stringlib_upper(self, NULL);
-    Py_END_CRITICAL_SECTION();
-    return ret;
-}
-
-static PyObject *
-bytearray_lower(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    PyObject *ret;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    ret = stringlib_lower(self, NULL);
-    Py_END_CRITICAL_SECTION();
-    return ret;
-}
-
-static PyObject *
-bytearray_zfill(PyObject *self, PyObject *arg)
-{
-    PyObject *ret;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    ret = stringlib_zfill(self, arg);
-    Py_END_CRITICAL_SECTION();
-    return ret;
-}
-
 /*[clinic input]
-@critical_section
 bytearray.lstrip
-
-    bytes: object = None
-    /
-
-Strip leading bytes contained in the argument.
-
-If the argument is omitted or None, strip leading ASCII whitespace.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_lstrip_impl(PyByteArrayObject *self, PyObject *bytes)
-/*[clinic end generated code: output=d005c9d0ab909e66 input=ed86e00eb2023625]*/
+/*[clinic end generated code: output=d005c9d0ab909e66 input=232baeb6e89b65d1]*/
 {
     return bytearray_strip_impl_helper(self, bytes, LEFTSTRIP);
 }
 
 /*[clinic input]
-@critical_section
 bytearray.rstrip
-
-    bytes: object = None
-    /
-
-Strip trailing bytes contained in the argument.
-
-If the argument is omitted or None, strip trailing ASCII whitespace.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_rstrip_impl(PyByteArrayObject *self, PyObject *bytes)
-/*[clinic end generated code: output=030e2fbd2f7276bd input=d9ca66cf20fe7649]*/
+/*[clinic end generated code: output=030e2fbd2f7276bd input=9858270ce2787b9d]*/
 {
     return bytearray_strip_impl_helper(self, bytes, RIGHTSTRIP);
 }
 
 /*[clinic input]
-@critical_section
 bytearray.decode
-
-    encoding: str(c_default="NULL") = 'utf-8'
-        The encoding with which to decode the bytearray.
-    errors: str(c_default="NULL") = 'strict'
-        The error handling scheme to use for the handling of decoding
-        errors.  The default is 'strict' meaning that decoding errors
-        raise a UnicodeDecodeError.  Other possible values are 'ignore'
-        and 'replace' as well as any other name registered with
-        codecs.register_error that can handle UnicodeDecodeErrors.
-
-Decode the bytearray using the codec registered for encoding.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_decode_impl(PyByteArrayObject *self, const char *encoding,
                       const char *errors)
-/*[clinic end generated code: output=f57d43f4a00b42c5 input=e51ce9b82b51e2ca]*/
+/*[clinic end generated code: output=f57d43f4a00b42c5 input=c6be2dbb72c126f7]*/
 {
     if (encoding == NULL)
         encoding = PyUnicode_GetDefaultEncoding();
     return PyUnicode_FromEncodedObject((PyObject*)self, encoding, errors);
 }
-
-PyDoc_STRVAR(alloc_doc,
-"B.__alloc__() -> int\n\
-\n\
-Return the number of bytes actually allocated.");
 
 static PyObject *
 bytearray_alloc(PyObject *op, PyObject *Py_UNUSED(ignored))
@@ -2613,23 +2177,12 @@ bytearray_alloc(PyObject *op, PyObject *Py_UNUSED(ignored))
 }
 
 /*[clinic input]
-@critical_section
 bytearray.join
-
-    iterable_of_bytes: object
-    /
-
-Concatenate any number of bytes/bytearray objects.
-
-The bytearray whose method is called is inserted in between each
-pair.
-
-The result is returned as a new bytearray object.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_join_impl(PyByteArrayObject *self, PyObject *iterable_of_bytes)
-/*[clinic end generated code: output=0ced382b5846a7ee input=0a31db349efcd7fa]*/
+/*[clinic end generated code: output=0ced382b5846a7ee input=5fa202741a26bc82]*/
 {
     PyObject *ret;
     self->ob_exports++; // this protects `self` from being cleared/resized if `iterable_of_bytes` is a custom iterator
@@ -2638,42 +2191,13 @@ bytearray_join_impl(PyByteArrayObject *self, PyObject *iterable_of_bytes)
     return ret;
 }
 
-static PyObject *
-bytearray_ljust(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
-{
-    PyObject *ret;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    ret = stringlib_ljust(self, args, nargs);
-    Py_END_CRITICAL_SECTION();
-    return ret;
-}
-
-static PyObject *
-bytearray_rjust(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
-{
-    PyObject *ret;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    ret = stringlib_rjust(self, args, nargs);
-    Py_END_CRITICAL_SECTION();
-    return ret;
-}
-
 /*[clinic input]
-@permit_long_summary
-@critical_section
 bytearray.splitlines
-
-    keepends: bool = False
-
-Return a list of the lines in the bytearray, breaking at line boundaries.
-
-Line breaks are not included in the resulting list unless keepends
-is given and true.
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_splitlines_impl(PyByteArrayObject *self, int keepends)
-/*[clinic end generated code: output=4223c94b895f6ad9 input=cc2bb740eed19f27]*/
+/*[clinic end generated code: output=4223c94b895f6ad9 input=1a1f7f8685294209]*/
 {
     return stringlib_splitlines(
         (PyObject*) self, PyByteArray_AS_STRING(self),
@@ -2682,22 +2206,12 @@ bytearray_splitlines_impl(PyByteArrayObject *self, int keepends)
 }
 
 /*[clinic input]
-@classmethod
 bytearray.fromhex
-
-    string: object
-    /
-
-Create a bytearray object from a string of hexadecimal numbers.
-
-Spaces between two numbers are accepted.
-Example:
-    bytearray.fromhex('B9 01EF') -> bytearray(b'\\xb9\\x01\\xef')
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_fromhex_impl(PyTypeObject *type, PyObject *string)
-/*[clinic end generated code: output=8f0f0b6d30fb3ba0 input=2243a8b0b9e66cd5]*/
+/*[clinic end generated code: output=8f0f0b6d30fb3ba0 input=e3e92e7e40d27597]*/
 {
     PyObject *result = _PyBytes_FromHex(string, type == &PyByteArray_Type);
     if (type != &PyByteArray_Type && result != NULL) {
@@ -2707,33 +2221,13 @@ bytearray_fromhex_impl(PyTypeObject *type, PyObject *string)
 }
 
 /*[clinic input]
-@critical_section
 bytearray.hex
-
-    sep: object = NULL
-        An optional single character or byte to separate hex bytes.
-    bytes_per_sep: Py_ssize_t = 1
-        How many bytes between separators.  Positive values count from
-        the right, negative values count from the left.
-
-Create a string of hexadecimal numbers from a bytearray object.
-
-Example:
->>> value = bytearray([0xb9, 0x01, 0xef])
->>> value.hex()
-'b901ef'
->>> value.hex(':')
-'b9:01:ef'
->>> value.hex(':', 2)
-'b9:01ef'
->>> value.hex(':', -2)
-'b901:ef'
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_hex_impl(PyByteArrayObject *self, PyObject *sep,
                    Py_ssize_t bytes_per_sep)
-/*[clinic end generated code: output=c9563921aff1262b input=9ed746203691e894]*/
+/*[clinic end generated code: output=c9563921aff1262b input=806591ed4ddc1fed]*/
 {
     char* argbuf = PyByteArray_AS_STRING(self);
     Py_ssize_t arglen = PyByteArray_GET_SIZE(self);
@@ -2773,45 +2267,34 @@ _common_reduce(PyByteArrayObject *self, int proto)
 }
 
 /*[clinic input]
-@critical_section
-bytearray.__reduce__ as bytearray_reduce
-
-Return state information for pickling.
+bytearray.__reduce__
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_reduce_impl(PyByteArrayObject *self)
-/*[clinic end generated code: output=52bf304086464cab input=0fac78e4b7d84dd2]*/
+/*[clinic end generated code: output=52bf304086464cab input=fc8dc27b0833241f]*/
 {
     return _common_reduce(self, 2);
 }
 
 /*[clinic input]
-@critical_section
-bytearray.__reduce_ex__ as bytearray_reduce_ex
-
-    proto: int = 0
-    /
-
-Return state information for pickling.
+bytearray.__reduce_ex__
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_reduce_ex_impl(PyByteArrayObject *self, int proto)
-/*[clinic end generated code: output=52eac33377197520 input=751718f477033a29]*/
+/*[clinic end generated code: output=52eac33377197520 input=7407931fa6c9dd42]*/
 {
     return _common_reduce(self, proto);
 }
 
 /*[clinic input]
-bytearray.__sizeof__ as bytearray_sizeof
-
-Returns the size of the bytearray object in memory, in bytes.
+bytearray.__sizeof__
 [clinic start generated code]*/
 
 static PyObject *
 bytearray_sizeof_impl(PyByteArrayObject *self)
-/*[clinic end generated code: output=738abdd17951c427 input=e27320fd98a4bc5a]*/
+/*[clinic end generated code: output=738abdd17951c427 input=211fdd7c21669c96]*/
 {
     Py_ssize_t res = _PyObject_SIZE(Py_TYPE(self));
     Py_ssize_t alloc = FT_ATOMIC_LOAD_SSIZE_RELAXED(self->ob_alloc);
@@ -2821,94 +2304,6 @@ bytearray_sizeof_impl(PyByteArrayObject *self)
 
     return PyLong_FromSsize_t(res);
 }
-
-static PySequenceMethods bytearray_as_sequence = {
-    bytearray_length,                       /* sq_length */
-    PyByteArray_Concat,                     /* sq_concat */
-    bytearray_repeat,                       /* sq_repeat */
-    bytearray_getitem,                      /* sq_item */
-    0,                                      /* sq_slice */
-    bytearray_setitem,                      /* sq_ass_item */
-    0,                                      /* sq_ass_slice */
-    bytearray_contains,                     /* sq_contains */
-    bytearray_iconcat,                      /* sq_inplace_concat */
-    bytearray_irepeat,                      /* sq_inplace_repeat */
-};
-
-static PyMappingMethods bytearray_as_mapping = {
-    bytearray_length,
-    bytearray_subscript,
-    bytearray_ass_subscript,
-};
-
-static PyBufferProcs bytearray_as_buffer = {
-    bytearray_getbuffer,
-    bytearray_releasebuffer,
-};
-
-static PyMethodDef bytearray_methods[] = {
-    {"__alloc__", bytearray_alloc, METH_NOARGS, alloc_doc},
-    BYTEARRAY_REDUCE_METHODDEF
-    BYTEARRAY_REDUCE_EX_METHODDEF
-    BYTEARRAY_SIZEOF_METHODDEF
-    BYTEARRAY_APPEND_METHODDEF
-    {"capitalize", bytearray_capitalize, METH_NOARGS, _Py_capitalize__doc__},
-    {"center", _PyCFunction_CAST(bytearray_center), METH_FASTCALL,
-    stringlib_center__doc__},
-    BYTEARRAY_CLEAR_METHODDEF
-    BYTEARRAY_COPY_METHODDEF
-    BYTEARRAY_COUNT_METHODDEF
-    BYTEARRAY_DECODE_METHODDEF
-    BYTEARRAY_ENDSWITH_METHODDEF
-    {"expandtabs", _PyCFunction_CAST(bytearray_expandtabs),
-    METH_FASTCALL|METH_KEYWORDS, stringlib_expandtabs__doc__},
-    BYTEARRAY_EXTEND_METHODDEF
-    BYTEARRAY_FIND_METHODDEF
-    BYTEARRAY_FROMHEX_METHODDEF
-    BYTEARRAY_HEX_METHODDEF
-    BYTEARRAY_INDEX_METHODDEF
-    BYTEARRAY_INSERT_METHODDEF
-    {"isalnum", bytearray_isalnum, METH_NOARGS, _Py_isalnum__doc__},
-    {"isalpha", bytearray_isalpha, METH_NOARGS, _Py_isalpha__doc__},
-    {"isascii", bytearray_isascii, METH_NOARGS, _Py_isascii__doc__},
-    {"isdigit", bytearray_isdigit, METH_NOARGS, _Py_isdigit__doc__},
-    {"islower", bytearray_islower, METH_NOARGS, _Py_islower__doc__},
-    {"isspace", bytearray_isspace, METH_NOARGS, _Py_isspace__doc__},
-    {"istitle", bytearray_istitle, METH_NOARGS, _Py_istitle__doc__},
-    {"isupper", bytearray_isupper, METH_NOARGS, _Py_isupper__doc__},
-    BYTEARRAY_JOIN_METHODDEF
-    {"ljust", _PyCFunction_CAST(bytearray_ljust), METH_FASTCALL,
-    stringlib_ljust__doc__},
-    {"lower", bytearray_lower, METH_NOARGS, _Py_lower__doc__},
-    BYTEARRAY_LSTRIP_METHODDEF
-    BYTEARRAY_MAKETRANS_METHODDEF
-    BYTEARRAY_PARTITION_METHODDEF
-    BYTEARRAY_POP_METHODDEF
-    BYTEARRAY_REMOVE_METHODDEF
-    BYTEARRAY_REPLACE_METHODDEF
-    BYTEARRAY_REMOVEPREFIX_METHODDEF
-    BYTEARRAY_REMOVESUFFIX_METHODDEF
-    BYTEARRAY_RESIZE_METHODDEF
-    BYTEARRAY_REVERSE_METHODDEF
-    BYTEARRAY_RFIND_METHODDEF
-    BYTEARRAY_RINDEX_METHODDEF
-    {"rjust", _PyCFunction_CAST(bytearray_rjust), METH_FASTCALL,
-    stringlib_rjust__doc__},
-    BYTEARRAY_RPARTITION_METHODDEF
-    BYTEARRAY_RSPLIT_METHODDEF
-    BYTEARRAY_RSTRIP_METHODDEF
-    BYTEARRAY_SPLIT_METHODDEF
-    BYTEARRAY_SPLITLINES_METHODDEF
-    BYTEARRAY_STARTSWITH_METHODDEF
-    BYTEARRAY_STRIP_METHODDEF
-    {"swapcase", bytearray_swapcase, METH_NOARGS, _Py_swapcase__doc__},
-    BYTEARRAY_TAKE_BYTES_METHODDEF
-    {"title", bytearray_title, METH_NOARGS, _Py_title__doc__},
-    BYTEARRAY_TRANSLATE_METHODDEF
-    {"upper", bytearray_upper, METH_NOARGS, _Py_upper__doc__},
-    {"zfill", bytearray_zfill, METH_O, stringlib_zfill__doc__},
-    {NULL}
-};
 
 static PyObject *
 bytearray_mod_lock_held(PyObject *v, PyObject *w)
@@ -2944,74 +2339,6 @@ bytearray_mod(PyObject *v, PyObject *w)
     return ret;
 }
 
-static PyNumberMethods bytearray_as_number = {
-    0,              /*nb_add*/
-    0,              /*nb_subtract*/
-    0,              /*nb_multiply*/
-    bytearray_mod,  /*nb_remainder*/
-};
-
-PyDoc_STRVAR(bytearray_doc,
-"bytearray(iterable_of_ints) -> bytearray\n\
-bytearray(string, encoding[, errors]) -> bytearray\n\
-bytearray(bytes_or_buffer) -> mutable copy of bytes_or_buffer\n\
-bytearray(int) -> bytes array of size given by the parameter initialized with null bytes\n\
-bytearray() -> empty bytes array\n\
-\n\
-Construct a mutable bytearray object from:\n\
-  - an iterable yielding integers in range(256)\n\
-  - a text string encoded using the specified encoding\n\
-  - a bytes or a buffer object\n\
-  - any object implementing the buffer API.\n\
-  - an integer");
-
-
-static PyObject *bytearray_iter(PyObject *seq);
-
-PyTypeObject PyByteArray_Type = {
-    PyVarObject_HEAD_INIT(&PyType_Type, 0)
-    "bytearray",
-    sizeof(PyByteArrayObject),
-    0,
-    bytearray_dealloc,                  /* tp_dealloc */
-    0,                                  /* tp_vectorcall_offset */
-    0,                                  /* tp_getattr */
-    0,                                  /* tp_setattr */
-    0,                                  /* tp_as_async */
-    bytearray_repr,                     /* tp_repr */
-    &bytearray_as_number,               /* tp_as_number */
-    &bytearray_as_sequence,             /* tp_as_sequence */
-    &bytearray_as_mapping,              /* tp_as_mapping */
-    0,                                  /* tp_hash */
-    0,                                  /* tp_call */
-    bytearray_str,                      /* tp_str */
-    PyObject_GenericGetAttr,            /* tp_getattro */
-    0,                                  /* tp_setattro */
-    &bytearray_as_buffer,               /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE |
-        _Py_TPFLAGS_MATCH_SELF,       /* tp_flags */
-    bytearray_doc,                      /* tp_doc */
-    0,                                  /* tp_traverse */
-    0,                                  /* tp_clear */
-    bytearray_richcompare,              /* tp_richcompare */
-    0,                                  /* tp_weaklistoffset */
-    bytearray_iter,                     /* tp_iter */
-    0,                                  /* tp_iternext */
-    bytearray_methods,                  /* tp_methods */
-    0,                                  /* tp_members */
-    0,                                  /* tp_getset */
-    0,                                  /* tp_base */
-    0,                                  /* tp_dict */
-    0,                                  /* tp_descr_get */
-    0,                                  /* tp_descr_set */
-    0,                                  /* tp_dictoffset */
-    bytearray___init__,                 /* tp_init */
-    PyType_GenericAlloc,                /* tp_alloc */
-    bytearray_new,                      /* tp_new */
-    PyObject_Free,                      /* tp_free */
-    .tp_version_tag = _Py_TYPE_VERSION_BYTEARRAY,
-};
-
 /*********************** Bytearray Iterator ****************************/
 
 typedef struct {
@@ -3019,6 +2346,11 @@ typedef struct {
     Py_ssize_t it_index;
     PyByteArrayObject *it_seq; /* Set to NULL when iterator is exhausted */
 } bytesiterobject;
+
+/*[clinic input]
+class bytearray_iterator "bytesiterobject *" "&PyByteArrayIter_Type"
+[clinic start generated code]*/
+/*[clinic end generated code: output=da39a3ee5e6b4b0d input=a3154f676a3c8c0d]*/
 
 #define _bytesiterobject_CAST(op)   ((bytesiterobject *)(op))
 
@@ -3088,9 +2420,6 @@ bytearrayiter_length_hint(PyObject *self, PyObject *Py_UNUSED(ignored))
     return PyLong_FromSsize_t(len);
 }
 
-PyDoc_STRVAR(length_hint_doc,
-    "Private method returning an estimate of len(list(it)).");
-
 static PyObject *
 bytearrayiter_reduce(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
@@ -3131,51 +2460,6 @@ bytearrayiter_setstate(PyObject *self, PyObject *state)
     Py_RETURN_NONE;
 }
 
-PyDoc_STRVAR(setstate_doc, "Set state information for unpickling.");
-
-static PyMethodDef bytearrayiter_methods[] = {
-    {"__length_hint__", bytearrayiter_length_hint, METH_NOARGS,
-     length_hint_doc},
-     {"__reduce__",     bytearrayiter_reduce, METH_NOARGS,
-     bytearray_reduce__doc__},
-    {"__setstate__",    bytearrayiter_setstate, METH_O,
-     setstate_doc},
-    {NULL, NULL} /* sentinel */
-};
-
-PyTypeObject PyByteArrayIter_Type = {
-    PyVarObject_HEAD_INIT(&PyType_Type, 0)
-    "bytearray_iterator",              /* tp_name */
-    sizeof(bytesiterobject),           /* tp_basicsize */
-    0,                                 /* tp_itemsize */
-    /* methods */
-    bytearrayiter_dealloc,             /* tp_dealloc */
-    0,                                 /* tp_vectorcall_offset */
-    0,                                 /* tp_getattr */
-    0,                                 /* tp_setattr */
-    0,                                 /* tp_as_async */
-    0,                                 /* tp_repr */
-    0,                                 /* tp_as_number */
-    0,                                 /* tp_as_sequence */
-    0,                                 /* tp_as_mapping */
-    0,                                 /* tp_hash */
-    0,                                 /* tp_call */
-    0,                                 /* tp_str */
-    PyObject_GenericGetAttr,           /* tp_getattro */
-    0,                                 /* tp_setattro */
-    0,                                 /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC, /* tp_flags */
-    0,                                 /* tp_doc */
-    bytearrayiter_traverse,            /* tp_traverse */
-    0,                                 /* tp_clear */
-    0,                                 /* tp_richcompare */
-    0,                                 /* tp_weaklistoffset */
-    PyObject_SelfIter,                 /* tp_iter */
-    bytearrayiter_next,                /* tp_iternext */
-    bytearrayiter_methods,             /* tp_methods */
-    0,
-};
-
 static PyObject *
 bytearray_iter(PyObject *seq)
 {
@@ -3193,3 +2477,8 @@ bytearray_iter(PyObject *seq)
     _PyObject_GC_TRACK(it);
     return (PyObject *)it;
 }
+
+/* Generated from Objects/pyspec/bytearrayobject.py: the stringlib methods
+   called in a critical section, then PyByteArray_Type and
+   PyByteArrayIter_Type with their method and slot tables. */
+#include "clinic/bytearrayobject_pyspec.c.h"

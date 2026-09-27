@@ -641,7 +641,7 @@ DOCSTRING_FILES = [
     'Objects/bytes_methods.c',
     'Objects/bytesobject.c',
     'Objects/bytearrayobject.c',
-    'Objects/clinic/bytearrayobject.c.h',   # clinic input: bytearrayobject.c
+    'Objects/pyspec/bytearrayobject.py',
     'Objects/pyspec/bytesobject.py',
     'Objects/stringlib/pyspec/ctype.py',
     'Objects/stringlib/pyspec/transmogrify.py',
