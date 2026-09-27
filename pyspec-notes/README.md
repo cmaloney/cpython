@@ -54,6 +54,7 @@ change: drop it before proposing anything.
 | D | catalog out of the spec, disconnect ratchet | merged | `reports/phase1_D.md` |
 | E | debug fact assertions, tripwire, direct-call difftest, F5 | merged | `reports/phase1_E.md` |
 | S | `_CALL_STR_1` exact-str bug fix (based on main) | merged here; local branch `fix-call-str-1-subclass` | `bugreports/call-str-1-subclass/`, `drafts/call-str-1-UPSTREAM.md` |
+| S2 | `_pylong.int_to_decimal_string()` must return an exact str (based on main) | merged here; local branch `fix-pylong-str-exact` | commit message of c490a0e38f2 |
 | A | `bytes(list)` regression, F1/F2/F4, code size | merged | `reports/phase1_A.md` |
 | Audit | comments and docstrings match the code | merged | `reports/comment_audit.md` |
 | P1+P2 | helpers by name, facts derived from bodies, F3, one types table, C-side check | merged | `reports/phase2_P1P2.md` |
@@ -104,9 +105,11 @@ leave the tree clean.  Parity with main: `transmogrify.h.h` identical;
    C-type annotations trigger ruff F722.  bytes `__iter__`/`__len__` are `...` (the old
    ITERATION fact had no consumer).  Two PGO builds of one commit differ by +-1-3%.
 2. `_CALL_STR_1` upstream: the user files the issue (text in `drafts/`), replaces
-   `gh-NNNNNN` in the commit and NEWS name.  Open choice: `str(int)` keeps the exact-str
-   claim (a monkeypatched `_pylong` can break it; main has the same claim); suggested
-   separate one-line fix in `Objects/longobject.c` (`PyUnicode_CheckExact`).  A constant
+   `gh-NNNNNN` in the commit and NEWS name.  `str(int)` keeps the exact-str claim; the
+   companion fix makes it always true: local branch `fix-pylong-str-exact` (c490a0e38f2,
+   based on main, merged here) requires `_pylong.int_to_decimal_string()` to return an
+   exact str (`PyUnicode_CheckExact` in `Objects/longobject.c`, test in test_int, NEWS
+   with a `gh-NNNNNN` placeholder); file it as its own small issue/PR.  A constant
    +1 refcount on the subclass remains in `repro_type_refleak.py` under the JIT
    (was +12007), not investigated.
 3. Phase 3: `b[i]` and `FOR_ITER` over bytes specializations from slot facts (the only
