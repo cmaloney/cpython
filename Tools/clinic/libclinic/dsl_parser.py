@@ -1810,10 +1810,11 @@ class DSLParser:
         if not func.cls.type_object:
             fail(f"{where}: requires the type object of {func.cls.name!r}, "
                  "which was declared without one", line_number=lineno)
-        if description.type_object != func.cls.type_object:
-            fail(f"{where}: {description.new_type} is "
-                 f"{description.type_object}, {func.cls.name!r} is "
-                 f"{func.cls.type_object}", line_number=lineno)
+        type_object = frontend.TYPE_OBJECTS[description.new_type]
+        if type_object != func.cls.type_object:
+            fail(f"{where}: {description.new_type} is {type_object}, "
+                 f"{func.cls.name!r} is {func.cls.type_object}",
+                 line_number=lineno)
         if func.critical_section:
             fail(f"{where}: a spec cannot be used with @critical_section",
                  line_number=lineno)
