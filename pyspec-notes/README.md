@@ -10,10 +10,16 @@ change: drop it before proposing anything.
 
 - `Objects/pyspec/bytesobject.py`: `class bytes` / `class bytes_iterator` (method
   signatures, docstrings, slots, `@static_type`), spec bodies (`__new__`, `__bytes__`,
-  `fromhex`, `PyBytes_FromObject`, `bytes_from_iterator`), and the escape stubs.
+  `fromhex`, `PyBytes_FromObject`, `bytes_from_iterator`), and `@c_implemented`
+  helpers (hand-written C; the body is the Python reference, facts derived from it).
+- `Objects/pyspec/{abstract,typeobject,unicodeobject}.py`, `Python/pyspec/errors.py`,
+  `Include/cpython/pyspec/longintrepr.py`: helpers of other C files, imported by name.
 - `Objects/stringlib/pyspec/{transmogrify,ctype}.py`: methods shared with bytearray.
 - `Objects/pyspec/bytesobject_cases.py`: difftest data (spec run as Python vs the
-  interpreter); `Objects/pyspec/capi/bytesobject.py`: the only hand-written C API facts.
+  interpreter).
+- Facts come from bodies plus four primitives (`exact(T, v)`, `unknown(v)`,
+  `calls(x, "__slot__")`, `runs_python()`); `...` means worst case; one audited table
+  of builtin types: `Tools/clinic/libclinic/pyspec/builtin_types.py`.
 - `Objects/pyspec/README.rst`: the contributor guide ("to do X, edit Y").
 - Clinic generates `Objects/clinic/bytesobject.c.h` (byte-identical to main outside
   `bytes.__new__`) and `Objects/clinic/bytesobject_pyspec.c.h` (spec bodies, per-arity
@@ -21,10 +27,13 @@ change: drop it before proposing anything.
 - The tier-2 optimizer uses derived facts (alias, constant, no-Python, exact type);
   debug builds assert them at run time.
 - `Lib/test/test_pyspec_catalog.py`: a disconnect ratchet over C API files, docs
-  signatures, typeobj.rst, duplicated docstrings and (optionally) typeshed; baselines in
+  signatures, typeobj.rst, duplicated docstrings, the C of `@c_implemented` helpers
+  (`c_calls`: every call that may run Python is accounted for in the reference, using
+  the cases generator's lexer) and (optionally) typeshed; baselines in
   `Tools/clinic/pyspec-baseline/*.txt` may only shrink.
-- `Lib/test/test_pyspec_facts.py`: every call-table entry called directly against
-  `bytes()`, with fact checks and a "no Python" tripwire.
+- `Lib/test/test_pyspec_facts.py`: every call-table entry and every callable helper
+  called directly against the interpreter / its reference, with fact checks and a
+  "no Python" tripwire.
 
 ## Workstreams and where their results are
 | WS | Topic | State | Report |
@@ -47,6 +56,7 @@ change: drop it before proposing anything.
 | S | `_CALL_STR_1` exact-str bug fix (based on main) | merged here; local branch `fix-call-str-1-subclass` | `bugreports/call-str-1-subclass/`, `drafts/call-str-1-UPSTREAM.md` |
 | A | `bytes(list)` regression, F1/F2/F4, code size | merged | `reports/phase1_A.md` |
 | Audit | comments and docstrings match the code | merged | `reports/comment_audit.md` |
+| P1+P2 | helpers by name, facts derived from bodies, F3, one types table, C-side check | merged | `reports/phase2_P1P2.md` |
 
 `DESIGN.md` is the shared brief every agent read (goals, decisions, resource rules);
 `PROPOSALS.md` holds P1/P2.
@@ -57,7 +67,7 @@ change: drop it before proposing anything.
 - Generated output byte-for-byte identical to main wherever possible; bracket
   `@text_signature`s stay (help() parity); typeshed is checked from the spec instead.
 - Free-threaded `bytes(list)` keeps main's atomic snapshot for all-int lists (F1).
-- P1 + P2 approved for phase 2 (see PROPOSALS.md).
+- P1 + P2 approved and implemented (see PROPOSALS.md, `reports/phase2_P1P2.md`).
 - Integration is measured as a ratchet that may only go down.
 - Heavy commands run memory-capped (`systemd-run --user --scope -p MemoryMax=...`),
   serially, `make -j8` (an OOM once took down the desktop).
@@ -69,48 +79,52 @@ Every `bytes()` call shape is below main, JIT on and off (full table:
 `bytes(range256)` 25572/5149 -> 15412/3000; `Sub(b16)` 1332/269 -> 1058/201.
 Methods, slots and startup are neutral; pyperformance shows no bytes-attributable
 change (bytes calls are <1% of every benchmark).  bytes code is +1.3 KB vs main.
+P2 changed no shape for the worse (non-PGO instruction counts); `bytes(16)` now uses
+the no-Python call (442 -> 433 instructions).
 
-## Test status (commit 04079e991e4)
-Debug JIT build (`../build-merge`): test_clinic, test_bytes, test_capi, test_inspect,
-test_pydoc, test_descr, test_pickle, test_iter, test_pyspec_catalog, test_pyspec_facts
-pass, except that running test_opt after other modules in one invocation fails 33
-guard-removal tests (the same upstream order dependency fails 21 on main; test_capi
-alone passes, 1599 tests).  `PYTHON_JIT=0 -R 3:3` on the four pyspec-related suites
-passes.  Free-threaded debug build (`../build-merge-ft`): test_bytes,
-test_free_threading, test_clinic, test_pyspec_facts pass; the F1 snapshot script
-gives 0 torn results.  Only expected failure: `test_static_type_rule` (F3, needs P2).
-Parity with main: `transmogrify.h.h` identical; `bytesobject.c.h` differs only in the
-`bytes.__new__` section.
+## Test status (commit 1b467fa3305)
+Debug JIT build `../build-exp` (srcdir: this checkout): test_clinic, test_bytes,
+test_inspect, test_iter, test_pydoc, test_descr, test_pickle, test_pyspec_catalog,
+test_pyspec_facts pass (2668 tests); test_capi alone passes (1587).  Running test_opt
+after other modules in one invocation fails guard-removal tests, as it does on main
+(upstream order dependency).  `PYTHON_JIT=0 -R 3:3` on the four pyspec-related suites
+passes.  Free-threaded debug build (by the P2 agent): test_bytes, test_pyspec_facts,
+test_clinic, test_free_threading pass; the F1 snapshot gives 0 torn results.  No
+expected failures remain.  Clinic on the six spec-backed files and `make regen-cases`
+leave the tree clean.  Parity with main: `transmogrify.h.h` identical;
+`bytesobject.c.h` differs only in the `bytes.__new__` section.
 
 ## Open items
-1. Tool code grew in A (+979/-209 in libclinic/pyspec, mostly partial_eval.py); P2
-   should net-remove it.  `bytes(16)` still "may run Python" (the `except TypeError`
-   fallback is not provably dead for an exact int; a spec for `PyNumber_AsSsize_t`
-   fixes it).  Two PGO builds of one commit differ by +-1-3% on unrelated shapes.
+1. Tool code is flat after P2 (5710 -> 5691 lines; the C-side check costs ~200).
+   P2 deleted `Objects/pyspec/capi/bytesobject.py` (hand-written runs-Python name sets
+   nothing consumed): awaiting user confirmation.  The C-side check is per function,
+   not per path, and treats refcount releases as running no Python (audited
+   assumption).  A JIT refleak in HelperTest with fresh functions per `-R` repetition
+   was worked around, not investigated (maybe the same class as item 2's).  String
+   C-type annotations trigger ruff F722.  bytes `__iter__`/`__len__` are `...` (the old
+   ITERATION fact had no consumer).  Two PGO builds of one commit differ by +-1-3%.
 2. `_CALL_STR_1` upstream: the user files the issue (text in `drafts/`), replaces
    `gh-NNNNNN` in the commit and NEWS name.  Open choice: `str(int)` keeps the exact-str
    claim (a monkeypatched `_pylong` can break it; main has the same claim); suggested
    separate one-line fix in `Objects/longobject.c` (`PyUnicode_CheckExact`).  A constant
    +1 refcount on the subclass remains in `repro_type_refleak.py` under the JIT
    (was +12007), not investigated.
-3. Phase 2: P1 + P2 (helpers by name, facts derived from bodies with
-   `exact()/unknown()/calls()/runs_python()`, ownership from refcounts.dat, C-side
-   token-level escape check reusing `Tools/cases_generator/analyzer.py`); one table of
-   builtin types in place of seven; replace the "exact static type runs no Python" rule (F3).
-4. Phase 3: `b[i]` and `FOR_ITER` over bytes specializations from slot facts (the only
+3. Phase 3: `b[i]` and `FOR_ITER` over bytes specializations from slot facts (the only
    measurable end-to-end lever, ~1.5-2% pyflate), then bytearray (shares the stringlib
    specs, removes duplicated docstrings), then tuple, int, list, str.
-5. Upstreamable pieces (see `reports/review_int.md` section 5): doc/docstring/typeshed
+4. Upstreamable pieces (see `reports/review_int.md` section 5): doc/docstring/typeshed
    fixes from WS9, typeobj.rst missing rows, refcounts.dat gaps, `PickleBuffer` over a
    Python `__buffer__` (F7), the devguide section (`drafts/devguide_draft.rst`).
 
 ## Resuming
 - Worktrees of finished agents are removed; their branches remain as
   `worktree-agent-*`.
-- Build dirs (outside the repo): `build-merge` / `build-merge-ft` (debug JIT /
-  free-threaded debug of 04079e991e4), `build-exp` (older debug JIT of this branch),
-  `build_perf_base_jit` (main, PGO+LTO JIT), `build_review_pgo` (PGO+LTO JIT of
-  62cc16504fe), `build-str1-dbg` (main, debug tier-2 interpreter).
+- Build dirs (outside the repo): `build-exp` (debug JIT, srcdir this checkout: use
+  it), `build_perf_base_jit` (main, PGO+LTO JIT), `build-str1-dbg` (main, debug tier-2
+  interpreter).  Build dirs of agent worktrees (`build-A*`, `build-B`, `build-E*`,
+  `build-merge*`, `build-P2*`, `P2-perf/`, `A-perf/`, `build_review_pgo`) point at
+  removed worktrees or tmpfs copies: stale, safe to delete.
 - Regenerate with `Tools/clinic/clinic.py Objects/bytesobject.c
-  Objects/stringlib/transmogrify.h` (not `--make` from a checkout containing
+  Objects/stringlib/transmogrify.h Objects/bytearrayobject.c Objects/abstract.c
+  Objects/typeobject.c Objects/unicodeobject.c` (not `--make` from a checkout containing
   `.claude/worktrees/`, which it would also scan).
