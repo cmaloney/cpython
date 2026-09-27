@@ -871,7 +871,7 @@ def c_calls(srcdir):
     for slotdef in slots.slotdefs():
         dunders.setdefault(slotdef.slot, set()).add(slotdef.name)
     dunders['tp_descr_get'] = {'__get__'}
-    specs = [frontend.load_imported(path) for path in _spec_files(srcdir)]
+    specs = [frontend.Spec.load(path) for path in _spec_files(srcdir)]
     implemented = {name for spec in specs
                    for name in spec.c_implemented_functions()}
     out = []

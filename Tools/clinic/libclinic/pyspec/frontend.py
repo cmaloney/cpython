@@ -277,6 +277,7 @@ class Spec:
         self.shared: dict[str, Shared] = {}
         # Specs imported with ``from pkg import module``: name -> path.
         self.imports: dict[str, str] = {}
+        self._specs: dict[str, Spec] = {}     # load_spec()
         # Functions imported with ``from pkg.module import f``: name ->
         # path of the spec.
         self.imported_functions: dict[str, str] = {}
@@ -351,7 +352,19 @@ class Spec:
 
     def imported(self, module: str) -> Spec:
         """The spec imported as *module*."""
-        return load_imported(self.imports[module])
+        return self.load_spec(self.imports[module])
+
+    def load_spec(self, path: str) -> Spec:
+        """The spec at *path*, imported by this one (or by a spec it
+        imports): read once."""
+        path = os.path.abspath(path)
+        if path == os.path.abspath(self.filename):
+            return self
+        if path not in self._specs:
+            spec = Spec.load(path)
+            assert spec is not None
+            self._specs[path] = spec
+        return self._specs[path]
 
     def resolve(self, name: str) -> tuple[Spec, ast.FunctionDef] | None:
         """(the spec defining it, its def) of the function *name* of this
@@ -361,7 +374,7 @@ class Spec:
         path = self.imported_functions.get(name)
         if path is None:
             return None
-        return load_imported(path).resolve(name)
+        return self.load_spec(path).resolve(name)
 
     def c_function(self, call: ast.Call
                    ) -> tuple[Spec, ast.FunctionDef] | None:
@@ -372,9 +385,8 @@ class Spec:
         func = call.func
         if not isinstance(func, ast.Name):
             return None
-        scope = getattr(call, 'pyspec_scope', self.filename)
-        spec = self if scope == self.filename else load_imported(scope)
-        found = spec.resolve(func.id)
+        found = self.load_spec(getattr(call, 'pyspec_scope',
+                                       self.filename)).resolve(func.id)
         if found is None or found[0].implemented(func.id):
             return None
         return found
@@ -841,19 +853,3 @@ class Spec:
                                  "signature)")
             return [lines[0], '', *lines[i + 1:]], param_docs
         return lines[:1], param_docs
-
-
-_IMPORTED: dict[str, tuple[float, Spec]] = {}
-
-
-def load_imported(path: str) -> Spec:
-    """The spec at *path*, imported by another: read once while it is
-    unchanged."""
-    path = os.path.abspath(path)
-    mtime = os.stat(path).st_mtime
-    cached = _IMPORTED.get(path)
-    if cached is None or cached[0] != mtime:
-        spec = Spec.load(path)
-        assert spec is not None
-        cached = _IMPORTED[path] = (mtime, spec)
-    return cached[1]

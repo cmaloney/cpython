@@ -6853,6 +6853,10 @@ class PyspecFilesTest(TestCase):
     REBUILD = ("the spec and the interpreter differ: if the spec changed, "
                "run \"make clinic\", rebuild Python (make) and rerun")
 
+    def setUp(self):
+        # Clinic on a C file registers the converters it defines.
+        save_restore_converters(self)
+
     def test_up_to_date(self):
         for spec_path, c_file in spec_files():
             if c_file is None:

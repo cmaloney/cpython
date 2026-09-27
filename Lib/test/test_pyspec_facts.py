@@ -376,7 +376,7 @@ class HelperTest(unittest.TestCase):
                 for name in files:
                     if name.endswith('.py') and not name.endswith('_cases.py'):
                         path = os.path.join(dirpath, name)
-                        spec = frontend.load_imported(path)
+                        spec = frontend.Spec.load(path)
                         for func in spec.c_implemented_functions():
                             cls.specs[func] = (spec, path)
 

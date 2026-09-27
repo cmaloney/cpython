@@ -32,7 +32,6 @@ that may run Python code must be accounted for by one of them.
 
 import ast
 import builtins
-import weakref
 
 from . import builtin_types, frontend, partial_eval
 
@@ -105,15 +104,11 @@ def _exception_name(node, env):
     return ANY
 
 
-_ANALYZERS = weakref.WeakKeyDictionary()
-
-
 def analyzer(spec):
-    """The Analyzer of *spec* (a frontend.Spec)."""
-    try:
-        return _ANALYZERS[spec]
-    except KeyError:
-        return _ANALYZERS.setdefault(spec, Analyzer(spec))
+    """The Analyzer of *spec* (a frontend.Spec), kept by the spec."""
+    if getattr(spec, 'analyzer', None) is None:
+        spec.analyzer = Analyzer(spec)
+    return spec.analyzer
 
 
 class Analyzer:
