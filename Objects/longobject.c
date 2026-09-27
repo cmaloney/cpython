@@ -2039,9 +2039,9 @@ pylong_int_to_decimal_string(PyObject *aa,
     if (s == NULL) {
         goto error;
     }
-    if (!PyUnicode_Check(s)) {
+    if (!PyUnicode_CheckExact(s)) {
         PyErr_SetString(PyExc_TypeError,
-                        "_pylong.int_to_decimal_string did not return a str");
+                        "_pylong.int_to_decimal_string did not return an exact str");
         goto error;
     }
     if (writer) {

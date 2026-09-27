@@ -1,0 +1,3 @@
+``str()`` of a very large :class:`int` now raises :exc:`TypeError` if
+``_pylong.int_to_decimal_string()`` returns a :class:`str` subclass instead of an
+exact :class:`str`.

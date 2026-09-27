@@ -818,6 +818,13 @@ class PyLongModuleTests(unittest.TestCase):
                 str(big_value)
             self.assertIn('_pylong.int_to_decimal_string did not',
                           str(ctx.exception))
+            class StrSubclass(str):
+                pass
+            mock_int_to_str.return_value = StrSubclass('7'*19_999)
+            with self.assertRaises(TypeError) as ctx:
+                str(big_value)
+            self.assertIn('_pylong.int_to_decimal_string did not',
+                          str(ctx.exception))
             mock_int_to_str.side_effect = RuntimeError("testABC")
             with self.assertRaises(RuntimeError):
                 str(big_value)
