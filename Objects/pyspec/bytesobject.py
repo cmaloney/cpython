@@ -31,7 +31,7 @@ from typing import final
 
 from libclinic.pyspec.runtime import (
     NULL, PY_SSIZE_T_MAX, c_implemented, calls, exact, fqname, isinstance,
-    iter, tp_name, unknown)
+    iter, runs_python, tp_name, unknown)
 
 # Argument Clinic decorators (no-ops in Python).
 from libclinic.pyspec.runtime import permit_long_summary, text_signature
@@ -547,10 +547,27 @@ class bytes:
     def __rmod__(self, value, /): ...
 
     @c_name(mp_length="bytes_length", sq_length="bytes_length")
-    def __len__(self, /): ...
+    @c_implemented
+    def __len__(self, /):
+        return len(bytes(self))
 
+    # The tier-2 optimizer uses the facts of b[i] for an exact bytes b and
+    # an exact int i (an exact int, no Python code; the only error is
+    # IndexError) for _BINARY_OP_SUBSCR_BYTES_INT (see pycore_pyspec.h).
     @c_name(mp_subscript="bytes_subscript", sq_item="bytes_item")
-    def __getitem__(self, key, /): ...
+    @c_implemented
+    def __getitem__(self, key, /):
+        if hasattr(type(key), "__index__"):
+            i = PyNumber_AsSsize_t(key, IndexError)
+            if i < -len(self) or i >= len(self):
+                raise IndexError("index out of range")
+            return exact(int, bytes(self)[i])
+        if isinstance(key, slice):
+            # PySlice_Unpack(): the __index__ of start, stop and step.
+            runs_python()
+            return exact(bytes, bytes(self)[key])
+        raise TypeError("byte indices must be integers or slices, not "
+                        f"{tp_name(type(key))}")
 
     @c_name(sq_concat="_PyBytes_Concat")
     def __add__(self, value, /): ...

@@ -647,12 +647,84 @@ static const _PySpecCall bytes_spec_methods[] = {
     },
 };
 
+/* Facts of the slots of the classes of the spec, derived from their Python
+ * references, for self of exactly the class (see Include/internal/pycore_pyspec.h). */
+static const _PySpecSlot bytes_spec_slots[] = {
+    /* bytes.__buffer__(self, x): result is exactly memoryview; runs no Python code */
+    {
+        .type = &PyBytes_Type,
+        .name = "__buffer__",
+        .facts = {
+            .nargs = 2,
+            .flags = 0,
+            .result_const = -1,
+            .result_alias = -1,
+            .arg_type = NULL,
+            .result_type = &PyMemoryView_Type,
+        },
+    },
+    /* bytes.__len__(self): result type not known exactly; runs no Python code */
+    {
+        .type = &PyBytes_Type,
+        .name = "__len__",
+        .facts = {
+            .nargs = 1,
+            .flags = 0,
+            .result_const = -1,
+            .result_alias = -1,
+            .arg_type = NULL,
+            .result_type = NULL,
+        },
+    },
+    /* bytes.__getitem__(self, int): result is exactly int; runs no Python code */
+    {
+        .type = &PyBytes_Type,
+        .name = "__getitem__",
+        .facts = {
+            .nargs = 2,
+            .flags = 0,
+            .result_const = -1,
+            .result_alias = -1,
+            .arg_type = &PyLong_Type,
+            .result_type = &PyLong_Type,
+        },
+    },
+    /* bytes.__getitem__(self, x): result type not known exactly; may run Python code */
+    {
+        .type = &PyBytes_Type,
+        .name = "__getitem__",
+        .facts = {
+            .nargs = 2,
+            .flags = _PySpec_MAY_RUN_PYTHON,
+            .result_const = -1,
+            .result_alias = -1,
+            .arg_type = NULL,
+            .result_type = NULL,
+        },
+    },
+    /* bytes_iterator.__next__(self): result is exactly int; runs no Python code */
+    {
+        .type = &PyBytesIter_Type,
+        .name = "__next__",
+        .facts = {
+            .nargs = 1,
+            .flags = 0,
+            .result_const = -1,
+            .result_alias = -1,
+            .arg_type = NULL,
+            .result_type = &PyLong_Type,
+        },
+    },
+};
+
 const _PySpecCallTable _PySpec_bytes_calls = {
     .type = &PyBytes_Type,
     .ncalls = Py_ARRAY_LENGTH(bytes_new_spec_calls),
     .calls = bytes_new_spec_calls,
     .nmethods = Py_ARRAY_LENGTH(bytes_spec_methods),
     .methods = bytes_spec_methods,
+    .nslots = Py_ARRAY_LENGTH(bytes_spec_slots),
+    .slots = bytes_spec_slots,
 };
 
 /* bytes_from_iterator() for it = iter(x), x of exact type list:

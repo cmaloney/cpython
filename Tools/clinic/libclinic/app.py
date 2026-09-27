@@ -327,9 +327,13 @@ impl_definition block
         parts = []
         if spec.implemented_functions():
             try:
+                type_objects = {
+                    path: cls.type_object
+                    for path, cls in self._clinic_classes(self, '')}
                 parts.append(emit.generate(spec, spec_name,
                                            self.pyspec_c_basenames,
-                                           self.pyspec_self_ctypes))
+                                           self.pyspec_self_ctypes,
+                                           type_objects))
             except emit.SpecError as exc:
                 message = exc.message
                 if message.startswith('unsupported'):

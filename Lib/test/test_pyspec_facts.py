@@ -336,6 +336,15 @@ class HelperTest(unittest.TestCase):
                              (b'41', False), (memoryview(b'42'), True),
                              (RecordingBuffer(), False), (5, False)],
         'bytes.__buffer__': [(b'abc', 0)],
+        'bytes.__len__': [(b'',), (b'abc',), (BytesSubclass(b'ab'),)],
+        'bytes.__getitem__': [
+            (b'abc', 0), (b'abc', 2), (b'abc', -1), (b'abc', -3),
+            (b'abc', 3), (b'abc', -4), (b'\xff', 0), (b'', 0),
+            (b'abc', True), (b'abc', 2**70), (b'abc', -2**70),
+            (b'abc', IntSubclass(1)), (b'abc', RecordingIndex(1)),
+            (BytesSubclass(b'abc'), 1), (b'abcdef', slice(1, 5, 2)),
+            (b'abc', slice(None)), (b'abc', slice(5, 1)), (b'abc', 'x'),
+            (b'abc', 1.5)],
         # (A function makes a fresh input for each call.)
         'bytes_iterator.__next__': [lambda: (iter(b'a'),),
                                     lambda: (iter(b''),)],
@@ -347,6 +356,8 @@ class HelperTest(unittest.TestCase):
         '_PyBytes_FromHex': lambda s, use_bytearray: (
             (bytearray.fromhex if use_bytearray else bytes.fromhex), (s,)),
         'bytes.__buffer__': lambda b, flags: (bytes.__buffer__, (b, flags)),
+        'bytes.__len__': lambda b: (bytes.__len__, (b,)),
+        'bytes.__getitem__': lambda b, key: (bytes.__getitem__, (b, key)),
         'bytes_iterator.__next__': lambda it: (type(it).__next__, (it,)),
     }
 
