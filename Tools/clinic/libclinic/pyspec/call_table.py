@@ -49,7 +49,7 @@ import ast
 import builtins
 
 from . import builtin_types, emit, facts, partial_eval
-from .partial_eval import NOTNULL, NULL, Value
+from .partial_eval import NOTNULL, Value
 
 # Keep a type-specialized variant when its residual has at most this
 # fraction of the AST nodes of the generic residual.
@@ -175,23 +175,18 @@ def generate_calls(generator, description):
     """The variants and the calls array of a clinic __new__."""
     spec = generator.spec
     analyzer = facts.analyzer(spec)
-    cls, *params = description.parameters
-    required = sum(not p.optional for p in params)
-    type_value = getattr(builtins, description.new_type)
+    params = description.parameters[1:]
     # The spec function ("bytes.__new__") and the C basename of its
     # clinic function ("bytes_new").
     name = description.name
     basename = generator.c_basename(name)
     out = []
     entries = []            # (nargs, arg type name, function, facts, const)
-    for nargs in range(required, len(params) + 1):
-        given, missing = params[:nargs], params[nargs:]
+    for env, _, given, missing in generator.arities(description):
+        nargs = len(given)
         if any(p.ctype != emit.OBJECT for p in given):
             continue
         arg_names = [p.name for p in given]
-        env = {cls.name: Value(type_value)}
-        env |= {p.name: NOTNULL for p in given}
-        env |= {p.name: NULL for p in missing}
         generic = partial_eval.specialize(spec, name, env)
         generic_size = node_count(generic)
         if nargs == 1:

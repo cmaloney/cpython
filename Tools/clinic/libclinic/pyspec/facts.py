@@ -342,7 +342,7 @@ class Analyzer:
             case 'exact', [ast.Name(tp_name), *_]:
                 facts.raises.add('MemoryError')
                 tp = builtin_types.by_name(tp_name)
-                return tp if tp is not None else self._spec_type(tp_name)
+                return tp
             case 'unknown', _:
                 facts.raises.add('MemoryError')
                 return None
@@ -376,12 +376,6 @@ class Analyzer:
         facts.runs_python = True
         facts.raises.add(ANY)
         return None
-
-    def _spec_type(self, name):
-        """The builtin type a spec class describes, or None."""
-        tp = getattr(builtins, name, None)
-        return tp if isinstance(tp, type) and name in self.spec.classes \
-            else None
 
     def special_facts(self, obj, name, env):
         """Facts of invoking special method *name* of type(obj)."""
