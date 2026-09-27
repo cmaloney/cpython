@@ -293,6 +293,11 @@ class IntSubclass(int):
     pass
 
 
+# The Python references of the specs, run once per process (runtime.load()
+# makes new functions).
+REFERENCES = {}
+
+
 class HelperTest(unittest.TestCase):
     """Every hand-written C function a spec calls (@c_implemented) that
     can be called from Python, called directly: the same outcome as its
@@ -412,7 +417,9 @@ class HelperTest(unittest.TestCase):
         from test.test_pyspec_facts import RECORDED
         for name, cases in self.CASES.items():
             spec, path = self.specs[name]
-            reference = self.runtime.load(path)[name]
+            if path not in REFERENCES:
+                REFERENCES[path] = self.runtime.load(path)
+            reference = REFERENCES[path][name]
             analyzer = self.facts.analyzer(spec)
             for case in cases:
                 args = case() if callable(case) else case
