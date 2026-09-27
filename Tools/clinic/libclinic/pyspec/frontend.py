@@ -674,6 +674,15 @@ class Spec:
                     names.append(name)
         return names
 
+    def declares_slots(self, cls_name: str) -> bool:
+        """True if class *cls_name* declares a slot (a dunder of
+        slotdefs[]).  Such a class describes its whole type: Argument
+        Clinic generates its method and slot tables, and test_clinic
+        compares all its slots with the type.  A class without slots
+        declares methods only; their table stays in C."""
+        return any(self.method_kind(f'{cls_name}.{meth}') == SLOT
+                   for meth in self.entries(cls_name))
+
     def docstring(self, name: str) -> str | None:
         """The docstring of method *name* as __doc__ shows it (the
         indentation of the source removed), or None."""

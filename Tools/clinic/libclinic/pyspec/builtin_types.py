@@ -21,11 +21,9 @@ A spec class that declares the slots of its type (bytes) describes the
 type itself; TypeFacts reads it instead of the table.
 """
 
-import ast
 import builtins
 import types
 
-from . import slots
 
 # A special method that may run Python code.
 PYTHON = 'PYTHON'
@@ -134,10 +132,7 @@ class TypeFacts:
         node = self.spec.classes.get(tp.__name__)
         if node is None or getattr(builtins, tp.__name__, None) is not tp:
             return None
-        for stmt in node.body:
-            if isinstance(stmt, ast.FunctionDef) and slots.is_slot(stmt.name):
-                return node
-        return None
+        return node if self.spec.declares_slots(tp.__name__) else None
 
     def mro(self, tp):
         """The MRO of tp, or None when tp is not known."""

@@ -420,7 +420,8 @@ def header(spec_path: str) -> str:
 def generate(spec: frontend.Spec, classes: set[str],
              functions: dict[str, tuple[str, str | None]]) -> str | None:
     """The tables of the classes of *spec*, the spec of a C file, that
-    the C file declares (clinic *classes*), or None.
+    the C file declares (clinic *classes*) and that declare slots
+    (Spec.declares_slots()), or None.
 
     *functions* maps the clinic functions of the C file ("bytes.split")
     to (C basename, vectorcall C name or None).  They are the end of
@@ -428,7 +429,8 @@ def generate(spec: frontend.Spec, classes: set[str],
     """
     out = []
     for cls_name in spec.classes:
-        if cls_name in classes:
+        class_prefix(spec, cls_name)    # checks the class decorators
+        if cls_name in classes and spec.declares_slots(cls_name):
             out += TypeGenerator(spec, cls_name, functions).generate()
     if not out:
         return None

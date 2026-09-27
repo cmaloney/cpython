@@ -6646,6 +6646,21 @@ class PyspecTypeTest(PyspecTestBase):
         with self.assertRaisesRegex(ClinicError, re.escape(errmsg)):
             self.types_header(spec)
 
+    def test_methods_only_class(self):
+        # A class that declares no slot declares its methods only: their
+        # table stays in C, so a first migration is signatures only.
+        self.generate("""
+            class bytes:
+                def meth(self, a: object, /):
+                    '''Meth.'''
+                    ...
+        """, self.CLASS + """
+        /*[clinic input]
+        bytes.meth
+        [clinic start generated code]*/
+        """)
+        self.assertFalse(os.path.exists(self.output_path))
+
     def test_method_table_with_ifdef(self):
         # The table lists every method unconditionally: clinic defines an
         # empty *_METHODDEF for a method not compiled in.  A signature
@@ -6653,6 +6668,7 @@ class PyspecTypeTest(PyspecTestBase):
         # the class by ``def other(self): ...``.
         spec = """
             class bytes:
+                def __repr__(self, /): ...
                 def meth(self, a: object, /):
                     ...
 
@@ -6733,11 +6749,13 @@ class PyspecTypeTest(PyspecTestBase):
     def test_pycfunction(self):
         self.check_error("""
             class bytes:
+                def __repr__(self, /): ...
                 @c_name(METH_O="f")
                 def meth(self, /): ...
         """, "bytes.meth: a METH_O function takes (self, arg, /)")
         self.check_error("""
             class bytes:
+                def __repr__(self, /): ...
                 @c_name(METH_VARARGS="f")
                 def meth(self, /): ...
         """, "@c_name with a keyword names a slot")
@@ -6753,6 +6771,7 @@ class PyspecTypeTest(PyspecTestBase):
              "@c_name, not @cname('bytes_r')")
         self.check_error("""
             class bytes:
+                def __repr__(self, /): ...
                 @permit_long_summary
                 @c_name(METH_NOARGS="f")
                 def meth(self, /): ...
@@ -6760,6 +6779,7 @@ class PyspecTypeTest(PyspecTestBase):
              "@c_name and @classmethod, not @permit_long_summary")
         self.check_error("""
             class bytes:
+                def __repr__(self, /): ...
                 @staticmethod
                 @c_name(METH_O="f")
                 def meth(x, /): ...
@@ -6767,6 +6787,7 @@ class PyspecTypeTest(PyspecTestBase):
         # @classmethod is METH_CLASS.
         header = self.types_header("""
             class bytes:
+                def __repr__(self, /): ...
                 @classmethod
                 @c_name(METH_O="Py_GenericAlias")
                 def __class_getitem__(cls, item, /):
@@ -6784,6 +6805,7 @@ class PyspecTypeTest(PyspecTestBase):
                 "supported yet")):
             self.types_header("""
                 class bytes:
+                    def __repr__(self, /): ...
                     @getter
                     def nbytes(self): ...
             """, self.CLASS + """
@@ -6793,6 +6815,7 @@ class PyspecTypeTest(PyspecTestBase):
         """)
         self.check_error("""
             class bytes:
+                def __repr__(self, /): ...
                 @getter
                 def nbytes(self): ...
                 @setter
@@ -6890,6 +6913,7 @@ class PyspecTypeTest(PyspecTestBase):
             from shared import m
 
             class bytes:
+                def __repr__(self, /): ...
                 center = m.B.center
                 lower = m.B.lower
         """)
@@ -6902,12 +6926,14 @@ class PyspecTypeTest(PyspecTestBase):
             from shared import m
 
             class bytes:
+                def __repr__(self, /): ...
                 center = m.B.centre
         """, "m.B has no method 'centre'")
         self.check_error("""
             from shared import m
 
             class bytes:
+                def __repr__(self, /): ...
                 centre = m.B.center
         """, "a shared method keeps its name: write "
              "center = m.B.center")
@@ -6947,6 +6973,7 @@ class PyspecTypeTest(PyspecTestBase):
             from shared import m
 
             class bytes:
+                def __repr__(self, /): ...
                 def __reduce__(self):
                     '''Reduce.'''
                     ...
@@ -6956,6 +6983,7 @@ class PyspecTypeTest(PyspecTestBase):
                 strip = critical_section(m.B.strip)
 
             class myiter:
+                def __repr__(self, /): ...
                 lower = c_name(METH_NOARGS="myiter_lower")(m.B.lower)
                 __reduce__ = c_name(METH_NOARGS="myiter_reduce")(
                     bytes.__reduce__)
@@ -7008,18 +7036,21 @@ class PyspecTypeTest(PyspecTestBase):
             from shared import m
 
             class bytes:
+                def __repr__(self, /): ...
                 strip = text_signature("()")(m.B.strip)
         """, "a shared method takes only critical_section and c_name")
         self.check_error("""
             from shared import m
 
             class bytes:
+                def __repr__(self, /): ...
                 lower = c_name(METH_O="f")(m.B.lower)
         """, "bytes.lower: write c_name(METH_NOARGS=\"f\")(...)")
         self.check_error("""
             from shared import m
 
             class bytes:
+                def __repr__(self, /): ...
                 lower = critical_section(c_name(METH_NOARGS="f")(m.B.lower))
         """, "critical_section() generates the C function")
 
