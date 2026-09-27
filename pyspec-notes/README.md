@@ -9,12 +9,17 @@ change: drop it before proposing anything.
 `bytes` is described by Python-syntax specs that Argument Clinic reads:
 
 - `Objects/pyspec/bytesobject.py`: `class bytes` / `class bytes_iterator` (method
-  signatures, docstrings, slots, `@static_type`), spec bodies (`__new__`, `__bytes__`,
+  signatures, docstrings, slot stubs), spec bodies (`__new__`, `__bytes__`,
   `fromhex`, `PyBytes_FromObject`, `bytes_from_iterator`), and `@c_implemented`
   helpers (hand-written C; the body is the Python reference, facts derived from it).
 - `Objects/pyspec/{abstract,typeobject,unicodeobject}.py`, `Python/pyspec/errors.py`,
   `Include/cpython/pyspec/longintrepr.py`: helpers of other C files, imported by name.
-- `Objects/stringlib/pyspec/{transmogrify,ctype}.py`: methods shared with bytearray.
+- `Objects/pyspec/bytearrayobject.py`: `class bytearray` / its iterator; shares methods
+  with bytes (`strip = critical_section(bytesobject.bytes.strip)`).
+- `Objects/stringlib/pyspec/{transmogrify,ctype}.py`: methods shared by bytes and bytearray.
+- The `PyTypeObject` structs stay hand-written in C (user decision); clinic generates
+  only `<prefix>_doc`, `<prefix>_methods[]` and the `as_number/sequence/mapping/buffer`
+  sub-tables, which the structs (after the generated include) name as on main.
 - `Objects/pyspec/bytesobject_cases.py`: difftest data (spec run as Python vs the
   interpreter).
 - Facts come from bodies plus four primitives (`exact(T, v)`, `unknown(v)`,
@@ -23,7 +28,8 @@ change: drop it before proposing anything.
 - `Objects/pyspec/README.rst`: the contributor guide ("to do X, edit Y").
 - Clinic generates `Objects/clinic/bytesobject.c.h` (byte-identical to main outside
   `bytes.__new__`) and `Objects/clinic/bytesobject_pyspec.c.h` (spec bodies, per-arity
-  and per-type entries, the tier-2 call table, the type objects).
+  and per-type entries, the tier-2 call table, the method and slot tables);
+  `bytearrayobject.c.h` and `transmogrify.h.h` are byte-identical to main.
 - The tier-2 optimizer uses derived facts (alias, constant, no-Python, exact type);
   debug builds assert them at run time.
 - `Lib/test/test_pyspec_catalog.py`: a disconnect ratchet over C API files, docs
@@ -58,6 +64,7 @@ change: drop it before proposing anything.
 | A | `bytes(list)` regression, F1/F2/F4, code size | merged | `reports/phase1_A.md` |
 | Audit | comments and docstrings match the code | merged | `reports/comment_audit.md` |
 | P1+P2 | helpers by name, facts derived from bodies, F3, one types table, C-side check | merged | `reports/phase2_P1P2.md` |
+| 3b | bytearray from a spec; PyTypeObject back in C (`@static_type`/`@final` removed) | merged | `reports/phase3b_bytearray.md` |
 
 `DESIGN.md` is the shared brief every agent read (goals, decisions, resource rules);
 `PROPOSALS.md` holds P1/P2.
@@ -65,6 +72,8 @@ change: drop it before proposing anything.
 ## User decisions in force
 - The branch must be a win across the board vs main (no micro regressions).
 - One mode: a one-line clinic block per spec method; clinic writes impl heads.
+- `PyTypeObject` definitions stay in C; the spec generates only what it derives
+  (method table, slot sub-tables, doc string).
 - Generated output byte-for-byte identical to main wherever possible; bracket
   `@text_signature`s stay (help() parity); typeshed is checked from the spec instead.
 - Free-threaded `bytes(list)` keeps main's atomic snapshot for all-int lists (F1).
@@ -83,17 +92,18 @@ change (bytes calls are <1% of every benchmark).  bytes code is +1.3 KB vs main.
 P2 changed no shape for the worse (non-PGO instruction counts); `bytes(16)` now uses
 the no-Python call (442 -> 433 instructions).
 
-## Test status (commit 1b467fa3305)
+## Test status (after merging 3b)
 Debug JIT build `../build-exp` (srcdir: this checkout): test_clinic, test_bytes,
-test_inspect, test_iter, test_pydoc, test_descr, test_pickle, test_pyspec_catalog,
-test_pyspec_facts pass (2668 tests); test_capi alone passes (1587).  Running test_opt
-after other modules in one invocation fails guard-removal tests, as it does on main
-(upstream order dependency).  `PYTHON_JIT=0 -R 3:3` on the four pyspec-related suites
-passes.  Free-threaded debug build (by the P2 agent): test_bytes, test_pyspec_facts,
-test_clinic, test_free_threading pass; the F1 snapshot gives 0 torn results.  No
-expected failures remain.  Clinic on the six spec-backed files and `make regen-cases`
-leave the tree clean.  Parity with main: `transmogrify.h.h` identical;
-`bytesobject.c.h` differs only in the `bytes.__new__` section.
+test_inspect, test_iter, test_pydoc, test_descr, test_pickle, test_buffer, test_int,
+test_pyspec_catalog, test_pyspec_facts pass (2820 tests); test_capi alone passes.
+Running test_opt after other modules in one invocation fails guard-removal tests, as on
+main (upstream order dependency).  `PYTHON_JIT=0 -R 3:3` on the four pyspec suites
+passes.  Free-threaded debug (3b's agent): test_bytes incl. bytearray free-threading
+tests, test_free_threading, test_pyspec_facts, test_clinic pass.  No expected failures.
+Clinic on the six spec-backed files and `make regen-cases` leave the tree clean.
+Parity with main: `bytearrayobject.c.h`, `transmogrify.h.h` identical; `bytesobject.c.h`
+differs only in the `bytes.__new__` section; bytes/bytearray type dumps identical except
+`bytes.tp_vectorcall`.  Ratchet: docstrings 22 -> 2, capi 23 -> 20, docs 1 -> 0.
 
 ## Open items
 1. Tool code is flat after P2 (5710 -> 5691 lines; the C-side check costs ~200).
@@ -112,7 +122,12 @@ leave the tree clean.  Parity with main: `transmogrify.h.h` identical;
    with a `gh-NNNNNN` placeholder); file it as its own small issue/PR.  A constant
    +1 refcount on the subclass remains in `repro_type_refleak.py` under the JIT
    (was +12007), not investigated.
-3. Phase 3: `b[i]` and `FOR_ITER` over bytes specializations from slot facts (the only
+2b. From 3b: `threadsafety.dat` levels for three bytearray entries are the agent's
+   judgement (review before upstream); ctype docstrings now compiled per type (+1.4 KB);
+   `pycore_bytes_methods.h` declares nine never-defined docstrings (pre-existing); the
+   spec's type-level slot C names are not compared with the C struct (only existence);
+   `bytes.lstrip` docstring has a double space (fixing it lets bytearray share it).
+3. Phase 3 (3b bytearray done): `b[i]` and `FOR_ITER` over bytes specializations from slot facts (the only
    measurable end-to-end lever, ~1.5-2% pyflate), then bytearray (shares the stringlib
    specs, removes duplicated docstrings), then tuple, int, list, str.
 4. Upstreamable pieces (see `reports/review_int.md` section 5): doc/docstring/typeshed
