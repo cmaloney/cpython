@@ -167,6 +167,42 @@ def _c_stub(spec: frontend.Spec, name: str, kind: str) -> ast.FunctionDef:
     return node
 
 
+# ``critical_section(module.Class.meth)``: the C function calling a shared
+# method in a critical section on self, by calling convention: its
+# parameters after self, and the arguments it passes on.
+LOCKED_WRAPPERS = {
+    'METH_NOARGS': ('PyObject *Py_UNUSED(ignored)', 'NULL'),
+    'METH_O': ('PyObject *arg', 'arg'),
+    'METH_FASTCALL': ('PyObject *const *args, Py_ssize_t nargs',
+                      'args, nargs'),
+    'METH_FASTCALL|METH_KEYWORDS': (
+        'PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames',
+        'args, nargs, kwnames'),
+}
+
+_METHODDEF_FLAGS = r'\s*\\\n\s*\{"\w+",\s*[^,]+,\s*([\w|]+),'
+
+
+def _clinic_flags(spec: frontend.Spec, c_basename: str, error) -> str:
+    """The calling convention of clinic function *c_basename*, declared
+    by *spec*: the flags of the ``*_METHODDEF`` clinic generated for the
+    C file of *spec* (``stringlib/clinic/transmogrify.h.h``)."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(spec.filename)))
+    stem = os.path.splitext(os.path.basename(spec.filename))[0]
+    paths = [os.path.join(root, 'clinic', f'{stem}{ext}.h')
+             for ext in ('.c', '.h')]
+    macro = f'{c_basename.upper()}_METHODDEF'
+    for path in paths:
+        if os.path.exists(path):
+            with open(path, encoding='utf-8') as f:
+                m = re.search(rf'#define {macro}{_METHODDEF_FLAGS}',
+                              f.read())
+            if m:
+                return m.group(1)
+    raise error(f"no {macro} in {' or '.join(paths)}: run clinic on the "
+                f"C file of {spec.filename} first")
+
+
 def _exported(name: str) -> bool:
     return name.startswith(('Py', '_Py'))
 
@@ -202,10 +238,10 @@ class TypeGenerator:
 
     # -- methods -----------------------------------------------------------
 
-    def _pycfunction_entry(self, spec: frontend.Spec, name: str,
-                           meth: str) -> tuple[list[str], str]:
-        """(docstring definition, method table entry) of a hand-written
-        PyCFunction of *spec*."""
+    def _pycfunction(self, spec: frontend.Spec, name: str, meth: str
+                     ) -> tuple[list[str], str, str, str]:
+        """(docstring definition, C function, flags, docstring name) of a
+        hand-written PyCFunction of *spec*."""
         node = _c_stub(spec, name, 'PyCFunction')
         _, keywords = spec.c_name(name)
         (flag, c_func), = keywords.items()
@@ -228,7 +264,7 @@ class TypeGenerator:
         if doc is not None:
             doc_name = f'{self.prefix}_{meth}__doc__'
             docs = [f'PyDoc_STRVAR({doc_name},', _c_string(doc) + ');', '']
-        return docs, f'    {{"{meth}", {c_func}, {flag}, {doc_name}}},'
+        return docs, c_func, flag, doc_name
 
     def _clinic_entry(self, name: str) -> str:
         node = self.spec.functions[name]
@@ -239,22 +275,73 @@ class TypeGenerator:
                                   "of the C file") from None
         return f'    {c_basename.upper()}_METHODDEF'
 
-    def _shared_entry(self, name: str) -> tuple[list[str], str]:
-        shared = self.spec.shared[name]
-        other = self.spec.imported(shared.module)
-        other_name = f'{shared.cls}.{shared.meth}'
+    def _shared_entry(self, name: str, meth: str) -> tuple[list[str], str]:
+        """(docstrings and C functions to define first, method table
+        entry) of shared method *name*."""
+        spec = self.spec
+        if name in self.functions:
+            # It has a block in the C file: a clinic function of the class.
+            c_basename, _ = self.functions[name]
+            return [], f'    {c_basename.upper()}_METHODDEF'
+        shared = spec.shared[name]
+        other, other_name = spec.shared_source(name)
+
+        def error(message: str) -> SpecError:
+            return SpecError(message, filename=spec.filename,
+                             lineno=shared.lineno)
+
         kind = other.method_kind(other_name)
+        _, keywords = spec.c_name(name)
+        locked = spec.is_locked(name)
         if kind == PYCFUNCTION:
-            return self._pycfunction_entry(other, other_name, shared.meth)
-        if kind != CLINIC:
-            raise SpecError(f"{other_name} of {other.filename} is a {kind}; "
-                            "only methods can be shared",
-                            filename=self.spec.filename,
-                            lineno=shared.lineno)
-        c_basename, _ = other.c_name(other_name)
-        if c_basename is None:
-            c_basename = other_name.replace('.', '_')
-        return [], f'    {c_basename.upper()}_METHODDEF'
+            docs, c_func, flag, doc_name = self._pycfunction(
+                other, other_name, meth)
+        elif kind == CLINIC:
+            docs = []
+            if other is spec:
+                c_basename, _ = self.functions[other_name]
+            else:
+                c_basename = (other.c_name(other_name)[0]
+                              or other_name.replace('.', '_'))
+            if not keywords and not locked:
+                return [], f'    {c_basename.upper()}_METHODDEF'
+            c_func, doc_name = c_basename, f'{c_basename}__doc__'
+            flag = None if keywords else _clinic_flags(other, c_basename,
+                                                       error)
+        else:
+            raise error(f"{other_name} of {other.filename} is a {kind}; "
+                        "only methods can be shared")
+        if keywords:
+            (given, c_func), = keywords.items()
+            if given not in frontend.PYCFUNCTION_FLAGS or \
+                    flag not in (None, given):
+                raise error(f"{name}: write c_name({flag or 'METH_NOARGS'}"
+                            f"=\"f\")(...), the calling convention of "
+                            f"{other_name}")
+            if locked:
+                raise error(f"{name}: critical_section() generates the C "
+                            "function; remove c_name()")
+            flag = given
+        if locked:
+            if flag not in LOCKED_WRAPPERS:
+                raise error(f"{name}: critical_section() of a {flag} "
+                            "function is not supported")
+            params, call_args = LOCKED_WRAPPERS[flag]
+            wrapper = f'{self.prefix}_{meth}'
+            docs += ['static PyObject *',
+                     f'{wrapper}(PyObject *self, {params})',
+                     '{',
+                     '    PyObject *ret;',
+                     '    Py_BEGIN_CRITICAL_SECTION(self);',
+                     f'    ret = {c_func}(self, {call_args});',
+                     '    Py_END_CRITICAL_SECTION();',
+                     '    return ret;',
+                     '}',
+                     '']
+            c_func = wrapper
+        if flag not in ('METH_NOARGS', 'METH_O'):
+            c_func = f'_PyCFunction_CAST({c_func})'
+        return docs, f'    {{"{meth}", {c_func}, {flag}, {doc_name}}},'
 
     # -- slots -------------------------------------------------------------
 
@@ -345,11 +432,13 @@ class TypeGenerator:
             if kind == SLOT:
                 dunders.append(meth)
             elif kind == PYCFUNCTION:
-                doc, entry = self._pycfunction_entry(spec, name, meth)
+                doc, c_func, flag, doc_name = self._pycfunction(spec, name,
+                                                                meth)
                 docs += doc
-                table.append(entry)
+                table.append(f'    {{"{meth}", {c_func}, {flag}, '
+                             f'{doc_name}}},')
             elif kind == SHARED:
-                doc, entry = self._shared_entry(name)
+                doc, entry = self._shared_entry(name, meth)
                 docs += doc
                 table.append(entry)
             elif meth in ('__new__', '__init__'):

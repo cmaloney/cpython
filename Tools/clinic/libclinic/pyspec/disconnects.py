@@ -512,12 +512,8 @@ def spec_signatures(srcdir, tp):
     out = {}
     for meth in spec.entries(tp):
         full = f'{tp}.{meth}'
-        if full in spec.shared:
-            shared = spec.shared[full]
-            node = spec.imported(shared.module).functions[
-                f'{shared.cls}.{shared.meth}']
-        else:
-            node = spec.functions[full]
+        other, name = spec.declaration(full)
+        node = other.functions[name]
         out[meth] = signature_of_def(node)
     return out
 

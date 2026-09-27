@@ -179,6 +179,14 @@ def load(path):
     bases = [base, os.path.dirname(base)]
 
     class SpecCalls(ast.NodeTransformer):
+        def visit_ClassDef(self, node):
+            # Only the bodies of methods: a shared method of a class body
+            # (``__reduce__ = bytearray.__reduce__``) is the spec's.
+            node.body = [self.visit(stmt)
+                         if isinstance(stmt, ast.FunctionDef) else stmt
+                         for stmt in node.body]
+            return node
+
         def visit_FunctionDef(self, node):
             # The Python reference of a C function models it with the
             # builtins.

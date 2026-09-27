@@ -318,6 +318,9 @@ class DSLParser:
         # "T.meth" when the block was completed from the spec method
         # T.meth (see spec_input()).
         self.spec_function: str | None = None
+        # Where the spec declares it, and its decorators: (file, line).
+        self.spec_location: tuple[str, int] = ('', 0)
+        self.spec_decorators: dict[str, tuple[str, int]] = {}
 
     def directive_module(self, name: str) -> None:
         fields = name.split('.')[:-1]
@@ -620,12 +623,25 @@ class DSLParser:
         if cls is None or cls.name not in spec.classes:
             return unchanged
         name = f'{cls.name}.{meth}'
-        if name in spec.functions or name in spec.shared:
+        # A shared method with a block is a clinic function of this class
+        # declared by the method it names.
+        decl_spec, decl_name = spec, name
+        if name in spec.shared:
+            decl_spec, decl_name = spec.declaration(name)
+            kind = decl_spec.method_kind(decl_name)
+            if kind != frontend.CLINIC:
+                fail(f"{names!r} is not a clinic function: it shares "
+                     f"{decl_name}, a {kind} of {decl_spec.filename}; "
+                     "remove its block")
+            if spec.c_name(name)[1]:
+                fail(f"{names!r} is a clinic function: its @c_name in "
+                     f"{spec.filename} takes no keyword")
+        elif name in spec.functions:
             kind = spec.method_kind(name)
             if kind != frontend.CLINIC:
                 fail(f"{names!r} is not a clinic function: it is a "
                      f"{kind} of {spec.filename}; remove its block")
-        if not spec.has_method(name):
+        if not decl_spec.has_method(decl_name):
             fail(f"{names!r} has no parameters or docstring, and class "
                  f"{cls.name} in {spec.filename} has no method {meth!r} "
                  "to take them from")
@@ -633,13 +649,19 @@ class DSLParser:
             if self.valid_line(line) and line.lstrip().startswith('@'):
                 fail(f"{names!r}: {shlex.split(line)[0]} of a spec method "
                      f"is written in {spec.filename}")
-        spec_decorators, suffix, rest = spec.clinic_input(name)
-        for line, lineno in spec_decorators:
+        decl_decorators, suffix, rest = decl_spec.clinic_input(decl_name)
+        where = decl_spec.filename
+        spec_decorators = [(line, (where, lineno))
+                           for line, lineno in decl_decorators]
+        if name in spec.shared:
+            spec_decorators += [(line, (spec.filename, lineno)) for line, lineno
+                                in spec.shared_decorators(name)]
+        for line, (filename, lineno) in spec_decorators:
             decorator = line.split()[0]
             if decorator not in self.directives:
                 raise frontend.SpecError(
                     f"{names!r}: unknown clinic decorator {decorator}",
-                    filename=spec.filename, lineno=lineno)
+                    filename=filename, lineno=lineno)
         if suffix.startswith(' -> ') and '->' in function_line:
             fail(f"{names!r}: the return converter is written in "
                  f"{spec.filename}")
@@ -652,11 +674,17 @@ class DSLParser:
             function_line = (f'{left.rstrip()} as {c_name}'
                              + (f' {arrow}{right}' if arrow else ''))
         self.spec_function = name
+        # Where the function is declared: its def, or the shared method.
+        if name in spec.shared:
+            self.spec_location = (spec.filename, spec.shared[name].lineno)
+        else:
+            self.spec_location = (spec.filename, spec.functions[name].lineno)
+        self.spec_decorators = {line.split()[0][1:]: loc
+                                for line, loc in spec_decorators}
         indent = function_line[:len(function_line) - len(function_line.lstrip())]
-        where = spec.filename
-        return [*[(line, (where, lineno)) for line, lineno in spec_decorators],
+        return [*spec_decorators,
                 (function_line.rstrip() + suffix,
-                 (where, spec.functions[name].lineno)),
+                 (where, decl_spec.functions[decl_name].lineno)),
                 *[(indent + line if line else line, (where, lineno))
                   for line, lineno in rest]]
 
@@ -665,15 +693,14 @@ class DSLParser:
         """Say where *exc* happened, unless it already says so.
 
         An error of a function taken from the spec, but not of one of its
-        lines (checks of the whole function), is reported at its def.
+        lines (checks of the whole function), is reported at its def (or
+        at the shared method naming it).
         """
         if exc.filename is not None:
             return
-        spec = self.clinic.pyspec
-        if (self.spec_function is not None and spec is not None
+        if (self.spec_function is not None
                 and location[0] == self.clinic.filename):
-            location = (spec.filename,
-                        spec.functions[self.spec_function].lineno)
+            location = self.spec_location
             keep_lineno = False
         exc.filename = location[0]
         if not (keep_lineno and exc.lineno is not None):
@@ -682,10 +709,9 @@ class DSLParser:
     def decorator_location(self, name: str, lineno: int | None
                            ) -> tuple[str | None, int | None]:
         """Where decorator @name of the current function is written."""
-        spec = self.clinic.pyspec
-        if spec is None or self.spec_function is None:
+        if self.spec_function is None:
             return self.clinic.filename, lineno
-        return spec.filename, spec.decorator_lineno(self.spec_function, name)
+        return self.spec_decorators.get(name, self.spec_location)
 
     def check_spec_duplicate(self, lineno: int) -> None:
         """A function is either in the spec or in its block, not both."""

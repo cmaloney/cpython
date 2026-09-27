@@ -6797,6 +6797,119 @@ class PyspecTypeTest(PyspecTestBase):
             from shared import nosuchmodule
         """, "nosuchmodule.py not found")
 
+    def test_shared_declarations(self):
+        # A shared method with decorators: critical_section() and c_name().
+        os.mkdir(os.path.join(self.tmp_dir, 'shared'))
+        with open(os.path.join(self.tmp_dir, 'shared', 'm.py'), 'w',
+                  encoding='utf-8') as f:
+            f.write(dedent('''
+                class B:
+                    @c_name("stringlib_center")
+                    def center(self, width: Py_ssize_t, /):
+                        """Center."""
+                        ...
+
+                    @c_name(METH_NOARGS="stringlib_lower")
+                    def lower(self, /):
+                        """B.lower() -> copy of B"""
+                        ...
+
+                    def strip(self, chars: object = None, /):
+                        """Strip."""
+                        ...
+            '''))
+        # The flags of a clinic function come from its METHODDEF.
+        os.mkdir(os.path.join(self.tmp_dir, 'clinic'))
+        with open(os.path.join(self.tmp_dir, 'clinic', 'm.h.h'), 'w',
+                  encoding='utf-8') as f:
+            f.write('#define STRINGLIB_CENTER_METHODDEF    \\\n'
+                    '    {"center", _PyCFunction_CAST(stringlib_center), '
+                    'METH_FASTCALL, stringlib_center__doc__},\n')
+        spec = """
+            from shared import m
+
+            @static_type()
+            class bytes:
+                def __reduce__(self):
+                    '''Reduce.'''
+                    ...
+
+                center = critical_section(m.B.center)
+                lower = critical_section(m.B.lower)
+                strip = critical_section(m.B.strip)
+
+            @final
+            @static_type()
+            class myiter:
+                lower = c_name(METH_NOARGS="myiter_lower")(m.B.lower)
+                __reduce__ = c_name(METH_NOARGS="myiter_reduce")(
+                    bytes.__reduce__)
+        """
+        # With a block, strip is a clinic function of bytes with the
+        # parameters and docstring of m.B.strip, and @critical_section.
+        blocks = self.CLASS + """
+        /*[clinic input]
+        bytes.__reduce__
+        [clinic start generated code]*/
+        /*[clinic input]
+        bytes.strip
+        [clinic start generated code]*/
+        """
+        generated = self.generate(spec, blocks)
+        self.assertIn('bytes_strip_impl(PyBytesObject *self, PyObject *chars)'
+                      '\n/*[clinic end generated code:', generated)
+        with open(os.path.join(self.tmp_dir, 'clinic', 'foo.c.h'),
+                  encoding='utf-8') as f:
+            clinic_h = f.read()
+        self.assertIn('"strip($self, chars=None, /)\\n"', clinic_h)
+        self.assertIn('Py_BEGIN_CRITICAL_SECTION(self);\n'
+                      '    return_value = bytes_strip_impl', clinic_h)
+        with open(self.output_path, encoding='utf-8') as f:
+            header = f.read()
+        self.assertIn(dedent("""\
+            static PyObject *
+            bytes_center(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+            {
+                PyObject *ret;
+                Py_BEGIN_CRITICAL_SECTION(self);
+                ret = stringlib_center(self, args, nargs);
+                Py_END_CRITICAL_SECTION();
+                return ret;
+            }
+            """), header)
+        self.assertIn('ret = stringlib_lower(self, NULL);', header)
+        self.assertIn(
+            '    BYTES___REDUCE___METHODDEF\n'
+            '    {"center", _PyCFunction_CAST(bytes_center), METH_FASTCALL, '
+            'stringlib_center__doc__},\n'
+            '    {"lower", bytes_lower, METH_NOARGS, bytes_lower__doc__},\n'
+            '    BYTES_STRIP_METHODDEF\n', header)
+        self.assertIn(
+            '    {"lower", myiter_lower, METH_NOARGS, myiter_lower__doc__},\n'
+            '    {"__reduce__", myiter_reduce, METH_NOARGS, '
+            'bytes___reduce____doc__},\n', header)
+        # Errors.
+        self.check_error("""
+            from shared import m
+
+            class bytes:
+                strip = text_signature("()")(m.B.strip)
+        """, "a shared method takes only critical_section and c_name")
+        self.check_error("""
+            from shared import m
+
+            @static_type()
+            class bytes:
+                lower = c_name(METH_O="f")(m.B.lower)
+        """, "bytes.lower: write c_name(METH_NOARGS=\"f\")(...)")
+        self.check_error("""
+            from shared import m
+
+            @static_type()
+            class bytes:
+                lower = critical_section(c_name(METH_NOARGS="f")(m.B.lower))
+        """, "critical_section() generates the C function")
+
 
 PYSPEC_DIRS = [os.path.join(test_tools.basepath, 'Objects', 'pyspec'),
                os.path.join(test_tools.basepath, 'Objects', 'stringlib',
@@ -6929,25 +7042,26 @@ class PyspecFilesTest(TestCase):
         for meth in spec.entries(cls_name):
             name = f'{cls_name}.{meth}'
             kind = spec.method_kind(name)
-            if kind == pyspec_frontend.SLOT:
-                slots.add(meth)
+            if kind == pyspec_frontend.SLOT or meth == '__init__':
+                slots.add(meth)     # tp_init: a wrapper too
                 continue
             if meth == '__new__':
                 continue
             methods.append(meth)
             if kind == pyspec_frontend.SHARED:
-                shared = spec.shared[name]
-                other = spec.imported(shared.module)
-                other_name = f'{shared.cls}.{meth}'
+                other, other_name = spec.shared_source(name)
                 if other.method_kind(other_name) == pyspec_frontend.PYCFUNCTION:
                     docs[meth] = other.docstring(other_name)
             elif kind == pyspec_frontend.PYCFUNCTION:
                 docs[meth] = spec.docstring(name)
         wrappers = {name for name, value in vars(tp).items()
                     if isinstance(value, types.WrapperDescriptorType)}
+        # __hash__ is None: PyType_Ready() makes a type that defines
+        # comparisons but no tp_hash unhashable.
         others = [name for name, value in vars(tp).items()
                   if name not in wrappers and name not in ('__doc__',
-                                                           '__new__')]
+                                                           '__new__')
+                  and not (name == '__hash__' and value is None)]
         # The method table, hence __dict__, is in the order of the spec.
         self.assertEqual(others, methods, self.REBUILD)
         # The slots of the spec are the wrappers of the type.
