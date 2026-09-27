@@ -694,10 +694,15 @@ class DSLParser:
         if self.spec_function is not None or func.cls is None:
             return
         spec = self.clinic.pyspec
-        if spec is not None and spec.has_method(f"{func.cls.name}.{func.name}"):
+        name = f"{func.cls.name}.{func.name}"
+        if (spec is not None and spec.has_method(name)
+                and not frontend.is_placeholder(spec.functions[name])):
             fail(f"{func.full_name!r} is declared both here and in "
-                 f"{spec.filename}; keep only its function line (and "
-                 "clinic decorators) here", line_number=lineno)
+                 f"{spec.filename}; a function whose signature depends on "
+                 "#if keeps its clinic input here, and is only "
+                 "'def meth(self): ...' in the spec; any other keeps only "
+                 "its function line here",
+                 line_number=lineno)
 
     def in_docstring(self) -> bool:
         """Return true if we are processing a docstring."""
@@ -1834,6 +1839,8 @@ class DSLParser:
         func.vectorcall = True
         func.pyspec = func.c_basename
         self.clinic.pyspec_c_basenames[name] = func.c_basename
+        if func.condition:
+            self.clinic.pyspec_conditions[name] = func.condition
 
     def check_pyspec_method(self, lineno: int) -> None:
         """Let a spec method (or class method) with a body implement this
@@ -1873,6 +1880,8 @@ class DSLParser:
                      line_number=lineno)
         func.pyspec = func.c_basename
         self.clinic.pyspec_c_basenames[name] = func.c_basename
+        if func.condition:
+            self.clinic.pyspec_conditions[name] = func.condition
         self.clinic.pyspec_self_ctypes[name] = self_ctype
 
     def do_post_block_processing_cleanup(self, lineno: int) -> None:

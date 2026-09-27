@@ -115,6 +115,8 @@ impl_definition block
         # C type of the self (or class) parameter of the implemented spec
         # methods other than __new__.
         self.pyspec_self_ctypes: dict[str, str] = {}
+        # #if condition of the implemented spec methods under one.
+        self.pyspec_conditions: dict[str, str] = {}
 
         self.line_prefix = self.line_suffix = ''
 
@@ -329,7 +331,8 @@ impl_definition block
             try:
                 parts.append(emit.generate(spec, spec_name,
                                            self.pyspec_c_basenames,
-                                           self.pyspec_self_ctypes))
+                                           self.pyspec_self_ctypes,
+                                           self.pyspec_conditions))
             except emit.SpecError as exc:
                 message = exc.message
                 if message.startswith('unsupported'):

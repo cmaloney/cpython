@@ -882,13 +882,15 @@ class Generator:
     """Generate the C for a spec.
 
     c_basenames maps the implemented spec methods ("bytes.__new__") to the
-    C basename of their clinic function ("bytes_new").
+    C basename of their clinic function ("bytes_new"); conditions maps
+    those whose block is under #if to the condition (clinic's).
     """
 
-    def __init__(self, spec, c_basenames, self_ctypes=None):
+    def __init__(self, spec, c_basenames, self_ctypes=None, conditions=None):
         self.spec = spec
         self.c_basenames = c_basenames
         self.self_ctypes = self_ctypes or {}
+        self.conditions = conditions or {}
         # The shared specializations the generated code calls, in order.
         self.specializations = []
 
@@ -918,6 +920,14 @@ class Generator:
                             f'{name} has a body, but no clinic block in '
                             'the C file uses it') from None
 
+    def guard(self, name, lines):
+        """*lines* under the condition of the block of *name*, as clinic
+        wraps the code of a block under #if."""
+        condition = self.conditions.get(name)
+        if not condition:
+            return lines
+        return [f'#if {condition}', *lines, f'#endif /* {condition} */']
+
     def c_name(self, name):
         """C name of spec function *name*: NAME_impl() for a method."""
         if '.' in name:
@@ -937,7 +947,8 @@ class Generator:
         for description in descriptions:
             name = self.c_name(description.name)
             if not exported(name):
-                out.append(prototype(name, c_params(description)))
+                out += self.guard(description.name,
+                                  [prototype(name, c_params(description))])
         prototypes = len(out)
         out.append('')
 
@@ -951,14 +962,18 @@ class Generator:
                 arities=[(env, name, [p.name for p in given])
                          for env, name, given, _ in self.arities(description)])
             emitter = FunctionEmitter(self, c_params(description))
-            out += emitter.function(self.c_name(description.name), body)
+            out += self.guard(description.name, emitter.function(
+                self.c_name(description.name), body))
             out.append('')
 
         for description in descriptions:
             if description.new_type is not None:
-                out += self.generate_arities(description)
-        # The call table of the tier-2 optimizer: see call_table.py.
-        out += call_table.generate(self, descriptions)
+                out += self.guard(description.name,
+                                  self.generate_arities(description))
+        # The call table of the tier-2 optimizer (see call_table.py): the
+        # functions compiled unconditionally.
+        out += call_table.generate(self, [
+            d for d in descriptions if d.name not in self.conditions])
         # The specializations, which may use others.
         done = 0
         while done < len(self.specializations):
@@ -1039,12 +1054,15 @@ class Generator:
 
 def generate(spec: frontend.Spec, spec_path: str,
              c_basenames: dict[str, str],
-             self_ctypes: dict[str, str] | None = None) -> str:
+             self_ctypes: dict[str, str] | None = None,
+             conditions: dict[str, str] | None = None) -> str:
     """C for the implemented functions of *spec*, a frontend.Spec.
 
     *spec_path* is only named in the header comment.  *self_ctypes* maps
     the implemented spec methods other than __new__ to the C type of their
-    self (or class) parameter.
+    self (or class) parameter; *conditions* those under #if to the
+    condition of their block.
     """
-    text: str = Generator(spec, c_basenames, self_ctypes).generate(spec_path)
+    text: str = Generator(spec, c_basenames, self_ctypes,
+                          conditions).generate(spec_path)
     return text
