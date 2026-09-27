@@ -3388,10 +3388,12 @@ class TestUopsOptimization(unittest.TestCase):
                 self.assertIsNotNone(ex)
                 uops = get_opnames(ex)
                 self.assertIn("_GUARD_TYPE", uops)
-                # bytes(bytearray), bytes(memoryview) and bytes(range)
-                # run no Python code (derived from the spec: a range
-                # yields exact ints, which need no __index__).
-                if isinstance(source, (bytearray, memoryview, range)):
+                # bytes(bytearray), bytes(memoryview), bytes(range) and
+                # bytes(int) run no Python code (derived from the spec: a
+                # range yields exact ints, which need no __index__, and
+                # the reference of PyNumber_AsSsize_t() calls no __index__
+                # for an int).
+                if isinstance(source, (bytearray, memoryview, range, int)):
                     self.assertIn("_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON",
                                   uops)
                     self.assertNotIn("_CALL_BUILTIN_CLASS_1_INLINE", uops)
@@ -3417,7 +3419,7 @@ class TestUopsOptimization(unittest.TestCase):
         self.assertEqual(res, sum(i & 3 for i in range(TIER2_THRESHOLD)))
         self.assertIsNotNone(ex)
         uops = get_opnames(ex)
-        self.assertIn("_CALL_BUILTIN_CLASS_1_INLINE", uops)
+        self.assertIn("_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON", uops)
         self.assertNotIn("_GUARD_TYPE", uops)
         self.assertNotIn("_CALL_ISINSTANCE", uops)
 
@@ -3516,7 +3518,8 @@ class TestUopsOptimization(unittest.TestCase):
         self.assertIsNotNone(ex)
         uops = get_opnames(ex)
         # The inner bytes(int) is called; the outer one is removed.
-        self.assertEqual(uops.count("_CALL_BUILTIN_CLASS_1_INLINE"), 1)
+        self.assertEqual(
+            uops.count("_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON"), 1)
         self.assertNotIn("_MAKE_HEAP_SAFE", uops)
         self.assertIn("_SWAP_3", uops)
 
