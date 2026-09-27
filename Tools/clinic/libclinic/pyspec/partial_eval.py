@@ -314,30 +314,18 @@ def _type_test(name, klass):
         ops=[ast.Is()], comparators=[ast.Name(klass.__name__, ast.Load())])
 
 
-def _iter_call(node):
-    """x for ``iter(x)`` (x a name), else None."""
-    match node:
-        case ast.Call(func=ast.Name('iter'), args=[ast.Name(name)],
-                      keywords=[]):
-            return name
-    return None
-
-
 def _iter_assignment(stmt):
     """(target, source) for ``target = iter(source)`` or for ``try:
     target = iter(source)`` with only ``except TypeError`` handlers, else
     None."""
+    if isinstance(stmt, ast.Try) and not stmt.finalbody and all(
+            isinstance(h.type, ast.Name) and h.type.id == 'TypeError'
+            for h in stmt.handlers) and len(stmt.body) == 1:
+        stmt = stmt.body[0]
     match stmt:
-        case ast.Assign(targets=[ast.Name(target)], value=value) \
-                if _iter_call(value):
-            return target, _iter_call(value)
-        case ast.Try(body=[ast.Assign(targets=[ast.Name(target)],
-                                      value=value)],
-                     handlers=handlers, finalbody=[]) \
-                if _iter_call(value) and all(
-                    isinstance(h.type, ast.Name) and h.type.id == 'TypeError'
-                    for h in handlers):
-            return target, _iter_call(value)
+        case ast.Assign(targets=[ast.Name(target)], value=ast.Call(
+                func=ast.Name('iter'), args=[ast.Name(source)])):
+            return target, source
     return None
 
 

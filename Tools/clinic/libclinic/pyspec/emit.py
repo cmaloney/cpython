@@ -828,22 +828,17 @@ class FunctionEmitter:
         self.emit('}')
 
     def with_(self, obj, body, node):
-        """``with critical_section(x):``: the critical section of x (the
-        partial evaluator writes it for snapshots)."""
-        checks = []
+        """``with critical_section(x): v = f(...)``: the critical section
+        of x (the partial evaluator writes it for snapshots).  The error
+        check comes after its end, so it is always closed."""
+        if not (len(body) == 1 and isinstance(body[0], ast.Assign)):
+            raise SpecError(node, 'a with body assigns one call')
         self.emit(f'Py_BEGIN_CRITICAL_SECTION({self.lower_value(obj)});')
-        for stmt in body:
-            # Errors are checked after the end of the block, so the
-            # block is always closed.
-            if not (isinstance(stmt, ast.Assign)
-                    and isinstance(stmt.targets[0], ast.Name)):
-                raise SpecError(stmt, 'with bodies may only assign calls')
-            checks.append(self.assign(stmt.targets[0], stmt.value, stmt,
-                                      check=False))
+        name, ctype, convention = self.assign(
+            body[0].targets[0], body[0].value, body[0], check=False)
         self.emit('Py_END_CRITICAL_SECTION();')
-        for name, ctype, convention in checks:
-            if convention is not None:
-                self.error_check(name, ctype, convention)
+        if convention is not None:
+            self.error_check(name, ctype, convention)
 
     # -- whole function ----------------------------------------------------
 

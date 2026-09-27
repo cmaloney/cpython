@@ -783,9 +783,7 @@ _LITERALS = re.compile(r"""/\*.*?\*/|//[^\n]*|"(?:[^"\\]|\\.)*"|"""
 
 
 def _blank(match):
-    text = match.group()
-    return ('' if text.lstrip().startswith('#') else '0') + \
-        '\n' * text.count('\n')
+    return '0' + '\n' * match.group().count('\n')
 
 
 def _c_function(lexer, text, name):
