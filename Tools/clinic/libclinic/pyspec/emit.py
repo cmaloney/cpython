@@ -294,22 +294,19 @@ class FunctionEmitter:
     def convention(self, call, returns):
         """The error convention of a call of a hand-written C function
         (see the module docstring)."""
-        raises = getattr(call, 'pyspec_raises', None)
-        null = getattr(call, 'pyspec_null', None)
-        if raises is None:
+        if not hasattr(call, 'pyspec_raises'):
             # Not marked by the partial evaluator: the facts for any
             # arguments.
             callee = self.analyzer.call_facts(call, {})
-            raises, null = bool(callee.raises), callee.returns_null
+            call.pyspec_raises = bool(callee.raises)
+            call.pyspec_null = callee.returns_null
         if frontend.is_struct(returns):
             return ERR_NEGATIVE
-        if not raises or returns == 'void':
+        if not call.pyspec_raises or returns == 'void':
             return None
         if returns == OBJECT:
-            return ERR_NULL_OR_MISSING if null else ERR_NULL
-        if returns == 'int':
-            return ERR_NEGATIVE
-        return ERR_MINUS1
+            return ERR_NULL_OR_MISSING if call.pyspec_null else ERR_NULL
+        return ERR_NEGATIVE if returns == 'int' else ERR_MINUS1
 
     def lower_arg(self, arg, ctype):
         """Argument *arg* of a C function parameter of type *ctype*."""

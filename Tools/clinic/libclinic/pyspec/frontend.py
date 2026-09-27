@@ -277,7 +277,6 @@ class Spec:
         self.shared: dict[str, Shared] = {}
         # Specs imported with ``from pkg import module``: name -> path.
         self.imports: dict[str, str] = {}
-        self._imported: dict[str, Spec] = {}
         # Functions imported with ``from pkg.module import f``: name ->
         # path of the spec.
         self.imported_functions: dict[str, str] = {}
@@ -352,9 +351,7 @@ class Spec:
 
     def imported(self, module: str) -> Spec:
         """The spec imported as *module*."""
-        if module not in self._imported:
-            self._imported[module] = load_imported(self.imports[module])
-        return self._imported[module]
+        return load_imported(self.imports[module])
 
     def resolve(self, name: str) -> tuple[Spec, ast.FunctionDef] | None:
         """(the spec defining it, its def) of the function *name* of this

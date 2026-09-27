@@ -37,6 +37,7 @@ from __future__ import annotations
 import ast
 import builtins
 import dataclasses as dc
+import glob
 import inspect
 import os
 import re
@@ -850,12 +851,9 @@ def _escaping_calls(analyzer, parsing, body, slot_fields):
 
 def _spec_files(srcdir):
     for top in ('Objects', 'Python', 'Include'):
-        for dirpath, _, files in os.walk(os.path.join(srcdir, top)):
-            if os.path.basename(dirpath) == 'pyspec':
-                for name in sorted(files):
-                    if name.endswith('.py') and not name.endswith(
-                            '_cases.py'):
-                        yield os.path.join(dirpath, name)
+        yield from sorted(path for path in glob.glob(os.path.join(
+            srcdir, top, '**', 'pyspec', '*.py'), recursive=True)
+            if not path.endswith('_cases.py'))
 
 
 def c_calls(srcdir):
@@ -879,10 +877,11 @@ def c_calls(srcdir):
     out = []
     for spec in specs:
         rel = os.path.relpath(spec.filename, srcdir).replace(os.sep, '/')
-        base = os.path.dirname(os.path.dirname(spec.filename))
-        stem = os.path.splitext(os.path.basename(spec.filename))[0]
-        cfiles = [os.path.join(base, stem + ext) for ext in ('.c', '.h')]
-        cfile = next((f for f in cfiles if os.path.exists(f)), None)
+        # Objects/pyspec/foo.py describes Objects/foo.c (or foo.h).
+        base = rel.replace('/pyspec/', '/').removesuffix('.py')
+        cfile = next((base + ext for ext in ('.c', '.h')
+                      if os.path.exists(os.path.join(srcdir, base + ext))),
+                     None)
         if cfile is None:
             continue
         text = _LITERALS.sub(_blank, _read(srcdir, cfile))
@@ -893,8 +892,7 @@ def c_calls(srcdir):
             where = f'{rel}: {name}'
             body = _c_function(lexer, text, c_name)
             if body is None:
-                out.append(f'{where}: no C function {c_name} in '
-                           f'{os.path.relpath(cfile, srcdir)}')
+                out.append(f'{where}: no C function {c_name} in {cfile}')
                 continue
             called = set()
             specials = set()
