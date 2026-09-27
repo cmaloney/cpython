@@ -44,7 +44,7 @@ def PyNumber_AsSsize_t(o: object, exc: object) -> Py_ssize_t:
         return _PyLong_CompactValue(o)
     value = _PyNumber_Index(o)
     if -PY_SSIZE_T_MAX - 1 <= value <= PY_SSIZE_T_MAX:
-        return value
+        return int(value)
     if exc is NULL:
         return PY_SSIZE_T_MAX if value > 0 else -PY_SSIZE_T_MAX - 1
     raise exc(f"cannot fit '{tp_name(type(o))}' into an index-sized "

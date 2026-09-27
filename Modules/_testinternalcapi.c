@@ -12,6 +12,7 @@
 #include "Python.h"
 #include <string.h>
 #include "pycore_backoff.h"       // JUMP_BACKWARD_INITIAL_VALUE
+#include "pycore_abstract.h"      // _PyNumber_Index()
 #include "pycore_bitutils.h"      // _Py_bswap32()
 #include "pycore_bytesobject.h"   // _PyBytes_Find()
 #include "pycore_ceval.h"         // _PyEval_AddPendingCall()
@@ -3654,6 +3655,103 @@ pyspec_call_method(PyObject *self, PyObject *args)
 }
 
 
+/* The hand-written C functions of the specs (@c_implemented, see
+ * Objects/pyspec/README.rst) that are not static: called directly, with
+ * the arguments of args (None for NULL), for the difftest of their Python
+ * references (Lib/test/test_pyspec_facts.py, HelperTest).  A result that
+ * is NULL without an exception is None. */
+static PyObject *
+pyspec_helper_call(const char *name, PyObject *args)
+{
+    Py_ssize_t n = PyTuple_GET_SIZE(args);
+    PyObject *a[2] = {NULL, NULL};
+    for (Py_ssize_t i = 0; i < n && i < 2; i++) {
+        a[i] = PyTuple_GET_ITEM(args, i);
+        a[i] = a[i] == Py_None ? NULL : a[i];
+    }
+#define ARGS(N) if (n != (N)) { goto bad; }
+    if (strcmp(name, "PyNumber_AsSsize_t") == 0) {
+        ARGS(2);
+        Py_ssize_t v = PyNumber_AsSsize_t(a[0], a[1]);
+        if (v == -1 && PyErr_Occurred()) {
+            return NULL;
+        }
+        return PyLong_FromSsize_t(v);
+    }
+    if (strcmp(name, "_PyNumber_Index") == 0) {
+        ARGS(1);
+        return _PyNumber_Index(a[0]);
+    }
+    if (strcmp(name, "PyObject_LengthHint") == 0) {
+        ARGS(2);
+        Py_ssize_t v = PyObject_LengthHint(a[0], PyLong_AsSsize_t(a[1]));
+        if (v == -1 && PyErr_Occurred()) {
+            return NULL;
+        }
+        return PyLong_FromSsize_t(v);
+    }
+    if (strcmp(name, "_PyObject_LookupSpecial") == 0) {
+        ARGS(2);
+        PyObject *res = _PyObject_LookupSpecial(a[0], a[1]);
+        if (res == NULL && !PyErr_Occurred()) {
+            Py_RETURN_NONE;
+        }
+        return res;
+    }
+    if (strcmp(name, "PyUnicode_AsEncodedString") == 0) {
+        if (n != 3) {
+            goto bad;
+        }
+        PyObject *enc = PyTuple_GET_ITEM(args, 1);
+        PyObject *err = PyTuple_GET_ITEM(args, 2);
+        return PyUnicode_AsEncodedString(
+            PyTuple_GET_ITEM(args, 0),
+            enc == Py_None ? NULL : PyUnicode_AsUTF8(enc),
+            err == Py_None ? NULL : PyUnicode_AsUTF8(err));
+    }
+    if (strcmp(name, "_PyLong_IsCompact") == 0) {
+        ARGS(1);
+        return PyBool_FromLong(_PyLong_IsCompact((PyLongObject *)a[0]));
+    }
+    if (strcmp(name, "_PyLong_CompactValue") == 0) {
+        ARGS(1);
+        return PyLong_FromSsize_t(
+            _PyLong_CompactValue((PyLongObject *)a[0]));
+    }
+#undef ARGS
+bad:
+    PyErr_Format(PyExc_ValueError, "no such helper call: %s/%zd", name, n);
+    return NULL;
+}
+
+/* pyspec_helper(name, args, no_python=False): see pyspec_helper_call().
+ * name may also be a C callable (a method descriptor, a slot wrapper):
+ * called with args.  With no_python, the call is in the "no Python"
+ * tripwire. */
+static PyObject *
+pyspec_helper(PyObject *self, PyObject *args)
+{
+    PyObject *name, *callargs;
+    int no_python = 0;
+    if (!PyArg_ParseTuple(args, "OO!|p", &name, &PyTuple_Type, &callargs,
+                          &no_python)) {
+        return NULL;
+    }
+    const char *cname = NULL;
+    if (PyUnicode_Check(name) && (cname = PyUnicode_AsUTF8(name)) == NULL) {
+        return NULL;
+    }
+    PyThreadState *tstate = PyThreadState_Get();
+    int saved = no_python ? _PySpec_EnterNoPython(tstate) : 0;
+    PyObject *res = cname ? pyspec_helper_call(cname, callargs)
+                          : PyObject_Call(name, callargs, NULL);
+    if (no_python) {
+        _PySpec_LeaveNoPython(tstate, saved);
+    }
+    return res;
+}
+
+
 static PyMethodDef module_functions[] = {
     {"get_configs", get_configs, METH_NOARGS},
     {"get_eval_frame_stats", get_eval_frame_stats, METH_NOARGS, NULL},
@@ -3769,6 +3867,7 @@ static PyMethodDef module_functions[] = {
     {"pyspec_find_method", pyspec_find_method, METH_VARARGS},
     {"pyspec_call", pyspec_call, METH_VARARGS},
     {"pyspec_call_method", pyspec_call_method, METH_VARARGS},
+    {"pyspec_helper", pyspec_helper, METH_VARARGS},
     {"identify_type_slot_wrappers", identify_type_slot_wrappers, METH_NOARGS},
     {"has_deferred_refcount", has_deferred_refcount, METH_O},
     {"get_tracked_heap_size", get_tracked_heap_size, METH_NOARGS},

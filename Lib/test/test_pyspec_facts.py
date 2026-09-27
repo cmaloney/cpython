@@ -12,6 +12,9 @@ them.  These tests check them without the JIT:
   "Runs no Python code" is checked dynamically (sys.setprofile and
   recording special methods), and by calling the entry through the
   debug-build tripwire (_PySpec_CallNoPython1).
+* HelperTest calls the hand-written C functions the specs call
+  (@c_implemented) directly, compares them with their Python references,
+  and checks the facts derived from the references the same way.
 * DebugAssertionTest checks the debug-build run-time assertions of
   optimizer facts and the "no Python" tripwire.
 * SoundnessTest pins latent soundness problems found in review.
@@ -284,6 +287,163 @@ class DirectCallTest(unittest.TestCase):
                     with self.assertRaises(TypeError):
                         _testinternalcapi.pyspec_call(
                             bytes, index, (BytesSubclass(b'x'),))
+
+
+class IntSubclass(int):
+    pass
+
+
+class HelperTest(unittest.TestCase):
+    """Every hand-written C function a spec calls (@c_implemented) that
+    can be called from Python, called directly: the same outcome as its
+    Python reference, and the facts derived from the reference for the
+    exact types of the arguments hold (runs no Python code, checked by
+    recording and by the debug-build tripwire; exact result type; cannot
+    raise)."""
+
+    # The inputs of each function, as its Python reference takes them
+    # (NULL for C NULL).
+    NULL = object()
+    CASES = {
+        'PyNumber_AsSsize_t': [
+            (5, NULL), (True, NULL), (-7, NULL), (2**40, NULL),
+            (2**70, NULL), (-2**70, NULL), (2**70, OverflowError),
+            (2**70, IndexError), (IntSubclass(9), NULL),
+            (RecordingIndex(4), NULL), (RecordingIndex(2**70), OverflowError),
+            (1.5, NULL), ('x', NULL)],
+        '_PyNumber_Index': [(5,), (True,), (IntSubclass(3),),
+                            (RecordingIndex(2),), (1.5,), ('x',)],
+        'PyObject_LengthHint': [
+            ([1, 2], 64), ((1,), 64), (range(5), 64), ({1: 2}, 64),
+            (iter([1, 2, 3]), 64), (RecordingIter(), 64), (5, 64),
+            (bytearray(b'ab'), 64), ('abc', 64)],
+        '_PyObject_LookupSpecial': [
+            (b'x', '__bytes__'), (bytearray(), '__bytes__'),
+            (range(3), '__length_hint__'), (iter([]), '__length_hint__'),
+            (RecordingBytes(), '__bytes__'), (5, '__index__')],
+        'PyUnicode_AsEncodedString': [
+            ('abc', 'ascii', NULL), ('\xe9', 'ascii', NULL),
+            ('\xe9', 'ascii', 'replace'), ('x', 'utf-8', NULL)],
+        '_PyLong_IsCompact': [(0,), (5,), (2**29,), (2**30,), (2**70,),
+                              (True,)],
+        '_PyLong_CompactValue': [(0,), (-5,), (2**29,), (True,)],
+        '_PyBytes_FromHex': [('00ff', False), ('0a 1B', True), ('zz', False),
+                             (b'41', False), (memoryview(b'42'), True),
+                             (RecordingBuffer(), False), (5, False)],
+        'bytes.__buffer__': [(b'abc', 0)],
+        # (A function makes a fresh input for each call.)
+        'bytes_iterator.__next__': [lambda: (iter(b'a'),),
+                                    lambda: (iter(b''),)],
+    }
+
+    # The C entry points of those that _testinternalcapi.pyspec_helper()
+    # does not call by name.
+    CALLERS = {
+        '_PyBytes_FromHex': lambda s, use_bytearray: (
+            (bytearray.fromhex if use_bytearray else bytes.fromhex), (s,)),
+        'bytes.__buffer__': lambda b, flags: (bytes.__buffer__, (b, flags)),
+        'bytes_iterator.__next__': lambda it: (type(it).__next__, (it,)),
+    }
+
+    # Not called directly: static functions, which only their callers
+    # (the spec functions of DirectCallTest and test_clinic's difftest)
+    # call, and PyErr_BadInternalCall(), which fails an assertion in debug
+    # builds.
+    NOT_CALLABLE = {
+        '_PyBytes_FromSize', '_PyBytes_FromBuffer', 'bytes_copy',
+        'bytes_subtype_new', 'bytes_appender_init', 'bytes_appender_append',
+        'bytes_appender_append_unchecked', 'bytes_appender_finish',
+        'bytes_appender_discard', 'PyErr_BadInternalCall',
+    }
+
+    # References with no model of the value (exact(T) alone): facts only.
+    FACTS_ONLY = {'bytes_iterator.__next__'}
+
+    @classmethod
+    def setUpClass(cls):
+        test_tools.skip_if_missing('clinic')
+        with test_tools.imports_under_tool('clinic'):
+            from libclinic.pyspec import (builtin_types, facts, frontend,
+                                          partial_eval, runtime)
+        cls.bt, cls.facts, cls.frontend = builtin_types, facts, frontend
+        cls.pe, cls.runtime = partial_eval, runtime
+        root = test_tools.basepath
+        cls.specs = {}
+        for top in ('Objects', 'Python', 'Include'):
+            for dirpath, _, files in os.walk(os.path.join(root, top)):
+                if os.path.basename(dirpath) != 'pyspec':
+                    continue
+                for name in files:
+                    if name.endswith('.py') and not name.endswith('_cases.py'):
+                        path = os.path.join(dirpath, name)
+                        spec = frontend.load_imported(path)
+                        for func in spec.c_implemented_functions():
+                            cls.specs[func] = (spec, path)
+
+    def test_every_helper(self):
+        self.assertEqual(set(self.specs),
+                         set(self.CASES) | self.NOT_CALLABLE)
+
+    def c_call(self, name, args):
+        """(callable, args) for pyspec_helper()."""
+        if name in self.CALLERS:
+            return self.CALLERS[name](*args)
+        return name, tuple(None if a is self.NULL else a for a in args)
+
+    def env(self, spec, name, args):
+        """The facts about the parameters of the reference for *args*."""
+        node = spec.functions[name]
+        if '.' in name:
+            params = [(a.arg, 'PyObject *') for a in node.args.args]
+        else:
+            params = self.frontend.c_signature(node)[0]
+        env = {}
+        for (param, ctype), arg in zip(params, args):
+            if arg is self.NULL:
+                env[param] = self.pe.NULL
+            elif ctype == 'PyObject *' and not isinstance(arg, str):
+                if type(arg) in self.bt.TABLE:
+                    env[param] = type(arg)
+            else:
+                env[param] = self.pe.Value(arg)
+        return env
+
+    def test_helpers(self):
+        from test.test_pyspec_facts import RECORDED
+        for name, cases in self.CASES.items():
+            spec, path = self.specs[name]
+            reference = self.runtime.load(path)[name]
+            analyzer = self.facts.analyzer(spec)
+            for case in cases:
+                args = case() if callable(case) else case
+                with self.subTest(helper=name, args=args):
+                    func, c_args = self.c_call(name, args)
+                    out, result, ran = python_calls(
+                        _testinternalcapi.pyspec_helper, func, c_args)
+                    if name not in self.FACTS_ONLY:
+                        ref_args = [self.runtime.NULL if a is self.NULL
+                                    else a for a in args]
+                        RECORDED.clear()
+                        expected, ref = outcome(reference, *ref_args)
+                        if ref is self.runtime.NULL:
+                            expected = ('returns', type(None), None)
+                        self.assertEqual(out, expected)
+                    found = analyzer.reference_facts(
+                        name, self.env(spec, name, args))
+                    if out[0] == 'returns' and found.result_type:
+                        self.assertIs(type(result), found.result_type,
+                                      'claims: exact result type')
+                    if not found.raises:
+                        self.assertEqual(out[0], 'returns',
+                                         'claims: cannot raise')
+                    if not found.runs_python:
+                        self.assertEqual(ran, [], 'claims: runs no Python')
+                        # In debug builds, running Python code is fatal.
+                        args = case() if callable(case) else case
+                        func, c_args = self.c_call(name, args)
+                        self.assertEqual(outcome(
+                            _testinternalcapi.pyspec_helper, func, c_args,
+                            True)[0][0], out[0])
 
 
 JIT_ON = {'PYTHON_JIT': '1'}
