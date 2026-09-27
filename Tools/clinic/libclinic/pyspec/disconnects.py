@@ -13,7 +13,7 @@ capi        For each C API function of a type: the headers (Include/), the
             Misc/stable_abi.toml and Doc/data/threadsafety.dat.
 docs        The ``.. method:: bytes.x(...)`` and ``.. class::`` lines of
             Doc/builtins/stdtypes.rst vs the runtime signatures (the
-            spec's for ``__new__``).
+            spec's for the constructor: its ``__new__`` or ``__init__``).
 slots       The slot tables of Doc/c-api/typeobj.rst vs slotdefs[] in
             Objects/typeobject.c.
 docstrings  The same docstring written by hand in two places.
@@ -578,8 +578,10 @@ def docs(srcdir):
                 continue
             runtime = runtime_signature(tp, meth)
             source = 'runtime'
-            if meth == '__new__' and meth in spec:
-                runtime, source = spec[meth], 'spec'
+            # The constructor: the spec's __new__, else its __init__.
+            ctor = [m for m in ('__new__', '__init__') if m in spec]
+            if meth == '__new__' and ctor:
+                runtime, source = spec[ctor[0]], 'spec'
             if runtime is None:
                 out.append(f'{label}: no runtime signature to compare with '
                            f'{rel}')
