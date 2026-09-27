@@ -16,34 +16,25 @@ A method declared elsewhere is shared, not repeated:
 * ``__length_hint__ = c_name(METH_NOARGS="f")(...)``: the docstring of
   another method, with its own hand-written C function f.
 
-The classes are the whole types: ``@static_type`` makes clinic generate
-PyByteArray_Type and PyByteArrayIter_Type, their method tables and slot
-tables, at the end of Objects/clinic/bytearrayobject_pyspec.c.h.  Dunders
-are slots (C functions with the slot's signature, from slotdefs[]).
+The classes are the whole types: clinic generates their docstring,
+method tables and slot tables at the end of
+Objects/clinic/bytearrayobject_pyspec.c.h, which PyByteArray_Type and
+PyByteArrayIter_Type (in C) name.  Dunders are slots (C functions with the
+slot's signature, from slotdefs[]).
 """
-
-from typing import final
 
 from libclinic.pyspec.runtime import NULL
 
 # Argument Clinic decorators (no-ops in Python).
 from libclinic.pyspec.runtime import (
     critical_section, permit_long_summary, text_signature)
-from libclinic.pyspec.runtime import c_name, static_type
+from libclinic.pyspec.runtime import c_name
 
 # Methods declared by bytes, and by the stringlib templates.
 from pyspec import bytesobject
 from stringlib.pyspec import ctype, transmogrify
 
 
-@static_type(
-    tp_dealloc="bytearray_dealloc",
-    tp_flags="_Py_TPFLAGS_MATCH_SELF",
-    tp_alloc="PyType_GenericAlloc",
-    tp_new="bytearray_new",
-    tp_free="PyObject_Free",
-    tp_version_tag="_Py_TYPE_VERSION_BYTEARRAY",
-)
 class bytearray:
     """bytearray(iterable_of_ints) -> bytearray
     bytearray(string, encoding[, errors]) -> bytearray
@@ -571,16 +562,13 @@ class bytearray:
     def __imul__(self, value, /): ...
 
 
-# iter(bytearray).  No docstring: tp_doc is NULL.  The struct
-# (bytesiterobject), its dealloc, traverse and next are C.
-@final
-@static_type(tp_dealloc="bytearrayiter_dealloc",
-             tp_traverse="bytearrayiter_traverse")
+# iter(bytearray).  No docstring: tp_doc is NULL.  PyByteArrayIter_Type,
+# the struct (bytesiterobject), its dealloc, traverse, __iter__
+# (PyObject_SelfIter) and __next__ are C; the method table is
+# bytearrayiter_methods.
+@c_name("bytearrayiter")
 class bytearray_iterator:
-    @c_name("PyObject_SelfIter")
     def __iter__(self, /): ...
-
-    @c_name("bytearrayiter_next")
     def __next__(self, /): ...
 
     __length_hint__ = c_name(METH_NOARGS="bytearrayiter_length_hint")(

@@ -2479,6 +2479,83 @@ bytearray_iter(PyObject *seq)
 }
 
 /* Generated from Objects/pyspec/bytearrayobject.py: the stringlib methods
-   called in a critical section, then PyByteArray_Type and
-   PyByteArrayIter_Type with their method and slot tables. */
+   called in a critical section, then the docstring, method and slot tables
+   of bytearray and of its iterator, which the types below name. */
 #include "clinic/bytearrayobject_pyspec.c.h"
+
+PyTypeObject PyByteArray_Type = {
+    PyVarObject_HEAD_INIT(&PyType_Type, 0)
+    "bytearray",
+    sizeof(PyByteArrayObject),
+    0,
+    bytearray_dealloc,                  /* tp_dealloc */
+    0,                                  /* tp_vectorcall_offset */
+    0,                                  /* tp_getattr */
+    0,                                  /* tp_setattr */
+    0,                                  /* tp_as_async */
+    bytearray_repr,                     /* tp_repr */
+    &bytearray_as_number,               /* tp_as_number */
+    &bytearray_as_sequence,             /* tp_as_sequence */
+    &bytearray_as_mapping,              /* tp_as_mapping */
+    0,                                  /* tp_hash */
+    0,                                  /* tp_call */
+    bytearray_str,                      /* tp_str */
+    PyObject_GenericGetAttr,            /* tp_getattro */
+    0,                                  /* tp_setattro */
+    &bytearray_as_buffer,               /* tp_as_buffer */
+    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE |
+        _Py_TPFLAGS_MATCH_SELF,       /* tp_flags */
+    bytearray_doc,                      /* tp_doc */
+    0,                                  /* tp_traverse */
+    0,                                  /* tp_clear */
+    bytearray_richcompare,              /* tp_richcompare */
+    0,                                  /* tp_weaklistoffset */
+    bytearray_iter,                     /* tp_iter */
+    0,                                  /* tp_iternext */
+    bytearray_methods,                  /* tp_methods */
+    0,                                  /* tp_members */
+    0,                                  /* tp_getset */
+    0,                                  /* tp_base */
+    0,                                  /* tp_dict */
+    0,                                  /* tp_descr_get */
+    0,                                  /* tp_descr_set */
+    0,                                  /* tp_dictoffset */
+    bytearray___init__,                 /* tp_init */
+    PyType_GenericAlloc,                /* tp_alloc */
+    bytearray_new,                      /* tp_new */
+    PyObject_Free,                      /* tp_free */
+    .tp_version_tag = _Py_TYPE_VERSION_BYTEARRAY,
+};
+
+PyTypeObject PyByteArrayIter_Type = {
+    PyVarObject_HEAD_INIT(&PyType_Type, 0)
+    "bytearray_iterator",              /* tp_name */
+    sizeof(bytesiterobject),           /* tp_basicsize */
+    0,                                 /* tp_itemsize */
+    /* methods */
+    bytearrayiter_dealloc,             /* tp_dealloc */
+    0,                                 /* tp_vectorcall_offset */
+    0,                                 /* tp_getattr */
+    0,                                 /* tp_setattr */
+    0,                                 /* tp_as_async */
+    0,                                 /* tp_repr */
+    0,                                 /* tp_as_number */
+    0,                                 /* tp_as_sequence */
+    0,                                 /* tp_as_mapping */
+    0,                                 /* tp_hash */
+    0,                                 /* tp_call */
+    0,                                 /* tp_str */
+    PyObject_GenericGetAttr,           /* tp_getattro */
+    0,                                 /* tp_setattro */
+    0,                                 /* tp_as_buffer */
+    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC, /* tp_flags */
+    0,                                 /* tp_doc */
+    bytearrayiter_traverse,            /* tp_traverse */
+    0,                                 /* tp_clear */
+    0,                                 /* tp_richcompare */
+    0,                                 /* tp_weaklistoffset */
+    PyObject_SelfIter,                 /* tp_iter */
+    bytearrayiter_next,                /* tp_iternext */
+    bytearrayiter_methods,             /* tp_methods */
+    0,
+};

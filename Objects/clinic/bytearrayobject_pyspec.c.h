@@ -5,7 +5,7 @@ Do not edit; edit the spec and run "make clinic".
 
 /* bytearray */
 
-PyDoc_STRVAR(bytearray__doc__,
+PyDoc_STRVAR(bytearray_doc,
 "bytearray(iterable_of_ints) -> bytearray\n"
 "bytearray(string, encoding[, errors]) -> bytearray\n"
 "bytearray(bytes_or_buffer) -> mutable copy of bytes_or_buffer\n"
@@ -368,55 +368,17 @@ static PyBufferProcs bytearray_as_buffer = {
     .bf_releasebuffer = bytearray_releasebuffer,
 };
 
-PyTypeObject PyByteArray_Type = {
-    PyVarObject_HEAD_INIT(&PyType_Type, 0)
-    .tp_name = "bytearray",
-    .tp_basicsize = sizeof(PyByteArrayObject),
-    .tp_dealloc = bytearray_dealloc,
-    .tp_repr = bytearray_repr,
-    .tp_as_number = &bytearray_as_number,
-    .tp_as_sequence = &bytearray_as_sequence,
-    .tp_as_mapping = &bytearray_as_mapping,
-    .tp_str = bytearray_str,
-    .tp_as_buffer = &bytearray_as_buffer,
-    .tp_flags = Py_TPFLAGS_DEFAULT |
-        Py_TPFLAGS_BASETYPE |
-        _Py_TPFLAGS_MATCH_SELF,
-    .tp_doc = bytearray__doc__,
-    .tp_richcompare = bytearray_richcompare,
-    .tp_iter = bytearray_iter,
-    .tp_methods = bytearray_methods,
-    .tp_init = bytearray___init__,
-    .tp_alloc = PyType_GenericAlloc,
-    .tp_new = bytearray_new,
-    .tp_free = PyObject_Free,
-    .tp_version_tag = _Py_TYPE_VERSION_BYTEARRAY,
-};
-
 /* bytearray_iterator */
 
-PyDoc_STRVAR(bytearray_iterator___length_hint____doc__,
+PyDoc_STRVAR(bytearrayiter___length_hint____doc__,
 "Private method returning an estimate of len(list(it)).");
 
-PyDoc_STRVAR(bytearray_iterator___setstate____doc__,
+PyDoc_STRVAR(bytearrayiter___setstate____doc__,
 "Set state information for unpickling.");
 
-static PyMethodDef bytearray_iterator_methods[] = {
-    {"__length_hint__", bytearrayiter_length_hint, METH_NOARGS, bytearray_iterator___length_hint____doc__},
+static PyMethodDef bytearrayiter_methods[] = {
+    {"__length_hint__", bytearrayiter_length_hint, METH_NOARGS, bytearrayiter___length_hint____doc__},
     {"__reduce__", bytearrayiter_reduce, METH_NOARGS, bytearray_reduce__doc__},
-    {"__setstate__", bytearrayiter_setstate, METH_O, bytearray_iterator___setstate____doc__},
+    {"__setstate__", bytearrayiter_setstate, METH_O, bytearrayiter___setstate____doc__},
     {NULL, NULL}  /* sentinel */
-};
-
-PyTypeObject PyByteArrayIter_Type = {
-    PyVarObject_HEAD_INIT(&PyType_Type, 0)
-    .tp_name = "bytearray_iterator",
-    .tp_basicsize = sizeof(bytesiterobject),
-    .tp_dealloc = bytearrayiter_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT |
-        Py_TPFLAGS_HAVE_GC,
-    .tp_traverse = bytearrayiter_traverse,
-    .tp_iter = PyObject_SelfIter,
-    .tp_iternext = bytearrayiter_next,
-    .tp_methods = bytearray_iterator_methods,
 };
