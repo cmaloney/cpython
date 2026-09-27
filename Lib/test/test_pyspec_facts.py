@@ -585,6 +585,22 @@ def specialize_and_run(func, *args):
     return result
 
 
+# (Module level: the JIT leaks a little memory for each fresh function it
+# compiles, which -R would report.)
+def _subscripts(b, indices):
+    out = []
+    for i in indices:
+        try:
+            out.append(b[i])
+        except IndexError as exc:
+            out.append(str(exc))
+    return out
+
+
+def _items(b):
+    return [c for c in b]
+
+
 class SlotFactsTest(unittest.TestCase):
     """The slot facts (_PySpec_FindSlot()) of the specialized uops that
     do what a slot does: _BINARY_OP_SUBSCR_BYTES_INT (bytes.__getitem__)
@@ -638,15 +654,6 @@ class SlotFactsTest(unittest.TestCase):
                 self.assertNotIn('HAS_ESCAPES_FLAG', line)
 
     def test_subscript_agrees(self):
-        def subscripts(b, indices):
-            out = []
-            for i in indices:
-                try:
-                    out.append(b[i])
-                except IndexError as exc:
-                    out.append(str(exc))
-            return out
-
         values = bytes(range(256))
         for b, indices in [
                 (values, range(-257, 258)),
@@ -655,7 +662,7 @@ class SlotFactsTest(unittest.TestCase):
             with self.subTest(b=b[:4]):
                 expected = [outcome(bytes.__getitem__, b, i)[0]
                             for i in indices]
-                got = specialize_and_run(subscripts, b, indices)
+                got = specialize_and_run(_subscripts, b, indices)
                 self.assertEqual(
                     [('returns', int, v) if isinstance(v, int)
                      else ('raises', IndexError, v) for v in got],
@@ -666,12 +673,9 @@ class SlotFactsTest(unittest.TestCase):
                         self.assertTrue(sys._is_immortal(v))
 
     def test_iteration_agrees(self):
-        def items(b):
-            return [c for c in b]
-
         for b in (bytes(range(256)), b'', b'\x00', b'\xff' * 3):
             with self.subTest(b=b[:4]):
-                got = specialize_and_run(items, b)
+                got = specialize_and_run(_items, b)
                 self.assertEqual(got, list(iter(b)))
                 self.assertEqual({type(c) for c in got}, {int} if b else set())
 
