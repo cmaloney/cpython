@@ -25,7 +25,14 @@ change: drop it before proposing anything.
 - Facts come from bodies plus four primitives (`exact(T, v)`, `unknown(v)`,
   `calls(x, "__slot__")`, `runs_python()`); `...` means worst case; one audited table
   of builtin types: `Tools/clinic/libclinic/pyspec/builtin_types.py`.
-- `Objects/pyspec/README.rst`: the contributor guide ("to do X, edit Y").
+- `Objects/pyspec/README.rst`: the contributor guide ("to do X, edit Y"), incl.
+  "Conditional compilation"; `Objects/pyspec/MIGRATING.rst`: the migration guide (five
+  levels, checklists, the "does a spec body help or just rewrite?" procedure with a
+  worked example); `Tools/clinic/pyspec_bench.py`: the instruction-count helper it uses.
+- `Modules/pyspec/mmapmodule.py`: a methods-only spec with `#if`-guarded methods (the
+  conditional-compilation sample; `mmapmodule.c.h` byte-identical to main).
+- A spec class generates method/slot tables only if it declares a slot
+  (`Spec.declares_slots()`); a methods-only class keeps its C method table.
 - Clinic generates `Objects/clinic/bytesobject.c.h` (byte-identical to main outside
   `bytes.__new__`) and `Objects/clinic/bytesobject_pyspec.c.h` (spec bodies, per-arity
   and per-type entries, the tier-2 call table, the method and slot tables);
@@ -65,6 +72,8 @@ change: drop it before proposing anything.
 | Audit | comments and docstrings match the code | merged | `reports/comment_audit.md` |
 | P1+P2 | helpers by name, facts derived from bodies, F3, one types table, C-side check | merged | `reports/phase2_P1P2.md` |
 | 3b | bytearray from a spec; PyTypeObject back in C (`@static_type`/`@final` removed) | merged | `reports/phase3b_bytearray.md` |
+| Cond | `#if` handled as plain clinic; mmap sample | merged | `reports/phase3_conditionals.md` |
+| Guide | MIGRATING.rst + pyspec_bench.py; removeprefix worked example: keep in C | merged | `reports/phase3_migration_guide.md` |
 
 `DESIGN.md` is the shared brief every agent read (goals, decisions, resource rules);
 `PROPOSALS.md` holds P1/P2.
@@ -92,18 +101,18 @@ change (bytes calls are <1% of every benchmark).  bytes code is +1.3 KB vs main.
 P2 changed no shape for the worse (non-PGO instruction counts); `bytes(16)` now uses
 the no-Python call (442 -> 433 instructions).
 
-## Test status (after merging 3b)
+## Test status (commit eb5f003ccc5)
 Debug JIT build `../build-exp` (srcdir: this checkout): test_clinic, test_bytes,
-test_inspect, test_iter, test_pydoc, test_descr, test_pickle, test_buffer, test_int,
-test_pyspec_catalog, test_pyspec_facts pass (2820 tests); test_capi alone passes.
-Running test_opt after other modules in one invocation fails guard-removal tests, as on
-main (upstream order dependency).  `PYTHON_JIT=0 -R 3:3` on the four pyspec suites
-passes.  Free-threaded debug (3b's agent): test_bytes incl. bytearray free-threading
-tests, test_free_threading, test_pyspec_facts, test_clinic pass.  No expected failures.
-Clinic on the six spec-backed files and `make regen-cases` leave the tree clean.
-Parity with main: `bytearrayobject.c.h`, `transmogrify.h.h` identical; `bytesobject.c.h`
-differs only in the `bytes.__new__` section; bytes/bytearray type dumps identical except
-`bytes.tp_vectorcall`.  Ratchet: docstrings 22 -> 2, capi 23 -> 20, docs 1 -> 0.
+test_mmap, test_inspect, test_iter, test_pydoc, test_descr, test_pickle, test_buffer,
+test_int, test_pyspec_catalog, test_pyspec_facts, test_tools.test_pyspec_bench pass
+(2884 tests); test_capi alone passes.  Running test_opt after other modules in one
+invocation fails guard-removal tests, as on main (upstream order dependency).
+`PYTHON_JIT=0 -R 3:3` on test_clinic, test_bytes, test_mmap and the pyspec suites
+passes.  No expected failures.  Clinic on the seven spec-backed files and
+`make regen-cases` leave the tree clean.  Parity with main: `bytearrayobject.c.h`,
+`transmogrify.h.h`, `mmapmodule.c.h` identical; `bytesobject.c.h` differs only in the
+`bytes.__new__` section; bytes/bytearray type dumps identical except
+`bytes.tp_vectorcall`.  Ratchet: docstrings 2, capi 20, docs 0, slots 3, c_calls 0.
 
 ## Open items
 1. Tool code is flat after P2 (5710 -> 5691 lines; the C-side check costs ~200).
@@ -141,6 +150,7 @@ differs only in the `bytes.__new__` section; bytes/bytearray type dumps identica
   it), `build_perf_base_jit` (main, PGO+LTO JIT), `build-str1-dbg` (main, debug tier-2
   interpreter).  Stale build dirs of finished agents were deleted.
 - Regenerate with `Tools/clinic/clinic.py Objects/bytesobject.c
-  Objects/stringlib/transmogrify.h Objects/bytearrayobject.c Objects/abstract.c
+  Objects/stringlib/transmogrify.h Objects/bytearrayobject.c Modules/mmapmodule.c
+  Objects/abstract.c
   Objects/typeobject.c Objects/unicodeobject.c` (not `--make` from a checkout containing
   `.claude/worktrees/`, which it would also scan).
