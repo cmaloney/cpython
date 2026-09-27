@@ -798,7 +798,7 @@ bytes_from_iterator_list_lock_held(PyObject *x)
 
 /* bytes */
 
-PyDoc_STRVAR(bytes__doc__,
+PyDoc_STRVAR(bytes_doc,
 "bytes(iterable_of_ints) -> bytes\n"
 "bytes(string, encoding[, errors]) -> bytes\n"
 "bytes(bytes_or_buffer) -> immutable copy of bytes_or_buffer\n"
@@ -958,61 +958,20 @@ static PyBufferProcs bytes_as_buffer = {
     .bf_getbuffer = bytes_buffer_getbuffer,
 };
 
-PyTypeObject PyBytes_Type = {
-    PyVarObject_HEAD_INIT(&PyType_Type, 0)
-    .tp_name = "bytes",
-    .tp_basicsize = PyBytesObject_SIZE,
-    .tp_itemsize = sizeof(char),
-    .tp_dealloc = bytes_dealloc,
-    .tp_repr = bytes_repr,
-    .tp_as_number = &bytes_as_number,
-    .tp_as_sequence = &bytes_as_sequence,
-    .tp_as_mapping = &bytes_as_mapping,
-    .tp_hash = bytes_hash,
-    .tp_str = bytes_str,
-    .tp_as_buffer = &bytes_as_buffer,
-    .tp_flags = Py_TPFLAGS_DEFAULT |
-        Py_TPFLAGS_BASETYPE |
-        Py_TPFLAGS_BYTES_SUBCLASS | _Py_TPFLAGS_MATCH_SELF,
-    .tp_doc = bytes__doc__,
-    .tp_richcompare = bytes_richcompare,
-    .tp_iter = bytes_iter,
-    .tp_methods = bytes_methods,
-    .tp_alloc = bytes_alloc,
-    .tp_new = bytes_new,
-    .tp_free = PyObject_Free,
-    .tp_version_tag = _Py_TYPE_VERSION_BYTES,
-    .tp_vectorcall = bytes_vectorcall,
-    ._tp_iteritem = bytes_iteritem,
-};
-
 /* bytes_iterator */
 
-PyDoc_STRVAR(bytes_iterator___length_hint____doc__,
+PyDoc_STRVAR(striter___length_hint____doc__,
 "Private method returning an estimate of len(list(it)).");
 
-PyDoc_STRVAR(bytes_iterator___reduce____doc__,
+PyDoc_STRVAR(striter___reduce____doc__,
 "Return state information for pickling.");
 
-PyDoc_STRVAR(bytes_iterator___setstate____doc__,
+PyDoc_STRVAR(striter___setstate____doc__,
 "Set state information for unpickling.");
 
-static PyMethodDef bytes_iterator_methods[] = {
-    {"__length_hint__", striter_len, METH_NOARGS, bytes_iterator___length_hint____doc__},
-    {"__reduce__", striter_reduce, METH_NOARGS, bytes_iterator___reduce____doc__},
-    {"__setstate__", striter_setstate, METH_O, bytes_iterator___setstate____doc__},
+static PyMethodDef striter_methods[] = {
+    {"__length_hint__", striter_len, METH_NOARGS, striter___length_hint____doc__},
+    {"__reduce__", striter_reduce, METH_NOARGS, striter___reduce____doc__},
+    {"__setstate__", striter_setstate, METH_O, striter___setstate____doc__},
     {NULL, NULL}  /* sentinel */
-};
-
-PyTypeObject PyBytesIter_Type = {
-    PyVarObject_HEAD_INIT(&PyType_Type, 0)
-    .tp_name = "bytes_iterator",
-    .tp_basicsize = sizeof(striterobject),
-    .tp_dealloc = striter_dealloc,
-    .tp_flags = Py_TPFLAGS_DEFAULT |
-        Py_TPFLAGS_HAVE_GC,
-    .tp_traverse = striter_traverse,
-    .tp_iter = PyObject_SelfIter,
-    .tp_iternext = striter_next,
-    .tp_methods = bytes_iterator_methods,
 };

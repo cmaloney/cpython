@@ -93,9 +93,8 @@ Methods that are not clinic functions (method_kind())
   critical section on self) and ``c_name(METH_NOARGS="f")(...)`` (the
   entry calls f, a PyCFunction, with the other's docstring).
 
-A class decorated with ``@static_type(...)`` has its PyTypeObject
-generated (typeobj.py); its keyword arguments are the members the spec
-cannot derive, as C expressions.
+For the classes of the spec of a C file, clinic generates the method and
+slot tables their PyTypeObject (written in C) names (typeobj.py).
 """
 
 
@@ -419,8 +418,6 @@ class Spec:
         """Only these statements may be in a spec class: a docstring,
         ``def``, ``meth = module.Class.meth`` and ``pass``."""
         self.classes[node.name] = node
-        static = any(decorator_name(d) == 'static_type'
-                     for d in node.decorator_list)
         for i, stmt in enumerate(node.body):
             match stmt:
                 case ast.Expr(ast.Constant(str())) if i == 0:
@@ -429,14 +426,6 @@ class Spec:
                     pass
                 case ast.FunctionDef(name=name):
                     self._add_function(f'{node.name}.{name}', stmt)
-                    for d in stmt.decorator_list:
-                        if static and decorator_name(d) in ('getter',
-                                                            'setter'):
-                            raise self.error(d, f"{node.name}.{name}: "
-                                             "accessors (@getter, @setter) "
-                                             "of a @static_type class are "
-                                             f"not supported yet; see "
-                                             f"{README}")
                 case ast.Assign(targets=[ast.Name(name)], value=value) \
                         if self._shared_source(value) is not None:
                     self._add_shared(node.name, stmt, name,

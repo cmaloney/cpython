@@ -2735,9 +2735,6 @@ bytes_dealloc(PyObject *op)
     _PyBytes_CheckOverflow(op, op, "bytes");
     Py_TYPE(self)->tp_free((PyObject *)self);
 }
-#else
-/* Release builds inherit the tp_dealloc of object. */
-#  define bytes_dealloc NULL
 #endif
 
 
@@ -3600,6 +3597,90 @@ _PyBytesWriter_ResizeToAllocated(PyBytesWriter *writer)
    bytes_from_iterator() and its specializations for a list (copied in the
    critical section of the list) and a tuple, the bytes_new_nargsN()
    functions called by bytes_vectorcall() and their variants per argument
-   type, the tier-2 call table, then PyBytes_Type and PyBytesIter_Type with
-   their method and slot tables. */
+   type, the tier-2 call table, then the docstring, method and slot tables
+   of bytes and of its iterator, which the types below name. */
 #include "clinic/bytesobject_pyspec.c.h"
+
+PyTypeObject PyBytes_Type = {
+    PyVarObject_HEAD_INIT(&PyType_Type, 0)
+    "bytes",
+    PyBytesObject_SIZE,
+    sizeof(char),
+#ifdef Py_DEBUG
+    bytes_dealloc,                              /* tp_dealloc */
+#else
+    0,                                          /* tp_dealloc */
+#endif
+    0,                                          /* tp_vectorcall_offset */
+    0,                                          /* tp_getattr */
+    0,                                          /* tp_setattr */
+    0,                                          /* tp_as_async */
+    bytes_repr,                                 /* tp_repr */
+    &bytes_as_number,                           /* tp_as_number */
+    &bytes_as_sequence,                         /* tp_as_sequence */
+    &bytes_as_mapping,                          /* tp_as_mapping */
+    bytes_hash,                                 /* tp_hash */
+    0,                                          /* tp_call */
+    bytes_str,                                  /* tp_str */
+    PyObject_GenericGetAttr,                    /* tp_getattro */
+    0,                                          /* tp_setattro */
+    &bytes_as_buffer,                           /* tp_as_buffer */
+    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE |
+        Py_TPFLAGS_BYTES_SUBCLASS |
+        _Py_TPFLAGS_MATCH_SELF,               /* tp_flags */
+    bytes_doc,                                  /* tp_doc */
+    0,                                          /* tp_traverse */
+    0,                                          /* tp_clear */
+    bytes_richcompare,                          /* tp_richcompare */
+    0,                                          /* tp_weaklistoffset */
+    bytes_iter,                                 /* tp_iter */
+    0,                                          /* tp_iternext */
+    bytes_methods,                              /* tp_methods */
+    0,                                          /* tp_members */
+    0,                                          /* tp_getset */
+    0,                                          /* tp_base */
+    0,                                          /* tp_dict */
+    0,                                          /* tp_descr_get */
+    0,                                          /* tp_descr_set */
+    0,                                          /* tp_dictoffset */
+    0,                                          /* tp_init */
+    bytes_alloc,                                /* tp_alloc */
+    bytes_new,                                  /* tp_new */
+    PyObject_Free,                              /* tp_free */
+    .tp_version_tag = _Py_TYPE_VERSION_BYTES,
+    .tp_vectorcall = bytes_vectorcall,
+    ._tp_iteritem = bytes_iteritem,
+};
+
+PyTypeObject PyBytesIter_Type = {
+    PyVarObject_HEAD_INIT(&PyType_Type, 0)
+    "bytes_iterator",                           /* tp_name */
+    sizeof(striterobject),                      /* tp_basicsize */
+    0,                                          /* tp_itemsize */
+    /* methods */
+    striter_dealloc,                            /* tp_dealloc */
+    0,                                          /* tp_vectorcall_offset */
+    0,                                          /* tp_getattr */
+    0,                                          /* tp_setattr */
+    0,                                          /* tp_as_async */
+    0,                                          /* tp_repr */
+    0,                                          /* tp_as_number */
+    0,                                          /* tp_as_sequence */
+    0,                                          /* tp_as_mapping */
+    0,                                          /* tp_hash */
+    0,                                          /* tp_call */
+    0,                                          /* tp_str */
+    PyObject_GenericGetAttr,                    /* tp_getattro */
+    0,                                          /* tp_setattro */
+    0,                                          /* tp_as_buffer */
+    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,/* tp_flags */
+    0,                                          /* tp_doc */
+    striter_traverse,                           /* tp_traverse */
+    0,                                          /* tp_clear */
+    0,                                          /* tp_richcompare */
+    0,                                          /* tp_weaklistoffset */
+    PyObject_SelfIter,                          /* tp_iter */
+    striter_next,                               /* tp_iternext */
+    striter_methods,                            /* tp_methods */
+    0,
+};

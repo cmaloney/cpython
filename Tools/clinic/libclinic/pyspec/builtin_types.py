@@ -17,13 +17,15 @@ items of any type).  A type whose special method may run Python code
 __length_hint__ or PickleBuffer's __buffer__) is not in the table, or
 lists the method as PYTHON: nothing is claimed about it.
 
-A spec class decorated with @static_type (bytes) describes its type
-itself; TypeFacts reads it instead of the table.
+A spec class that declares the slots of its type (bytes) describes the
+type itself; TypeFacts reads it instead of the table.
 """
 
 import ast
 import builtins
 import types
+
+from . import slots
 
 # A special method that may run Python code.
 PYTHON = 'PYTHON'
@@ -119,21 +121,21 @@ def constant(value):
 
 class TypeFacts:
     """What the tools know about builtin types: from the spec for its
-    @static_type classes, else from TABLE; nothing about other types.
+    complete classes, else from TABLE; nothing about other types.
     Never from the Python running Argument Clinic."""
 
     def __init__(self, spec):
         self.spec = spec
 
     def spec_class(self, tp):
-        """The complete spec class (@static_type) of builtin tp, or None."""
+        """The complete spec class of builtin tp, or None.  A class that
+        declares a slot (a dunder of slotdefs[]) declares them all:
+        test_clinic checks it against the slot wrappers of the type."""
         node = self.spec.classes.get(tp.__name__)
         if node is None or getattr(builtins, tp.__name__, None) is not tp:
             return None
-        for decorator in node.decorator_list:
-            if (isinstance(decorator, ast.Call)
-                    and isinstance(decorator.func, ast.Name)
-                    and decorator.func.id == 'static_type'):
+        for stmt in node.body:
+            if isinstance(stmt, ast.FunctionDef) and slots.is_slot(stmt.name):
                 return node
         return None
 
