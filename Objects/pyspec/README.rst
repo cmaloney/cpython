@@ -63,6 +63,14 @@ Add or rename a slot        ``def __len__(self, /): ...`` in the class,
                             function is not ``<class>_<slot>`` without the
                             slot's prefix (``bytes_repr``); write the C
                             function with the slot's typedef.
+Give the optimizer the      ``@c_implemented`` on the slot, with its Python
+facts of a slot             reference (``bytes.__getitem__``); add it to
+                            ``HelperTest``.  Clinic puts its facts in the
+                            call table; a uop that does what the slot does
+                            takes its result facts from
+                            ``_PySpec_FindSlot()`` (see
+                            ``_BINARY_OP_SUBSCR_BYTES_INT``) and is listed
+                            in ``SlotFactsTest.USES``.
 Add a hand-written          ``@c_name(METH_O="f")`` (or ``METH_NOARGS``,
 PyCFunction                 plus ``@classmethod`` for ``METH_CLASS``);
                             the docstring is ``__doc__`` as is.

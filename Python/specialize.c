@@ -2415,6 +2415,10 @@ _Py_Specialize_BinaryOp(_PyStackRef lhs_st, _PyStackRef rhs_st, _Py_CODEUNIT *in
                     specialize(instr, BINARY_OP_SUBSCR_TUPLE_INT);
                     return;
                 }
+                if (PyBytes_CheckExact(lhs)) {
+                    specialize(instr, BINARY_OP_SUBSCR_BYTES_INT);
+                    return;
+                }
                 if (PyUnicode_CheckExact(lhs) && _PyLong_IsNonNegativeCompact((PyLongObject*)rhs)) {
                     if (PyUnicode_IS_COMPACT_ASCII(lhs)) {
                         specialize(instr, BINARY_OP_SUBSCR_STR_INT);
@@ -2726,6 +2730,10 @@ _Py_Specialize_ForIter(_PyStackRef iter, _PyStackRef null_or_index, _Py_CODEUNIT
             }
             else if (tp == &PyTuple_Type) {
                 specialize(instr, FOR_ITER_TUPLE);
+                return;
+            }
+            else if (tp == &PyBytes_Type) {
+                specialize(instr, FOR_ITER_BYTES);
                 return;
             }
         }

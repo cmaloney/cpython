@@ -639,6 +639,91 @@
             DISPATCH();
         }
 
+        TARGET(BINARY_OP_SUBSCR_BYTES_INT) {
+            #if _Py_TAIL_CALL_INTERP
+            int opcode = BINARY_OP_SUBSCR_BYTES_INT;
+            (void)(opcode);
+            #endif
+            _Py_CODEUNIT* const this_instr = next_instr;
+            (void)this_instr;
+            frame->instr_ptr = next_instr;
+            next_instr += 6;
+            INSTRUCTION_STATS(BINARY_OP_SUBSCR_BYTES_INT);
+            static_assert(INLINE_CACHE_ENTRIES_BINARY_OP == 5, "incorrect cache size");
+            _PyStackRef value;
+            _PyStackRef nos;
+            _PyStackRef bytes_st;
+            _PyStackRef sub_st;
+            _PyStackRef res;
+            _PyStackRef b;
+            _PyStackRef s;
+            // _GUARD_TOS_INT
+            {
+                value = stack_pointer[-1];
+                PyObject *value_o = PyStackRef_AsPyObjectBorrow(value);
+                if (!_PyLong_CheckExactAndCompact(value_o)) {
+                    UPDATE_MISS_STATS(BINARY_OP);
+                    assert(_PyOpcode_Deopt[opcode] == (BINARY_OP));
+                    JUMP_TO_PREDICTED(BINARY_OP);
+                }
+            }
+            // _GUARD_NOS_BYTES
+            {
+                nos = stack_pointer[-2];
+                PyObject *o = PyStackRef_AsPyObjectBorrow(nos);
+                if (!PyBytes_CheckExact(o)) {
+                    UPDATE_MISS_STATS(BINARY_OP);
+                    assert(_PyOpcode_Deopt[opcode] == (BINARY_OP));
+                    JUMP_TO_PREDICTED(BINARY_OP);
+                }
+            }
+            /* Skip 5 cache entries */
+            // _BINARY_OP_SUBSCR_BYTES_INT
+            {
+                sub_st = value;
+                bytes_st = nos;
+                PyObject *sub = PyStackRef_AsPyObjectBorrow(sub_st);
+                PyObject *bytes = PyStackRef_AsPyObjectBorrow(bytes_st);
+                assert(PyLong_CheckExact(sub));
+                assert(PyBytes_CheckExact(bytes));
+                if (!_PyLong_IsNonNegativeCompact((PyLongObject*)sub)) {
+                    UPDATE_MISS_STATS(BINARY_OP);
+                    assert(_PyOpcode_Deopt[opcode] == (BINARY_OP));
+                    JUMP_TO_PREDICTED(BINARY_OP);
+                }
+                Py_ssize_t index = ((PyLongObject*)sub)->long_value.ob_digit[0];
+                if (PyBytes_GET_SIZE(bytes) <= index) {
+                    UPDATE_MISS_STATS(BINARY_OP);
+                    assert(_PyOpcode_Deopt[opcode] == (BINARY_OP));
+                    JUMP_TO_PREDICTED(BINARY_OP);
+                }
+                unsigned char c = ((PyBytesObject *)bytes)->ob_sval[index];
+                STAT_INC(BINARY_OP, hit);
+                PyObject *res_o = (PyObject *)&_PyLong_SMALL_INTS[_PY_NSMALLNEGINTS + c];
+                b = bytes_st;
+                s = sub_st;
+                res = PyStackRef_FromPyObjectBorrow(res_o);
+            }
+            // _POP_TOP_INT
+            {
+                value = s;
+                assert(PyLong_CheckExact(PyStackRef_AsPyObjectBorrow(value)));
+                PyStackRef_CLOSE_SPECIALIZED(value, _PyLong_ExactDealloc);
+            }
+            // _POP_TOP
+            {
+                value = b;
+                stack_pointer[-2] = res;
+                stack_pointer += -1;
+                ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+                _PyFrame_SetStackPointer(frame, stack_pointer);
+                _PyFrame_StackPointerValidate(frame);
+                PyStackRef_XCLOSE(value);
+                _PyFrame_StackPointerInvalidate(frame);
+            }
+            DISPATCH();
+        }
+
         TARGET(BINARY_OP_SUBSCR_DICT) {
             #if _Py_TAIL_CALL_INTERP
             int opcode = BINARY_OP_SUBSCR_DICT;
@@ -6360,6 +6445,63 @@
                     DISPATCH();
                 }
                 next = item;
+            }
+            stack_pointer[-1] = null_or_index;
+            stack_pointer[0] = next;
+            stack_pointer += 1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            DISPATCH();
+        }
+
+        TARGET(FOR_ITER_BYTES) {
+            #if _Py_TAIL_CALL_INTERP
+            int opcode = FOR_ITER_BYTES;
+            (void)(opcode);
+            #endif
+            _Py_CODEUNIT* const this_instr = next_instr;
+            (void)this_instr;
+            frame->instr_ptr = next_instr;
+            next_instr += 2;
+            INSTRUCTION_STATS(FOR_ITER_BYTES);
+            static_assert(INLINE_CACHE_ENTRIES_FOR_ITER == 1, "incorrect cache size");
+            _PyStackRef iter;
+            _PyStackRef null_or_index;
+            _PyStackRef next;
+            /* Skip 1 cache entry */
+            // _ITER_CHECK_BYTES
+            {
+                null_or_index = stack_pointer[-1];
+                iter = stack_pointer[-2];
+                PyObject *iter_o = PyStackRef_AsPyObjectBorrow(iter);
+                if (Py_TYPE(iter_o) != &PyBytes_Type) {
+                    UPDATE_MISS_STATS(FOR_ITER);
+                    assert(_PyOpcode_Deopt[opcode] == (FOR_ITER));
+                    JUMP_TO_PREDICTED(FOR_ITER);
+                }
+                assert(PyStackRef_IsTaggedInt(null_or_index));
+            }
+            // _ITER_JUMP_BYTES
+            {
+                PyObject *bytes_o = PyStackRef_AsPyObjectBorrow(iter);
+                assert(Py_TYPE(bytes_o) == &PyBytes_Type);
+                STAT_INC(FOR_ITER, hit);
+                if ((size_t)PyStackRef_UntagInt(null_or_index) >= (size_t)PyBytes_GET_SIZE(bytes_o)) {
+                    null_or_index = PyStackRef_TagInt(-1);
+                    JUMPBY(oparg + 1);
+                    stack_pointer[-1] = null_or_index;
+                    DISPATCH();
+                }
+            }
+            // _ITER_NEXT_BYTES
+            {
+                PyObject *bytes_o = PyStackRef_AsPyObjectBorrow(iter);
+                assert(Py_TYPE(bytes_o) == &PyBytes_Type);
+                uintptr_t i = PyStackRef_UntagInt(null_or_index);
+                assert((size_t)i < (size_t)PyBytes_GET_SIZE(bytes_o));
+                unsigned char c = ((PyBytesObject *)bytes_o)->ob_sval[i];
+                next = PyStackRef_FromPyObjectBorrow(
+                    (PyObject *)&_PyLong_SMALL_INTS[_PY_NSMALLNEGINTS + c]);
+                null_or_index = PyStackRef_IncrementTaggedIntNoOverflow(null_or_index);
             }
             stack_pointer[-1] = null_or_index;
             stack_pointer[0] = next;

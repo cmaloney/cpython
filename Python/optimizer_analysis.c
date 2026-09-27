@@ -348,6 +348,25 @@ assert_result_facts(JitOptContext *ctx, _PyUOpInstruction *this_instr,
 #  define ASSERT_RESULT_FACTS(RES, ABOVE) ((void)0)
 #endif
 
+/* The result of a uop that does what special method name of an exact tp
+ * does (a copy of its slot's C), with an argument of exact type arg_type
+ * (NULL for none): the facts the spec derives for the slot
+ * (_PySpec_FindSlot()), not a copy of them.  A byte is also a small int:
+ * compact, which the uop's code, not the spec, gives. */
+static JitOptRef
+spec_slot_result(JitOptContext *ctx, PyTypeObject *tp, const char *name,
+                 PyTypeObject *arg_type, bool byte)
+{
+    const _PySpecCall *spec = _PySpec_FindSlot(tp, name, arg_type);
+    if (spec == NULL || spec->result_type == NULL) {
+        return sym_new_not_null(ctx);
+    }
+    if (byte && spec->result_type == &PyLong_Type) {
+        return sym_new_compact_int(ctx);
+    }
+    return sym_new_type(ctx, spec->result_type);
+}
+
 static int
 check_stack_bounds(JitOptContext *ctx, JitOptRef *stack_pointer, int offset, int opcode)
 {

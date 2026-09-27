@@ -883,14 +883,18 @@ class Generator:
 
     c_basenames maps the implemented spec methods ("bytes.__new__") to the
     C basename of their clinic function ("bytes_new"); conditions maps
-    those whose block is under #if to the condition (clinic's).
+    those whose block is under #if to the condition (clinic's);
+    type_objects maps the clinic classes of the C file to their type
+    object ("&PyBytesIter_Type").
     """
 
-    def __init__(self, spec, c_basenames, self_ctypes=None, conditions=None):
+    def __init__(self, spec, c_basenames, self_ctypes=None, conditions=None,
+                 type_objects=None):
         self.spec = spec
         self.c_basenames = c_basenames
         self.self_ctypes = self_ctypes or {}
         self.conditions = conditions or {}
+        self.type_objects = type_objects or {}
         # The shared specializations the generated code calls, in order.
         self.specializations = []
 
@@ -1055,14 +1059,16 @@ class Generator:
 def generate(spec: frontend.Spec, spec_path: str,
              c_basenames: dict[str, str],
              self_ctypes: dict[str, str] | None = None,
-             conditions: dict[str, str] | None = None) -> str:
+             conditions: dict[str, str] | None = None,
+             type_objects: dict[str, str] | None = None) -> str:
     """C for the implemented functions of *spec*, a frontend.Spec.
 
     *spec_path* is only named in the header comment.  *self_ctypes* maps
     the implemented spec methods other than __new__ to the C type of their
     self (or class) parameter; *conditions* those under #if to the
-    condition of their block.
+    condition of their block; *type_objects* the clinic classes of the C
+    file to their type object.
     """
     text: str = Generator(spec, c_basenames, self_ctypes,
-                          conditions).generate(spec_path)
+                          conditions, type_objects).generate(spec_path)
     return text

@@ -60,6 +60,18 @@ typedef struct {
     } func;
 } _PySpecCall;
 
+/* The facts of a slot of a class of a spec that has a Python reference
+ * (a @c_implemented dunder), for self of exactly that class: the facts
+ * of calling the special method, e.g. b[i] for bytes.__getitem__.  In
+ * facts, nargs counts self, arg_type is the exact type of the argument
+ * after self (NULL: any), and func is not used. */
+typedef struct {
+    PyTypeObject *type;
+    /* The special method: "__getitem__". */
+    const char *name;
+    _PySpecCall facts;
+} _PySpecSlot;
+
 typedef struct {
     PyTypeObject *type;
     /* Calls of the type (tp_new): positional arguments only. */
@@ -72,6 +84,10 @@ typedef struct {
        _PySpec_FindMethod()). */
     Py_ssize_t nmethods;
     const _PySpecCall *methods;
+    /* The slots of all the classes of the spec file (bytes_iterator's
+       too) with a Python reference. */
+    Py_ssize_t nslots;
+    const _PySpecSlot *slots;
 } _PySpecCallTable;
 
 /* Generated into Objects/clinic/bytesobject_pyspec.c.h. */
@@ -109,6 +125,36 @@ _PySpec_FindCall(PyTypeObject *tp, int nargs, PyTypeObject *arg_type)
         }
         else if (call->arg_type == arg_type) {
             return call;
+        }
+    }
+    return generic;
+}
+
+/* The facts of special method name (a slot with a Python reference in a
+ * spec) of self of exact type tp, called with an argument of exact type
+ * arg_type after self (NULL when unknown or none); an entry specialized
+ * for arg_type is preferred over the generic one.  NULL when the spec has
+ * none.  A specialized uop that does what the slot does (the
+ * interpreter's own copy of its C) takes its result facts from here, so
+ * that they are those derived from the spec; the debug build checks them
+ * at run time (_ASSERT_RESULT_TYPE) and test_pyspec_facts checks the
+ * entries against the slot. */
+static inline const _PySpecCall *
+_PySpec_FindSlot(PyTypeObject *tp, const char *name, PyTypeObject *arg_type)
+{
+    /* The tables with slots: add a line per spec file. */
+    const _PySpecCallTable *table = &_PySpec_bytes_calls;
+    const _PySpecCall *generic = NULL;
+    for (Py_ssize_t i = 0; i < table->nslots; i++) {
+        const _PySpecSlot *slot = &table->slots[i];
+        if (slot->type != tp || strcmp(slot->name, name) != 0) {
+            continue;
+        }
+        if (slot->facts.arg_type == NULL) {
+            generic = &slot->facts;
+        }
+        else if (slot->facts.arg_type == arg_type) {
+            return &slot->facts;
         }
     }
     return generic;

@@ -38,6 +38,18 @@ writes it; there is no separate command):
     - _PySpec_ALWAYS_RAISES: no ``return`` is left;
     - _PySpec_MAY_RUN_PYTHON: some call on a path may run Python code.
 
+* ``const _PySpecSlot <type>_spec_slots[]``: the facts of the slots of
+  the classes of the spec that have a Python reference (``@c_implemented``
+  dunders: bytes.__getitem__, bytes_iterator.__next__), for self of
+  exactly the class: per slot, a generic entry, and an entry per exact
+  type of the argument after self whose facts differ from it (unless
+  it always raises).  They are
+  the facts of the special method as Python calls it.  A specialized uop
+  that does what a slot does (_BINARY_OP_SUBSCR_BYTES_INT for
+  bytes.__getitem__) takes its result facts from them
+  (_PySpec_FindSlot()).  The slots of all the classes of a spec are in
+  the table of its first type.
+
 The facts are those of facts.py, derived from the residual code and from
 the Python references of the C functions it calls.  They hold only for
 the exact argument types of their entry: a subclass instance uses the
@@ -47,7 +59,7 @@ generic entry.
 import ast
 import builtins
 
-from . import builtin_types, emit, facts, partial_eval
+from . import builtin_types, emit, facts, partial_eval, slots
 from .partial_eval import NOTNULL, Value
 
 # Keep a type-specialized variant when its residual has at most this
@@ -113,6 +125,8 @@ def _type_object(tp):
 
 
 def _entry(comment, nargs, facts, const, arg_type, func, arg_names=()):
+    """The lines of a _PySpecCall; *func* is (union member, C name), or
+    None for none."""
     result_type = _type_object(facts.result_type)
     alias = facts.alias if const is None and facts.alias is not None else -1
     return [
@@ -124,7 +138,7 @@ def _entry(comment, nargs, facts, const, arg_type, func, arg_names=()):
         f'        .result_alias = {alias},',
         f'        .arg_type = {_type_object(arg_type)},',
         f'        .result_type = {result_type},',
-        f'        .func.{func[0]} = {func[1]},',
+        *([f'        .func.{func[0]} = {func[1]},'] if func else []),
         '    },',
     ]
 
@@ -146,6 +160,7 @@ def generate(generator, descriptions):
             by_type[cls_name][0] = description
         else:
             methods.append(description)
+    slot_table = None
     for type_name, (new, methods) in by_type.items():
         calls = None
         if new is not None:
@@ -155,6 +170,9 @@ def generate(generator, descriptions):
         if methods:
             lines, method_table = generate_methods(generator, type_name,
                                                    methods)
+            out += lines
+        if slot_table is None:
+            lines, slot_table = generate_slots(generator, type_name)
             out += lines
         out += [
             f'const _PySpecCallTable _PySpec_{type_name}_calls = {{',
@@ -166,6 +184,10 @@ def generate(generator, descriptions):
         if method_table:
             out += [f'    .nmethods = Py_ARRAY_LENGTH({method_table}),',
                     f'    .methods = {method_table},']
+        if slot_table:
+            out += [f'    .nslots = Py_ARRAY_LENGTH({slot_table}),',
+                    f'    .slots = {slot_table},']
+            slot_table = ''
         out += ['};', '']
     return out
 
@@ -302,6 +324,65 @@ def generate_methods(generator, type_name, descriptions):
         comment = f'{name}({", ".join(shown)}){on}'
         out += _entry(comment, nargs, found, None, arg_type,
                       ('meth', meth), arg_names)
+    out += ['};', '']
+    return out, table
+
+
+def generate_slots(generator, type_name):
+    """(C lines, array name) of the facts of the slots of the classes of
+    the spec that have a Python reference, for self of exactly the class;
+    ([], '') when there are none."""
+    spec = generator.spec
+    analyzer = facts.analyzer(spec)
+    dunders = {slotdef.name for slotdef in slots.slotdefs()}
+    entries = []
+    for name in spec.c_implemented_functions():
+        cls_name, _, dunder = name.rpartition('.')
+        if dunder not in dunders:
+            continue
+        tp = builtin_types.by_name(cls_name)
+        type_object = (_type_object(tp) if tp is not None
+                       else generator.type_objects.get(cls_name))
+        if type_object is None:
+            continue
+        arg_names = spec.params(name)
+        env = {arg_names[0]: tp or NOTNULL}
+        env |= {p: NOTNULL for p in arg_names[1:]}
+        generic = analyzer.reference_facts(name, env)
+        if len(arg_names) > 1:
+            for arg_type in builtin_types.CANDIDATES:
+                found = analyzer.reference_facts(
+                    name, env | {arg_names[1]: arg_type})
+                # (An argument type that always raises is left to the
+                # generic entry: nothing uses that.)
+                if found.key() != generic.key() and not found.always_raises:
+                    entries.append((cls_name, dunder, type_object,
+                                    arg_names, arg_type, found))
+        entries.append((cls_name, dunder, type_object, arg_names, None,
+                        generic))
+    if not entries:
+        return [], ''
+    table = f'{type_name}_spec_slots'
+    out = [
+        '/* Facts of the slots of the classes of the spec, derived from '
+        'their Python',
+        ' * references, for self of exactly the class (see '
+        'Include/internal/pycore_pyspec.h). */',
+        f'static const _PySpecSlot {table}[] = {{',
+    ]
+    for cls_name, dunder, type_object, arg_names, arg_type, found in entries:
+        shown = ['self', getattr(arg_type, '__name__', 'x')][:len(arg_names)]
+        # The entry of a call, without the function.
+        entry = _entry(f'{cls_name}.{dunder}({", ".join(shown)})',
+                       len(arg_names), found, None, arg_type, None,
+                       arg_names)
+        out += [entry[0], '    {',
+                f'        .type = {type_object},',
+                f'        .name = "{dunder}",',
+                '        .facts = {',
+                *['    ' + line for line in entry[2:-1]],
+                '        },',
+                '    },']
     out += ['};', '']
     return out, table
 

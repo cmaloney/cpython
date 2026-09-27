@@ -15,6 +15,9 @@ them.  These tests check them without the JIT:
 * HelperTest calls the hand-written C functions the specs call
   (@c_implemented) directly, compares them with their Python references,
   and checks the facts derived from the references the same way.
+* SlotFactsTest checks the slot facts that specialized uops use
+  (_PySpec_FindSlot()) against the derivation, and the uops against the
+  slots.
 * DebugAssertionTest checks the debug-build run-time assertions of
   optimizer facts and the "no Python" tripwire.
 * SoundnessTest pins latent soundness problems found in review.
@@ -336,6 +339,15 @@ class HelperTest(unittest.TestCase):
                              (b'41', False), (memoryview(b'42'), True),
                              (RecordingBuffer(), False), (5, False)],
         'bytes.__buffer__': [(b'abc', 0)],
+        'bytes.__len__': [(b'',), (b'abc',), (BytesSubclass(b'ab'),)],
+        'bytes.__getitem__': [
+            (b'abc', 0), (b'abc', 2), (b'abc', -1), (b'abc', -3),
+            (b'abc', 3), (b'abc', -4), (b'\xff', 0), (b'', 0),
+            (b'abc', True), (b'abc', 2**70), (b'abc', -2**70),
+            (b'abc', IntSubclass(1)), (b'abc', RecordingIndex(1)),
+            (BytesSubclass(b'abc'), 1), (b'abcdef', slice(1, 5, 2)),
+            (b'abc', slice(None)), (b'abc', slice(5, 1)), (b'abc', 'x'),
+            (b'abc', 1.5)],
         # (A function makes a fresh input for each call.)
         'bytes_iterator.__next__': [lambda: (iter(b'a'),),
                                     lambda: (iter(b''),)],
@@ -347,6 +359,8 @@ class HelperTest(unittest.TestCase):
         '_PyBytes_FromHex': lambda s, use_bytearray: (
             (bytearray.fromhex if use_bytearray else bytes.fromhex), (s,)),
         'bytes.__buffer__': lambda b, flags: (bytes.__buffer__, (b, flags)),
+        'bytes.__len__': lambda b: (bytes.__len__, (b,)),
+        'bytes.__getitem__': lambda b, key: (bytes.__getitem__, (b, key)),
         'bytes_iterator.__next__': lambda it: (type(it).__next__, (it,)),
     }
 
@@ -561,6 +575,143 @@ class DebugAssertionTest(unittest.TestCase):
         ''')
         rc, out, err = script_helper.assert_python_ok('-c', code, **JIT_ON)
         self.assertEqual(out.strip(), b'0')
+
+
+def specialize_and_run(func, *args):
+    """func(*args), called often enough for the specializing interpreter
+    (and, when enabled, the JIT) to use its specialized code."""
+    for _ in range(_testinternalcapi.TIER2_THRESHOLD + 2):
+        result = func(*args)
+    return result
+
+
+# (Module level: the JIT leaks a little memory for each fresh function it
+# compiles, which -R would report.)
+def _subscripts(b, indices):
+    out = []
+    for i in indices:
+        try:
+            out.append(b[i])
+        except IndexError as exc:
+            out.append(str(exc))
+    return out
+
+
+def _items(b):
+    return [c for c in b]
+
+
+class SlotFactsTest(unittest.TestCase):
+    """The slot facts (_PySpec_FindSlot()) of the specialized uops that
+    do what a slot does: _BINARY_OP_SUBSCR_BYTES_INT (bytes.__getitem__)
+    and _ITER_NEXT_BYTES (bytes_iterator.__next__, the items of a bytes).
+    The optimizer takes their result facts from the table; here the table
+    must be the facts derived from the references (which HelperTest checks
+    against the slots), each uop must agree with its slot, and a uop that
+    cannot escape needs a slot that runs no Python code."""
+
+    # uop: (type, special method, exact type of the other argument).
+    USES = {
+        '_BINARY_OP_SUBSCR_BYTES_INT': (bytes, '__getitem__', int),
+        '_ITER_NEXT_BYTES': (type(iter(b'')), '__next__', None),
+    }
+
+    def test_table_is_derived(self):
+        spec, facts, _, analyzer = SoundnessTest.analyzer()
+        for uop, (tp, name, arg_type) in self.USES.items():
+            with self.subTest(uop=uop):
+                entry = _testinternalcapi.pyspec_find_slot(tp, name,
+                                                           arg_type)
+                self.assertIsNotNone(entry)
+                spec_name = ('bytes_iterator' if tp is not bytes
+                             else 'bytes') + '.' + name
+                params = spec.params(spec_name)
+                env = {params[0]: tp} if tp is bytes else {}
+                if arg_type is not None:
+                    env[params[1]] = arg_type
+                found = analyzer.reference_facts(spec_name, env)
+                self.assertIs(entry['result_type'], found.result_type)
+                self.assertIs(entry['may_run_python'], found.runs_python)
+                self.assertIs(entry['always_raises'], found.always_raises)
+                # What the uops rely on.
+                self.assertIs(entry['result_type'], int)
+                self.assertFalse(entry['may_run_python'])
+
+    def test_uops_do_not_escape(self):
+        # A uop without HAS_ESCAPES_FLAG runs no Python code: the slot it
+        # copies must not either (test_table_is_derived).
+        path = os.path.join(test_tools.basepath, 'Include', 'internal',
+                            'pycore_uop_metadata.h')
+        try:
+            with open(path, encoding='utf-8') as f:
+                text = f.read()
+        except FileNotFoundError:
+            self.skipTest('needs the source tree')
+        for uop in self.USES:
+            with self.subTest(uop=uop):
+                line = next(line for line in text.splitlines()
+                            if line.strip().startswith(f'[{uop}] = '))
+                self.assertNotIn('HAS_ESCAPES_FLAG', line)
+
+    def test_subscript_agrees(self):
+        values = bytes(range(256))
+        for b, indices in [
+                (values, range(-257, 258)),
+                (b'', range(-2, 3)),
+                (b'\x00\xff', [0, 1, 2, 2**62, -1, -2, -3, True])]:
+            with self.subTest(b=b[:4]):
+                expected = [outcome(bytes.__getitem__, b, i)[0]
+                            for i in indices]
+                got = specialize_and_run(_subscripts, b, indices)
+                self.assertEqual(
+                    [('returns', int, v) if isinstance(v, int)
+                     else ('raises', IndexError, v) for v in got],
+                    expected)
+                for v in got:
+                    if isinstance(v, int):
+                        self.assertIs(type(v), int)
+                        self.assertTrue(sys._is_immortal(v))
+
+    def test_iteration_agrees(self):
+        for b in (bytes(range(256)), b'', b'\x00', b'\xff' * 3):
+            with self.subTest(b=b[:4]):
+                got = specialize_and_run(_items, b)
+                self.assertEqual(got, list(iter(b)))
+                self.assertEqual({type(c) for c in got}, {int} if b else set())
+
+    @requires_jit()
+    @unittest.skipUnless(support.Py_DEBUG, 'debug builds only')
+    @support.requires_subprocess()
+    def test_result_assertions_emitted(self):
+        # Debug builds check the slot facts at run time after the uops.
+        code = textwrap.dedent('''
+            import _opcode
+            from _testinternalcapi import TIER2_THRESHOLD
+            def main():
+                def f(n, b):
+                    x = 0
+                    for i in range(n):
+                        x += b[i & 7]
+                        for c in b:
+                            x += c
+                    return x
+                f(TIER2_THRESHOLD * 2, bytes(range(248, 256)))
+                code = f.__code__
+                for i in range(0, len(code.co_code), 2):
+                    try:
+                        ex = _opcode.get_executor(code, i)
+                    except ValueError:
+                        continue
+                    print(*[op[0] for op in ex])
+            main()
+        ''')
+        rc, out, err = script_helper.assert_python_ok('-c', code, **JIT_ON)
+        uops = out.decode().split()
+        for uop in self.USES:
+            with self.subTest(uop=uop):
+                i = uops.index(uop)
+                self.assertTrue(uops[i + 1].startswith('_ASSERT_RESULT_TYPE'),
+                                uops)
 
 
 class SoundnessTest(unittest.TestCase):

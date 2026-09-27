@@ -3463,6 +3463,29 @@ pyspec_find_call(PyObject *self, PyObject *args)
                         table->calls);
 }
 
+/* pyspec_find_slot(tp, name, arg_type) -> the facts _PySpec_FindSlot() gives
+ * the optimizer for special method *name* of an exact tp, with an argument
+ * of exact type arg_type (None: unknown or none), as a dict, or None. */
+static PyObject *
+pyspec_find_slot(PyObject *self, PyObject *args)
+{
+    PyObject *tp, *arg_type;
+    const char *name;
+    PyTypeObject *at;
+    if (!PyArg_ParseTuple(args, "O!sO", &PyType_Type, &tp, &name,
+                          &arg_type)) {
+        return NULL;
+    }
+    if (pyspec_arg_type(arg_type, &at) < 0) {
+        return NULL;
+    }
+    const _PySpecCall *facts = _PySpec_FindSlot((PyTypeObject *)tp, name, at);
+    if (facts == NULL) {
+        Py_RETURN_NONE;
+    }
+    return pyspec_entry_dict((PyTypeObject *)tp, facts, 0);
+}
+
 /* pyspec_find_method(tp, name, self_or_cls, nargs, arg_type) -> the index of
  * the entry that _PySpec_FindMethod() gives a consumer for method *name* of
  * tp bound to self_or_cls (the class, for a class method), called with
@@ -3865,6 +3888,7 @@ static PyMethodDef module_functions[] = {
     {"pyspec_table", pyspec_table, METH_O},
     {"pyspec_find_call", pyspec_find_call, METH_VARARGS},
     {"pyspec_find_method", pyspec_find_method, METH_VARARGS},
+    {"pyspec_find_slot", pyspec_find_slot, METH_VARARGS},
     {"pyspec_call", pyspec_call, METH_VARARGS},
     {"pyspec_call_method", pyspec_call_method, METH_VARARGS},
     {"pyspec_helper", pyspec_helper, METH_VARARGS},

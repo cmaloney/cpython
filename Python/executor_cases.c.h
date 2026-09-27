@@ -7185,6 +7185,140 @@
             break;
         }
 
+        case _GUARD_NOS_BYTES_r02: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef nos;
+            nos = stack_pointer[-2];
+            PyObject *o = PyStackRef_AsPyObjectBorrow(nos);
+            if (!PyBytes_CheckExact(o)) {
+                UOP_STAT_INC(uopcode, miss);
+                SET_CURRENT_CACHED_VALUES(0);
+                JUMP_TO_JUMP_TARGET();
+            }
+            _tos_cache1 = stack_pointer[-1];
+            _tos_cache0 = nos;
+            SET_CURRENT_CACHED_VALUES(2);
+            stack_pointer += -2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _GUARD_NOS_BYTES_r12: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef nos;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            nos = stack_pointer[-1];
+            PyObject *o = PyStackRef_AsPyObjectBorrow(nos);
+            if (!PyBytes_CheckExact(o)) {
+                UOP_STAT_INC(uopcode, miss);
+                _tos_cache0 = _stack_item_0;
+                SET_CURRENT_CACHED_VALUES(1);
+                JUMP_TO_JUMP_TARGET();
+            }
+            _tos_cache1 = _stack_item_0;
+            _tos_cache0 = nos;
+            SET_CURRENT_CACHED_VALUES(2);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _GUARD_NOS_BYTES_r22: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef nos;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            nos = _stack_item_0;
+            PyObject *o = PyStackRef_AsPyObjectBorrow(nos);
+            if (!PyBytes_CheckExact(o)) {
+                UOP_STAT_INC(uopcode, miss);
+                _tos_cache1 = _stack_item_1;
+                _tos_cache0 = nos;
+                SET_CURRENT_CACHED_VALUES(2);
+                JUMP_TO_JUMP_TARGET();
+            }
+            _tos_cache1 = _stack_item_1;
+            _tos_cache0 = nos;
+            SET_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _GUARD_NOS_BYTES_r33: {
+            CHECK_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef nos;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            _PyStackRef _stack_item_2 = _tos_cache2;
+            nos = _stack_item_1;
+            PyObject *o = PyStackRef_AsPyObjectBorrow(nos);
+            if (!PyBytes_CheckExact(o)) {
+                UOP_STAT_INC(uopcode, miss);
+                _tos_cache2 = _stack_item_2;
+                _tos_cache1 = nos;
+                _tos_cache0 = _stack_item_0;
+                SET_CURRENT_CACHED_VALUES(3);
+                JUMP_TO_JUMP_TARGET();
+            }
+            _tos_cache2 = _stack_item_2;
+            _tos_cache1 = nos;
+            _tos_cache0 = _stack_item_0;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _BINARY_OP_SUBSCR_BYTES_INT_r23: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef sub_st;
+            _PyStackRef bytes_st;
+            _PyStackRef res;
+            _PyStackRef b;
+            _PyStackRef s;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            sub_st = _stack_item_1;
+            bytes_st = _stack_item_0;
+            PyObject *sub = PyStackRef_AsPyObjectBorrow(sub_st);
+            PyObject *bytes = PyStackRef_AsPyObjectBorrow(bytes_st);
+            assert(PyLong_CheckExact(sub));
+            assert(PyBytes_CheckExact(bytes));
+            if (!_PyLong_IsNonNegativeCompact((PyLongObject*)sub)) {
+                UOP_STAT_INC(uopcode, miss);
+                _tos_cache1 = sub_st;
+                _tos_cache0 = bytes_st;
+                SET_CURRENT_CACHED_VALUES(2);
+                JUMP_TO_JUMP_TARGET();
+            }
+            Py_ssize_t index = ((PyLongObject*)sub)->long_value.ob_digit[0];
+            if (PyBytes_GET_SIZE(bytes) <= index) {
+                UOP_STAT_INC(uopcode, miss);
+                _tos_cache1 = sub_st;
+                _tos_cache0 = bytes_st;
+                SET_CURRENT_CACHED_VALUES(2);
+                JUMP_TO_JUMP_TARGET();
+            }
+            unsigned char c = ((PyBytesObject *)bytes)->ob_sval[index];
+            STAT_INC(BINARY_OP, hit);
+            PyObject *res_o = (PyObject *)&_PyLong_SMALL_INTS[_PY_NSMALLNEGINTS + c];
+            b = bytes_st;
+            s = sub_st;
+            res = PyStackRef_FromPyObjectBorrow(res_o);
+            _tos_cache2 = s;
+            _tos_cache1 = b;
+            _tos_cache0 = res;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
         case _GUARD_NOS_TUPLE_r02: {
             CHECK_CURRENT_CACHED_VALUES(0);
             ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
@@ -15755,6 +15889,289 @@
             uintptr_t i = PyStackRef_UntagInt(null_or_index);
             assert((size_t)i < (size_t)PyTuple_GET_SIZE(tuple_o));
             next = PyStackRef_FromPyObjectNew(PyTuple_GET_ITEM(tuple_o, i));
+            null_or_index = PyStackRef_IncrementTaggedIntNoOverflow(null_or_index);
+            _tos_cache2 = next;
+            _tos_cache1 = null_or_index;
+            _tos_cache0 = iter;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ITER_CHECK_BYTES_r02: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef null_or_index;
+            _PyStackRef iter;
+            null_or_index = stack_pointer[-1];
+            iter = stack_pointer[-2];
+            PyObject *iter_o = PyStackRef_AsPyObjectBorrow(iter);
+            if (Py_TYPE(iter_o) != &PyBytes_Type) {
+                UOP_STAT_INC(uopcode, miss);
+                SET_CURRENT_CACHED_VALUES(0);
+                JUMP_TO_JUMP_TARGET();
+            }
+            assert(PyStackRef_IsTaggedInt(null_or_index));
+            _tos_cache1 = null_or_index;
+            _tos_cache0 = iter;
+            SET_CURRENT_CACHED_VALUES(2);
+            stack_pointer += -2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ITER_CHECK_BYTES_r12: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef null_or_index;
+            _PyStackRef iter;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            null_or_index = _stack_item_0;
+            iter = stack_pointer[-1];
+            PyObject *iter_o = PyStackRef_AsPyObjectBorrow(iter);
+            if (Py_TYPE(iter_o) != &PyBytes_Type) {
+                UOP_STAT_INC(uopcode, miss);
+                _tos_cache0 = null_or_index;
+                SET_CURRENT_CACHED_VALUES(1);
+                JUMP_TO_JUMP_TARGET();
+            }
+            assert(PyStackRef_IsTaggedInt(null_or_index));
+            _tos_cache1 = null_or_index;
+            _tos_cache0 = iter;
+            SET_CURRENT_CACHED_VALUES(2);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ITER_CHECK_BYTES_r22: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef null_or_index;
+            _PyStackRef iter;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            null_or_index = _stack_item_1;
+            iter = _stack_item_0;
+            PyObject *iter_o = PyStackRef_AsPyObjectBorrow(iter);
+            if (Py_TYPE(iter_o) != &PyBytes_Type) {
+                UOP_STAT_INC(uopcode, miss);
+                _tos_cache1 = null_or_index;
+                _tos_cache0 = iter;
+                SET_CURRENT_CACHED_VALUES(2);
+                JUMP_TO_JUMP_TARGET();
+            }
+            assert(PyStackRef_IsTaggedInt(null_or_index));
+            _tos_cache1 = null_or_index;
+            _tos_cache0 = iter;
+            SET_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ITER_CHECK_BYTES_r33: {
+            CHECK_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef null_or_index;
+            _PyStackRef iter;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            _PyStackRef _stack_item_2 = _tos_cache2;
+            null_or_index = _stack_item_2;
+            iter = _stack_item_1;
+            PyObject *iter_o = PyStackRef_AsPyObjectBorrow(iter);
+            if (Py_TYPE(iter_o) != &PyBytes_Type) {
+                UOP_STAT_INC(uopcode, miss);
+                _tos_cache2 = null_or_index;
+                _tos_cache1 = iter;
+                _tos_cache0 = _stack_item_0;
+                SET_CURRENT_CACHED_VALUES(3);
+                JUMP_TO_JUMP_TARGET();
+            }
+            assert(PyStackRef_IsTaggedInt(null_or_index));
+            _tos_cache2 = null_or_index;
+            _tos_cache1 = iter;
+            _tos_cache0 = _stack_item_0;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        /* _ITER_JUMP_BYTES is not a viable micro-op for tier 2 because it is replaced */
+
+        case _GUARD_NOT_EXHAUSTED_BYTES_r02: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef null_or_index;
+            _PyStackRef iter;
+            null_or_index = stack_pointer[-1];
+            iter = stack_pointer[-2];
+            PyObject *bytes_o = PyStackRef_AsPyObjectBorrow(iter);
+            assert(Py_TYPE(bytes_o) == &PyBytes_Type);
+            if ((size_t)PyStackRef_UntagInt(null_or_index) >= (size_t)PyBytes_GET_SIZE(bytes_o)) {
+                UOP_STAT_INC(uopcode, miss);
+                SET_CURRENT_CACHED_VALUES(0);
+                JUMP_TO_JUMP_TARGET();
+            }
+            _tos_cache1 = null_or_index;
+            _tos_cache0 = iter;
+            SET_CURRENT_CACHED_VALUES(2);
+            stack_pointer += -2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _GUARD_NOT_EXHAUSTED_BYTES_r12: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef null_or_index;
+            _PyStackRef iter;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            null_or_index = _stack_item_0;
+            iter = stack_pointer[-1];
+            PyObject *bytes_o = PyStackRef_AsPyObjectBorrow(iter);
+            assert(Py_TYPE(bytes_o) == &PyBytes_Type);
+            if ((size_t)PyStackRef_UntagInt(null_or_index) >= (size_t)PyBytes_GET_SIZE(bytes_o)) {
+                UOP_STAT_INC(uopcode, miss);
+                _tos_cache0 = null_or_index;
+                SET_CURRENT_CACHED_VALUES(1);
+                JUMP_TO_JUMP_TARGET();
+            }
+            _tos_cache1 = null_or_index;
+            _tos_cache0 = iter;
+            SET_CURRENT_CACHED_VALUES(2);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _GUARD_NOT_EXHAUSTED_BYTES_r22: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef null_or_index;
+            _PyStackRef iter;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            null_or_index = _stack_item_1;
+            iter = _stack_item_0;
+            PyObject *bytes_o = PyStackRef_AsPyObjectBorrow(iter);
+            assert(Py_TYPE(bytes_o) == &PyBytes_Type);
+            if ((size_t)PyStackRef_UntagInt(null_or_index) >= (size_t)PyBytes_GET_SIZE(bytes_o)) {
+                UOP_STAT_INC(uopcode, miss);
+                _tos_cache1 = null_or_index;
+                _tos_cache0 = iter;
+                SET_CURRENT_CACHED_VALUES(2);
+                JUMP_TO_JUMP_TARGET();
+            }
+            _tos_cache1 = null_or_index;
+            _tos_cache0 = iter;
+            SET_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _GUARD_NOT_EXHAUSTED_BYTES_r33: {
+            CHECK_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef null_or_index;
+            _PyStackRef iter;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            _PyStackRef _stack_item_2 = _tos_cache2;
+            null_or_index = _stack_item_2;
+            iter = _stack_item_1;
+            PyObject *bytes_o = PyStackRef_AsPyObjectBorrow(iter);
+            assert(Py_TYPE(bytes_o) == &PyBytes_Type);
+            if ((size_t)PyStackRef_UntagInt(null_or_index) >= (size_t)PyBytes_GET_SIZE(bytes_o)) {
+                UOP_STAT_INC(uopcode, miss);
+                _tos_cache2 = null_or_index;
+                _tos_cache1 = iter;
+                _tos_cache0 = _stack_item_0;
+                SET_CURRENT_CACHED_VALUES(3);
+                JUMP_TO_JUMP_TARGET();
+            }
+            _tos_cache2 = null_or_index;
+            _tos_cache1 = iter;
+            _tos_cache0 = _stack_item_0;
+            SET_CURRENT_CACHED_VALUES(3);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ITER_NEXT_BYTES_r03: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef null_or_index;
+            _PyStackRef iter;
+            _PyStackRef next;
+            null_or_index = stack_pointer[-1];
+            iter = stack_pointer[-2];
+            PyObject *bytes_o = PyStackRef_AsPyObjectBorrow(iter);
+            assert(Py_TYPE(bytes_o) == &PyBytes_Type);
+            uintptr_t i = PyStackRef_UntagInt(null_or_index);
+            assert((size_t)i < (size_t)PyBytes_GET_SIZE(bytes_o));
+            unsigned char c = ((PyBytesObject *)bytes_o)->ob_sval[i];
+            next = PyStackRef_FromPyObjectBorrow(
+                (PyObject *)&_PyLong_SMALL_INTS[_PY_NSMALLNEGINTS + c]);
+            null_or_index = PyStackRef_IncrementTaggedIntNoOverflow(null_or_index);
+            _tos_cache2 = next;
+            _tos_cache1 = null_or_index;
+            _tos_cache0 = iter;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -2;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ITER_NEXT_BYTES_r13: {
+            CHECK_CURRENT_CACHED_VALUES(1);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef null_or_index;
+            _PyStackRef iter;
+            _PyStackRef next;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            null_or_index = _stack_item_0;
+            iter = stack_pointer[-1];
+            PyObject *bytes_o = PyStackRef_AsPyObjectBorrow(iter);
+            assert(Py_TYPE(bytes_o) == &PyBytes_Type);
+            uintptr_t i = PyStackRef_UntagInt(null_or_index);
+            assert((size_t)i < (size_t)PyBytes_GET_SIZE(bytes_o));
+            unsigned char c = ((PyBytesObject *)bytes_o)->ob_sval[i];
+            next = PyStackRef_FromPyObjectBorrow(
+                (PyObject *)&_PyLong_SMALL_INTS[_PY_NSMALLNEGINTS + c]);
+            null_or_index = PyStackRef_IncrementTaggedIntNoOverflow(null_or_index);
+            _tos_cache2 = next;
+            _tos_cache1 = null_or_index;
+            _tos_cache0 = iter;
+            SET_CURRENT_CACHED_VALUES(3);
+            stack_pointer += -1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ITER_NEXT_BYTES_r23: {
+            CHECK_CURRENT_CACHED_VALUES(2);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef null_or_index;
+            _PyStackRef iter;
+            _PyStackRef next;
+            _PyStackRef _stack_item_0 = _tos_cache0;
+            _PyStackRef _stack_item_1 = _tos_cache1;
+            null_or_index = _stack_item_1;
+            iter = _stack_item_0;
+            PyObject *bytes_o = PyStackRef_AsPyObjectBorrow(iter);
+            assert(Py_TYPE(bytes_o) == &PyBytes_Type);
+            uintptr_t i = PyStackRef_UntagInt(null_or_index);
+            assert((size_t)i < (size_t)PyBytes_GET_SIZE(bytes_o));
+            unsigned char c = ((PyBytesObject *)bytes_o)->ob_sval[i];
+            next = PyStackRef_FromPyObjectBorrow(
+                (PyObject *)&_PyLong_SMALL_INTS[_PY_NSMALLNEGINTS + c]);
             null_or_index = PyStackRef_IncrementTaggedIntNoOverflow(null_or_index);
             _tos_cache2 = next;
             _tos_cache1 = null_or_index;
