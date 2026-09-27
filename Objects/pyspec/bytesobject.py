@@ -9,7 +9,10 @@ body of ``...`` are implemented in C by hand.  The others (``__new__``,
 impls into Objects/clinic/bytesobject_pyspec.c.h and, for the vectorcall
 of ``__new__``, bytes_new_nargsN(): ``__new__`` partially evaluated for
 exactly bytes and N positional arguments.  Top-level functions are C
-functions of the same name.
+functions of the same name: generated from their body, or, with
+``@c_implemented``, written by hand in C, the body being their Python
+reference.  The C functions of other files the bodies call are imported
+from the specs of those files.
 
 The classes are the whole types: ``@static_type`` makes clinic generate
 PyBytes_Type and PyBytesIter_Type, their method tables and slot tables,
