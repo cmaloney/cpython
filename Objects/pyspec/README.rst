@@ -183,3 +183,6 @@ aborting when Python code runs where the facts say none does.
 Clinic reports every error as ``path:line: error: message``, at the line
 of the spec when the error is in the spec.  The implementation is in
 ``Tools/clinic/libclinic/pyspec/``.
+
+To migrate a C file to a spec, and to decide whether a function is
+worth a spec body, see `MIGRATING.rst <MIGRATING.rst>`_.
