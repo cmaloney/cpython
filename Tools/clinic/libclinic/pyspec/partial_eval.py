@@ -198,9 +198,8 @@ def evaluate(expr, env, ev):
             return value != isinstance(op, ast.IsNot)
         case ast.Call(func=ast.Name('isinstance'), args=[obj, cls]):
             tp, klass = exact_type(obj, env), _builtin_type(cls)
-            if tp is None or klass is None:
-                return None
-            return ev.facts.is_subclass(tp, klass)
+            mro = tp and klass and ev.facts.mro(tp)
+            return klass in mro if mro else None
         case ast.Call(func=ast.Name('hasattr'), args=[type_call, name]) \
                 if _is_type_call(type_call):
             tp = exact_type(type_call.args[0], env)

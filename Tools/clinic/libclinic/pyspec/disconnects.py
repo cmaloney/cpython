@@ -744,14 +744,10 @@ def typeshed(srcdir, typeshed_dir):
 # argument: the calls(x, "__name__") that accounts for them.  A call
 # through a slot (``->nb_index(...)``, or a local set from one) is read
 # from slotdefs[] (slots.py).
-SLOT_CALLS = {
-    'PyObject_GetBuffer': '__buffer__',
-    'PyBuffer_Release': '__release_buffer__',
-    'PyObject_Length': '__len__',
-    'PyObject_Size': '__len__',
-    'PyObject_GetIter': '__iter__',
-    'PyIter_Next': '__next__',
-}
+SLOT_CALLS = {'PyObject_GetBuffer': '__buffer__',
+              'PyBuffer_Release': '__release_buffer__',
+              'PyObject_Length': '__len__', 'PyObject_Size': '__len__',
+              'PyObject_GetIter': '__iter__', 'PyIter_Next': '__next__'}
 
 # Audited: C functions without a spec (and not in the file of the function
 # checked, which is read) that run no Python code.  Errors, memory, the

@@ -174,12 +174,6 @@ class TypeFacts:
         owner = self.owner(tp, name)
         return None if owner is None else owner is not False
 
-    def is_subclass(self, tp, klass):
-        mro = self.mro(tp)
-        if mro is None:
-            return None
-        return klass in mro
-
     def special(self, tp, name):
         """The special method *name* of exact type tp: (the spec function
         that implements it, None) for a spec class, (None, its TABLE
