@@ -15,6 +15,9 @@ them.  These tests check them without the JIT:
 * HelperTest calls the hand-written C functions the specs call
   (@c_implemented) directly, compares them with their Python references,
   and checks the facts derived from the references the same way.
+* SlotFactsTest checks the slot facts that specialized uops use
+  (_PySpec_FindSlot()) against the derivation, and the uops against the
+  slots.
 * DebugAssertionTest checks the debug-build run-time assertions of
   optimizer facts and the "no Python" tripwire.
 * SoundnessTest pins latent soundness problems found in review.
