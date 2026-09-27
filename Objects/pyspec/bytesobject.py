@@ -92,6 +92,9 @@ class bytes:
             if isinstance(source, str):
                 raise TypeError("string argument without an encoding")
             raise TypeError("errors without a string argument")
+        # bytes.__bytes__ of an exact bytes returns it: no lookup, no call.
+        if type(source) is bytes:
+            return source
         # We'd like to call PyObject_Bytes here, but we need to check for an
         # integer argument before deferring to PyBytes_FromObject, something
         # PyObject_Bytes doesn't do.

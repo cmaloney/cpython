@@ -7020,8 +7020,8 @@ class BytesSpecFactsTest(TestCase):
         return self.facts('bytes.__bytes__', env, ['self'])
 
     def test_bytes_of_exact_bytes(self):
-        # bytes.__new__ -> lookup_special(__bytes__) -> bytes.__bytes__,
-        # which is "return self" for exact bytes: bytes(b) is b.
+        # bytes.__new__ returns an exact bytes argument (what
+        # bytes.__bytes__ returns for it): bytes(b) is b.
         residual, facts = self.new_facts(bytes)
         self.assertEqual(ast.unparse(ast.Module(residual, [])),
                          'return source')
@@ -7050,17 +7050,15 @@ class BytesSpecFactsTest(TestCase):
         self.assertIsNot(bytes(BYTES_CASES.BytesSubclass(b'x')), b)
 
     def test_bytes_of_unknown(self):
-        # For an argument of unknown type, the __bytes__ lookup is
-        # versioned for exact bytes, where it is known to find
-        # bytes.__bytes__, which returns its argument: no lookup, no call.
-        # The other types are not exactly bytes: the later test of
-        # PyBytes_FromObject() is gone.
+        # bytes.__new__ returns an exact bytes argument before the
+        # __bytes__ lookup.  After that test, the argument is not exactly
+        # bytes: the later test of PyBytes_FromObject() is gone.
         residual, _ = self.new_facts(None)
         first = residual[0]
         self.assertEqual(ast.unparse(first.test), 'type(source) is bytes')
         self.assertEqual(ast.unparse(ast.Module(first.body, [])),
                          'return source')
-        code = ast.unparse(ast.Module(first.orelse, []))
+        code = ast.unparse(ast.Module(residual[1:], []))
         self.assertIn('_PyObject_LookupSpecial', code)
         self.assertNotIn('is bytes', code)
 

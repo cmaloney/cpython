@@ -39,9 +39,7 @@ the exact type of x is known (from the call site, or from a
 When the exact type of x is not known where ``it = iter(x)`` is
 evaluated, the rest of the block is versioned: specialized for an exact
 list and an exact tuple when that gives an index loop, and kept generic
-for other types (VERSIONED_ITERABLES).  ``_PyObject_LookupSpecial(x,
-name)`` is versioned the same way for the spec types on which the special
-method it finds is pure (bytes.__bytes__ on exactly bytes: ``return x``).
+for other types (VERSIONED_ITERABLES).
 
 Arity functions.  Where the rest of a __new__ body has the facts of one
 of its NAME_nargsN() functions (emit.py) and is that whole function, it
@@ -124,24 +122,6 @@ SEQUENCES = (list, tuple)
 VERSIONED_ITERABLES = SEQUENCES
 
 
-class Bound:
-    """The name refers to a spec method bound to an argument, whose call
-    evaluates to *value* (an ast node) without side effects.
-
-    ``(func := _PyObject_LookupSpecial(x, "__bytes__")) is not NULL``
-    binds func when the exact type of x is a type TypeFacts knows (a
-    static type) whose __bytes__ is a spec method, and that method,
-    partially evaluated for x, is just ``return self`` (or a constant):
-    ``result = func()`` then becomes ``result`` is x.  A static type
-    cannot change, so the lookup is decided by the type alone; a heap type
-    (e.g. a subclass) is not.
-    """
-
-    def __init__(self, name, value):
-        self.name = name
-        self.value = value
-
-
 MAX_INLINE_DEPTH = 8
 
 
@@ -175,9 +155,7 @@ def arg_fact(node, env):
             return NULL
         case ast.Name(name) if name in env:
             fact = env[name]
-            if isinstance(fact, (IterOf, Bound)):
-                return NOTNULL
-            return fact
+            return NOTNULL if isinstance(fact, IterOf) else fact
         case ast.Name(name) if hasattr(builtins, name):
             return Value(getattr(builtins, name))
         case ast.Constant(value):
@@ -289,7 +267,8 @@ def refine(test, env):
     """The environments of the body and of the else clause of
     ``if test`` that is not decided by *env*: ``type(x) is K`` gives x
     the exact type K in the body (and in the else clause for ``is
-    not``), ``x is NULL`` and ``x is K`` (x is the type K) are decided."""
+    not``), and in the other clause, x is not exactly K; ``x is NULL``
+    and ``x is K`` (x is the type K) are decided."""
     match test:
         case ast.Compare(left=ast.Name(name),
                          ops=[ast.Is() | ast.IsNot() as op],
@@ -311,9 +290,14 @@ def refine(test, env):
             klass = _builtin_type(right)
             if klass is not None:
                 known = env | {name: klass}
+                other = env
+                if env.get(name) in (None, NOTNULL) or isinstance(
+                        env.get(name), Other):
+                    excluded = getattr(env.get(name), 'types', ())
+                    other = env | {name: Other([*excluded, klass])}
                 if isinstance(op, ast.IsNot):
-                    return env, known
-                return known, env
+                    return other, known
+                return known, other
         case ast.BoolOp(op=ast.And(), values=values):
             body = env
             for value in values:
@@ -464,17 +448,6 @@ class _Rename(ast.NodeTransformer):
         return ast.copy_location(new, node)
 
 
-def _pure_value(residual, param):
-    """The value of a residual that is just ``return <param or constant>``
-    (the parameter as ast.Name), or None."""
-    match residual:
-        case [ast.Return(value=ast.Name(name) as value)] if name == param:
-            return value
-        case [ast.Return(value=ast.Constant() as value)]:
-            return value
-    return None
-
-
 def _mark_len(node, env):
     """Mark the ``len(x)`` calls in *node* with the exact type of x, when
     its size is read inline (builtin_types.Row.size)."""
@@ -548,53 +521,6 @@ class Evaluator:
             break
         return [stmt], env
 
-    def special_method(self, tp, name):
-        """The spec method (name) that _PyObject_LookupSpecial(x, name)
-        finds for an object x of exact type tp, or None when not known
-        statically.  The types TypeFacts knows are static types: their
-        methods cannot change."""
-        owner = self.facts.owner(tp, name)
-        if not owner:
-            return None
-        spec_name = f'{owner.__name__}.{name}'
-        node = self.spec.functions.get(spec_name)
-        if self.spec.implemented(spec_name) and not node.decorator_list:
-            return spec_name
-        return None
-
-    def bind_special(self, test, env, depth):
-        """For ``if (v := _PyObject_LookupSpecial(x, "name")) is [not]
-        NULL`` that finds a spec method whose call on x is pure: (v, Bound,
-        is the test true).  Otherwise None."""
-        match test:
-            case ast.Compare(
-                    left=ast.NamedExpr(
-                        target=ast.Name(target),
-                        value=ast.Call(
-                            func=ast.Name('_PyObject_LookupSpecial'),
-                            args=[ast.Name(obj) as obj_node,
-                                  ast.Constant(str() as name)])),
-                    ops=[ast.Is() | ast.IsNot() as op],
-                    comparators=[ast.Name('NULL')]):
-                pass
-            case _:
-                return None
-        tp = env.get(obj)
-        if not isinstance(tp, type) or depth >= MAX_INLINE_DEPTH:
-            return None
-        spec_name = self.special_method(tp, name)
-        if spec_name is None:
-            return None
-        self_param = self.spec.params(spec_name)[0]
-        residual = Evaluator(self.spec).block(self.spec.body(spec_name),
-                                              {self_param: tp}, depth + 1)
-        value = _pure_value(residual, self_param)
-        if value is None:
-            return None
-        if isinstance(value, ast.Name):
-            value = copy.copy(obj_node)
-        return target, Bound(spec_name, value), isinstance(op, ast.IsNot)
-
     def _is_spec_call(self, node):
         return (isinstance(node, ast.Call)
                 and self.spec.call_target(node.func) is not None)
@@ -626,16 +552,6 @@ class Evaluator:
                     break
             stmt = stmts[i]
             i += 1
-            match stmt:
-                case ast.Assign(targets=[ast.Name(target)],
-                                value=ast.Call(func=ast.Name(func), args=[]))\
-                        if isinstance(env.get(func), Bound):
-                    # result = func() of a pure bound spec method: result
-                    # is its value from here on.
-                    rename = _Rename({target: env[func].value})
-                    stmts[i:] = [rename.visit(copy.deepcopy(s))
-                                 for s in stmts[i:]]
-                    continue
             iteration = _iter_assignment(stmt)
             if iteration is not None:
                 target, source = iteration
@@ -653,26 +569,7 @@ class Evaluator:
                     if versioned is not None:
                         out += versioned
                         break
-            bound = (self.bind_special(stmt.test, env, depth)
-                     if isinstance(stmt, ast.If) else None)
-            specials = (self.pure_specials(stmt.test)
-                        if isinstance(stmt, ast.If) and bound is None
-                        else None)
-            if specials and specials[1] and self.can_version(env,
-                                                             specials[0]):
-                # The lookup and the call are known for these exact types:
-                # versioned, as for iteration.
-                versioned = self.version(specials[0], [stmt, *stmts[i:]],
-                                         env, depth, inline, specials[1])
-                if versioned is not None:
-                    out += versioned
-                    break
-            if bound is not None:
-                target, method, value = bound
-                env = env | {target: method}
-                out += self.block(stmt.body if value else stmt.orelse, env,
-                                  depth, inline)
-            elif isinstance(stmt, ast.If):
+            if isinstance(stmt, ast.If):
                 value = evaluate(stmt.test, env, self)
                 if value is True:
                     left = getattr(stmt.test, 'left', None)
@@ -765,7 +662,7 @@ class Evaluator:
             if isinstance(fact, IterOf):
                 fact = (IterOf(params[args.index(fact.source)], fact.tp)
                         if fact.source in args else NOTNULL)
-            if fact is not None and not isinstance(fact, Bound):
+            if fact is not None:
                 callee_env[param] = fact
         special = specialize_call(self.spec, name, callee_env, depth + 1)
         if special is None:
@@ -787,21 +684,20 @@ class Evaluator:
         value = env.get(name)
         return not (value == NULL or isinstance(value, (type, Value, IterOf)))
 
-    def version(self, name, tail, env, depth, inline, types=None):
+    def version(self, name, tail, env, depth, inline):
         """*tail*, which starts iterating *name* (of unknown type),
         specialized for each exact type of VERSIONED_ITERABLES that gives
-        an index loop (or for each of *types*), and kept generic for the
-        other types, as a chain of ``if type(name) is K:``; None if no
-        type gives an index loop."""
+        an index loop, and kept generic for the other types, as a chain of
+        ``if type(name) is K:``; None if no type gives an index loop."""
         known = env.get(name)
         excluded = known.types if isinstance(known, Other) else ()
         branches = []
-        for tp in types or VERSIONED_ITERABLES:
+        for tp in VERSIONED_ITERABLES:
             if tp in excluded:
                 continue
             residual = self.block(copy.deepcopy(tail), env | {name: tp},
                                   depth, True)
-            if types or name in _index_loops(self.spec, residual):
+            if name in _index_loops(self.spec, residual):
                 branches.append((tp, residual))
         if not branches:
             return None
@@ -810,27 +706,6 @@ class Evaluator:
         for tp, residual in reversed(branches):
             out = [ast.If(_type_test(name, tp), residual, out)]
         return out
-
-    def pure_specials(self, test):
-        """(x, the types whose special method the test looks up is pure
-        on x: see bind_special()) for ``if (v := _PyObject_LookupSpecial(x,
-        "name")) is [not] NULL``; else None."""
-        match test:
-            case ast.Compare(
-                    left=ast.NamedExpr(value=ast.Call(
-                        func=ast.Name('_PyObject_LookupSpecial'),
-                        args=[ast.Name(obj), ast.Constant(str())])),
-                    comparators=[ast.Name('NULL')]):
-                pass
-            case _:
-                return None
-        types = []
-        for cls_name in self.spec.classes:
-            tp = getattr(builtins, cls_name, None)
-            if (isinstance(tp, type) and self.facts.spec_class(tp)
-                    and self.bind_special(test, {obj: tp}, 0) is not None):
-                types.append(tp)
-        return obj, types
 
     def loop(self, stmt, env, depth, inline):
         """``for item in it:``, specialized: see the module docstring.
