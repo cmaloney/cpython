@@ -964,16 +964,17 @@ def presize(spec, stmts):
     for stmt in stmts:
         match stmt:
             case ast.Assign(targets=[ast.Name(target)],
-                            value=ast.Call(func=ast.Name('len'),
-                                           args=[ast.Name(arg)]) as call) \
-                    if getattr(call, 'pyspec_exact', None):
-                lengths[target] = arg
-                continue
-            case ast.Assign(targets=[ast.Name(target)],
-                            value=ast.Call(args=[ast.Name(arg)]) as call) \
-                    if arg in lengths and _initializes(spec, call):
-                capacity[target] = lengths[arg]
-                continue
+                            value=ast.Call(args=[ast.Name(arg)]) as call):
+                found = spec.c_function(call)
+                if getattr(call, 'pyspec_exact', None):     # len(arg)
+                    lengths[target] = arg
+                    continue
+                if (arg in lengths and found
+                        and frontend.is_c_implemented(found[1])
+                        and frontend.is_struct(
+                            frontend.c_signature(found[1])[1])):
+                    capacity[target] = lengths[arg]     # init(len(seq))
+                    continue
             case ast.Try(finalbody=[_, *_], handlers=[]):
                 # The release in the finally clause runs after the loop.
                 _presize_loops(spec, stmt.body, capacity)
@@ -981,14 +982,6 @@ def presize(spec, stmts):
         _presize_loops(spec, [stmt], capacity)
         loaded = _names_loaded([stmt])
         capacity = {b: q for b, q in capacity.items() if b not in loaded}
-
-
-def _initializes(spec, call):
-    """Whether *call* calls a @c_implemented function that initializes a
-    C struct (a buffer) in place."""
-    found = spec.c_function(call)
-    return bool(found) and frontend.is_c_implemented(found[1]) and \
-        frontend.is_struct(frontend.c_signature(found[1])[1])
 
 
 def _presize_loops(spec, stmts, capacity):
@@ -1009,21 +1002,17 @@ def _presize_loops(spec, stmts, capacity):
                                and node.value.args
                                and isinstance(node.value.args[0], ast.Name)
                                and node.value.args[0].id == buffer]
-                    if sequence == seq and len(appends) == 1:
-                        _take_fast_path(spec, appends[0])
-
-
-def _take_fast_path(spec, stmt):
-    """Replace the call of expression statement *stmt* by the value of
-    its first fast path, in place."""
-    found = spec.c_function(stmt.value)
-    if not found:
-        return
-    paths, params = fast_paths(found[0], found[1].name)
-    if paths:
-        rename = _Rename(dict(zip(params, stmt.value.args)))
-        stmt.value = _scoped(rename.visit(copy.deepcopy(paths[0][1])),
-                             found[0])
+                    found = appends and spec.c_function(appends[0].value)
+                    if sequence != seq or len(appends) != 1 or not found:
+                        continue
+                    # The value of its first fast path, in place.
+                    paths, params = fast_paths(found[0], found[1].name)
+                    if paths:
+                        rename = _Rename(dict(zip(params,
+                                                  appends[0].value.args)))
+                        appends[0].value = _scoped(
+                            rename.visit(copy.deepcopy(paths[0][1])),
+                            found[0])
 
 
 def remove_dead_iterators(stmts, live=frozenset()):
