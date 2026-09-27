@@ -70,10 +70,9 @@ Python; the docs and typeshed ratchets can compare with it.
 *Parity:* ``git diff HEAD~ -- Objects/clinic/foo.c.h`` is empty.  In
 ``foo.c`` only the blocks and their ``input=`` checksums change.
 
-*Today levels 1 and 2 are one PR:* clinic generates the tables of every
-spec class that ``foo.c`` declares, which would define
-``<prefix>_methods[]`` a second time next to the hand-written one.  Do
-both levels, and both parity checks, in the same PR.
+*A PR of its own:* a class that declares no slot declares its methods
+only, so clinic generates no tables for it and the hand-written method
+table stays (``Modules/pyspec/mmapmodule.py`` is such a spec).
 
 *Size:* WS7's census: ``tupleobject.c`` 4 functions (29 block lines
 become 6, spec 29 lines), ``floatobject.c`` 14 (91 to 19, spec 96),
@@ -91,7 +90,8 @@ Level 2: method and slot tables
 '''''''''''''''''''''''''''''''
 
 *Needs:* the slots as dunders in the class (``def __len__(self, /):
-...``, no docstring, the whole richcompare group), ``@c_name`` where
+...``, no docstring, the whole richcompare group); declaring a slot is
+what makes clinic generate the tables of the class.  ``@c_name`` where
 the C name is not the default, and hand-written ``PyCFunction``\ s as
 ``@c_name(METH_O="f")``.  In ``foo.c``: delete the hand-written
 ``PyDoc_STRVAR`` of the type, the ``PyMethodDef`` array and the
