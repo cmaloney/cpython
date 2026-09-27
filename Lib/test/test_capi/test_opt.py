@@ -3440,8 +3440,8 @@ class TestUopsOptimization(unittest.TestCase):
 
     def test_call_builtin_class_pyspec_alias(self):
         # bytes(b) of an exact bytes b is b itself, derived from the spec
-        # (bytes.__new__ -> lookup_special __bytes__ -> bytes.__bytes__,
-        # "return self" when type(self) is bytes): the call is removed.
+        # (bytes.__new__ returns an exact bytes argument): the call is
+        # removed.
         # The borrowed argument is made a strong reference in the result
         # slot, and the class takes its slot: both pops are free.
         def testfunc(n, b):

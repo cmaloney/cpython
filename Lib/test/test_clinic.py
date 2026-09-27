@@ -7185,7 +7185,7 @@ class BytesSpecFactsTest(TestCase):
                                  inline=False, arities=arities)
         self.assertEqual(ast.unparse(residual[-1]),
                          'return bytes_new_nargs1(source)')
-        self.assertNotIn('lookup_special',
+        self.assertNotIn('_PyObject_LookupSpecial',
                          ast.unparse(ast.Module(residual, [])))
 
     def test_dunder_bytes(self):
