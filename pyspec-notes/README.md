@@ -74,6 +74,7 @@ change: drop it before proposing anything.
 | 3b | bytearray from a spec; PyTypeObject back in C (`@static_type`/`@final` removed) | merged | `reports/phase3b_bytearray.md` |
 | Cond | `#if` handled as plain clinic; mmap sample | merged | `reports/phase3_conditionals.md` |
 | Guide | MIGRATING.rst + pyspec_bench.py; removeprefix worked example: keep in C | merged | `reports/phase3_migration_guide.md` |
+| 3a | bytes slot facts; `BINARY_OP_SUBSCR_BYTES_INT`, `FOR_ITER_BYTES` | merged | `reports/phase3a_slot_specializations.md` |
 
 `DESIGN.md` is the shared brief every agent read (goals, decisions, resource rules);
 `PROPOSALS.md` holds P1/P2.
@@ -96,20 +97,25 @@ Every `bytes()` call shape is below main, JIT on and off (full table:
 `reports/phase1_A.md`).  Examples, main -> branch: `bytes(list256)` 6849/1227 ->
 5124/872; `bytes(list16)` 1329/250 -> 798/157; `bytes(b16)` 923/187 -> 218/43;
 `bytes(range256)` 25572/5149 -> 15412/3000; `Sub(b16)` 1332/269 -> 1058/201.
-Methods, slots and startup are neutral; pyperformance shows no bytes-attributable
+3a: `b16[i]` 141 -> 44 net instructions, `for c in b16` 93 -> 59 per item; pyflate
+-3.1% instructions, -1.2..-2.2% cycles (perf stat), ~-0.4% wall clock (pyperformance,
+inside A/A noise).  Other methods, `==`, hash and startup are neutral; pyperformance shows no bytes-attributable
 change (bytes calls are <1% of every benchmark).  bytes code is +1.3 KB vs main.
 P2 changed no shape for the worse (non-PGO instruction counts); `bytes(16)` now uses
 the no-Python call (442 -> 433 instructions).
 
-## Test status (commit eb5f003ccc5)
+## Test status (commit 300ec600747)
 Debug JIT build `../build-exp` (srcdir: this checkout): test_clinic, test_bytes,
 test_mmap, test_inspect, test_iter, test_pydoc, test_descr, test_pickle, test_buffer,
-test_int, test_pyspec_catalog, test_pyspec_facts, test_tools.test_pyspec_bench pass
-(2884 tests); test_capi alone passes.  Running test_opt after other modules in one
-invocation fails guard-removal tests, as on main (upstream order dependency).
-`PYTHON_JIT=0 -R 3:3` on test_clinic, test_bytes, test_mmap and the pyspec suites
-passes.  No expected failures.  Clinic on the seven spec-backed files and
-`make regen-cases` leave the tree clean.  Parity with main: `bytearrayobject.c.h`,
+test_int, test_opcache, test_generated_cases, test_pyspec_catalog, test_pyspec_facts,
+test_tools.test_pyspec_bench pass, and test_dis alone; test_capi alone passes.  Running
+test_opt or test_dis after other modules in one invocation fails a few specialization
+tests (e.g. `test_dis.test_show_jit` sees `LOAD_GLOBAL` not `LOAD_GLOBAL_BUILTIN`); main
+fails the same tests in the same combinations (upstream order dependency, worth an
+issue).  `PYTHON_JIT=0 -R 3:3` on test_clinic, test_bytes, test_opcache and the pyspec
+suites passes; JIT-on `-R 3:3` on test_pyspec_facts reports decaying counts (JIT
+warm-up, see open items).  No expected failures.  Clinic on the seven spec-backed files
+and `make regen-cases` leave the tree clean.  Parity with main: `bytearrayobject.c.h`,
 `transmogrify.h.h`, `mmapmodule.c.h` identical; `bytesobject.c.h` differs only in the
 `bytes.__new__` section; bytes/bytearray type dumps identical except
 `bytes.tp_vectorcall`.  Ratchet: docstrings 2, capi 20, docs 0, slots 3, c_calls 0.
@@ -136,7 +142,14 @@ passes.  No expected failures.  Clinic on the seven spec-backed files and
    `pycore_bytes_methods.h` declares nine never-defined docstrings (pre-existing); the
    spec's type-level slot C names are not compared with the C struct (only existence);
    `bytes.lstrip` docstring has a double space (fixing it lets bytearray share it).
-3. Phase 3 (3b bytearray done): `b[i]` and `FOR_ITER` over bytes specializations from slot facts (the only
+2c. From 3a: no magic-number bump for the two new opcodes; the free-threaded build
+   was not re-tested after 3a; "a byte is a small int" is a uop claim (no value
+   ranges in the facts); `_PySpec_FindSlot` looks at bytes' table only (one line per
+   new spec file); `==` specialization skipped (below noise).
+3. Next (queued, needs the user's go-ahead): generated constructor vectorcall for every
+   spec'd type, replacing hand-written `*_vectorcall`; then types in order tuple,
+   int, list, str.  Done in phase 3: bytearray, bytes slot specializations.
+   Previously listed phase 3: `b[i]` and `FOR_ITER` over bytes specializations from slot facts (the only
    measurable end-to-end lever, ~1.5-2% pyflate), then bytearray (shares the stringlib
    specs, removes duplicated docstrings), then tuple, int, list, str.
 4. Upstreamable pieces (see `reports/review_int.md` section 5): doc/docstring/typeshed
