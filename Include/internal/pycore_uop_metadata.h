@@ -141,6 +141,8 @@ const uint32_t _PyUop_Flags[MAX_UOP_ID+1] = {
     [_BINARY_OP_SUBSCR_LIST_SLICE] = HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG,
     [_BINARY_OP_SUBSCR_STR_INT] = HAS_EXIT_FLAG,
     [_BINARY_OP_SUBSCR_USTR_INT] = HAS_EXIT_FLAG,
+    [_GUARD_NOS_BYTES] = HAS_EXIT_FLAG,
+    [_BINARY_OP_SUBSCR_BYTES_INT] = HAS_EXIT_FLAG,
     [_GUARD_NOS_TUPLE] = HAS_EXIT_FLAG,
     [_GUARD_TOS_TUPLE] = HAS_EXIT_FLAG,
     [_GUARD_BINARY_OP_SUBSCR_TUPLE_INT_BOUNDS] = HAS_EXIT_FLAG,
@@ -276,6 +278,9 @@ const uint32_t _PyUop_Flags[MAX_UOP_ID+1] = {
     [_ITER_CHECK_TUPLE] = HAS_EXIT_FLAG,
     [_GUARD_NOT_EXHAUSTED_TUPLE] = HAS_EXIT_FLAG,
     [_ITER_NEXT_TUPLE] = 0,
+    [_ITER_CHECK_BYTES] = HAS_EXIT_FLAG,
+    [_GUARD_NOT_EXHAUSTED_BYTES] = HAS_EXIT_FLAG,
+    [_ITER_NEXT_BYTES] = 0,
     [_ITER_CHECK_RANGE] = HAS_EXIT_FLAG,
     [_GUARD_NOT_EXHAUSTED_RANGE] = HAS_EXIT_FLAG,
     [_ITER_NEXT_RANGE] = HAS_ERROR_FLAG,
@@ -1412,6 +1417,24 @@ const _PyUopCachingInfo _PyUop_Caching[MAX_UOP_ID+1] = {
             { -1, -1, -1 },
             { -1, -1, -1 },
             { 3, 2, _BINARY_OP_SUBSCR_USTR_INT_r23 },
+            { -1, -1, -1 },
+        },
+    },
+    [_GUARD_NOS_BYTES] = {
+        .best = { 0, 1, 2, 3 },
+        .entries = {
+            { 2, 0, _GUARD_NOS_BYTES_r02 },
+            { 2, 1, _GUARD_NOS_BYTES_r12 },
+            { 2, 2, _GUARD_NOS_BYTES_r22 },
+            { 3, 3, _GUARD_NOS_BYTES_r33 },
+        },
+    },
+    [_BINARY_OP_SUBSCR_BYTES_INT] = {
+        .best = { 2, 2, 2, 2 },
+        .entries = {
+            { -1, -1, -1 },
+            { -1, -1, -1 },
+            { 3, 2, _BINARY_OP_SUBSCR_BYTES_INT_r23 },
             { -1, -1, -1 },
         },
     },
@@ -2627,6 +2650,33 @@ const _PyUopCachingInfo _PyUop_Caching[MAX_UOP_ID+1] = {
             { 3, 0, _ITER_NEXT_TUPLE_r03 },
             { 3, 1, _ITER_NEXT_TUPLE_r13 },
             { 3, 2, _ITER_NEXT_TUPLE_r23 },
+            { -1, -1, -1 },
+        },
+    },
+    [_ITER_CHECK_BYTES] = {
+        .best = { 0, 1, 2, 3 },
+        .entries = {
+            { 2, 0, _ITER_CHECK_BYTES_r02 },
+            { 2, 1, _ITER_CHECK_BYTES_r12 },
+            { 2, 2, _ITER_CHECK_BYTES_r22 },
+            { 3, 3, _ITER_CHECK_BYTES_r33 },
+        },
+    },
+    [_GUARD_NOT_EXHAUSTED_BYTES] = {
+        .best = { 0, 1, 2, 3 },
+        .entries = {
+            { 2, 0, _GUARD_NOT_EXHAUSTED_BYTES_r02 },
+            { 2, 1, _GUARD_NOT_EXHAUSTED_BYTES_r12 },
+            { 2, 2, _GUARD_NOT_EXHAUSTED_BYTES_r22 },
+            { 3, 3, _GUARD_NOT_EXHAUSTED_BYTES_r33 },
+        },
+    },
+    [_ITER_NEXT_BYTES] = {
+        .best = { 0, 1, 2, 2 },
+        .entries = {
+            { 3, 0, _ITER_NEXT_BYTES_r03 },
+            { 3, 1, _ITER_NEXT_BYTES_r13 },
+            { 3, 2, _ITER_NEXT_BYTES_r23 },
             { -1, -1, -1 },
         },
     },
@@ -4339,6 +4389,11 @@ const uint16_t _PyUop_Uncached[MAX_UOP_REGS_ID+1] = {
     [_BINARY_OP_SUBSCR_LIST_SLICE_r23] = _BINARY_OP_SUBSCR_LIST_SLICE,
     [_BINARY_OP_SUBSCR_STR_INT_r23] = _BINARY_OP_SUBSCR_STR_INT,
     [_BINARY_OP_SUBSCR_USTR_INT_r23] = _BINARY_OP_SUBSCR_USTR_INT,
+    [_GUARD_NOS_BYTES_r02] = _GUARD_NOS_BYTES,
+    [_GUARD_NOS_BYTES_r12] = _GUARD_NOS_BYTES,
+    [_GUARD_NOS_BYTES_r22] = _GUARD_NOS_BYTES,
+    [_GUARD_NOS_BYTES_r33] = _GUARD_NOS_BYTES,
+    [_BINARY_OP_SUBSCR_BYTES_INT_r23] = _BINARY_OP_SUBSCR_BYTES_INT,
     [_GUARD_NOS_TUPLE_r02] = _GUARD_NOS_TUPLE,
     [_GUARD_NOS_TUPLE_r12] = _GUARD_NOS_TUPLE,
     [_GUARD_NOS_TUPLE_r22] = _GUARD_NOS_TUPLE,
@@ -4613,6 +4668,17 @@ const uint16_t _PyUop_Uncached[MAX_UOP_REGS_ID+1] = {
     [_ITER_NEXT_TUPLE_r03] = _ITER_NEXT_TUPLE,
     [_ITER_NEXT_TUPLE_r13] = _ITER_NEXT_TUPLE,
     [_ITER_NEXT_TUPLE_r23] = _ITER_NEXT_TUPLE,
+    [_ITER_CHECK_BYTES_r02] = _ITER_CHECK_BYTES,
+    [_ITER_CHECK_BYTES_r12] = _ITER_CHECK_BYTES,
+    [_ITER_CHECK_BYTES_r22] = _ITER_CHECK_BYTES,
+    [_ITER_CHECK_BYTES_r33] = _ITER_CHECK_BYTES,
+    [_GUARD_NOT_EXHAUSTED_BYTES_r02] = _GUARD_NOT_EXHAUSTED_BYTES,
+    [_GUARD_NOT_EXHAUSTED_BYTES_r12] = _GUARD_NOT_EXHAUSTED_BYTES,
+    [_GUARD_NOT_EXHAUSTED_BYTES_r22] = _GUARD_NOT_EXHAUSTED_BYTES,
+    [_GUARD_NOT_EXHAUSTED_BYTES_r33] = _GUARD_NOT_EXHAUSTED_BYTES,
+    [_ITER_NEXT_BYTES_r03] = _ITER_NEXT_BYTES,
+    [_ITER_NEXT_BYTES_r13] = _ITER_NEXT_BYTES,
+    [_ITER_NEXT_BYTES_r23] = _ITER_NEXT_BYTES,
     [_ITER_CHECK_RANGE_r02] = _ITER_CHECK_RANGE,
     [_ITER_CHECK_RANGE_r12] = _ITER_CHECK_RANGE,
     [_ITER_CHECK_RANGE_r22] = _ITER_CHECK_RANGE,
@@ -5114,6 +5180,8 @@ const char *const _PyOpcode_uop_name[MAX_UOP_REGS_ID+1] = {
     [_BINARY_OP_MULTIPLY_INT_INPLACE_RIGHT_r03] = "_BINARY_OP_MULTIPLY_INT_INPLACE_RIGHT_r03",
     [_BINARY_OP_MULTIPLY_INT_INPLACE_RIGHT_r13] = "_BINARY_OP_MULTIPLY_INT_INPLACE_RIGHT_r13",
     [_BINARY_OP_MULTIPLY_INT_INPLACE_RIGHT_r23] = "_BINARY_OP_MULTIPLY_INT_INPLACE_RIGHT_r23",
+    [_BINARY_OP_SUBSCR_BYTES_INT] = "_BINARY_OP_SUBSCR_BYTES_INT",
+    [_BINARY_OP_SUBSCR_BYTES_INT_r23] = "_BINARY_OP_SUBSCR_BYTES_INT_r23",
     [_BINARY_OP_SUBSCR_CHECK_FUNC] = "_BINARY_OP_SUBSCR_CHECK_FUNC",
     [_BINARY_OP_SUBSCR_CHECK_FUNC_r23] = "_BINARY_OP_SUBSCR_CHECK_FUNC_r23",
     [_BINARY_OP_SUBSCR_DICT] = "_BINARY_OP_SUBSCR_DICT",
@@ -5640,6 +5708,11 @@ const char *const _PyOpcode_uop_name[MAX_UOP_REGS_ID+1] = {
     [_GUARD_LOAD_SUPER_ATTR_METHOD_r13] = "_GUARD_LOAD_SUPER_ATTR_METHOD_r13",
     [_GUARD_LOAD_SUPER_ATTR_METHOD_r23] = "_GUARD_LOAD_SUPER_ATTR_METHOD_r23",
     [_GUARD_LOAD_SUPER_ATTR_METHOD_r33] = "_GUARD_LOAD_SUPER_ATTR_METHOD_r33",
+    [_GUARD_NOS_BYTES] = "_GUARD_NOS_BYTES",
+    [_GUARD_NOS_BYTES_r02] = "_GUARD_NOS_BYTES_r02",
+    [_GUARD_NOS_BYTES_r12] = "_GUARD_NOS_BYTES_r12",
+    [_GUARD_NOS_BYTES_r22] = "_GUARD_NOS_BYTES_r22",
+    [_GUARD_NOS_BYTES_r33] = "_GUARD_NOS_BYTES_r33",
     [_GUARD_NOS_COMPACT_ASCII] = "_GUARD_NOS_COMPACT_ASCII",
     [_GUARD_NOS_COMPACT_ASCII_r02] = "_GUARD_NOS_COMPACT_ASCII_r02",
     [_GUARD_NOS_COMPACT_ASCII_r12] = "_GUARD_NOS_COMPACT_ASCII_r12",
@@ -5705,6 +5778,11 @@ const char *const _PyOpcode_uop_name[MAX_UOP_REGS_ID+1] = {
     [_GUARD_NOS_UNICODE_r12] = "_GUARD_NOS_UNICODE_r12",
     [_GUARD_NOS_UNICODE_r22] = "_GUARD_NOS_UNICODE_r22",
     [_GUARD_NOS_UNICODE_r33] = "_GUARD_NOS_UNICODE_r33",
+    [_GUARD_NOT_EXHAUSTED_BYTES] = "_GUARD_NOT_EXHAUSTED_BYTES",
+    [_GUARD_NOT_EXHAUSTED_BYTES_r02] = "_GUARD_NOT_EXHAUSTED_BYTES_r02",
+    [_GUARD_NOT_EXHAUSTED_BYTES_r12] = "_GUARD_NOT_EXHAUSTED_BYTES_r12",
+    [_GUARD_NOT_EXHAUSTED_BYTES_r22] = "_GUARD_NOT_EXHAUSTED_BYTES_r22",
+    [_GUARD_NOT_EXHAUSTED_BYTES_r33] = "_GUARD_NOT_EXHAUSTED_BYTES_r33",
     [_GUARD_NOT_EXHAUSTED_LIST] = "_GUARD_NOT_EXHAUSTED_LIST",
     [_GUARD_NOT_EXHAUSTED_LIST_r02] = "_GUARD_NOT_EXHAUSTED_LIST_r02",
     [_GUARD_NOT_EXHAUSTED_LIST_r12] = "_GUARD_NOT_EXHAUSTED_LIST_r12",
@@ -5856,6 +5934,11 @@ const char *const _PyOpcode_uop_name[MAX_UOP_REGS_ID+1] = {
     [_IS_OP_r03] = "_IS_OP_r03",
     [_IS_OP_r13] = "_IS_OP_r13",
     [_IS_OP_r23] = "_IS_OP_r23",
+    [_ITER_CHECK_BYTES] = "_ITER_CHECK_BYTES",
+    [_ITER_CHECK_BYTES_r02] = "_ITER_CHECK_BYTES_r02",
+    [_ITER_CHECK_BYTES_r12] = "_ITER_CHECK_BYTES_r12",
+    [_ITER_CHECK_BYTES_r22] = "_ITER_CHECK_BYTES_r22",
+    [_ITER_CHECK_BYTES_r33] = "_ITER_CHECK_BYTES_r33",
     [_ITER_CHECK_LIST] = "_ITER_CHECK_LIST",
     [_ITER_CHECK_LIST_r02] = "_ITER_CHECK_LIST_r02",
     [_ITER_CHECK_LIST_r12] = "_ITER_CHECK_LIST_r12",
@@ -5871,6 +5954,10 @@ const char *const _PyOpcode_uop_name[MAX_UOP_REGS_ID+1] = {
     [_ITER_CHECK_TUPLE_r12] = "_ITER_CHECK_TUPLE_r12",
     [_ITER_CHECK_TUPLE_r22] = "_ITER_CHECK_TUPLE_r22",
     [_ITER_CHECK_TUPLE_r33] = "_ITER_CHECK_TUPLE_r33",
+    [_ITER_NEXT_BYTES] = "_ITER_NEXT_BYTES",
+    [_ITER_NEXT_BYTES_r03] = "_ITER_NEXT_BYTES_r03",
+    [_ITER_NEXT_BYTES_r13] = "_ITER_NEXT_BYTES_r13",
+    [_ITER_NEXT_BYTES_r23] = "_ITER_NEXT_BYTES_r23",
     [_ITER_NEXT_INLINE] = "_ITER_NEXT_INLINE",
     [_ITER_NEXT_INLINE_r23] = "_ITER_NEXT_INLINE_r23",
     [_ITER_NEXT_LIST_TIER_TWO] = "_ITER_NEXT_LIST_TIER_TWO",
@@ -6599,6 +6686,10 @@ int _PyUop_num_popped(int opcode, int oparg)
             return 2;
         case _BINARY_OP_SUBSCR_USTR_INT:
             return 2;
+        case _GUARD_NOS_BYTES:
+            return 0;
+        case _BINARY_OP_SUBSCR_BYTES_INT:
+            return 2;
         case _GUARD_NOS_TUPLE:
             return 0;
         case _GUARD_TOS_TUPLE:
@@ -6868,6 +6959,12 @@ int _PyUop_num_popped(int opcode, int oparg)
         case _GUARD_NOT_EXHAUSTED_TUPLE:
             return 0;
         case _ITER_NEXT_TUPLE:
+            return 0;
+        case _ITER_CHECK_BYTES:
+            return 0;
+        case _GUARD_NOT_EXHAUSTED_BYTES:
+            return 0;
+        case _ITER_NEXT_BYTES:
             return 0;
         case _ITER_CHECK_RANGE:
             return 0;

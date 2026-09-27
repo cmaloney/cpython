@@ -1410,6 +1410,40 @@
             break;
         }
 
+        case _GUARD_NOS_BYTES: {
+            JitOptRef nos;
+            nos = stack_pointer[-2];
+            if (sym_matches_type(nos, &PyBytes_Type)) {
+                ADD_OP(_NOP, 0, 0);
+            }
+            else {
+                sym_set_type(nos, &PyBytes_Type);
+            }
+            break;
+        }
+
+        case _BINARY_OP_SUBSCR_BYTES_INT: {
+            JitOptRef sub_st;
+            JitOptRef bytes_st;
+            JitOptRef res;
+            JitOptRef b;
+            JitOptRef s;
+            sub_st = stack_pointer[-1];
+            bytes_st = stack_pointer[-2];
+            res = spec_slot_result(ctx, &PyBytes_Type, "__getitem__",
+                               &PyLong_Type, true);
+            b = bytes_st;
+            s = sub_st;
+            ASSERT_RESULT_FACTS(res, 2);
+            CHECK_STACK_BOUNDS(1);
+            stack_pointer[-2] = res;
+            stack_pointer[-1] = b;
+            stack_pointer[0] = s;
+            stack_pointer += 1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            break;
+        }
+
         case _GUARD_NOS_TUPLE: {
             JitOptRef nos;
             nos = stack_pointer[-2];
@@ -3814,6 +3848,36 @@
         case _ITER_NEXT_TUPLE: {
             JitOptRef next;
             next = sym_new_not_null(ctx);
+            CHECK_STACK_BOUNDS(1);
+            stack_pointer[0] = next;
+            stack_pointer += 1;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+            break;
+        }
+
+        case _ITER_CHECK_BYTES: {
+            JitOptRef iter;
+            iter = stack_pointer[-2];
+            if (sym_matches_type(iter, &PyBytes_Type)) {
+                ADD_OP(_NOP, 0, 0);
+            }
+            else {
+                sym_set_type(iter, &PyBytes_Type);
+            }
+            break;
+        }
+
+        /* _ITER_JUMP_BYTES is not a viable micro-op for tier 2 */
+
+        case _GUARD_NOT_EXHAUSTED_BYTES: {
+            break;
+        }
+
+        case _ITER_NEXT_BYTES: {
+            JitOptRef next;
+            next = spec_slot_result(ctx, &PyBytesIter_Type, "__next__", NULL,
+                                true);
+            ASSERT_RESULT_FACTS(next, 0);
             CHECK_STACK_BOUNDS(1);
             stack_pointer[0] = next;
             stack_pointer += 1;

@@ -600,6 +600,42 @@ dummy_func(void) {
         i = sub_st;
     }
 
+    op(_GUARD_NOS_BYTES, (nos, unused -- nos, unused)) {
+        if (sym_matches_type(nos, &PyBytes_Type)) {
+            ADD_OP(_NOP, 0, 0);
+        }
+        else {
+            sym_set_type(nos, &PyBytes_Type);
+        }
+    }
+
+    op(_BINARY_OP_SUBSCR_BYTES_INT, (bytes_st, sub_st -- res, b, s)) {
+        /* The facts of bytes.__getitem__(int), from the spec. */
+        res = spec_slot_result(ctx, &PyBytes_Type, "__getitem__",
+                               &PyLong_Type, true);
+        b = bytes_st;
+        s = sub_st;
+        ASSERT_RESULT_FACTS(res, 2);
+    }
+
+    op(_ITER_CHECK_BYTES, (iter, null_or_index -- iter, null_or_index)) {
+        if (sym_matches_type(iter, &PyBytes_Type)) {
+            ADD_OP(_NOP, 0, 0);
+        }
+        else {
+            sym_set_type(iter, &PyBytes_Type);
+        }
+    }
+
+    op(_ITER_NEXT_BYTES, (iter, null_or_index -- iter, null_or_index, next)) {
+        /* The items of an exact bytes are those of its iterator: the
+         * facts of bytes_iterator.__next__, from the spec
+         * (bytes_iteritem() is its index form). */
+        next = spec_slot_result(ctx, &PyBytesIter_Type, "__next__", NULL,
+                                true);
+        ASSERT_RESULT_FACTS(next, 0);
+    }
+
     op(_GUARD_BINARY_OP_SUBSCR_TUPLE_INT_BOUNDS, (tuple_st, sub_st -- tuple_st, sub_st)) {
         assert(sym_matches_type(tuple_st, &PyTuple_Type));
         if (sym_is_const(ctx, sub_st)) {

@@ -627,6 +627,7 @@ dummy_func(
             BINARY_OP_SUBSCR_TUPLE_INT,
             BINARY_OP_SUBSCR_STR_INT,
             BINARY_OP_SUBSCR_USTR_INT,
+            BINARY_OP_SUBSCR_BYTES_INT,
             BINARY_OP_SUBSCR_DICT,
             BINARY_OP_SUBSCR_GETITEM,
             BINARY_OP_INPLACE_ADD_UNICODE,
@@ -1230,6 +1231,36 @@ dummy_func(
             PyObject *res_o = (PyObject*)&_Py_SINGLETON(strings).ascii[c];
             s = str_st;
             i = sub_st;
+            INPUTS_DEAD();
+            res = PyStackRef_FromPyObjectBorrow(res_o);
+        }
+
+        op(_GUARD_NOS_BYTES, (nos, unused -- nos, unused)) {
+            PyObject *o = PyStackRef_AsPyObjectBorrow(nos);
+            EXIT_IF(!PyBytes_CheckExact(o));
+        }
+
+        macro(BINARY_OP_SUBSCR_BYTES_INT) =
+            _GUARD_TOS_INT + _GUARD_NOS_BYTES + unused/5 + _BINARY_OP_SUBSCR_BYTES_INT + _POP_TOP_INT + POP_TOP;
+
+        /* b[i] for an exact bytes b: bytes_subscript() for a non-negative
+         * index in range (the rest exits).  The tier-2 optimizer takes
+         * the facts of its result from the spec, bytes.__getitem__
+         * (_PySpec_FindSlot()). */
+        op(_BINARY_OP_SUBSCR_BYTES_INT, (bytes_st, sub_st -- res, b, s)) {
+            PyObject *sub = PyStackRef_AsPyObjectBorrow(sub_st);
+            PyObject *bytes = PyStackRef_AsPyObjectBorrow(bytes_st);
+
+            assert(PyLong_CheckExact(sub));
+            assert(PyBytes_CheckExact(bytes));
+            EXIT_IF(!_PyLong_IsNonNegativeCompact((PyLongObject*)sub));
+            Py_ssize_t index = ((PyLongObject*)sub)->long_value.ob_digit[0];
+            EXIT_IF(PyBytes_GET_SIZE(bytes) <= index);
+            unsigned char c = ((PyBytesObject *)bytes)->ob_sval[index];
+            STAT_INC(BINARY_OP, hit);
+            PyObject *res_o = (PyObject *)&_PyLong_SMALL_INTS[_PY_NSMALLNEGINTS + c];
+            b = bytes_st;
+            s = sub_st;
             INPUTS_DEAD();
             res = PyStackRef_FromPyObjectBorrow(res_o);
         }
@@ -3801,6 +3832,7 @@ dummy_func(
         family(FOR_ITER, INLINE_CACHE_ENTRIES_FOR_ITER) = {
             FOR_ITER_LIST,
             FOR_ITER_TUPLE,
+            FOR_ITER_BYTES,
             FOR_ITER_RANGE,
             FOR_ITER_GEN,
             FOR_ITER_VIRTUAL,
@@ -4060,6 +4092,51 @@ dummy_func(
             _ITER_CHECK_TUPLE +
             _ITER_JUMP_TUPLE +
             _ITER_NEXT_TUPLE;
+
+        /* Iterating an exact bytes: bytes_iteritem(), inline.  The
+         * tier-2 optimizer takes the facts of the items from the spec,
+         * bytes_iterator.__next__ (_PySpec_FindSlot()). */
+        op(_ITER_CHECK_BYTES, (iter, null_or_index -- iter, null_or_index)) {
+            PyObject *iter_o = PyStackRef_AsPyObjectBorrow(iter);
+            EXIT_IF(Py_TYPE(iter_o) != &PyBytes_Type);
+            assert(PyStackRef_IsTaggedInt(null_or_index));
+        }
+
+        replaced op(_ITER_JUMP_BYTES, (iter, null_or_index -- iter, null_or_index)) {
+            PyObject *bytes_o = PyStackRef_AsPyObjectBorrow(iter);
+            assert(Py_TYPE(bytes_o) == &PyBytes_Type);
+            STAT_INC(FOR_ITER, hit);
+            if ((size_t)PyStackRef_UntagInt(null_or_index) >= (size_t)PyBytes_GET_SIZE(bytes_o)) {
+                null_or_index = PyStackRef_TagInt(-1);
+                /* Jump forward oparg, then skip following END_FOR instruction */
+                JUMPBY(oparg + 1);
+                DISPATCH();
+            }
+        }
+
+        // Only used by Tier 2
+        op(_GUARD_NOT_EXHAUSTED_BYTES, (iter, null_or_index -- iter, null_or_index)) {
+            PyObject *bytes_o = PyStackRef_AsPyObjectBorrow(iter);
+            assert(Py_TYPE(bytes_o) == &PyBytes_Type);
+            EXIT_IF((size_t)PyStackRef_UntagInt(null_or_index) >= (size_t)PyBytes_GET_SIZE(bytes_o));
+        }
+
+        op(_ITER_NEXT_BYTES, (iter, null_or_index -- iter, null_or_index, next)) {
+            PyObject *bytes_o = PyStackRef_AsPyObjectBorrow(iter);
+            assert(Py_TYPE(bytes_o) == &PyBytes_Type);
+            uintptr_t i = PyStackRef_UntagInt(null_or_index);
+            assert((size_t)i < (size_t)PyBytes_GET_SIZE(bytes_o));
+            unsigned char c = ((PyBytesObject *)bytes_o)->ob_sval[i];
+            next = PyStackRef_FromPyObjectBorrow(
+                (PyObject *)&_PyLong_SMALL_INTS[_PY_NSMALLNEGINTS + c]);
+            null_or_index = PyStackRef_IncrementTaggedIntNoOverflow(null_or_index);
+        }
+
+        macro(FOR_ITER_BYTES) =
+            unused/1 +  // Skip over the counter
+            _ITER_CHECK_BYTES +
+            _ITER_JUMP_BYTES +
+            _ITER_NEXT_BYTES;
 
         op(_ITER_CHECK_RANGE, (iter, null_or_index -- iter, null_or_index)) {
             _PyRangeIterObject *r = (_PyRangeIterObject *)PyStackRef_AsPyObjectBorrow(iter);

@@ -2718,6 +2718,43 @@ class TestUopsOptimization(unittest.TestCase):
         self.assertNotIn("_GUARD_TOS_UNICODE", uops)
         self.assertIn("_BINARY_OP_ADD_UNICODE", uops)
 
+    def test_binary_subscr_bytes_int_narrows_to_compact_int(self):
+        def testfunc(n):
+            x = 0
+            b = b"\x01\xff"
+            for i in range(n):
+                y = b[i & 1]   # _BINARY_OP_SUBSCR_BYTES_INT
+                x = y + x      # (_GUARD_NOS_INT) + _BINARY_OP_ADD_INT
+            return x
+
+        res, ex = self._run_with_optimizer(testfunc, TIER2_THRESHOLD)
+        self.assertEqual(res, 256 * (TIER2_THRESHOLD // 2)
+                         + (TIER2_THRESHOLD % 2))
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_BINARY_OP_SUBSCR_BYTES_INT", uops)
+        # Its result is a compact int (facts from the spec, see
+        # pycore_pyspec.h): the int guard of y is removed.
+        self.assertNotIn("_GUARD_NOS_INT", uops)
+        self.assertIn("_BINARY_OP_ADD_INT", uops)
+
+    def test_for_iter_bytes(self):
+        def testfunc(b):
+            total = 0
+            for c in b:
+                total = c + total
+            return total
+
+        b = bytes(range(256)) * (TIER2_THRESHOLD // 256 + 1)
+        self.assertEqual(testfunc(b), sum(b))
+        ex = get_first_executor(testfunc)
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_GUARD_NOT_EXHAUSTED_BYTES", uops)
+        self.assertIn("_ITER_NEXT_BYTES", uops)
+        # The items are compact ints: no guard for c.
+        self.assertNotIn("_GUARD_NOS_INT", uops)
+
     def test_binary_op_subscr_str_int(self):
         def testfunc(n):
             x = 0

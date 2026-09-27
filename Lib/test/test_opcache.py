@@ -1977,6 +1977,19 @@ class TestSpecializer(TestBase):
         self.assert_specialized(binary_subscr_str_int_non_compact, "BINARY_OP_SUBSCR_USTR_INT")
         self.assert_no_opcode(binary_subscr_str_int_non_compact, "BINARY_OP_SUBSCR_STR_INT")
 
+        def binary_subscr_bytes_int():
+            for _ in range(_testinternalcapi.SPECIALIZATION_THRESHOLD):
+                a = b"\x00\x7f\x80\xff"
+                for idx, expected in enumerate((0, 127, 128, 255)):
+                    self.assertEqual(a[idx], expected)
+                    self.assertIs(type(a[idx]), int)
+                with self.assertRaises(IndexError):
+                    a[4]
+
+        binary_subscr_bytes_int()
+        self.assert_specialized(binary_subscr_bytes_int, "BINARY_OP_SUBSCR_BYTES_INT")
+        self.assert_no_opcode(binary_subscr_bytes_int, "BINARY_OP")
+
         def binary_subscr_getitems():
             class C:
                 def __init__(self, val):
@@ -2093,6 +2106,15 @@ class TestSpecializer(TestBase):
         for_iter_tuple()
         self.assert_specialized(for_iter_tuple, "FOR_ITER_TUPLE")
         self.assert_no_opcode(for_iter_tuple, "FOR_ITER")
+
+        b = bytes(range(250, 256))
+        def for_iter_bytes():
+            for i in b:
+                self.assertIn(i, b)
+
+        for_iter_bytes()
+        self.assert_specialized(for_iter_bytes, "FOR_ITER_BYTES")
+        self.assert_no_opcode(for_iter_bytes, "FOR_ITER")
 
         s = "abcdefghij"
         def for_iter_str():
