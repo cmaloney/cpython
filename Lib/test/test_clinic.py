@@ -7697,6 +7697,34 @@ class PyspecFactsTest(TestCase):
         self.assertIn(pyspec_facts.ANY, facts.raises)
         self.assertIsNone(facts.result_type)
 
+    def test_unknown_type_is_worst(self):
+        # An object of a type not known exactly may have any special
+        # method: iter(x) and len(x) may run Python code and raise
+        # anything.
+        spec = pyspec_frontend.Spec(dedent("""
+            from libclinic.pyspec.runtime import iter
+
+            def f(x: object):
+                it = iter(x)
+                return it
+
+            def g(x: object):
+                n = len(x)
+                return x
+        """))
+        context = pyspec_context.Context(spec)
+        for name in ('f', 'g'):
+            with self.subTest(name=name):
+                facts = context.analyzer().function_facts(name)
+                self.assertTrue(facts.runs_python)
+                self.assertIn(pyspec_facts.ANY, facts.raises)
+        types_ = context.types()
+        self.assertIsNone(types_.mro(None))
+        for name in ('__iter__', '__len__'):
+            with self.subTest(name=name):
+                self.assertIsNone(types_.has(None, name))
+                self.assertIsNone(types_.special(None, name))
+
 
 class PyspecLanguageTest(PyspecTestBase):
     """The spec language (libclinic/pyspec/frontend.py): every signature

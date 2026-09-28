@@ -225,7 +225,10 @@ class TypeFacts:
         return PYTHON
 
     def mro(self, tp: type | None) -> list[type] | None:
-        """The MRO of tp, or None when tp is not known."""
+        """The MRO of tp, or None when tp is not known (None: a type not
+        known exactly, which may have any special method)."""
+        if tp is None:
+            return None
         out = []
         while tp is not None:
             if self.spec_class(tp) is not None:

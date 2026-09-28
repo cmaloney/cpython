@@ -375,7 +375,7 @@ class Analyzer(subset.Walker[Flow, None]):
         exact type of the items or None)."""
         if tp in known.SEQUENCES:
             return True, None
-        special = self.types.special(tp, '__iter__') if tp else None
+        special = self.types.special(tp, '__iter__')
         if special is None or special[0] is not None or special[1] in (
                 False, None, builtin_types.PYTHON):
             return False, None
@@ -446,8 +446,8 @@ class Analyzer(subset.Walker[Flow, None]):
     def special_facts(self, obj: ast.expr, name: str, env: Env) -> Facts:
         """Facts of invoking special method *name* of type(obj)."""
         tp = known.exact_type(obj, env)
-        special = None if tp is None else self.types.special(tp, name)
-        if special is None or tp is None:
+        special = self.types.special(tp, name)
+        if special is None:
             return Facts(worst=True)
         spec_name, value = special
         if spec_name is None and value is False:
