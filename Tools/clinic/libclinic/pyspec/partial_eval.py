@@ -999,12 +999,11 @@ def remove_dead_iterators(stmts: list[ast.stmt],
     return out
 
 
-def specialize(context: Context, spec: Spec, name: str, env: Env,
-               inline: bool = True,
-               arities: Sequence[Arity] = ()) -> list[ast.stmt]:
+def residual(context: Context, spec: Spec, name: str, env: Env,
+             inline: bool = True,
+             arities: Sequence[Arity] = ()) -> list[ast.stmt]:
     """The residual of spec function *name* under *env*.  With *inline*
     false, tail calls of spec functions stay calls (except where the
     block is versioned); *arities*: see Evaluator.arity_call()."""
-    residual = Evaluator(context, spec, arities, name).block(
-        spec.body(name), env, inline=inline, top=True)
-    return remove_dead_iterators(residual)
+    return remove_dead_iterators(Evaluator(context, spec, arities, name).block(
+        spec.body(name), env, inline=inline, top=True))

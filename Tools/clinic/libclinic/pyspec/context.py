@@ -57,7 +57,6 @@ class Context:
                  inline: bool = True,
                  arities: Sequence[partial_eval.Arity] = ()
                  ) -> list[ast.stmt]:
-        """The residual statements of spec function *name* of *spec*
-        under the facts *env* (partial_eval.specialize())."""
-        return partial_eval.specialize(self, spec, name, env, inline=inline,
-                                       arities=arities)
+        """partial_eval.residual() of spec function *name* of *spec*."""
+        return partial_eval.residual(self, spec, name, env, inline=inline,
+                                     arities=arities)
