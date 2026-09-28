@@ -627,31 +627,24 @@ class Spec:
         positional = args.posonlyargs + args.args
         if not static:
             positional = positional[1:]
-        match convention:
-            case 'METH_NOARGS':
-                ok = not positional
-            case 'METH_O':
-                ok = len(positional) == 1
-            case _:
-                ok = not positional and args.vararg is not None
-        if (not ok or args.kwonlyargs or args.defaults
-                or (args.kwarg and convention in ('METH_NOARGS', 'METH_O'))
-                or (args.vararg and convention in ('METH_NOARGS', 'METH_O'))
-                or args.args):
+        if convention in ('METH_NOARGS', 'METH_O'):
+            ok = (len(positional) == (convention == 'METH_O')
+                  and not (args.vararg or args.kwarg))
+        else:
+            ok = not positional and args.vararg is not None
+        if not ok or args.kwonlyargs or args.defaults or args.args:
             wanted = PYCFUNCTION_FLAGS[convention]
             if static:
                 wanted = wanted.replace('self, ', '').replace('self', '')
             raise self.error(node, f"{name}: a {convention} function takes "
                              f"{wanted}")
         flags = [convention]
-        if args.kwarg:
-            flags.append('METH_KEYWORDS')
-        if 'classmethod' in decorators:
-            flags.append('METH_CLASS')
-        if static:
-            flags.append('METH_STATIC')
-        if 'coexist' in decorators:
-            flags.append('METH_COEXIST')
+        for flag, given in (('METH_KEYWORDS', args.kwarg),
+                            ('METH_CLASS', 'classmethod' in decorators),
+                            ('METH_STATIC', static),
+                            ('METH_COEXIST', 'coexist' in decorators)):
+            if given:
+                flags.append(flag)
         return PyCFunctionEntry(c_function, ' | '.join(flags))
 
     def method_kind(self, name: str) -> str:
