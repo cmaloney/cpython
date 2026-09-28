@@ -11,8 +11,9 @@ of ``__new__``, bytes_new_nargsN(): ``__new__`` partially evaluated for
 exactly bytes and N positional arguments.  Top-level functions are C
 functions of the same name: generated from their body, or, with
 ``@native``, written by hand in C, the body being their Python
-reference.  The C functions of other files the bodies call are imported
-from the specs of those files.
+reference (never compiled); an ``@inline`` function is generated into
+its callers.  The C functions of other files the bodies call are
+imported from the specs of those files.
 
 The classes are the whole types: clinic generates their docstring, method
 tables and slot tables at the end of Objects/clinic/bytesobject_pyspec.c.h,
@@ -29,15 +30,16 @@ interpreter on the cases of bytesobject_cases.py.
 import types
 
 from libclinic.pyspec.runtime import (
-    NULL, PY_SSIZE_T_MAX, native, calls, exact, fqname, isinstance,
-    iter, runs_python, tp_name, unknown)
+    NULL, PY_SSIZE_T_MAX, calls, exact, fqname, inline, isinstance, iter,
+    native, runs_python, tp_name, unknown)
 
 # Argument Clinic decorators (no-ops in Python).
 from libclinic.pyspec.runtime import permit_long_summary, text_signature
 from libclinic.pyspec.runtime import c_name
 
 # The C functions of other files the bodies call.
-from pyspec.abstract import PyNumber_AsSsize_t, PyObject_LengthHint
+from pyspec.abstract import (
+    PyNumber_AsSsize_t, PyNumber_AsSsize_t_fast, PyObject_LengthHint_fast)
 from pyspec.typeobject import _PyObject_LookupSpecial
 from pyspec.unicodeobject import PyUnicode_AsEncodedString
 from Python.pyspec.errors import PyErr_BadInternalCall
@@ -101,7 +103,7 @@ class bytes:
         # Is it an integer?
         if hasattr(type(source), "__index__"):
             try:
-                size = PyNumber_AsSsize_t(source, OverflowError)
+                size = PyNumber_AsSsize_t_fast(source, OverflowError)
             except TypeError:
                 return PyBytes_FromObject(source)
             if size < 0:
@@ -631,14 +633,14 @@ def PyBytes_FromObject(x: object):
 def bytes_from_iterator(it: object, x: object):
     """The bytes of the ints (or objects with __index__) of iterator it,
     iter(x)."""
-    size = PyObject_LengthHint(x, 64)
+    size = PyObject_LengthHint_fast(x, 64)
     writer = bytes_appender_init(size)
     try:
         for item in it:
-            value = PyNumber_AsSsize_t(item, NULL)
+            value = PyNumber_AsSsize_t_fast(item, NULL)
             if value < 0 or value >= 256:
                 raise ValueError("bytes must be in range(0, 256)")
-            bytes_appender_append(writer, value)
+            bytes_appender_append_fast(writer, value)
         return bytes_appender_finish(writer)
     finally:
         bytes_appender_discard(writer)
@@ -648,7 +650,7 @@ def bytes_from_iterator(it: object, x: object):
 # The C functions of bytesobject.c the bodies above call.  Each is
 # @native: its C is the authority; the body is its Python
 # reference, run when the spec runs as Python and read for the facts of
-# the calls (see Objects/pyspec/README.rst).
+# the calls, never compiled (see Objects/pyspec/README.rst).
 
 
 @native
@@ -702,15 +704,9 @@ def bytes_appender_init(size: Py_ssize_t) -> 'bytes_appender':
 
 
 @native
-def bytes_appender_append(appender: 'bytes_appender *',
-                          value: 'unsigned char') -> int:
-    """Append a byte, growing the buffer first when it is full."""
-    if appender.room:
-        return bytes_appender_append_unchecked(appender, value)
-    if len(appender.data) == PY_SSIZE_T_MAX:
-        raise MemoryError()
-    appender.room = len(appender.data) + 1
-    return bytes_appender_append_unchecked(appender, value)
+def bytes_appender_has_room(appender: 'const bytes_appender *') -> int:
+    """Whether the buffer has room for one more byte."""
+    return appender.room > 0
 
 
 @native
@@ -719,6 +715,29 @@ def bytes_appender_append_unchecked(appender: 'bytes_appender *',
     """Append a byte to a buffer that has room for it."""
     appender.data.append(value)
     appender.room -= 1
+
+
+@native
+def bytes_appender_append(appender: 'bytes_appender *',
+                          value: 'unsigned char') -> int:
+    """Append a byte, growing the buffer first when it is full."""
+    if not bytes_appender_has_room(appender):
+        if len(appender.data) == PY_SSIZE_T_MAX:
+            raise MemoryError()
+        appender.room = len(appender.data) + 1
+    bytes_appender_append_unchecked(appender, value)
+    return 0
+
+
+@inline
+def bytes_appender_append_fast(appender: 'bytes_appender *',
+                               value: 'unsigned char') -> int:
+    """bytes_appender_append(), in place where the buffer has room.  A
+    loop over a sequence the buffer was sized for takes the first path
+    without its test (Capacity in libclinic/pyspec/partial_eval.py)."""
+    if bytes_appender_has_room(appender):
+        return bytes_appender_append_unchecked(appender, value)
+    return bytes_appender_append(appender, value)
 
 
 @native

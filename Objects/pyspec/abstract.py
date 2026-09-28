@@ -1,16 +1,16 @@
 """Spec of Objects/abstract.c: the functions other specs call.
 
-Each is @native: the C is the authority; the body is its Python
-reference, run when a spec runs as Python and read for the facts of its
-calls (see Objects/pyspec/README.rst).  A leading ``if <test>: return
-<value>`` is a fast path: where a call knows the test holds, Argument
-Clinic writes the value instead of the call.
+The @native ones are the C of abstract.c: the C is the authority; the
+body is its Python reference, run when a spec runs as Python and read
+for the facts of its calls, never compiled (see Objects/pyspec/README.rst).
+The @inline ones are fast paths that spec bodies call instead: generated
+code, written once here, which calls the native function last.
 """
 
 import operator
 
 from libclinic.pyspec.runtime import (
-    NULL, PY_SSIZE_T_MAX, native, calls, isinstance, runs_python,
+    NULL, PY_SSIZE_T_MAX, calls, inline, isinstance, native, runs_python,
     tp_name)
 
 from Include.cpython.pyspec.longintrepr import (
@@ -40,8 +40,6 @@ def _PyNumber_Index(o: object):
 def PyNumber_AsSsize_t(o: object, exc: object) -> Py_ssize_t:
     """o (with its __index__) as a Py_ssize_t: exc is raised when it does
     not fit, or, when exc is NULL, the nearest bound is returned."""
-    if (type(o) is int or type(o) is bool) and _PyLong_IsCompact(o):
-        return _PyLong_CompactValue(o)
     value = _PyNumber_Index(o)
     if -PY_SSIZE_T_MAX - 1 <= value <= PY_SSIZE_T_MAX:
         return int(value)
@@ -55,8 +53,6 @@ def PyNumber_AsSsize_t(o: object, exc: object) -> Py_ssize_t:
 def PyObject_LengthHint(o: object, defaultvalue: Py_ssize_t) -> Py_ssize_t:
     """len(o), else o.__length_hint__(), else defaultvalue: a TypeError
     from either means it has none."""
-    if type(o) is list or type(o) is tuple:
-        return len(o)
     if hasattr(type(o), "__len__"):
         try:
             return len(o)
@@ -67,3 +63,25 @@ def PyObject_LengthHint(o: object, defaultvalue: Py_ssize_t) -> Py_ssize_t:
         return defaultvalue
     runs_python()       # the call of hint
     return operator.length_hint(o, defaultvalue)
+
+
+# Fast paths, generated into the spec bodies that call them.
+
+@inline
+def PyNumber_AsSsize_t_fast(o: object, exc: object) -> Py_ssize_t:
+    """PyNumber_AsSsize_t(o, exc), read inline for a compact int."""
+    if (type(o) is int or type(o) is bool) and _PyLong_IsCompact(o):
+        return _PyLong_CompactValue(o)
+    return PyNumber_AsSsize_t(o, exc)
+
+
+@inline
+def PyObject_LengthHint_fast(o: object, defaultvalue: Py_ssize_t
+                             ) -> Py_ssize_t:
+    """PyObject_LengthHint(o, defaultvalue), read inline for an exact list
+    or tuple: its size (the len() of PyObject_LengthHint())."""
+    if type(o) is list:
+        return len(o)
+    if type(o) is tuple:
+        return len(o)
+    return PyObject_LengthHint(o, defaultvalue)

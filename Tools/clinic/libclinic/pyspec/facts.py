@@ -10,9 +10,9 @@ The facts of a list of statements (Facts) are what every path does:
   exception classes, or ANY.
 
 They come from the statements only: a spec function called is analyzed
-in turn, and a @native function through its Python reference,
-partially evaluated for the facts known about the arguments of the call
-(partial_eval.py).  The primitives of runtime.py say what plain Python
+in turn, an @inline function through its body, and a @native function
+through its Python reference, each partially evaluated for the facts
+known about the arguments of the call (partial_eval.py).  The primitives of runtime.py say what plain Python
 cannot: exact(T) and unknown() are new objects (of type T, or of a type
 not known exactly) and may fail with MemoryError; calls(x, "__name__")
 runs what the special method of type(x) runs (builtin_types.TypeFacts:
@@ -185,21 +185,44 @@ class Analyzer:
             (name, *(partial_eval.fact_key(env.get(p)) for p in params)),
             compute)
 
+    def inline_facts(self, name: str, env: Env) -> Facts:
+        """Facts of @inline function *name* of this spec, called with the
+        facts *env* about its parameters: of its body, partially
+        evaluated for them, as generated into the caller."""
+        params = self.spec.params(name)
+        if subset.inline(self.spec, name):
+            return Facts(worst=True)
+
+        def compute() -> Facts:
+            residual = partial_eval.specialize(self.spec, name, env)
+            saved, self.reference = self.reference, False
+            try:
+                return self.facts(residual, env, params)
+            finally:
+                self.reference = saved
+        return self._cached(
+            ('inline', name,
+             *(partial_eval.fact_key(env.get(p)) for p in params)),
+            compute)
+
     def call_facts(self, call: ast.Call, env: Env) -> Facts | None:
         """Facts of the call of a hand-written C function (@native,
-        or a stub: worst), with the facts *env* of the caller; None when
-        *call* is not one."""
-        found = self.spec.c_function(call)
+        or a stub: worst) or of an @inline function, with the facts *env*
+        of the caller; None when *call* is neither."""
+        inline = self.spec.inline_function(call)
+        found = inline or self.spec.c_function(call)
         if found is None:
             return None
         spec, node = found
-        if not frontend.is_native(node):
+        if not (inline or frontend.is_native(node)):
             return Facts(worst=True)
         callee_env: Env = {}
         for param, arg in zip(spec.params(node.name), call.args):
             fact = partial_eval.arg_fact(arg, env)
             if fact is not None:
                 callee_env[param] = fact
+        if inline:
+            return analyzer(spec).inline_facts(node.name, callee_env)
         return analyzer(spec).reference_facts(node.name, callee_env)
 
     def facts(self, stmts: list[ast.stmt], env: Env,

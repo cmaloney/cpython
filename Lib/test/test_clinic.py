@@ -8014,15 +8014,15 @@ class PyspecLanguageTest(PyspecTestBase):
     # -- errors -------------------------------------------------------------
 
     def test_error_in_the_spec_it_is_written_in(self):
-        # A fast path copied from another spec is reported there.
+        # An @inline function of another spec is reported there.
         other = os.path.join(self.tmp_dir, 'pyspec', 'other.py')
         with open(other, 'w', encoding='utf-8') as f:
             f.write(dedent("""\
-                @native
+                @inline
                 def helper(x: object):
                     if type(x) is bytes:
                         return x.upper()
-                    return unknown(x)
+                    return x
             """))
         spec = """
             from pyspec.other import helper
@@ -8037,7 +8037,7 @@ class PyspecLanguageTest(PyspecTestBase):
             self.generate(spec, PyspecTest.BLOCK)
         exc = cm.exception
         self.assertEqual((exc.filename, exc.lineno), (other, 4))
-        self.assertStartsWith(exc.message, "unsupported call a.upper()")
+        self.assertStartsWith(exc.message, "helper(): call x.upper() ")
         self.assertEqual(exc.kind, SpecErrorKind.NOT_LOWERED)
 
     def test_error_kinds(self):

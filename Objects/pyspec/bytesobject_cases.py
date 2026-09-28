@@ -593,9 +593,9 @@ HELPER_CALLERS = {
 
 NOT_CALLABLE = {
     '_PyBytes_FromSize', '_PyBytes_FromBuffer', 'bytes_copy',
-    'bytes_subtype_new', 'bytes_appender_init', 'bytes_appender_append',
-    'bytes_appender_append_unchecked', 'bytes_appender_finish',
-    'bytes_appender_discard',
+    'bytes_subtype_new', 'bytes_appender_init', 'bytes_appender_has_room',
+    'bytes_appender_append', 'bytes_appender_append_unchecked',
+    'bytes_appender_finish', 'bytes_appender_discard',
 }
 
 FACTS_ONLY = {'bytes_iterator.__next__'}

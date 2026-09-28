@@ -33,7 +33,7 @@ named T.  A method is written like the clinic block it replaces:
   hand-written.  A real body implements the function (emit.py), if it
   and the signature are in the lowered subset (subset.py; describe()
   checks it first); with ``@native`` the C impl is hand-written
-  and the body, any Python, is its Python reference.
+  and the body, any Python, is its Python reference, never compiled.
 
 Any signature clinic can state is a spec signature, and any Python is a
 spec body: only the lowered subset is generated as C.
@@ -53,11 +53,15 @@ The C basename of a spec method is clinic's default (``T`` for
 ``@c_name("x")`` gives another, as ``as x`` does in a block.
 
 Top-level functions are C functions named like the function.  A real
-body is generated.  ``@native`` marks a hand-written C function
-whose body is its Python reference, never lowered to C; its annotations
-are the C types of its parameters and result (see c_signature()).  A body
-of ``...`` (or only a docstring) is a hand-written C function about which
-nothing is known.  A spec imports the functions of other specs by name:
+body is generated.  ``@native`` marks a function implemented natively
+(in C, written by hand) whose body is its Python reference, never
+compiled, not even in part; its annotations are the C types of its
+parameters and result, the interface generated code calls it through
+(see c_signature()).  ``@inline`` marks a function whose body is
+generated into each of its callers (partial_eval.py), never a C function
+of its own: the fast path of a native function is one (see
+is_inline()).  A body of ``...`` (or only a docstring) is a hand-written
+C function about which nothing is known.  A spec imports the functions of other specs by name:
 ``from pyspec.abstract import PyNumber_AsSsize_t``, a path relative to
 the directory of the C file, or to the source root (``from
 Python.pyspec.errors import PyErr_BadInternalCall``).
@@ -150,9 +154,9 @@ TYPE_OBJECTS = {tp.__name__: row.type_object
 
 # Clinic decorators that are also Python's: they set the kind of the
 # method.  Any other decorator is a clinic-only one (see "Decorators"),
-# except the spec's own: @c_name and @native.
+# except the spec's own: @c_name, @native and @inline.
 METHOD_DECORATORS = ('classmethod', 'staticmethod')
-SPEC_DECORATORS = ('c_name', 'native')
+SPEC_DECORATORS = ('c_name', 'native', 'inline')
 
 # The clinic decorators that make a def an accessor: in the C file, its
 # one-line block names the accessor with the same decorator.
@@ -302,9 +306,23 @@ def accessor_kind(node: ast.FunctionDef) -> str:
 
 
 def is_native(node: ast.FunctionDef) -> bool:
-    """True for ``@native``: a hand-written C function whose body
-    is its Python reference."""
+    """True for ``@native``: a function implemented natively (C written
+    by hand) whose body is its Python reference: it describes the native
+    code (facts, the difftest) and is never compiled."""
     return any(decorator_name(d) == 'native'
+               for d in node.decorator_list)
+
+
+def is_inline(node: ast.FunctionDef) -> bool:
+    """True for ``@inline``: a top-level function whose body is generated
+    into each caller by the partial evaluator, and is never a C function
+    of its own.  Its annotations are C types, as for @native; its body is
+    fast paths, ``if <test>: return <value>``, then ``return <value>``
+    (subset.Inline).  A fast path of a native function f is written as
+    one, ``return f(...)`` last, and spec bodies call it instead of f:
+    the fast path is then generated code, and f's reference only
+    describes f."""
+    return any(decorator_name(d) == 'inline'
                for d in node.decorator_list)
 
 
@@ -316,8 +334,8 @@ def is_struct(ctype: str) -> bool:
 
 
 def c_signature(node: ast.FunctionDef) -> tuple[list[tuple[str, str]], str]:
-    """([(parameter, C type)], C return type) of a @native
-    function: an annotation of C_CTYPES or a string (the C type); no
+    """([(parameter, C type)], C return type) of a @native or
+    @inline function: an annotation of C_CTYPES or a string (the C type); no
     return annotation is ``PyObject *``.  A return type that is neither
     a scalar nor a pointer is a C struct that the function initializes in
     place (see emit.py)."""
@@ -332,7 +350,7 @@ def c_signature(node: ast.FunctionDef) -> tuple[list[tuple[str, str]], str]:
             case ast.Constant(None):
                 return 'void'
         raise SpecError(f"{node.name}(): the annotations of a "
-                        f"@native function are C types: "
+                        f"@native or @inline function are C types: "
                         f"{sorted(C_CTYPES)} or a string",
                         lineno=getattr(annotation, 'lineno', node.lineno))
     args = node.args.posonlyargs + node.args.args
@@ -403,6 +421,19 @@ class Spec:
                              "function is its Python reference; write ... "
                              "without @native for a C function "
                              "about which nothing is known")
+        if is_inline(node):
+            if is_native(node):
+                raise self.error(node, f"{name}: @native (a native "
+                                 "function, its body only describes it) "
+                                 "and @inline (a body generated into its "
+                                 "callers) exclude each other")
+            if is_stub(node):
+                raise self.error(node, f"{name}: an @inline function "
+                                 "needs a body: it is generated into its "
+                                 "callers")
+            if '.' in name:
+                raise self.error(node, f"{name}: only a top-level "
+                                 "function can be @inline")
         body = without_docstring(node)
         if len(body) == 1 and isinstance(body[0], ast.Pass):
             raise self.error(body[0], f"{name}: use ... as the body of a "
@@ -491,18 +522,34 @@ class Spec:
             return None
         return self.load_spec(path).resolve(name)
 
-    def c_function(self, call: ast.Call
-                   ) -> tuple[Spec, ast.FunctionDef] | None:
-        """(spec, def) of the hand-written C function *call* calls (by
-        name): @native or a stub, of this spec or imported.  A
-        call copied from another spec (a fast path, see partial_eval.py)
-        names the spec it was written in (``pyspec_scope``)."""
+    def _called(self, call: ast.Call
+                ) -> tuple[Spec, ast.FunctionDef] | None:
+        """(spec, def) of the function *call* calls by name, of this spec
+        or imported.  A call copied from another spec (the body of an
+        @inline function, see partial_eval.py) names the spec it was
+        written in (``pyspec_scope``)."""
         func = call.func
         if not isinstance(func, ast.Name):
             return None
-        found = self.load_spec(getattr(call, 'pyspec_scope',
-                                       self.filename)).resolve(func.id)
-        if found is None or found[0].implemented(func.id):
+        return self.load_spec(getattr(call, 'pyspec_scope',
+                                      self.filename)).resolve(func.id)
+
+    def c_function(self, call: ast.Call
+                   ) -> tuple[Spec, ast.FunctionDef] | None:
+        """(spec, def) of the hand-written C function *call* calls (by
+        name): @native or a stub, of this spec or imported."""
+        found = self._called(call)
+        if (found is None or is_inline(found[1])
+                or found[0].implemented(ast.unparse(call.func))):
+            return None
+        return found
+
+    def inline_function(self, call: ast.Call
+                        ) -> tuple[Spec, ast.FunctionDef] | None:
+        """(spec, def) of the @inline function *call* calls (by name), of
+        this spec or imported."""
+        found = self._called(call)
+        if found is None or not is_inline(found[1]):
             return None
         return found
 
@@ -612,12 +659,13 @@ class Spec:
     # -- implemented functions ---------------------------------------------
 
     def implemented(self, name: str) -> bool:
-        """Whether spec function *name* has a body lowered to C: a
-        top-level function or a clinic method with a body other than
-        ``...``, not @native.  (Slots and hand-written
-        PyCFunctions are C: typeobj.py rejects a body.)"""
+        """Whether spec function *name* has a body lowered to a C function
+        of its own: a top-level function or a clinic method with a body
+        other than ``...``, neither @native nor @inline.  (Slots and
+        hand-written PyCFunctions are C: typeobj.py rejects a body.)"""
         node = self.functions.get(name)
-        if node is None or is_stub(node) or is_native(node):
+        if (node is None or is_stub(node) or is_native(node)
+                or is_inline(node)):
             return False
         return '.' not in name or self.method_kind(name) == CLINIC
 

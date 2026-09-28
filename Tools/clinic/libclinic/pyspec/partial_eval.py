@@ -11,18 +11,24 @@ Argument Clinic.
 
 Calls of hand-written C functions.  A @native function is
 evaluated through its Python reference, for the facts of the call
-(facts.py):
+(facts.py), and only for them: no code of a reference is ever generated.
 
 * a call whose result is NULL on every path (``return NULL``: absent) is
   that NULL;
 * a ``try`` around a call that cannot raise what its handlers catch is
-  its body (``iter(x)`` of a list cannot raise TypeError);
-* a fast path, a leading ``if <test>: return <value>`` of the reference,
-  is the value where the facts decide the test.  A call whose first
-  argument is a loop item, or where the facts decide the type tests of
-  the test but not all of it, is split: ``if <test>: <statement with the
-  value> else: <statement>`` (PyNumber_AsSsize_t() of a compact exact
-  int is read inline).
+  its body (``iter(x)`` of a list cannot raise TypeError).
+
+Calls of @inline functions.  The body of an @inline function, fast paths
+``if <test>: return <value>`` then ``return <value>`` (subset.Inline), is
+generated into every statement that calls it (expand()): the statement
+with the value of each path, under ``if <test>:``, in order.  A test the
+facts decide selects or drops its path, and what they decide of a test
+is dropped from it (only ``_PyLong_IsCompact(x)`` of ``(type(x) is int
+or type(x) is bool) and _PyLong_IsCompact(x)`` remains for an exact
+int).  The fast path of a native function is written as an @inline
+function that returns the native call last (PyNumber_AsSsize_t_fast()):
+the fast path is generated code, from one place, and the generated code
+never assumes that the native function has it.
 
 Loops.  ``for item in it:`` iterates an iterator ``it = iter(x)``.  When
 the exact type of x is known (from the call site, or from a
@@ -66,9 +72,10 @@ snapshot ran no Python code, the restart cannot be observed.
 Capacity.  A buffer (a C struct, see emit.py) initialized with the
 length of a sequence, ``w = init(len(x))``, has room for one unit per
 item of x: in a loop over x with a fixed number of iterations (a tuple,
-or a list in a snapshot) that passes w to at most one call per
-iteration, the fast path of that call, which is the path where the
-buffer has room, is taken (presize()).  The debug build checks it (see
+or a list in a snapshot) whose one use of w is one call of an @inline
+function writing w (its first argument), the first path of that call,
+whose test is that the buffer has room, is taken without its test
+(presize()).  The debug build checks it (see
 bytes_appender_append_unchecked()).
 """
 
@@ -366,30 +373,24 @@ def _top_call(stmt):
 
 
 def _with_call(stmt, value):
-    """A copy of *stmt* with *value* in place of its top level call."""
+    """A copy of *stmt* with *value* in place of its top level call (for
+    ``try: x = f()``, the try statement)."""
     stmt = copy.deepcopy(stmt)
     holder = stmt.body[0] if isinstance(stmt, ast.Try) else stmt
     if isinstance(holder, ast.Expr) and not isinstance(value, ast.Call):
         return ast.Pass()
     holder.value = value
-    return holder
+    return stmt
 
 
-def fast_paths(spec, name):
-    """(test, value, parameters) of the fast paths of @native
-    function *name* of *spec*: its leading ``if test: return value``.
-    A reference facts.py cannot follow has none (subset.analysed())."""
-    out = []
-    if subset.analysed(spec, name):
-        return out, spec.params(name)
-    for stmt in spec.body(name):
-        match stmt:
-            case ast.If(test=test, body=[ast.Return(value=value)],
-                        orelse=[]) if value is not None:
-                out.append((test, value))
-            case _:
-                break
-    return out, spec.params(name)
+def inline_paths(spec, name):
+    """([(test, value)], last value, parameters) of @inline function
+    *name* of *spec*: its fast paths ``if test: return value``, then its
+    ``return value`` (subset.Inline, which check_inline() checks)."""
+    subset.check_inline(spec, name)
+    *paths, last = spec.body(name)
+    return ([(stmt.test, stmt.body[0].value) for stmt in paths],
+            last.value, spec.params(name))
 
 
 def _scoped(node, spec):
@@ -458,8 +459,6 @@ class Evaluator:
         self._suffix = itertools.count(1)
         # (facts, C function, arguments): see arity_call().
         self.arities = arities
-        # The item of the loop whose body is evaluated.
-        self.item = None
 
     def arity_call(self, stmts, i, env):
         """``[return F(args)]`` when the rest of a function body,
@@ -480,10 +479,17 @@ class Evaluator:
 
     def c_statement(self, stmt, env):
         """*stmt* (see _top_call()) with the facts of its call of a
-        @native function: (statements, env).  See "Calls of
-        hand-written C functions" in the module docstring."""
+        @native function, or its call of an @inline function
+        expanded: (statements, env).  See "Calls of hand-written C
+        functions" and "Calls of @inline functions" in the module
+        docstring."""
         call = _top_call(stmt)
-        found = call and self.spec.c_function(call)
+        if call is None:
+            return [stmt], env
+        inline = self.spec.inline_function(call)
+        if inline:
+            return self.expand(stmt, call, inline, env), env
+        found = self.spec.c_function(call)
         if not found:
             return [stmt], env
         callee = self.analyzer.call_facts(call, env)
@@ -491,26 +497,51 @@ class Evaluator:
         call.pyspec_null = callee.returns_null
         if isinstance(stmt, ast.Assign) and _only_null(callee):
             return [], env | {stmt.targets[0].id: NULL}
-        spec, node = found
-        paths, params = fast_paths(spec, node.name)
-        rename = _Rename(dict(zip(params, call.args)))
-        for test, value in paths:
-            test = _scoped(rename.visit(copy.deepcopy(test)), spec)
-            value = _scoped(rename.visit(copy.deepcopy(value)), spec)
-            decided = simplify(test, env, self)
-            if decided is False:
-                continue
-            fast = self.c_statement(_with_call(stmt, value), env)[0]
-            for part in fast:
-                _mark_len(part, env)
-            if decided is True:
-                return fast, env
-            first = call.args[0] if call.args else None
-            if ((isinstance(first, ast.Name) and first.id == self.item)
-                    or ast.dump(decided) != ast.dump(test)):
-                return [ast.If(decided, fast, [stmt])], env
-            break
         return [stmt], env
+
+    def expand(self, stmt, call, found, env):
+        """*stmt*, which calls @inline function *found* (spec, def) as
+        *call*, with its body in place of the call (see "Calls of @inline
+        functions" in the module docstring).  The ``if`` of the first
+        path is marked with the call (pyspec_inline_call, see
+        presize())."""
+        spec, node = found
+        paths, last, params = inline_paths(spec, node.name)
+        rename = _Rename(dict(zip(params, call.args)))
+
+        def copied(expr):
+            return _scoped(rename.visit(copy.deepcopy(expr)), spec)
+
+        def with_value(value, env):
+            new = _with_call(stmt, copied(value))
+            out = []
+            if isinstance(new, ast.Try) and not self.analyzer.facts(
+                    new.body, env).raises_any(
+                        [h.type.id for h in new.handlers]):
+                parts = [new.body[0], *new.orelse]     # no handler runs
+            else:
+                parts = [new]
+            for part in parts:
+                _mark_len(part, env)
+                out += self.c_statement(part, env)[0]
+            return out
+
+        def paths_from(i, env):
+            if i == len(paths):
+                return with_value(last, env)
+            test, value = paths[i]
+            decided = simplify(copied(test), env, self)
+            if decided is False:
+                return paths_from(i + 1, env)
+            if decided is True:
+                return with_value(value, env)
+            body_env, else_env = refine(decided, env)
+            branch = ast.If(decided, with_value(value, body_env),
+                            paths_from(i + 1, else_env))
+            if i == 0:
+                branch.pyspec_inline_call = call
+            return [branch]
+        return paths_from(0, env)
 
     def _is_spec_call(self, node):
         return (isinstance(node, ast.Call)
@@ -720,13 +751,8 @@ class Evaluator:
             iterable = fact
             sequence = True
         item_type = self.analyzer.iteration(iterable)[1]
-        saved, self.item = self.item, item
-        try:
-            new.body = self.block(stmt.body,
-                                  env | {item: item_type or NOTNULL},
-                                  depth, inline)
-        finally:
-            self.item = saved
+        new.body = self.block(stmt.body, env | {item: item_type or NOTNULL},
+                              depth, inline)
         new.pyspec_iterable = iterable
         new.pyspec_sequence = sequence
         return new
@@ -953,10 +979,10 @@ class _Snapshot:
 
 
 def presize(spec, stmts):
-    """Take the fast path of the calls that append to a buffer that has
-    room for all of them: see Capacity in the module docstring.  The top
-    level of *stmts* (a function body, and the body of its try) is
-    scanned."""
+    """Take the first path of the @inline calls that write to a buffer
+    that has room for all of them: see Capacity in the module docstring.
+    The top level of *stmts* (a function body, and the body of its try)
+    is scanned."""
     lengths = {}            # local -> the sequence it is the length of
     capacity = {}           # buffer local -> the sequence it has room for
     for stmt in stmts:
@@ -994,23 +1020,42 @@ def _presize_loops(spec, stmts, capacity):
                 if any(isinstance(node, ast.For) for node in inner):
                     continue
                 for buffer, sequence in capacity.items():
-                    appends = [node for node in inner
-                               if isinstance(node, ast.Expr)
-                               and isinstance(node.value, ast.Call)
-                               and node.value.args
-                               and isinstance(node.value.args[0], ast.Name)
-                               and node.value.args[0].id == buffer]
-                    found = appends and spec.c_function(appends[0].value)
-                    if sequence != seq or len(appends) != 1 or not found:
+                    writes = [node for node in inner
+                              if _writes(node, buffer)]
+                    if sequence != seq or len(writes) != 1:
                         continue
-                    # The value of its first fast path, in place.
-                    paths, params = fast_paths(found[0], found[1].name)
-                    if paths:
-                        rename = _Rename(dict(zip(params,
-                                                  appends[0].value.args)))
-                        appends[0].value = _scoped(
-                            rename.visit(copy.deepcopy(paths[0][1])),
-                            found[0])
+                    # The one use of the buffer in the loop.
+                    within = {id(node) for node in ast.walk(writes[0])}
+                    if any(isinstance(node, ast.Name) and node.id == buffer
+                           and id(node) not in within for node in inner):
+                        continue
+                    # Its first path, in place, without its test.
+                    _replace(stmt.body, writes[0], writes[0].body)
+
+
+def _writes(node, buffer):
+    """Whether *node* is the ``if`` of the first path of an @inline call
+    (expand()) whose first argument is *buffer*."""
+    call = getattr(node, 'pyspec_inline_call', None)
+    return (isinstance(node, ast.If) and call is not None and call.args
+            and isinstance(call.args[0], ast.Name)
+            and call.args[0].id == buffer)
+
+
+def _replace(stmts, old, new):
+    """Replace statement *old*, in *stmts* or in a block nested in them,
+    with the statements *new*; return whether it was found."""
+    for i, stmt in enumerate(stmts):
+        if stmt is old:
+            stmts[i:i + 1] = new
+            return True
+        blocks = [getattr(stmt, field, None)
+                  for field in ('body', 'orelse', 'finalbody')]
+        blocks += [handler.body for handler in getattr(stmt, 'handlers', ())]
+        if any(isinstance(block, list) and _replace(block, old, new)
+               for block in blocks):
+            return True
+    return False
 
 
 def remove_dead_iterators(stmts, live=frozenset()):
