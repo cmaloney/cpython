@@ -12,7 +12,9 @@ templates that bytes and bytearray share.  A spec body calls C functions
 by name; each one it calls is declared in the spec of its own file
 (``Objects/pyspec/abstract.py`` for ``Objects/abstract.c``,
 ``Python/pyspec/errors.py``, ``Include/cpython/pyspec/longintrepr.py``),
-with its Python reference (below).
+``@native``, with its Python reference (below).  Every piece of code
+that runs has one source: native code (C written by hand) that a
+reference only describes, or a spec body that clinic generates.
 
 Files
 -----
@@ -66,10 +68,17 @@ Add an accessor             ``@getter def attr(self) -> conv:`` (its
 Call a C function from a    Call it by name.  Declare it, if no spec does
 spec body                   yet, in the spec of its C file, with
                             ``@native`` and its Python reference
-                            (below), and import it (``from pyspec.abstract
-                            import PyObject_LengthHint``); add its inputs
-                            to ``HELPERS`` of the ``_cases.py`` of its
-                            spec (``HelperTest`` of ``test_pyspec_facts``).
+                            (below), and import it by the path of the
+                            spec from the source root (``from
+                            Objects.pyspec.abstract import
+                            PyObject_LengthHint``); add its inputs to
+                            ``HELPERS`` of the ``_cases.py`` of its spec
+                            (``HelperTest`` of ``test_pyspec_facts``).
+Give a C function a fast    An ``@inline`` function next to it in its
+path in generated code      spec: ``if <test>: return <value>``, then
+                            ``return f(...)``; spec bodies call it instead
+                            of ``f`` (``PyNumber_AsSsize_t_fast``, below).
+                            Never in the reference of ``f``.
 Add or rename a slot        ``def __len__(self, /): ...`` in the class,
                             no docstring, with ``@c_name(...)`` if the C
                             function is not ``<class>_<slot>`` without the
@@ -130,11 +139,13 @@ Test                        ``./python -m test test_clinic
                             test_pyspec_facts test_pyspec_catalog`` (after
                             rebuilding Python if the spec changed)
 Change a C function a spec  Keep its Python reference in step: what it
-calls                       returns and raises, and which Python code it
-                            may run (``calls()``, ``runs_python()``).
+calls                       returns and raises, which Python code it may
+                            run (``calls()``, ``runs_python()``) and which
+                            native functions it calls.
                             ``test_pyspec_catalog`` reads the C and fails
                             on a call that may run Python code the
-                            reference does not account for.
+                            reference does not account for, or on a call
+                            the reference makes that the C does not.
 ==========================  ===============================================
 
 Decorators
@@ -153,9 +164,12 @@ Decorators
 * ``@c_name(METH_NOARGS="f")``, ``@c_name(METH_O="f")``,
   ``METH_VARARGS``, ``METH_FASTCALL``: a hand-written PyCFunction entry
   (``Spec.pycfunction()`` in ``frontend.py``).
-* ``@native``: the C is written by hand and the body is its Python
-  reference (below); on a clinic method, clinic generates what it does
-  for ``...``.
+* ``@native``: the function is implemented natively (C written by
+  hand) and the body is its Python reference, which describes it and is
+  never compiled (below); on a clinic method, clinic generates what it
+  does for ``...``.
+* ``@inline``: a top-level function whose body clinic generates into
+  each caller, never as a C function of its own: a fast path (below).
 * ``@getter``, ``@setter`` (and ``@deleter`` after ``@setter``): an
   accessor; its block in the C file starts with the same decorator.
 * ``@c_name("prefix")`` on a class: the prefix of its generated tables
@@ -191,8 +205,18 @@ with the ``ast`` module; the tests run it.
 * A body is any Python.  ``...`` (or only a docstring, not ``pass``) is
   a C implementation about which nothing is known: a call of it may do
   anything.  With ``@native`` the body is the Python reference of
-  C written by hand (below).  Any other body is generated as C, and must
-  be in the lowered subset.
+  native code (below), never compiled.  Any other body is generated as
+  C (with ``@inline``, into each caller), and must be in the lowered
+  subset.
+* A spec imports the functions of another spec, and the specs whose
+  methods it shares, by the path of that spec from the source root:
+  ``from Objects.pyspec.abstract import PyNumber_AsSsize_t``, ``from
+  Objects.stringlib.pyspec import transmogrify``.  It imports the names
+  of ``Tools/clinic/libclinic/pyspec/runtime.py`` it uses from there
+  (``from libclinic.pyspec.runtime import NULL, isinstance``);
+  ``isinstance()`` and ``iter()`` have their C meaning only when
+  imported, and a spec that uses them without the import fails to load
+  as Python.
 
 The lowered subset
 ------------------
@@ -232,11 +256,15 @@ Values                    names, ``NULL``, types, exception classes,
                           ``bool`` and ``int`` constants; a ``str``
                           constant as the argument of a C function
 Calls                     C functions by name (``@native``, or
-                          ``...``), other spec functions (``f(...)``,
-                          ``T.meth(...)``), ``iter(x)``, ``len(x)`` of
-                          an exact list or tuple, a local object or
-                          type with at most one argument (``f()``,
-                          ``cls(x)``)
+                          ``...``), ``@inline`` functions, other spec
+                          functions (``f(...)``, ``T.meth(...)``),
+                          ``iter(x)``, ``len(x)`` of an exact list or
+                          tuple, a local object or type with at most one
+                          argument (``f()``, ``cls(x)``)
+``@inline`` body          ``if <condition>: return <value>`` (any
+                          number), then ``return <value>``: conditions
+                          and values (a call, or a value) as above; its
+                          parameters and result of any C type
 ========================  ================================================
 
 In a Python reference (``@native``), the facts follow the same
@@ -283,17 +311,20 @@ method is where its block is in the C file.
 * The tests skip a method whose block is under an ``#if`` false in this
   build.
 
-C functions: ``@native``
-------------------------
+Native functions: ``@native``
+-----------------------------
 
-A C function written by hand that spec bodies call is a function of the
-spec of its file, decorated ``@native``: the C is the authority, and
-the body is its *Python reference*.  The reference runs when a spec runs
-as Python (the difftest), and Argument Clinic reads it for the facts of
-each call: the exact type of the result, whether it can raise, and whether
-it may run Python code, for the arguments the call knows about.  It is
-never compiled.  Its annotations are its C types (``object``, ``str``,
-``int``, ``Py_ssize_t``, ``None``, or the C type as a string,
+A function implemented natively that spec bodies call, C written by
+hand today (another language, Rust say, later), is a function of the
+spec of its file, decorated ``@native``: the native code is the
+authority, and the body is its *Python reference*, which describes it.
+The reference runs when a spec runs as Python (the difftest), and
+Argument Clinic reads it for the facts of each call: the exact type of
+the result, whether it can raise, and whether it may run Python code,
+for the arguments the call knows about.  It is never compiled, not even
+in part.  Its annotations are the C types of its interface, the one
+generated code calls it through (``object``, ``str``, ``int``,
+``Py_ssize_t``, ``None``, or the C type as a string,
 ``'PyTypeObject *'``)::
 
     @native
@@ -324,23 +355,85 @@ has no other effects.  ``raise`` says what the C raises; ``exact()`` and
 none if it cannot raise; else NULL for an object (NULL with an exception
 set if it may also return NULL), -1 with an exception set for a
 ``Py_ssize_t``, negative for an ``int``.  Ownership is C's: a returned
-object is a new reference, arguments are borrowed.
+object is a new reference, arguments are borrowed.  A model uses the
+parameters of the interpreter it runs in (``sys.int_info.bits_per_digit``
+in ``_PyLong_IsCompact()``), not a constant of one build.
 
-A leading ``if <test>: return <value>`` of a reference is a *fast path*:
-where a call knows the test holds (``type(o) is int`` for an exact int),
-the value is written instead of the call; a call on a loop item is split
-into both.  A C struct kept in a local, such as the ``bytes_appender`` of
+A C struct kept in a local, such as the ``bytes_appender`` of
 ``bytesobject.c``, is the result of a function whose return annotation
 is the struct: it initializes the local in place, and the body releases
 it in a ``finally`` clause.
 
-Two checks keep a reference true: ``test_pyspec_catalog`` reads the C of
-the function (and the static functions it calls) and fails on a call that
-may run Python code the reference does not account for (a call of the
-same function, a ``calls()`` of the special method, or ``runs_python()``);
-``HelperTest`` of ``test_pyspec_facts`` calls the C directly, compares it
-with the reference, and checks the derived facts, with debug builds
-aborting when Python code runs where the facts say none does.
+Fast paths: ``@inline``
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Where generated code has a cheaper way to the result of a native
+function for some arguments (a compact int read inline instead of a call
+of ``PyNumber_AsSsize_t()``), the fast path is generated code of its
+own, written once as an ``@inline`` function in the spec of the native
+function, which spec bodies call instead of it::
+
+    @inline
+    def PyNumber_AsSsize_t_fast(o: object, exc: object) -> Py_ssize_t:
+        """PyNumber_AsSsize_t(o, exc), read inline for a compact int."""
+        if (type(o) is int or type(o) is bool) and _PyLong_IsCompact(o):
+            return _PyLong_CompactValue(o)
+        return PyNumber_AsSsize_t(o, exc)
+
+Its body is fast paths, ``if <test>: return <value>``, then ``return
+<value>`` (the lowered subset); its annotations are C types, as for
+``@native``.  Clinic generates it into every statement that calls it and
+never as a C function of its own: a test the facts of the call decide
+selects or drops its path (for an exact int, only
+``_PyLong_IsCompact(o)`` is left), and one they do not is tested at run
+time.  The generated code never assumes that the native function has
+the fast path, and the reference of the native function describes only
+the native code, so the two cannot disagree.  In a loop over a tuple (or
+a list, in its critical section) that writes to a buffer sized for every
+item, the first path of the ``@inline`` call writing the buffer is taken
+without its test (``bytes_appender_append_fast()``; "Capacity" in
+``Tools/clinic/libclinic/pyspec/partial_eval.py``).
+
+Native code that needs the logic of a fast path calls the same code
+instead of repeating it: the pieces are native functions that both use
+(``bytes_appender_append()`` is ``bytes_appender_has_room()`` and
+``bytes_appender_append_unchecked()`` in C, as its fast path is in the
+spec).  Logic that exists only as a spec body would be generated as a
+``static inline`` function of a header the native code includes; no
+native code needs one yet.
+
+Checking a reference against its native code
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* ``HelperTest`` of ``test_pyspec_facts`` calls the native function
+  directly with the ``HELPERS`` of the ``_cases.py`` of its spec,
+  compares it with the reference, and checks the derived facts, with
+  debug builds aborting when Python code runs where the facts say none
+  does.
+* The checker of the language of the native file reads the native code
+  (``NATIVE_CHECKERS`` in
+  ``Tools/clinic/libclinic/pyspec/disconnects.py``, by extension): every
+  call that may run Python code is accounted for by the reference (a
+  call of the same function, a ``calls()`` of the special method it
+  invokes, or ``runs_python()``); a reference that cannot fail has
+  native code that calls nothing that can; and the native code calls
+  every native function the reference calls.  The C checker,
+  ``CChecker``, uses the lexer and the escape analysis of the cases
+  generator (``Tools/cases_generator/``); ``test_pyspec_catalog`` holds
+  its disconnects to a ratchet (``c_calls``).
+
+A native file in another language needs only a checker of its own: a
+subclass of ``NativeChecker`` registered in ``NATIVE_CHECKERS`` for its
+extension (``.rs``), with ``function(name)``, the code of a function of
+the file; ``calls(code)``, the functions that code calls;
+``escaping_calls(code)``, those that may run Python code;
+``runs_no_python(name)``, the calls audited to run none; and
+``special_method(name)``, the special method whose Python code a call
+runs (``PyObject_GetIter()`` runs ``__iter__``), and a ratchet
+dimension of its own next to ``c_calls``.  The spec, the reference, the
+facts, the fast paths and ``HelperTest`` stay as they are: the reference
+describes the function whatever its language, and generated code calls
+it through its C interface.
 
 Clinic reports every error as ``path:line: error: message``, at the line
 of the spec when the error is in the spec (in the spec it was written

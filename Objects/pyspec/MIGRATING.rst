@@ -279,6 +279,16 @@ with its Python reference, in the spec of its own C file; cases in
 ``test_pyspec_facts``.  Only ``object`` and ``str`` parameters (and
 ``NULL`` defaults) are accepted.
 
+A reference describes its C and nothing more: it is never compiled.
+When the body should not call a C function for some arguments (read a
+compact int inline, the size of an exact tuple), write that fast path
+as an ``@inline`` function in the spec of the C function, returning the
+C function's call last, and call it from the body
+(``PyNumber_AsSsize_t_fast``, ``PyObject_LengthHint_fast``).  Never
+give a reference an ``if`` its C does not have to steer the generated
+code; if the C needs the same fast path, build both from the same C
+pieces (``bytes_appender_has_room()``), and say so in the reference.
+
 *Gives:* the C impl is generated; for ``__new__`` also a vectorcall,
 per-arity and per-type entries and the tier-2 call table; the logic is
 tested as Python (the difftest).  Whether that is worth it is section 3.
@@ -296,7 +306,13 @@ Checklist:
 
 - [ ] section 3's decision recorded in the PR (numbers, not adjectives);
 - [ ] cases cover each branch of the body, errors included;
-- [ ] each reference models the exceptions of its C, messages included.
+- [ ] each reference models the exceptions of its C, messages included;
+- [ ] each reference describes only its C: no path the C does not have,
+  no constant of one build (``sys.int_info.bits_per_digit``, not 30),
+  and the native functions it calls are the ones the C calls
+  (``c_calls``);
+- [ ] a fast path is an ``@inline`` function, measured with section 3
+  where it is taken and where its test runs for nothing.
 
 Level 4: facts for the specializer and the JIT
 ''''''''''''''''''''''''''''''''''''''''''''''
@@ -651,8 +667,18 @@ line.  The common ones:
     ``...``, or ``@native`` with the body as its reference.
 ``unsupported ...`` (the same hint)
     A use the partial evaluation produced that the emitter cannot lower
-    yet, e.g. a fast path of a reference in another spec (reported
-    there).
+    yet, e.g. in the body of an ``@inline`` function of another spec
+    (reported there).
+``f(): 'x = ...' in an @inline function (lowered: fast paths ...)``
+    The body of an ``@inline`` function is ``if <test>: return
+    <value>`` statements, then ``return <value>``.
+``isinstance() is the builtin here, not the C's: import it ...``
+    Running as Python, the spec (or a spec it imports) calls the builtin
+    ``isinstance()`` or ``iter()``: import them from
+    ``libclinic.pyspec.runtime``.
+``imported spec ... not found: a spec imports another by its path from the source root``
+    Write ``from Objects.pyspec.abstract import ...``, not ``from
+    pyspec.abstract import ...``.
 ``m: use ... as the body of a function implemented in C, not pass``
     Write ``...``.
 ``the body of a @native function is its Python reference``
@@ -671,6 +697,9 @@ A difftest failure on an exception message
     Python code, add ``calls(x, "__slot__")`` or ``runs_python()`` to
     the reference.  If it cannot (``memcmp``), add it to the audited
     ``NO_PYTHON`` set of ``disconnects.py``.
+``its reference calls f(), which its native code does not`` (``test_pyspec_catalog``)
+    The reference says the C calls ``f``; the C (or a function of its
+    file it calls) does not.  Correct whichever is wrong.
 ``New disconnects: fix them (or ... add these lines to ...)``
     Fix the docs or data file; add a baseline line only on purpose.
 ``Fixed disconnects: delete these lines``
