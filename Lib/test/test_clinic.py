@@ -12,7 +12,6 @@ from unittest import TestCase
 import ast
 import difflib
 import importlib
-import importlib.machinery
 import inspect
 import os.path
 import re
@@ -41,10 +40,12 @@ with test_tools.imports_under_tool('clinic'):
     from libclinic.cli import parse_file, Clinic
     from libclinic.pyspec import runtime as pyspec_runtime
     from libclinic.pyspec import (builtin_types as pyspec_builtin_types,
+                                  call_table as pyspec_call_table,
                                   facts as pyspec_facts,
                                   frontend as pyspec_frontend,
                                   partial_eval as pyspec_partial_eval,
-                                  slots as pyspec_slots)
+                                  slots as pyspec_slots,
+                                  specfiles as pyspec_specfiles)
 
 
 def repeat_fn(*functions):
@@ -7055,39 +7056,16 @@ class PyspecTypeTest(PyspecTestBase):
         """, "critical_section() generates the C function")
 
 
-PYSPEC_DIRS = [os.path.join(test_tools.basepath, 'Objects', 'pyspec'),
-               os.path.join(test_tools.basepath, 'Objects', 'stringlib',
-                            'pyspec'),
-               os.path.join(test_tools.basepath, 'Modules', 'pyspec')]
-BYTES_SPEC = os.path.join(PYSPEC_DIRS[0], 'bytesobject.py')
+def spec_files():
+    """(spec, the C file it describes or None) of every spec of the tree,
+    as the tools and test_pyspec_facts find them
+    (libclinic/pyspec/specfiles.py)."""
+    return pyspec_specfiles.spec_files(test_tools.basepath)
 
 
 def load_cases(spec_path):
     """The module <stem>_cases.py next to the spec *spec_path*, or None."""
-    path = spec_path.removesuffix('.py') + '_cases.py'
-    if not os.path.exists(path):
-        return None
-    name = '_pyspec_cases_' + os.path.basename(path).removesuffix('.py')
-    loader = importlib.machinery.SourceFileLoader(name, path)
-    module = types.ModuleType(name)
-    module.__file__ = path
-    loader.exec_module(module)
-    return module
-
-
-def spec_files():
-    """(spec, the C file it describes) of every spec in the tree: for
-    Objects/pyspec/foo.py, Objects/foo.c (or Objects/foo.h)."""
-    for dirname in PYSPEC_DIRS:
-        for name in sorted(os.listdir(dirname)):
-            if not name.endswith('.py') or name.endswith('_cases.py'):
-                continue
-            stem = name.removesuffix('.py')
-            parent = os.path.dirname(dirname)
-            c_files = [os.path.join(parent, stem + ext)
-                       for ext in ('.c', '.h')]
-            c_files = [path for path in c_files if os.path.exists(path)]
-            yield os.path.join(dirname, name), (c_files or [None])[0]
+    return pyspec_specfiles.load_cases(spec_path)
 
 
 def compiled_out(c_file, types):
@@ -7106,12 +7084,7 @@ def compiled_out(c_file, types):
             and func.name not in vars(types[cls.name])}
 
 
-# The cases of the bytes spec, also used by BytesSpecFactsTest (its
-# classes) and test_pyspec_facts (its SOURCES).
-BYTES_CASES = load_cases(BYTES_SPEC) if os.path.exists(BYTES_SPEC) else None
-
-
-@unittest.skipUnless(os.path.exists(BYTES_SPEC), 'needs the source tree')
+@unittest.skipUnless(spec_files(), 'needs the source tree')
 class PyspecFilesTest(TestCase):
     """Every spec file (Objects/pyspec/*.py, Objects/stringlib/pyspec/*.py,
     Modules/pyspec/*.py):
@@ -7196,7 +7169,7 @@ class PyspecFilesTest(TestCase):
     def test_cases(self):
         for spec_path, c_file in spec_files():
             cases = load_cases(spec_path)
-            if cases is None:
+            if not getattr(cases, 'CASES', None):
                 continue
             spec = pyspec_runtime.load(spec_path)
             skip = compiled_out(c_file, cases.TYPES) if c_file else set()
@@ -7284,23 +7257,48 @@ class PyspecFilesTest(TestCase):
         self.assertEqual(tp.__doc__, doc, self.REBUILD)
 
     def test_types_mismatch(self):
-        # The C of a type and the dunders of its spec class disagree.
-        with open(BYTES_SPEC, encoding='utf-8') as f:
-            source = f.read()
-        for dunder in ('__hash__', '__contains__'):
-            line = re.search(rf'\n    def {dunder}\(self.*', source).group()
-            spec = pyspec_frontend.Spec(source.replace(line, ''), BYTES_SPEC)
-            with self.subTest(missing=dunder):
-                with self.assertRaisesRegex(AssertionError,
-                                            'and the dunders of the spec'):
-                    self.check_type(spec, 'bytes', bytes)
-        extra = source.replace('    def __iter__(self, /): ...',
-                               '    def __iter__(self, /): ...\n'
-                               '    def __index__(self, /): ...')
-        with self.assertRaisesRegex(AssertionError,
-                                    'and the dunders of the spec'):
-            self.check_type(pyspec_frontend.Spec(extra, BYTES_SPEC), 'bytes',
-                            bytes)
+        # The C of a type and the dunders of its spec class disagree: a
+        # dunder of the type missing from the class, or one too many.
+        checked = 0
+        for spec_path, c_file in spec_files():
+            if c_file is None or not c_file.endswith('.c'):
+                continue
+            with open(spec_path, encoding='utf-8') as f:
+                source = f.read()
+            lines = source.splitlines(keepends=True)
+            spec = pyspec_frontend.Spec(source, spec_path)
+            for cls_name, node in spec.classes.items():
+                if not spec.declares_slots(cls_name):
+                    continue
+                tp = load_cases(spec_path).TYPES[cls_name]
+                stubs = [f for f in node.body
+                         if isinstance(f, ast.FunctionDef)
+                         and f.lineno == f.end_lineno and not f.decorator_list
+                         and spec.method_kind(f'{cls_name}.{f.name}')
+                         == pyspec_frontend.SLOT]
+                if not stubs:
+                    continue
+                line = stubs[0].lineno - 1
+                extra = next(s.name for s in pyspec_slots.slotdefs()
+                             if s.name not in vars(tp)
+                             and pyspec_slots.is_slot(s.name))
+                indent = ' ' * stubs[0].col_offset
+                changes = {
+                    f'missing {stubs[0].name}':
+                        lines[:line] + lines[line + 1:],
+                    f'extra {extra}':
+                        lines[:line] + [f'{indent}def {extra}(self, /): '
+                                        '...\n'] + lines[line:],
+                }
+                for change, text in changes.items():
+                    with self.subTest(cls=cls_name, change=change):
+                        changed = pyspec_frontend.Spec(''.join(text),
+                                                       spec_path)
+                        with self.assertRaisesRegex(
+                                AssertionError, 'and the dunders of the spec'):
+                            self.check_type(changed, cls_name, tp)
+                checked += 1
+        self.assertGreater(checked, 0)
 
 
 class PyspecSlotdefsTest(TestCase):
@@ -7332,272 +7330,183 @@ class PyspecSlotdefsTest(TestCase):
         self.assertGreater(seen, 100)
 
 
-@unittest.skipUnless(os.path.exists(BYTES_SPEC), 'needs the source tree')
-class BytesSpecFactsTest(TestCase):
-    """Facts of the tier-2 call table, derived from the bytes spec by
-    partial evaluation (Tools/clinic/libclinic/pyspec/call_table.py), and
-    the conditions under which they hold."""
+@unittest.skipUnless(spec_files(), 'needs the source tree')
+class PyspecFactsTest(TestCase):
+    """The facts Argument Clinic derives from the specs by partial
+    evaluation (libclinic/pyspec/facts.py, for the tier-2 call tables of
+    call_table.py), and the conditions under which they hold: the FACTS
+    of each <stem>_cases.py, checked by the generic assertions below (the
+    format is described in Objects/pyspec/bytesobject_cases.py)."""
 
-    @classmethod
-    def setUpClass(cls):
-        cls.spec = pyspec_frontend.Spec.load(BYTES_SPEC)
+    maxDiff = None
 
-    def facts(self, name, env, args):
-        residual = pyspec_partial_eval.specialize(self.spec, name, env)
-        analyzer = pyspec_facts.analyzer(self.spec)
-        return residual, analyzer.facts(residual, env, args)
-
-    def new_facts(self, arg_type):
+    @staticmethod
+    def env(cases, env):
+        """The facts of partial_eval for the markers of a FACTS env."""
         pe = pyspec_partial_eval
-        env = {'cls': pe.Value(bytes), 'source': arg_type or pe.NOTNULL,
-               'encoding': pe.NULL, 'errors': pe.NULL}
-        return self.facts('bytes.__new__', env, ['source'])
+        out = {}
+        for name, value in env.items():
+            if value is getattr(cases, 'NULL', None):
+                out[name] = pe.NULL
+            elif value is getattr(cases, 'ANY', None):
+                out[name] = pe.NOTNULL
+            elif isinstance(value, tuple) and value[:1] == ('is',):
+                out[name] = pe.Value(value[1])
+            else:
+                out[name] = value
+        return out
 
-    def dunder_bytes_facts(self, self_type):
-        env = {'self': self_type or pyspec_partial_eval.NOTNULL}
-        return self.facts('bytes.__bytes__', env, ['self'])
+    def check_code(self, code, expected):
+        for text in expected.get('contains', ()):
+            self.assertIn(text, code)
+        for text in expected.get('lacks', ()):
+            self.assertNotIn(text, code)
+        for text, count in expected.get('count', {}).items():
+            self.assertEqual(code.count(text), count, text)
 
-    def test_bytes_of_exact_bytes(self):
-        # bytes.__new__ returns an exact bytes argument (what
-        # bytes.__bytes__ returns for it): bytes(b) is b.
-        residual, facts = self.new_facts(bytes)
-        self.assertEqual(ast.unparse(ast.Module(residual, [])),
-                         'return source')
-        self.assertEqual(facts.alias, 0)
-        self.assertIs(facts.result_type, bytes)
-        self.assertFalse(facts.runs_python)
+    def check_body(self, body, expected):
+        """A specialization's body: its code, its only loop (whether it
+        iterates by index, and the exact type it iterates), and the calls
+        in the loop (else in the body)."""
+        self.check_code(ast.unparse(ast.Module(body, [])), expected)
+        where = body
+        if 'loop' in expected:
+            loop, = [node for stmt in body for node in ast.walk(stmt)
+                     if isinstance(node, ast.For)]
+            sequence, iterable = expected['loop']
+            self.assertIs(loop.pyspec_sequence, sequence)
+            self.assertIs(loop.pyspec_iterable, iterable)
+            where = [loop]
+        calls = {ast.unparse(node.func) for stmt in where
+                 for node in ast.walk(stmt) if isinstance(node, ast.Call)}
+        for name in expected.get('calls', ()):
+            self.assertIn(name, calls)
+        for name in expected.get('no_calls', ()):
+            self.assertNotIn(name, calls)
 
-    def test_bytes_of_subclass(self):
-        # A subclass (a heap type) may override __bytes__, even later:
-        # the lookup is not decided, and neither the alias nor the exact
-        # type holds.  The call table only has entries for exact static
-        # types; the generic entry, used for a subclass, has the same
-        # facts.
-        for arg_type in (BYTES_CASES.BytesSubclass,
-                         BYTES_CASES.BytesOverridingDunderBytes, None):
-            with self.subTest(arg_type=arg_type):
-                residual, facts = self.new_facts(arg_type)
-                self.assertIsNone(facts.alias)
-                self.assertIsNone(facts.result_type)
-                self.assertTrue(facts.runs_python)
-                self.assertIn('_PyObject_LookupSpecial',
-                              ast.unparse(ast.Module(residual, [])))
-        # What the interpreter does.
-        b = BYTES_CASES.BytesOverridingDunderBytes(b'x')
-        self.assertIs(type(bytes(b)), BYTES_CASES.BytesSubclass)
-        self.assertIsNot(bytes(BYTES_CASES.BytesSubclass(b'x')), b)
-
-    def test_bytes_of_unknown(self):
-        # bytes.__new__ returns an exact bytes argument before the
-        # __bytes__ lookup.  After that test, the argument is not exactly
-        # bytes: the later test of PyBytes_FromObject() is gone.
-        residual, _ = self.new_facts(None)
-        first = residual[0]
-        self.assertEqual(ast.unparse(first.test), 'type(source) is bytes')
-        self.assertEqual(ast.unparse(ast.Module(first.body, [])),
-                         'return source')
-        code = ast.unparse(ast.Module(residual[1:], []))
-        self.assertIn('_PyObject_LookupSpecial', code)
-        self.assertNotIn('is bytes', code)
-
-    def test_bytes_of_other_types(self):
-        for arg_type in (bytearray, memoryview):
-            with self.subTest(arg_type=arg_type):
-                _, facts = self.new_facts(arg_type)
-                self.assertIsNone(facts.alias)
-                self.assertIs(facts.result_type, bytes)
-                self.assertFalse(facts.runs_python)
-        _, facts = self.new_facts(list)
-        self.assertIsNone(facts.alias)
-        self.assertTrue(facts.runs_python)
-
-    def test_bytes_of_int(self):
-        # PyNumber_AsSsize_t() of an exact int runs no Python code and can
-        # only raise OverflowError (its Python reference in
-        # Objects/pyspec/abstract.py): the except TypeError of
-        # bytes.__new__ is dead, and bytes(16) runs no Python code.  A
-        # compact int is read inline (the fast path of the reference).
-        residual, facts = self.new_facts(int)
-        self.assertFalse(facts.runs_python)
-        self.assertIs(facts.result_type, bytes)
+    def check_fact(self, spec, cases, fact):
+        pe = pyspec_partial_eval
+        analyzer = pyspec_facts.analyzer(spec)
+        env = self.env(cases, fact['env'])
+        residual = None
+        if 'expr' in fact:
+            effects = pyspec_facts.Facts()
+            call = ast.parse(fact['expr'], mode='eval').body
+            result_type = analyzer.call(call, env, effects)
+            found = types.SimpleNamespace(
+                result_type=result_type, runs_python=effects.runs_python)
+        elif fact.get('reference'):
+            found = analyzer.reference_facts(fact['function'], env)
+        else:
+            options = {}
+            if 'inline' in fact:
+                options['inline'] = fact['inline']
+            if 'arities' in fact:
+                options['arities'] = [(self.env(cases, e), name, given)
+                                      for e, name, given in fact['arities']]
+            residual = pe.specialize(spec, fact['function'], env, **options)
+            found = None
+            if 'args' in fact:
+                found = analyzer.facts(residual, env, fact['args'])
+        for key in ('alias', 'result_type', 'runs_python', 'always_raises'):
+            if key in fact:
+                self.assertEqual(getattr(found, key), fact[key], key)
+        if residual is None:
+            return
         code = ast.unparse(ast.Module(residual, []))
-        self.assertNotIn('except', code)
-        self.assertIn('if _PyLong_IsCompact(source):\n'
-                      '    size = _PyLong_CompactValue(source)', code)
-        # A subclass of int is not an exact int.
-        _, facts = self.new_facts(BYTES_CASES.IntSubclass)
-        self.assertTrue(facts.runs_python)
+        if 'residual' in fact:
+            self.assertEqual(code, fact['residual'])
+        if 'first' in fact:
+            self.assertEqual(ast.unparse(residual[0]), fact['first'])
+        if 'last' in fact:
+            self.assertEqual(ast.unparse(residual[-1]), fact['last'])
+        self.check_code(code, fact)
+        if 'called' in fact:
+            special = pe.specialization_of(spec, residual[-1].value,
+                                           facts=True)
+            self.check_body(special.body, fact['called'])
+        for name, expected in fact.get('specializations', {}).items():
+            special = pe.specialization(spec, name)
+            if 'params' in expected:
+                self.assertEqual(special.params, expected['params'])
+            if 'lock' in expected:
+                self.assertEqual(special.lock, expected['lock'])
+            self.check_body(special.body, expected)
 
-    def test_bytes_of_iterables(self):
-        # bytes_from_iterator() has a spec body: the facts of bytes(x)
-        # depend on what iterating x runs.  A range yields exact ints, so
-        # neither __next__ nor __index__ runs Python code; the items of a
-        # list, a tuple, a dict or a set may have a Python __index__.
-        pe = pyspec_partial_eval
-        _, facts = self.new_facts(range)
-        self.assertIs(facts.result_type, bytes)
-        self.assertFalse(facts.runs_python)
-        for arg_type in (list, tuple, dict, set):
-            with self.subTest(arg_type=arg_type):
-                _, facts = self.new_facts(arg_type)
-                self.assertIs(facts.result_type, bytes)
-                self.assertTrue(facts.runs_python)
-        self.assertEqual(bytes({BYTES_CASES.IndexOnly(3)}), b'\x03')
-        # A list or a tuple is iterated by index, without an iterator, in
-        # a specialization of bytes_from_iterator() shared by every caller;
-        # exact ints take a fast path without a call.  A list is copied in
-        # its critical section by a loop that runs no Python code; on an
-        # item that could run Python code the call restarts with the
-        # generic bytes_from_iterator().
-        for arg_type in (list, tuple):
-            with self.subTest(arg_type=arg_type):
-                residual, _ = self.new_facts(arg_type)
-                name = f'bytes_from_iterator_{arg_type.__name__}'
-                self.assertEqual(ast.unparse(ast.Module(residual, [])),
-                                 f'return {name}(source)')
-                special = pe.specialization_of(self.spec, residual[0].value)
-                self.assertEqual(special.params, ['x'])
-                if arg_type is list:
-                    code = ast.unparse(ast.Module(special.body, []))
-                    self.assertIn('with critical_section(x):', code)
-                    self.assertIn('return bytes_from_iterator(it, x)', code)
-                    held = pe.specialization(self.spec, f'{name}_lock_held')
-                    self.assertEqual(held.lock, 'x')
-                    body = held.body
-                else:
-                    body = special.body
-                loop, = [node for stmt in body for node in ast.walk(stmt)
-                         if isinstance(node, ast.For)]
-                self.assertTrue(loop.pyspec_sequence)
-                self.assertIs(loop.pyspec_iterable, arg_type)
-                self.assertEqual(ast.unparse(loop.iter), 'x')
-                code = ast.unparse(ast.Module(body, []))
-                self.assertNotIn('iter(', code)
-                self.assertIn('size = len(x)', code)
-                self.assertIn('if (type(item) is int or type(item) is bool) '
-                              'and _PyLong_IsCompact(item):', code)
-                self.assertEqual('return FALLBACK' in code, arg_type is list)
-                # The buffer has room for every item: the fast path of
-                # bytes_appender_append() is taken.
-                calls = [ast.unparse(node.func) for node in ast.walk(loop)
-                         if isinstance(node, ast.Call)]
-                self.assertIn('bytes_appender_append_unchecked', calls)
-                self.assertNotIn('bytes_appender_append', calls)
-        # Any other iterable: the iterator protocol.
-        # A range is not iterated by index: the generic function is
-        # called, with the facts of its residual for a range.
-        residual, _ = self.new_facts(range)
-        self.assertEqual(ast.unparse(residual[-1]),
-                         'return bytes_from_iterator(it_1, source)')
-        special = pe.specialization_of(self.spec, residual[-1].value,
-                                       facts=True)
-        loop, = [node for stmt in special.body for node in ast.walk(stmt)
-                 if isinstance(node, ast.For)]
-        self.assertFalse(loop.pyspec_sequence)
-        self.assertIs(loop.pyspec_iterable, range)
-        # An argument of unknown type is versioned for list and tuple.
-        residual, facts = self.new_facts(None)
-        code = ast.unparse(ast.Module(residual, []))
-        self.assertIn('if type(source) is list:', code)
-        self.assertIn('if type(source) is tuple:', code)
-        self.assertIn('bytes_from_iterator(it_1, source)', code)
-        self.assertTrue(facts.runs_python)
-        # Unknown iterators run Python code (generators, __next__).
-        env = {'it': pe.NOTNULL, 'x': pe.NOTNULL}
-        _, facts = self.facts('bytes_from_iterator', env, ['it', 'x'])
-        self.assertTrue(facts.runs_python)
+    def test_facts(self):
+        checked = 0
+        for spec_path, _ in spec_files():
+            cases = load_cases(spec_path)
+            spec = pyspec_frontend.Spec.load(spec_path)
+            for fact in getattr(cases, 'FACTS', ()):
+                what = fact.get('function') or fact['expr']
+                with self.subTest(spec=spec_path, what=what,
+                                  env=fact['env']):
+                    self.check_fact(spec, cases, fact)
+                    checked += 1
+        self.assertGreater(checked, 0)
 
-    def test_new_calls_arity_function(self):
-        # After the checks of bytes_new_impl(), the facts are those of
-        # bytes_new_nargs1() (exactly bytes, one argument), whose code is
-        # the rest of the body: it is called, not repeated.
-        pe = pyspec_partial_eval
-        facts = {'cls': pe.Value(bytes), 'source': pe.NOTNULL,
-                 'encoding': pe.NULL, 'errors': pe.NULL}
-        arities = [(facts, 'bytes_new_nargs1', ['source'])]
-        residual = pe.specialize(self.spec, 'bytes.__new__', {},
-                                 inline=False, arities=arities)
-        self.assertEqual(ast.unparse(residual[-1]),
-                         'return bytes_new_nargs1(source)')
-        self.assertNotIn('_PyObject_LookupSpecial',
-                         ast.unparse(ast.Module(residual, [])))
-
-    def test_dunder_bytes(self):
-        _, facts = self.dunder_bytes_facts(bytes)
-        self.assertEqual(facts.alias, 0)
-        self.assertIs(facts.result_type, bytes)
-        self.assertFalse(facts.runs_python)
-        # A subclass instance gets an exact copy: exact type, no alias.
-        for self_type in (BYTES_CASES.BytesSubclass, None):
-            with self.subTest(self_type=self_type):
-                _, facts = self.dunder_bytes_facts(self_type)
-                self.assertIsNone(facts.alias)
-                self.assertIs(facts.result_type, bytes)
-                self.assertFalse(facts.runs_python)
-        b = BYTES_CASES.BytesSubclass(b'x')
-        self.assertIs(type(b.__bytes__()), bytes)
-        self.assertIsNot(b.__bytes__(), b)
-
-    def test_fromhex(self):
-        pe = pyspec_partial_eval
-        env = {'cls': pe.Value(bytes), 'string': str}
-        _, facts = self.facts('bytes.fromhex', env, ['string'])
-        self.assertIs(facts.result_type, bytes)
-        self.assertFalse(facts.runs_python)
-        # Any argument: __buffer__ of a Python class may run.
-        env['string'] = pe.NOTNULL
-        _, facts = self.facts('bytes.fromhex', env, ['string'])
-        self.assertIs(facts.result_type, bytes)
-        self.assertTrue(facts.runs_python)
-        # A subclass: cls(result) runs Python code and returns anything.
-        env['cls'] = pe.NOTNULL
-        _, facts = self.facts('bytes.fromhex', env, ['string'])
-        self.assertIsNone(facts.result_type)
-        self.assertTrue(facts.runs_python)
-
-        class H(bytes):
-            def __new__(cls, value):
-                return 42
-        self.assertEqual(H.fromhex('4142'), 42)
-
-    def test_fromhex_table(self):
-        # Sub.fromhex shares the ml_meth of bytes.fromhex, and the table is
-        # keyed by it: the generic entry of the class method, which
+    def test_class_method_entries(self):
+        # Sub.m shares the ml_meth of T.m, and the method table is keyed
+        # by it: the generic entry of a class method, which
         # _PySpec_FindMethod() returns for a subclass, holds for any
-        # class; the entries for an argument type are for exactly bytes.
-        path = os.path.join(test_tools.basepath, 'Objects', 'clinic',
-                            'bytesobject_pyspec.c.h')
-        with open(path, encoding='utf-8') as f:
-            text = f.read()
-        entries = re.findall(r'/\* (bytes\.fromhex\(\w+\)[^:]*): ([^*]*) \*/'
-                             r'\s*\{([^}]*)\}', text)
-        self.assertGreater(len(entries), 1)
-        for comment, described, body in entries:
-            with self.subTest(comment=comment):
-                if '.arg_type = NULL' in body:
-                    self.assertEqual(comment, 'bytes.fromhex(x)')
-                    self.assertIn('.result_type = NULL', body)
-                    self.assertIn('_PySpec_MAY_RUN_PYTHON', body)
-                else:
-                    self.assertTrue(comment.endswith(', on exactly bytes'))
+        # class; the entries for an argument type are for exactly T.
+        checked = 0
+        for spec_path, c_file in spec_files():
+            if c_file is None or not c_file.endswith('.c'):
+                continue
+            spec = pyspec_frontend.Spec.load(spec_path)
+            output = pyspec_frontend.output_path(c_file)
+            if not os.path.exists(output):
+                continue
+            with open(output, encoding='utf-8') as f:
+                text = f.read()
+            for name in spec.implemented_functions():
+                node = spec.functions[name]
+                if not any(pyspec_frontend.decorator_name(d) == 'classmethod'
+                           for d in node.decorator_list):
+                    continue
+                cls_name = name.rpartition('.')[0]
+                entries = re.findall(
+                    rf'/\* ({re.escape(name)}\(\w+\)[^:]*): [^*]* \*/'
+                    r'\s*\{([^}]*)\}', text)
+                for comment, body in entries:
+                    with self.subTest(comment=comment):
+                        if '.arg_type = NULL' in body:
+                            self.assertEqual(comment, f'{name}(x)')
+                        else:
+                            self.assertTrue(comment.endswith(
+                                f', on exactly {cls_name}'))
+                        checked += 1
+        self.assertGreater(checked, 0)
 
     def test_builtin_type_facts(self):
         # The facts about builtin types (libclinic/pyspec/builtin_types.py,
-        # and the spec class for bytes) agree with the builtins of the
-        # Python being built.
+        # and the spec classes that describe a whole builtin type) agree
+        # with the builtins of the Python being built.
+        import builtins
         bt = pyspec_builtin_types
-        facts = bt.TypeFacts(self.spec)
-        for tp in [*bt.TABLE, bytes]:
-            for name in bt.SPECIALS:
-                with self.subTest(tp=tp, name=name):
-                    self.assertEqual(facts.defines(tp, name),
-                                     name in tp.__dict__)
-                    self.assertEqual(facts.has(tp, name), hasattr(tp, name))
-            with self.subTest(tp=tp):
-                self.assertEqual(facts.mro(tp), list(tp.__mro__))
-        # Types it knows nothing about: nothing is decided.
-        self.assertIsNone(facts.has(BYTES_CASES.BytesSubclass, '__bytes__'))
-        self.assertIsNone(facts.has(bytes, '__add__'))
+        for spec_path, _ in spec_files():
+            spec = pyspec_frontend.Spec.load(spec_path)
+            facts = bt.TypeFacts(spec)
+            tps = [*bt.TABLE]
+            tps += [tp for name in spec.classes
+                    if (tp := getattr(builtins, name, None)) is not None
+                    and facts.spec_class(tp) is not None]
+            for tp in tps:
+                for name in bt.SPECIALS:
+                    with self.subTest(spec=spec_path, tp=tp, name=name):
+                        self.assertEqual(facts.defines(tp, name),
+                                         name in tp.__dict__)
+                        self.assertEqual(facts.has(tp, name),
+                                         hasattr(tp, name))
+                with self.subTest(spec=spec_path, tp=tp):
+                    self.assertEqual(facts.mro(tp), list(tp.__mro__))
+            # Types it knows nothing about: nothing is decided.
+            class Unknown:
+                pass
+            self.assertIsNone(facts.has(Unknown, '__len__'))
+            self.assertIsNone(facts.has(object, '__add__'))
 
     def test_independent_of_host(self):
         # The generated code does not depend on the builtins of the Python
@@ -7608,26 +7517,34 @@ class BytesSpecFactsTest(TestCase):
         real_hasattr = hasattr
 
         def old_hasattr(obj, name):
-            if name in ('__buffer__', '__bytes__') and isinstance(obj, type):
+            if name in pyspec_builtin_types.SPECIALS \
+                    and isinstance(obj, type):
                 return False
             return real_hasattr(obj, name)
 
-        filename = os.path.join(test_tools.basepath, 'Objects',
-                                'bytesobject.c')
-        writer = libclinic.FileWriter(dry_run=True)
-        with mock.patch('builtins.hasattr', old_hasattr):
-            parse_file(filename, limited_capi=False, writer=writer)
-        self.assertEqual([change.filename for change in writer.changes], [])
+        for spec_path, c_file in spec_files():
+            spec = pyspec_frontend.Spec.load(spec_path)
+            if c_file is None or not spec.implemented_functions():
+                continue
+            with self.subTest(spec=spec_path):
+                writer = libclinic.FileWriter(dry_run=True)
+                with mock.patch('builtins.hasattr', old_hasattr):
+                    parse_file(c_file, limited_capi=False, writer=writer)
+                self.assertEqual(
+                    [change.filename for change in writer.changes], [])
 
-    def test_iterator_next_facts(self):
-        # bytes_iterator.__next__ returns exact(int): an exact int, and it
-        # states no effect: it runs no Python code.
-        facts = pyspec_facts.analyzer(self.spec).reference_facts(
-            'bytes_iterator.__next__', {})
-        self.assertIs(facts.result_type, int)
-        self.assertIs(facts.runs_python, False)
-        for value in iter(bytes(range(256))):
-            self.assertIs(type(value), int)
+    def test_registry_up_to_date(self):
+        # The registry in pycore_pyspec.h lists the call table of every
+        # class of call_table.table_classes() of the core specs.
+        root = test_tools.basepath
+        header = os.path.join(root, pyspec_call_table.REGISTRY_HEADER)
+        with open(header, encoding='utf-8') as f:
+            text = f.read()
+        expected = pyspec_call_table.registry_text(
+            pyspec_call_table.registry(root))
+        self.assertIn(pyspec_call_table.REGISTRY_START + '\n' + expected
+                      + pyspec_call_table.REGISTRY_END, text,
+                      'run "make clinic"')
 
     def test_unknown_is_worst(self):
         # A C function whose body is ... may do anything: a call of it may
