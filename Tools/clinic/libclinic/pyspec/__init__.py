@@ -14,8 +14,11 @@ For Objects/foo.c, Objects/pyspec/foo.py is its spec:
                 functions from their Python references
   partial_eval  folds a spec function for facts known at a call site
   emit          generates C from the implemented spec functions
-  call_table    adds the call table of the tier-2 optimizer to that C
-                (Include/internal/pycore_pyspec.h)
+  call_table    adds the call table of each class for the tier-2
+                optimizer to that C, and writes the registry of all of
+                them (Include/internal/pycore_pyspec.h)
+  specfiles     finds every spec of the tree (one glob) and its test
+                data (<stem>_cases.py)
   disconnects   where the code and the files describing it by hand
                 disagree, per dimension (C API, docs, slots, docstrings,
                 typeshed); a ratchet run by Lib/test/test_pyspec_catalog.py
