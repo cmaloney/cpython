@@ -1,30 +1,37 @@
 """Check the facts Argument Clinic derives from the pyspec files.
 
 The pyspec call tables (Include/internal/pycore_pyspec.h, generated from
-Objects/pyspec/*.py) give the tier-2 optimizer direct C entry points and
-facts about their results: an exact result type, a constant, an alias of
-an argument, and whether the call may run Python code.  The JIT trusts
-them.  These tests check them without the JIT:
+the specs, one per spec'd class, found through the registry) give the
+tier-2 optimizer direct C entry points and facts about their results: an
+exact result type, a constant, an alias of an argument, and whether the
+call may run Python code.  The JIT trusts them.  These tests check them
+without the JIT, for every class of the registry and every spec, with
+the test data of the <stem>_cases.py next to each spec (the names are
+described in Objects/pyspec/bytesobject_cases.py); nothing here names a
+type:
 
+* RegistryTest: the registry is the classes the tools give tables.
 * DirectCallTest calls every table entry directly (through
-  _testinternalcapi) with every input its guard accepts, compares the
-  outcome with the interpreter, and checks each claimed fact on the result.
-  "Runs no Python code" is checked dynamically (sys.setprofile and
-  recording special methods), and by calling the entry through the
-  debug-build tripwire (_PySpec_CallNoPython1).
+  _testinternalcapi) with every case of CASES its guard accepts, compares
+  the outcome with the interpreter, and checks each claimed fact on the
+  result.  "Runs no Python code" is checked dynamically (sys.setprofile),
+  and by calling the entry in the debug-build tripwire
+  (_testinternalcapi.pyspec_no_python()).
 * HelperTest calls the hand-written C functions the specs call
-  (@c_implemented) directly, compares them with their Python references,
-  and checks the facts derived from the references the same way.
+  (@c_implemented, HELPERS) directly, compares them with their Python
+  references, and checks the facts derived from the references the same
+  way.
 * SlotFactsTest checks the slot facts that specialized uops use
-  (_PySpec_FindSlot()) against the derivation, and the uops against the
-  slots.
+  (_PySpec_FindSlot(), SLOT_USES) against the derivation, and the uops
+  against the slots.
 * DebugAssertionTest checks the debug-build run-time assertions of
   optimizer facts and the "no Python" tripwire.
-* SoundnessTest pins latent soundness problems found in review.
+* SoundnessTest pins soundness problems found in review (the class
+  methods of a subclass, FACTS with a run).
 """
 
-import ast
-import codecs
+import builtins
+import functools
 import gc
 import os
 import sys
@@ -35,18 +42,67 @@ from test import support, test_tools
 from test.support import import_helper, script_helper
 
 _testinternalcapi = import_helper.import_module('_testinternalcapi')
+test_tools.skip_if_missing('clinic')
+with test_tools.imports_under_tool('clinic'):
+    from libclinic.pyspec import (builtin_types, call_table, facts,
+                                  frontend, partial_eval, runtime,
+                                  specfiles)
+
+SRCDIR = test_tools.basepath
 
 
-def bytes_spec_cases():
-    """The bytes() inputs of the spec difftest
-    (SOURCES of Objects/pyspec/bytesobject_cases.py)."""
-    try:
-        from test.test_clinic import BYTES_CASES
-    except unittest.SkipTest as exc:
-        raise unittest.SkipTest(f'test_clinic is not available: {exc}')
-    if BYTES_CASES is None:
-        raise unittest.SkipTest('Objects/pyspec/bytesobject_cases.py is not available')
-    return BYTES_CASES.SOURCES
+class SpecInfo:
+    """A spec file: its path, the C file it describes, the spec, and its
+    test data (the <stem>_cases.py module, or None)."""
+
+    def __init__(self, path, c_file):
+        self.path = path
+        self.c_file = c_file
+        self.spec = frontend.Spec.load(path)
+        self.cases = specfiles.load_cases(path)
+
+    def data(self, name, default):
+        return getattr(self.cases, name, default)
+
+    @functools.cached_property
+    def analyzer(self):
+        return facts.analyzer(self.spec)
+
+    @functools.cached_property
+    def references(self):
+        """The spec run as Python (once: runtime.load() makes new
+        functions each time)."""
+        return runtime.load(self.path)
+
+
+@functools.cache
+def specs():
+    found = [SpecInfo(path, c_file)
+             for path, c_file in specfiles.spec_files(SRCDIR)]
+    if not found:
+        raise unittest.SkipTest('needs the spec files of the source tree')
+    return found
+
+
+@functools.cache
+def registry():
+    """[(type, class name, SpecInfo)] of the classes with a call table,
+    in the order of the registry the tools generate."""
+    out = []
+    for info in specs():
+        if not specfiles.is_core(SRCDIR, info.c_file):
+            continue
+        for cls_name in call_table.table_classes(info.spec):
+            out.append((info.data('TYPES', {})[cls_name], cls_name, info))
+    return out
+
+
+def spec_class(tp):
+    """(class name, SpecInfo) of the registry class tp."""
+    for other, cls_name, info in registry():
+        if other is tp:
+            return cls_name, info
+    raise LookupError(tp)
 
 
 def outcome(func, *args):
@@ -58,10 +114,9 @@ def outcome(func, *args):
 
 
 def python_calls(func, *args):
-    """Call func(*args) (a C function); return (outcome, result, the Python
-    functions that ran during the call: their names as seen by
-    sys.setprofile, and the recording special methods below that were
-    called)."""
+    """Call func(*args) (a C function); return (outcome, result, the
+    Python functions that ran during the call, as sys.setprofile sees
+    them: every Python frame, special methods included)."""
     ran = []
 
     def profile(frame, event, arg):
@@ -73,7 +128,6 @@ def python_calls(func, *args):
     gc_enabled = gc.isenabled()
     gc.disable()
     exc = result = None
-    RECORDED.clear()
     sys.setprofile(profile)
     try:
         result = func(*args)
@@ -81,7 +135,6 @@ def python_calls(func, *args):
         exc = e
     finally:
         sys.setprofile(old)
-        ran += [f'recorded {name}' for name in RECORDED]
         if gc_enabled:
             gc.enable()
     if exc is not None:
@@ -89,369 +142,308 @@ def python_calls(func, *args):
     return ('returns', type(result), result), result, ran
 
 
-# Recording special methods: an extra, explicit check that the calls the
-# facts say run no Python code really call none of them.
-RECORDED = []
+def no_python(func, *args):
+    """func(*args) in the "no Python" tripwire: in debug builds, running
+    Python code is a fatal error."""
+    return _testinternalcapi.pyspec_no_python(func, args)
 
 
-class RecordingIndex:
-    def __init__(self, value):
-        self.value = value
-
-    def __index__(self):
-        RECORDED.append('__index__')
-        return self.value
+def cases_of(info, name):
+    """The cases (args, kwargs) of spec function *name*, fresh each."""
+    for make_case in info.data('CASES', {}).get(name, ()):
+        yield make_case
 
 
-class RecordingBuffer:
-    recorded = RECORDED     # still reachable at interpreter shutdown
-
-    def __buffer__(self, flags):
-        self.recorded.append('__buffer__')
-        return memoryview(b'rb')
-
-    def __release_buffer__(self, view):
-        self.recorded.append('__release_buffer__')
-
-
-class RecordingIter:
-    def __iter__(self):
-        RECORDED.append('__iter__')
-        return iter([1, 2])
-
-
-class RecordingBytes:
-    def __bytes__(self):
-        RECORDED.append('__bytes__')
-        return b'rbytes'
+def check_facts(test, entry, args, out, result, ran):
+    """The facts of a table entry hold for a call with args."""
+    kind = out[0]
+    if entry['always_raises']:
+        test.assertEqual(kind, 'raises', 'claims: always raises')
+    if kind == 'returns':
+        if entry['result_type'] is not None:
+            test.assertIs(type(result), entry['result_type'],
+                          'claims: exact result type')
+        if entry['result_alias'] >= 0:
+            test.assertIs(result, args[entry['result_alias']],
+                          'claims: result is an argument')
+        if entry['has_const']:
+            test.assertIs(result, entry['result_const'],
+                          'claims: constant result')
+    if not entry['may_run_python']:
+        test.assertEqual(ran, [], 'claims: runs no Python code')
 
 
-class BytesSubclass(bytes):
-    pass
+def guard_accepts(entry, args):
+    """Whether the entry holds for these arguments (counted as the entry
+    counts them)."""
+    if entry['nargs'] != len(args):
+        return False
+    return entry['arg_type'] is None or type(args[0]) is entry['arg_type']
 
 
-class RecordingStr(str):
-    def __index__(self):
-        RECORDED.append('__index__')
-        return 1
+def method_call(tp, entry, args):
+    """(bound method, its arguments, the arguments as the entry counts
+    them) of a case of a method entry, or None when the entry is not for
+    it: a class method is called on the class of the case, exactly tp (a
+    subclass is SoundnessTest's)."""
+    if entry['classmethod'] and args[0] is not tp:
+        return None
+    return (bound(tp, entry['name'], args[0]), args[1:],
+            args[1:] if entry['classmethod'] else args)
 
 
-# More inputs, for the exact types of the typed entries.
-EXTRA_CASES = [
-    lambda: ((memoryview(RecordingBuffer()),), {}),
-    lambda: ((memoryview(bytearray(b'ab')),), {}),
-    lambda: (([RecordingIndex(1), RecordingIndex(2)],), {}),
-    lambda: (((RecordingIndex(3),),), {}),
-    lambda: (({RecordingIndex(4): 0},), {}),
-    lambda: (([RecordingIndex(300)],), {}),
-    lambda: ((RecordingIter(),), {}),
-    lambda: ((RecordingBytes(),), {}),
-    lambda: ((RecordingStr('x'),), {}),
-    lambda: ((range(0),), {}),
-    lambda: ((bytearray(),), {}),
-    lambda: ((b'',), {}),
-    lambda: ((BytesSubclass(b'sub'),), {}),
-]
+def bound(tp, name, self_or_cls):
+    """Method *name* of tp (its C function, even if a subclass overrides
+    it) bound to self, or to the class for a class method."""
+    descriptor = vars(tp)[name]
+    if isinstance(descriptor, types.ClassMethodDescriptorType):
+        return descriptor.__get__(None, self_or_cls)
+    return descriptor.__get__(self_or_cls)
+
+
+class RegistryTest(unittest.TestCase):
+
+    def test_registry(self):
+        # The interpreter's registry (the generated part of
+        # pycore_pyspec.h) lists exactly the classes the tools give a
+        # table: a new spec'd class needs no C edit.
+        self.assertEqual(_testinternalcapi.pyspec_classes(),
+                         [tp for tp, _, _ in registry()])
+
+    def test_each_class_has_its_own_slots(self):
+        # The slots of a table are those of its class.
+        for tp, cls_name, info in registry():
+            for entry in _testinternalcapi.pyspec_table(tp)['slots']:
+                with self.subTest(cls=cls_name, slot=entry['name']):
+                    self.assertIn(entry['name'],
+                                  info.spec.entries(cls_name))
 
 
 class DirectCallTest(unittest.TestCase):
-    """Every entry of the bytes call table, called directly."""
+    """Every entry of every call table, called directly."""
 
     maxDiff = None
 
-    @classmethod
-    def setUpClass(cls):
-        cls.calls, cls.methods = _testinternalcapi.pyspec_table(bytes)
-
-    def check_facts(self, entry, args, out, result, ran):
-        kind = out[0]
-        if entry['always_raises']:
-            self.assertEqual(kind, 'raises', 'claims: always raises')
-        if kind == 'returns':
-            if entry['result_type'] is not None:
-                self.assertIs(type(result), entry['result_type'],
-                              'claims: exact result type')
-            if entry['result_alias'] >= 0:
-                self.assertIs(result, args[entry['result_alias']],
-                              'claims: result is an argument')
-            if entry['has_const']:
-                self.assertIs(result, entry['result_const'],
-                              'claims: constant result')
-        if not entry['may_run_python']:
-            self.assertEqual(ran, [], 'claims: runs no Python code')
-
-    def guard_accepts(self, entry, args, nargs=None):
-        if entry['nargs'] != (len(args) if nargs is None else nargs):
-            return False
-        return entry['arg_type'] is None or type(args[0]) is entry['arg_type']
-
     def test_calls(self):
-        # bytes(*args) through every entry whose guard accepts args.
-        checked = {i: 0 for i in range(len(self.calls))}
-        for make_case in bytes_spec_cases() + EXTRA_CASES:
-            args, kwargs = make_case()
-            if kwargs:
-                continue    # the table is for positional arguments only
-            expected, _ = outcome(bytes, *args)
-            for index, entry in enumerate(self.calls):
-                if not self.guard_accepts(entry, args):
-                    continue
-                with self.subTest(args=args, entry=index,
-                                  arg_type=entry['arg_type']):
-                    args, _ = make_case()
-                    out, result, ran = python_calls(
-                        _testinternalcapi.pyspec_call, bytes, index, args)
-                    self.assertEqual(out, expected)
-                    self.check_facts(entry, args, out, result, ran)
-                    checked[index] += 1
-                    if not entry['may_run_python'] and not ran:
-                        # The way the JIT calls it: in debug builds, running
-                        # Python code is a fatal error.
-                        args, _ = make_case()
-                        out, _ = outcome(_testinternalcapi.pyspec_call,
-                                         bytes, index, args, True)
+        # T(*args) through every entry whose guard accepts args, for the
+        # cases of T.__new__ with the class exactly T.
+        for tp, cls_name, info in registry():
+            calls = _testinternalcapi.pyspec_table(tp)['calls']
+            checked = {i: 0 for i in range(len(calls))}
+            for make_case in cases_of(info, f'{cls_name}.__new__'):
+                args, kwargs = make_case()
+                if kwargs or args[0] is not tp:
+                    continue    # the table: exactly T, positional only
+                expected, _ = outcome(tp, *args[1:])
+                for index, entry in enumerate(calls):
+                    if not guard_accepts(entry, args[1:]):
+                        continue
+                    with self.subTest(cls=cls_name, args=args[1:],
+                                      entry=index):
+                        call_args = make_case()[0][1:]
+                        out, result, ran = python_calls(
+                            _testinternalcapi.pyspec_call, tp, index,
+                            call_args)
                         self.assertEqual(out, expected)
-        # Every entry was tested with at least one input.
-        self.assertEqual([i for i, n in checked.items() if n == 0], [])
+                        check_facts(self, entry, call_args, out, result,
+                                    ran)
+                        checked[index] += 1
+                        if not entry['may_run_python'] and not ran:
+                            # The way the JIT calls it.
+                            out, _ = outcome(
+                                no_python, _testinternalcapi.pyspec_call,
+                                tp, index, make_case()[0][1:])
+                            self.assertEqual(out, expected)
+            with self.subTest(cls=cls_name):
+                # Every entry was tested with at least one input.
+                self.assertEqual([i for i, n in checked.items() if n == 0],
+                                 [])
 
     def test_find_call(self):
         # The entry the optimizer picks accepts the argument's exact type,
         # and an unknown type gets the generic entry (a subclass instance
         # never gets the facts of its base).
-        for make_case in bytes_spec_cases() + EXTRA_CASES:
-            args, kwargs = make_case()
-            if kwargs or len(args) > 1:
-                continue
-            arg_type = type(args[0]) if args else None
-            index = _testinternalcapi.pyspec_find_call(bytes, len(args),
-                                                       arg_type)
-            with self.subTest(args=args):
-                self.assertIsNotNone(index)
-                self.assertTrue(self.guard_accepts(self.calls[index], args))
-                if args and arg_type not in {e['arg_type'] for e in self.calls}:
-                    self.assertIsNone(self.calls[index]['arg_type'])
-        index = _testinternalcapi.pyspec_find_call(bytes, 1, None)
-        self.assertIsNone(self.calls[index]['arg_type'])
-        self.assertTrue(self.calls[index]['may_run_python'])
-        self.assertIsNone(self.calls[index]['result_type'])
-
-    @staticmethod
-    def method_inputs(name):
-        """Fresh inputs (self and the arguments, or the arguments of a
-        class method) of the methods the spec implements."""
-        if name == '__bytes__':
-            return [(b'',), (b'abc',), (BytesSubclass(b'xy'),),
-                    (BytesSubclass(),)]
-        assert name == 'fromhex', name
-        return [('',), ('00ff',), (' 0a 1B ',), ('abc',), ('zz',),
-                (b'00ff',), (bytearray(b'0a'),), (memoryview(b'ab'),),
-                (1,), (None,), ([RecordingIndex(1)],), ((1,),), ({1: 2},),
-                (range(2),), (1.5,), (RecordingStr('41'),),
-                (memoryview(RecordingBuffer()),), (RecordingBuffer(),),
-                (BytesSubclass(b'41'),)]
+        for tp, cls_name, info in registry():
+            calls = _testinternalcapi.pyspec_table(tp)['calls']
+            typed = {e['arg_type'] for e in calls}
+            for make_case in cases_of(info, f'{cls_name}.__new__'):
+                args, kwargs = make_case()
+                args = args[1:]
+                if kwargs or len(args) > 1:
+                    continue
+                arg_type = type(args[0]) if args else None
+                index = _testinternalcapi.pyspec_find_call(tp, len(args),
+                                                           arg_type)
+                with self.subTest(cls=cls_name, args=args):
+                    self.assertIsNotNone(index)
+                    self.assertTrue(guard_accepts(calls[index], args))
+                    if args and arg_type not in typed:
+                        self.assertIsNone(calls[index]['arg_type'])
+            if calls:
+                index = _testinternalcapi.pyspec_find_call(tp, 1, None)
+                if index is not None:
+                    self.assertIsNone(calls[index]['arg_type'])
 
     def test_methods(self):
-        # Each method entry, with self (a method) or cls=bytes (a class
-        # method); subclasses as cls are SoundnessTest.test_fromhex_cls.
-        checked = {i: 0 for i in range(len(self.methods))}
-        for index, entry in enumerate(self.methods):
-            name = entry['method']
-            is_class = bool(entry['method_flags'] & 0x0010)    # METH_CLASS
-            for inputs in self.method_inputs(name):
-                if is_class:
-                    self_or_cls, args = bytes, inputs
-                else:
-                    self_or_cls, args = inputs[0], inputs[1:]
-                if not self.guard_accepts(entry, inputs):
-                    continue
-                with self.subTest(method=name, entry=index, inputs=inputs):
-                    expected, _ = outcome(getattr(bytes, name),
-                                          *(() if is_class else
-                                            (self_or_cls,)), *args)
-                    out, result, ran = python_calls(
-                        _testinternalcapi.pyspec_call_method, bytes, index,
-                        self_or_cls, args)
-                    self.assertEqual(out, expected)
-                    self.check_facts(entry, inputs, out, result, ran)
-                    checked[index] += 1
-                    if not entry['may_run_python'] and not ran:
-                        out, _ = outcome(
-                            _testinternalcapi.pyspec_call_method, bytes,
-                            index, self_or_cls, args, True)
+        # Each method entry, with the cases of the method: self and the
+        # arguments, or the class and the arguments of a class method.
+        for tp, cls_name, info in registry():
+            methods = _testinternalcapi.pyspec_table(tp)['methods']
+            checked = {i: 0 for i in range(len(methods))}
+            for index, entry in enumerate(methods):
+                name = f'{cls_name}.{entry["name"]}'
+                for make_case in cases_of(info, name):
+                    args, kwargs = make_case()
+                    call = method_call(tp, entry, args)
+                    if kwargs or call is None or \
+                            not guard_accepts(entry, call[2]):
+                        continue
+                    with self.subTest(method=name, entry=index, args=args):
+                        func, rest, counted = call
+                        expected, _ = outcome(func, *rest)
+                        func, rest, counted = method_call(
+                            tp, entry, make_case()[0])
+                        out, result, ran = python_calls(func, *rest)
                         self.assertEqual(out, expected)
-        self.assertEqual([i for i, n in checked.items() if n == 0], [])
+                        check_facts(self, entry, counted, out, result, ran)
+                        checked[index] += 1
+                        if not entry['may_run_python'] and not ran:
+                            func, rest, _ = method_call(
+                                tp, entry, make_case()[0])
+                            out, _ = outcome(no_python, func, *rest)
+                            self.assertEqual(out, expected)
+            with self.subTest(cls=cls_name):
+                self.assertEqual([i for i, n in checked.items() if n == 0],
+                                 [])
 
     def test_guard(self):
         # The hook refuses arguments the entry's guard rejects: the typed C
         # variants rely on the exact type.
-        for index, entry in enumerate(self.calls):
-            if entry['arg_type'] is not None:
-                with self.subTest(entry=index):
-                    with self.assertRaises(TypeError):
-                        _testinternalcapi.pyspec_call(
-                            bytes, index, (BytesSubclass(b'x'),))
+        for tp, cls_name, _ in registry():
+            calls = _testinternalcapi.pyspec_table(tp)['calls']
+            for index, entry in enumerate(calls):
+                if entry['arg_type'] is not None:
+                    with self.subTest(cls=cls_name, entry=index):
+                        with self.assertRaises(TypeError):
+                            _testinternalcapi.pyspec_call(tp, index,
+                                                          (object(),))
 
 
-class IntSubclass(int):
-    pass
+# The C NULL of test data without a NULL: nothing is NULL.
+NO_NULL = object()
 
 
-# The Python references of the specs, run once per process (runtime.load()
-# makes new functions).
-REFERENCES = {}
+@functools.cache
+def helpers():
+    """{C function: SpecInfo of its spec} of every @c_implemented function
+    of the specs."""
+    defined = {}
+    for info in specs():
+        for name in info.spec.c_implemented_functions():
+            defined[name] = info
+    return defined
+
+
+def c_shape(node):
+    """The shape of the C signature of spec function *node*, as
+    _testinternalcapi.pyspec_helper_shapes() writes it: "OO->n"."""
+    codes = {'Py_ssize_t': 'n', 'const char *': 's', 'int': 'i'}
+    params, returns = frontend.c_signature(node)
+    return (''.join(codes.get(c, 'O') for _, c in params) + '->'
+            + codes.get(returns, 'O'))
 
 
 class HelperTest(unittest.TestCase):
     """Every hand-written C function a spec calls (@c_implemented) that
-    can be called from Python, called directly: the same outcome as its
-    Python reference, and the facts derived from the reference for the
-    exact types of the arguments hold (runs no Python code, checked by
-    recording and by the debug-build tripwire; exact result type; cannot
-    raise)."""
-
-    # The inputs of each function, as its Python reference takes them
-    # (NULL for C NULL).
-    NULL = object()
-    CASES = {
-        'PyNumber_AsSsize_t': [
-            (5, NULL), (True, NULL), (-7, NULL), (2**40, NULL),
-            (2**70, NULL), (-2**70, NULL), (2**70, OverflowError),
-            (2**70, IndexError), (IntSubclass(9), NULL),
-            (RecordingIndex(4), NULL), (RecordingIndex(2**70), OverflowError),
-            (1.5, NULL), ('x', NULL)],
-        '_PyNumber_Index': [(5,), (True,), (IntSubclass(3),),
-                            (RecordingIndex(2),), (1.5,), ('x',)],
-        'PyObject_LengthHint': [
-            ([1, 2], 64), ((1,), 64), (range(5), 64), ({1: 2}, 64),
-            (iter([1, 2, 3]), 64), (RecordingIter(), 64), (5, 64),
-            (bytearray(b'ab'), 64), ('abc', 64)],
-        '_PyObject_LookupSpecial': [
-            (b'x', '__bytes__'), (bytearray(), '__bytes__'),
-            (range(3), '__length_hint__'), (iter([]), '__length_hint__'),
-            (RecordingBytes(), '__bytes__'), (5, '__index__')],
-        'PyUnicode_AsEncodedString': [
-            ('abc', 'ascii', NULL), ('\xe9', 'ascii', NULL),
-            ('\xe9', 'ascii', 'replace'), ('x', 'utf-8', NULL)],
-        '_PyLong_IsCompact': [(0,), (5,), (2**29,), (2**30,), (2**70,),
-                              (True,)],
-        '_PyLong_CompactValue': [(0,), (-5,), (2**29,), (True,)],
-        '_PyBytes_FromHex': [('00ff', False), ('0a 1B', True), ('zz', False),
-                             (b'41', False), (memoryview(b'42'), True),
-                             (RecordingBuffer(), False), (5, False)],
-        'bytes.__buffer__': [(b'abc', 0)],
-        'bytes.__len__': [(b'',), (b'abc',), (BytesSubclass(b'ab'),)],
-        'bytes.__getitem__': [
-            (b'abc', 0), (b'abc', 2), (b'abc', -1), (b'abc', -3),
-            (b'abc', 3), (b'abc', -4), (b'\xff', 0), (b'', 0),
-            (b'abc', True), (b'abc', 2**70), (b'abc', -2**70),
-            (b'abc', IntSubclass(1)), (b'abc', RecordingIndex(1)),
-            (BytesSubclass(b'abc'), 1), (b'abcdef', slice(1, 5, 2)),
-            (b'abc', slice(None)), (b'abc', slice(5, 1)), (b'abc', 'x'),
-            (b'abc', 1.5)],
-        # (A function makes a fresh input for each call.)
-        'bytes_iterator.__next__': [lambda: (iter(b'a'),),
-                                    lambda: (iter(b''),)],
-    }
-
-    # The C entry points of those that _testinternalcapi.pyspec_helper()
-    # does not call by name.
-    CALLERS = {
-        '_PyBytes_FromHex': lambda s, use_bytearray: (
-            (bytearray.fromhex if use_bytearray else bytes.fromhex), (s,)),
-        'bytes.__buffer__': lambda b, flags: (bytes.__buffer__, (b, flags)),
-        'bytes.__len__': lambda b: (bytes.__len__, (b,)),
-        'bytes.__getitem__': lambda b, key: (bytes.__getitem__, (b, key)),
-        'bytes_iterator.__next__': lambda it: (type(it).__next__, (it,)),
-    }
-
-    # Not called directly: static functions, which only their callers
-    # (the spec functions of DirectCallTest and test_clinic's difftest)
-    # call, and PyErr_BadInternalCall(), which fails an assertion in debug
-    # builds.
-    NOT_CALLABLE = {
-        '_PyBytes_FromSize', '_PyBytes_FromBuffer', 'bytes_copy',
-        'bytes_subtype_new', 'bytes_appender_init', 'bytes_appender_append',
-        'bytes_appender_append_unchecked', 'bytes_appender_finish',
-        'bytes_appender_discard', 'PyErr_BadInternalCall',
-    }
-
-    # References with no model of the value (exact(T) alone): facts only.
-    FACTS_ONLY = {'bytes_iterator.__next__'}
-
-    @classmethod
-    def setUpClass(cls):
-        test_tools.skip_if_missing('clinic')
-        with test_tools.imports_under_tool('clinic'):
-            from libclinic.pyspec import (builtin_types, facts, frontend,
-                                          partial_eval, runtime)
-        cls.bt, cls.facts, cls.frontend = builtin_types, facts, frontend
-        cls.pe, cls.runtime = partial_eval, runtime
-        root = test_tools.basepath
-        cls.specs = {}
-        for top in ('Objects', 'Python', 'Include'):
-            for dirpath, _, files in os.walk(os.path.join(root, top)):
-                if os.path.basename(dirpath) != 'pyspec':
-                    continue
-                for name in files:
-                    if name.endswith('.py') and not name.endswith('_cases.py'):
-                        path = os.path.join(dirpath, name)
-                        spec = frontend.Spec.load(path)
-                        for func in spec.c_implemented_functions():
-                            cls.specs[func] = (spec, path)
+    can be called from Python, called directly with the HELPERS of its
+    spec's cases: the same outcome as its Python reference, and the facts
+    derived from the reference for the exact types of the arguments hold
+    (runs no Python code, checked by sys.setprofile and by the debug-build
+    tripwire; exact result type; cannot raise)."""
 
     def test_every_helper(self):
-        self.assertEqual(set(self.specs),
-                         set(self.CASES) | self.NOT_CALLABLE)
+        # Each is called, or listed as NOT_CALLABLE, in the cases of its
+        # spec.
+        for name, info in helpers().items():
+            with self.subTest(helper=name, spec=info.path):
+                self.assertIn(name, set(info.data('HELPERS', {}))
+                              | info.data('NOT_CALLABLE', set()))
 
-    def c_call(self, name, args):
-        """(callable, args) for pyspec_helper()."""
-        if name in self.CALLERS:
-            return self.CALLERS[name](*args)
-        return name, tuple(None if a is self.NULL else a for a in args)
+    def test_helper_shapes(self):
+        # The rows of _testinternalcapi calling the C functions agree with
+        # the C signatures of the specs.
+        shapes = _testinternalcapi.pyspec_helper_shapes()
+        for name, shape in shapes.items():
+            with self.subTest(helper=name):
+                self.assertIn(name, helpers())
+                node = helpers()[name].spec.functions[name]
+                self.assertEqual(shape, c_shape(node))
 
-    def env(self, spec, name, args):
+    def c_call(self, info, name, args):
+        """(callable, its arguments, whether the C result is a scalar) of
+        C function *name* for *args* (the arguments of its reference)."""
+        callers = info.data('HELPER_CALLERS', {})
+        if name in callers:
+            func, c_args = callers[name](*args)
+            return func, c_args, False
+        cls_name, _, meth = name.rpartition('.')
+        if cls_name:
+            # A slot: the slot wrapper of the type.
+            return vars(info.cases.TYPES[cls_name])[meth], args, False
+        shape = _testinternalcapi.pyspec_helper_shapes().get(name)
+        if shape is None:
+            self.fail(f'{name} cannot be called: add a row to '
+                      'pyspec_helpers in Modules/_testinternalcapi.c, or '
+                      'add it to HELPER_CALLERS or NOT_CALLABLE in '
+                      f'{specfiles.cases_path(info.path)}')
+        return (_testinternalcapi.pyspec_helper,
+                (name, tuple(args), getattr(info.cases, 'NULL', NO_NULL)),
+                not shape.endswith('O'))
+
+    def env(self, info, name, args):
         """The facts about the parameters of the reference for *args*."""
-        node = spec.functions[name]
+        node = info.spec.functions[name]
         if '.' in name:
             params = [(a.arg, 'PyObject *') for a in node.args.args]
         else:
-            params = self.frontend.c_signature(node)[0]
+            params = frontend.c_signature(node)[0]
+        null = getattr(info.cases, 'NULL', NO_NULL)
         env = {}
         for (param, ctype), arg in zip(params, args):
-            if arg is self.NULL:
-                env[param] = self.pe.NULL
+            if arg is null:
+                env[param] = partial_eval.NULL
             elif ctype == 'PyObject *' and not isinstance(arg, str):
-                if type(arg) in self.bt.TABLE:
+                if type(arg) in builtin_types.TABLE:
                     env[param] = type(arg)
             else:
-                env[param] = self.pe.Value(arg)
+                env[param] = partial_eval.Value(arg)
         return env
 
     def test_helpers(self):
-        from test.test_pyspec_facts import RECORDED
-        for name, cases in self.CASES.items():
-            spec, path = self.specs[name]
-            if path not in REFERENCES:
-                REFERENCES[path] = self.runtime.load(path)
-            reference = REFERENCES[path][name]
-            analyzer = self.facts.analyzer(spec)
+        for name, info in helpers().items():
+            cases = info.data('HELPERS', {}).get(name, [])
+            facts_only = name in info.data('FACTS_ONLY', set())
+            null = getattr(info.cases, 'NULL', NO_NULL)
             for case in cases:
                 args = case() if callable(case) else case
                 with self.subTest(helper=name, args=args):
-                    func, c_args = self.c_call(name, args)
-                    out, result, ran = python_calls(
-                        _testinternalcapi.pyspec_helper, func, c_args)
-                    if name not in self.FACTS_ONLY:
-                        ref_args = [self.runtime.NULL if a is self.NULL
-                                    else a for a in args]
-                        RECORDED.clear()
-                        expected, ref = outcome(reference, *ref_args)
-                        if ref is self.runtime.NULL:
+                    func, c_args, scalar = self.c_call(info, name, args)
+                    out, result, ran = python_calls(func, *c_args)
+                    if not facts_only:
+                        ref_args = [runtime.NULL if a is null else a
+                                    for a in args]
+                        expected, ref = outcome(info.references[name],
+                                                *ref_args)
+                        if ref is runtime.NULL:
                             expected = ('returns', type(None), None)
+                        elif scalar and expected[0] == 'returns':
+                            # A C int for a Python int or bool.
+                            expected = ('returns', int, int(ref))
                         self.assertEqual(out, expected)
-                    found = analyzer.reference_facts(
-                        name, self.env(spec, name, args))
-                    if out[0] == 'returns' and found.result_type:
+                    found = info.analyzer.reference_facts(
+                        name, self.env(info, name, args))
+                    if out[0] == 'returns' and found.result_type \
+                            and not scalar:
                         self.assertIs(type(result), found.result_type,
                                       'claims: exact result type')
                     if not found.raises:
@@ -461,10 +453,10 @@ class HelperTest(unittest.TestCase):
                         self.assertEqual(ran, [], 'claims: runs no Python')
                         # In debug builds, running Python code is fatal.
                         args = case() if callable(case) else case
-                        func, c_args = self.c_call(name, args)
-                        self.assertEqual(outcome(
-                            _testinternalcapi.pyspec_helper, func, c_args,
-                            True)[0][0], out[0])
+                        func, c_args, _ = self.c_call(info, name, args)
+                        self.assertEqual(
+                            outcome(no_python, func, *c_args)[0][0],
+                            out[0])
 
 
 JIT_ON = {'PYTHON_JIT': '1'}
@@ -476,79 +468,143 @@ def requires_jit():
                                'requires the JIT')
 
 
+# The uops of the executors of functions, printed by a subprocess (see
+# executor_uops()).  The code runs in main(): changing the globals would
+# invalidate the traces.
+_DUMP = '''
+import _opcode
+import importlib.util
+from _testinternalcapi import TIER2_THRESHOLD
+
+def load(path):
+    spec = importlib.util.spec_from_file_location('cases', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+def dump(label, func):
+    code = func.__code__
+    for i in range(0, len(code.co_code), 2):
+        try:
+            ex = _opcode.get_executor(code, i)
+        except ValueError:
+            continue
+        print(label, *[op[0] for op in ex])
+
+def main():
+'''
+
+
+def executor_uops(body):
+    """{label: [uops]} of the executors dump(label, func) prints, from
+    *body*, the code of main() (after _DUMP), with the JIT on."""
+    script = _DUMP + textwrap.indent(textwrap.dedent(body), '    ')
+    script += '\nmain()\n'
+    rc, out, err = script_helper.assert_python_ok('-c', script, **JIT_ON)
+    uops = {}
+    for line in out.decode().splitlines():
+        label, *ops = line.split()
+        uops.setdefault(label, []).extend(ops)
+    return uops
+
+
+def followed_by_assertion(test, uops, uop):
+    i = uops.index(uop)
+    test.assertTrue(uops[i + 1].startswith('_ASSERT_RESULT_TYPE'), uops)
+
+
 class DebugAssertionTest(unittest.TestCase):
     """Debug builds check the optimizer's facts and the "runs no Python
     code" facts at run time; release builds have no such checks."""
 
     @support.requires_subprocess()
     def test_no_python_tripwire(self):
-        # A deliberately wrong fact: the generic bytes(x) entry, which may
-        # run Python code, called as if it could not.
+        # Python code run in the tripwire.
         code = textwrap.dedent('''
             import _testinternalcapi
-            calls, _ = _testinternalcapi.pyspec_table(bytes)
-            index = _testinternalcapi.pyspec_find_call(bytes, 1, None)
-            assert calls[index]['may_run_python']
-            class HasBytes:
-                def __bytes__(self):
-                    return b'x'
-            print(_testinternalcapi.pyspec_call(bytes, index, (HasBytes(),),
-                                                True))
+            def python():
+                return 'x'
+            print(_testinternalcapi.pyspec_no_python(python, ()))
         ''')
         if support.Py_DEBUG:
             rc, out, err = script_helper.assert_python_failure('-c', code)
             self.assertIn(b'Fatal Python error: _PySpec_CheckPythonAllowed: '
-                          b'HasBytes.__bytes__ (<string>:7) runs inside a '
-                          b'call that the pyspec facts say runs no Python '
-                          b'code', err)
+                          b'python (<string>:3) runs inside a call that the '
+                          b'pyspec facts say runs no Python code', err)
         else:
             rc, out, err = script_helper.assert_python_ok('-c', code)
-            self.assertEqual(out.strip(), b"b'x'")
+            self.assertEqual(out.strip(), b'x')
 
     def test_no_python_tripwire_nests(self):
-        # A correct fact passes, and the flag is restored afterwards.
-        calls, _ = _testinternalcapi.pyspec_table(bytes)
-        index = _testinternalcapi.pyspec_find_call(bytes, 1, bytearray)
-        self.assertFalse(calls[index]['may_run_python'])
-        self.assertEqual(
-            _testinternalcapi.pyspec_call(bytes, index, (bytearray(b'a'),),
-                                          True), b'a')
+        # A call that runs no Python code passes, and the flag is restored
+        # afterwards.
+        tripwire = _testinternalcapi.pyspec_no_python
+        self.assertEqual(tripwire(tripwire, (len, ([1],))), 1)
         self.assertEqual(eval('1 + 1'), 2)
 
     @requires_jit()
     @unittest.skipUnless(support.Py_DEBUG, 'debug builds only')
     @support.requires_subprocess()
     def test_result_assertions_emitted(self):
-        # After a call with facts from the pyspec table, and after
-        # _CALL_STR_1, whose hand-written result type is claimed for an
-        # exact int argument: str(len(b)).
-        # (In a function: changing the globals would invalidate the trace.)
-        code = textwrap.dedent('''
-            import _opcode
-            from _testinternalcapi import TIER2_THRESHOLD
-            def main():
-                def f(n, ba, b, s):
-                    x = 0
-                    for _ in range(n):
-                        x += len(bytes(ba)) + len(bytes(b)) + len(str(len(b)))
-                    return x
-                f(TIER2_THRESHOLD * 2, bytearray(b'ab'), b'cd', 3)
-                code = f.__code__
-                for i in range(0, len(code.co_code), 2):
-                    try:
-                        ex = _opcode.get_executor(code, i)
-                    except ValueError:
-                        continue
-                    print(*[op[0] for op in ex])
-            main()
+        # After a call of a class through its table: for each typed entry
+        # that runs no Python code, a uop calling it followed by the
+        # assertion of its facts, or, for an alias (T(x) is x), a swap.
+        for tp, cls_name, info in registry():
+            if getattr(builtins, tp.__name__, None) is not tp:
+                continue        # called by its builtin name
+            name = f'{cls_name}.__new__'
+            calls = _testinternalcapi.pyspec_table(tp)['calls']
+            body, expect = [], {}
+            for index, entry in enumerate(calls):
+                if (entry['nargs'] != 1 or entry['arg_type'] is None
+                        or entry['may_run_python']
+                        or entry['result_type'] is None):
+                    continue
+                for i, make_case in enumerate(cases_of(info, name)):
+                    args, kwargs = make_case()
+                    if (not kwargs and args[0] is tp and len(args) == 2
+                            and type(args[1]) is entry['arg_type']):
+                        break
+                else:
+                    continue
+                body.append(f'''
+                    x = cases.CASES[{name!r}][{i}]()[0][1]
+                    def f(n, x):
+                        for _ in range(n):
+                            {tp.__name__}(x)
+                    f(TIER2_THRESHOLD * 2, x)
+                    dump('e{index}', f)
+                ''')
+                expect[f'e{index}'] = entry
+            if not body:
+                continue
+            uops = executor_uops(
+                f'cases = load({info.cases.__file__!r})\n'
+                + ''.join(textwrap.dedent(b) for b in body))
+            for label, entry in expect.items():
+                with self.subTest(cls=cls_name, arg_type=entry['arg_type']):
+                    if entry['result_alias'] == 0:
+                        self.assertIn('_SWAP_3', uops[label])
+                    else:
+                        followed_by_assertion(
+                            self, uops[label],
+                            '_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON')
+
+    @requires_jit()
+    @unittest.skipUnless(support.Py_DEBUG, 'debug builds only')
+    @support.requires_subprocess()
+    def test_call_str_1_assertion_emitted(self):
+        # _CALL_STR_1 claims an exact str for an exact int argument.
+        uops = executor_uops('''
+            def f(n, k):
+                x = 0
+                for _ in range(n):
+                    x += len(str(len(k)))
+                return x
+            f(TIER2_THRESHOLD * 2, 'abc')
+            dump('f', f)
         ''')
-        rc, out, err = script_helper.assert_python_ok('-c', code, **JIT_ON)
-        uops = out.decode().split()
-        i = uops.index('_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON')
-        self.assertTrue(uops[i + 1].startswith('_ASSERT_RESULT_TYPE'), uops)
-        self.assertIn('_SWAP_3', uops)     # the bytes(b) alias
-        i = uops.index('_CALL_STR_1')
-        self.assertTrue(uops[i + 1].startswith('_ASSERT_RESULT_TYPE'), uops)
+        followed_by_assertion(self, uops['f'], '_CALL_STR_1')
 
     @requires_jit()
     @support.requires_subprocess()
@@ -585,277 +641,157 @@ def specialize_and_run(func, *args):
     return result
 
 
-# (Module level: the JIT leaks a little memory for each fresh function it
-# compiles, which -R would report.)
-def _subscripts(b, indices):
-    out = []
-    for i in indices:
-        try:
-            out.append(b[i])
-        except IndexError as exc:
-            out.append(str(exc))
-    return out
-
-
-def _items(b):
-    return [c for c in b]
+@functools.cache
+def slot_uses():
+    """[(uop, use, SpecInfo)] of the SLOT_USES of every spec."""
+    return [(uop, use, info) for info in specs()
+            for uop, use in info.data('SLOT_USES', {}).items()]
 
 
 class SlotFactsTest(unittest.TestCase):
     """The slot facts (_PySpec_FindSlot()) of the specialized uops that
-    do what a slot does: _BINARY_OP_SUBSCR_BYTES_INT (bytes.__getitem__)
-    and _ITER_NEXT_BYTES (bytes_iterator.__next__, the items of a bytes).
-    The optimizer takes their result facts from the table; here the table
-    must be the facts derived from the references (which HelperTest checks
-    against the slots), each uop must agree with its slot, and a uop that
-    cannot escape needs a slot that runs no Python code."""
+    do what a slot does (SLOT_USES).  The optimizer takes their result
+    facts from the table; here the table must be the facts derived from
+    the references (which HelperTest checks against the slots), each uop
+    must agree with its slot, and a uop that cannot escape needs a slot
+    that runs no Python code."""
 
-    # uop: (type, special method, exact type of the other argument).
-    USES = {
-        '_BINARY_OP_SUBSCR_BYTES_INT': (bytes, '__getitem__', int),
-        '_ITER_NEXT_BYTES': (type(iter(b'')), '__next__', None),
-    }
+    def slot_entry(self, use, info):
+        """(type, the table entry the optimizer finds for the use)."""
+        tp = info.cases.TYPES[use['cls']]
+        slots = _testinternalcapi.pyspec_table(tp)['slots']
+        ids = {e['slot'] for e in slots if e['name'] == use['slot']}
+        self.assertEqual(len(ids), 1, ids)
+        index = _testinternalcapi.pyspec_find_slot(tp, ids.pop(),
+                                                   use['arg_type'])
+        self.assertIsNotNone(index)
+        return tp, slots[index]
 
     def test_table_is_derived(self):
-        spec, facts, _, analyzer = SoundnessTest.analyzer()
-        for uop, (tp, name, arg_type) in self.USES.items():
+        for uop, use, info in slot_uses():
             with self.subTest(uop=uop):
-                entry = _testinternalcapi.pyspec_find_slot(tp, name,
-                                                           arg_type)
-                self.assertIsNotNone(entry)
-                spec_name = ('bytes_iterator' if tp is not bytes
-                             else 'bytes') + '.' + name
-                params = spec.params(spec_name)
-                env = {params[0]: tp} if tp is bytes else {}
-                if arg_type is not None:
-                    env[params[1]] = arg_type
-                found = analyzer.reference_facts(spec_name, env)
+                tp, entry = self.slot_entry(use, info)
+                name = f'{use["cls"]}.{use["slot"]}'
+                params = info.spec.params(name)
+                env = {}
+                if builtin_types.by_name(use['cls']) is tp:
+                    env[params[0]] = tp
+                if use['arg_type'] is not None:
+                    env[params[1]] = use['arg_type']
+                found = info.analyzer.reference_facts(name, env)
                 self.assertIs(entry['result_type'], found.result_type)
                 self.assertIs(entry['may_run_python'], found.runs_python)
                 self.assertIs(entry['always_raises'], found.always_raises)
                 # What the uops rely on.
-                self.assertIs(entry['result_type'], int)
+                self.assertIsNotNone(entry['result_type'])
                 self.assertFalse(entry['may_run_python'])
+
+    def test_uop_names_the_slot(self):
+        # The uop's optimizer code looks the facts up by the slot the
+        # table keys them by (call_table.slot_member()).
+        path = os.path.join(SRCDIR, 'Python', 'optimizer_bytecodes.c')
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        for uop, use, info in slot_uses():
+            with self.subTest(uop=uop):
+                start = text.index(f'op({uop},')
+                end = text.find('\n    op(', start + 1)
+                member = call_table.slot_member(info.spec, use['cls'],
+                                                use['slot'])
+                self.assertIn(f'_PySpec_SLOT({member})', text[start:end])
 
     def test_uops_do_not_escape(self):
         # A uop without HAS_ESCAPES_FLAG runs no Python code: the slot it
         # copies must not either (test_table_is_derived).
-        path = os.path.join(test_tools.basepath, 'Include', 'internal',
+        path = os.path.join(SRCDIR, 'Include', 'internal',
                             'pycore_uop_metadata.h')
-        try:
-            with open(path, encoding='utf-8') as f:
-                text = f.read()
-        except FileNotFoundError:
-            self.skipTest('needs the source tree')
-        for uop in self.USES:
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        for uop, _, _ in slot_uses():
             with self.subTest(uop=uop):
                 line = next(line for line in text.splitlines()
                             if line.strip().startswith(f'[{uop}] = '))
                 self.assertNotIn('HAS_ESCAPES_FLAG', line)
 
-    def test_subscript_agrees(self):
-        values = bytes(range(256))
-        for b, indices in [
-                (values, range(-257, 258)),
-                (b'', range(-2, 3)),
-                (b'\x00\xff', [0, 1, 2, 2**62, -1, -2, -3, True])]:
-            with self.subTest(b=b[:4]):
-                expected = [outcome(bytes.__getitem__, b, i)[0]
-                            for i in indices]
-                got = specialize_and_run(_subscripts, b, indices)
-                self.assertEqual(
-                    [('returns', int, v) if isinstance(v, int)
-                     else ('raises', IndexError, v) for v in got],
-                    expected)
-                for v in got:
-                    if isinstance(v, int):
-                        self.assertIs(type(v), int)
-                        self.assertTrue(sys._is_immortal(v))
-
-    def test_iteration_agrees(self):
-        for b in (bytes(range(256)), b'', b'\x00', b'\xff' * 3):
-            with self.subTest(b=b[:4]):
-                got = specialize_and_run(_items, b)
-                self.assertEqual(got, list(iter(b)))
-                self.assertEqual({type(c) for c in got}, {int} if b else set())
+    def test_uops_agree(self):
+        # The specialized code gives what the slot gives, with the facts.
+        for uop, use, info in slot_uses():
+            _, entry = self.slot_entry(use, info)
+            for args in use['inputs']:
+                with self.subTest(uop=uop, args=args):
+                    got = specialize_and_run(use['run'], *args)
+                    self.assertEqual(got, use['reference'](*args))
+                    for kind, value in got:
+                        if kind == 'returns':
+                            self.assertIs(type(value), entry['result_type'])
+                            if use.get('compact'):
+                                self.assertTrue(sys._is_immortal(value))
 
     @requires_jit()
     @unittest.skipUnless(support.Py_DEBUG, 'debug builds only')
     @support.requires_subprocess()
     def test_result_assertions_emitted(self):
         # Debug builds check the slot facts at run time after the uops.
-        code = textwrap.dedent('''
-            import _opcode
-            from _testinternalcapi import TIER2_THRESHOLD
-            def main():
-                def f(n, b):
-                    x = 0
-                    for i in range(n):
-                        x += b[i & 7]
-                        for c in b:
-                            x += c
-                    return x
-                f(TIER2_THRESHOLD * 2, bytes(range(248, 256)))
-                code = f.__code__
-                for i in range(0, len(code.co_code), 2):
-                    try:
-                        ex = _opcode.get_executor(code, i)
-                    except ValueError:
-                        continue
-                    print(*[op[0] for op in ex])
-            main()
-        ''')
-        rc, out, err = script_helper.assert_python_ok('-c', code, **JIT_ON)
-        uops = out.decode().split()
-        for uop in self.USES:
+        for uop, use, info in slot_uses():
             with self.subTest(uop=uop):
-                i = uops.index(uop)
-                self.assertTrue(uops[i + 1].startswith('_ASSERT_RESULT_TYPE'),
-                                uops)
+                uops = executor_uops(f'''
+                    use = load({info.cases.__file__!r}).SLOT_USES[{uop!r}]
+                    args = use['inputs'][-1]
+                    for _ in range(TIER2_THRESHOLD * 2):
+                        use['run'](*args)
+                    dump('run', use['run'])
+                ''')
+                followed_by_assertion(self, uops['run'], uop)
 
 
 class SoundnessTest(unittest.TestCase):
-    """Latent soundness problems of the derived facts; these fail if the
-    facts are (or become) wrong."""
+    """Soundness problems of the derived facts found in review; these
+    fail if the facts are (or become) wrong."""
 
-    @classmethod
-    def setUpClass(cls):
-        cls.calls, cls.methods = _testinternalcapi.pyspec_table(bytes)
+    def test_classmethod_on_subclass(self):
+        # F2: the facts of the typed entries of a class method hold only
+        # when cls is exactly the type: Sub.fromhex(s) calls Sub(result),
+        # which may return anything and run Python code.  The entry a
+        # consumer finds for a subclass must have no facts that are false
+        # for it.
+        for tp, cls_name, info in registry():
+            methods = _testinternalcapi.pyspec_table(tp)['methods']
+            for meth in {e['name'] for e in methods if e['classmethod']}:
+                name = f'{cls_name}.{meth}'
+                for make_case in cases_of(info, name):
+                    args, kwargs = make_case()
+                    cls, rest = args[0], args[1:]
+                    if kwargs or cls is tp or len(rest) != 1:
+                        continue
+                    index = _testinternalcapi.pyspec_find_method(
+                        tp, meth, cls, 1, type(rest[0]))
+                    if index is None:
+                        continue
+                    entry = methods[index]
+                    with self.subTest(method=name, cls=cls, args=rest):
+                        expected, _ = outcome(bound(tp, meth, cls), *rest)
+                        cls, *rest = make_case()[0]
+                        out, result, ran = python_calls(bound(tp, meth, cls),
+                                                        *rest)
+                        self.assertEqual(out, expected)
+                        if out[0] == 'returns' and entry['result_type']:
+                            self.assertIs(type(result), entry['result_type'],
+                                          'claims: exact result type')
+                        if not entry['may_run_python']:
+                            self.assertEqual(ran, [],
+                                             'claims: runs no Python code')
 
-    def test_fromhex_cls(self):
-        # F2: the facts of the typed bytes.fromhex entries hold only when
-        # cls is exactly bytes: B.fromhex(s) calls B(result), which may
-        # return anything and run Python code.  The entry a consumer finds
-        # for B.fromhex must have no facts that are false for B.
-        class H(bytes):
-            def __new__(cls, value):
-                return 42
-
-        for cls in (BytesSubclass, H):
-            for inputs in DirectCallTest.method_inputs('fromhex'):
-                (arg,) = inputs
-                index = _testinternalcapi.pyspec_find_method(
-                    bytes, 'fromhex', cls, 1, type(arg))
-                if index is None:
+    def test_facts_observed(self):
+        # F3: a FACTS entry with a run: run(input()) makes the call, and
+        # runs Python code exactly when the derivation says it may.
+        for info in specs():
+            for fact in info.data('FACTS', []):
+                if 'run' not in fact:
                     continue
-                entry = self.methods[index]
-                with self.subTest(cls=cls, arg=arg, entry=index):
-                    expected, _ = outcome(cls.fromhex, arg)
-                    out, result, ran = python_calls(
-                        _testinternalcapi.pyspec_call_method, bytes, index,
-                        cls, inputs)
-                    self.assertEqual(out, expected)
-                    if out[0] == 'returns' and entry['result_type']:
-                        self.assertIs(type(result), entry['result_type'],
-                                      'claims: exact result type')
-                    if not entry['may_run_python']:
-                        self.assertEqual(ran, [],
-                                         'claims: runs no Python code')
-
-    @classmethod
-    def analyzer(cls):
-        test_tools.skip_if_missing('clinic')
-        with test_tools.imports_under_tool('clinic'):
-            from libclinic.pyspec import facts, frontend, partial_eval
-        path = os.path.join(test_tools.basepath, 'Objects', 'pyspec',
-                            'bytesobject.py')
-        with open(path, encoding='utf-8') as f:
-            spec = frontend.Spec(f.read(), path)
-        return spec, facts, partial_eval, facts.analyzer(spec)
-
-    def derived_runs_python(self, expr, tp):
-        """Whether the facts derivation says that call *expr*, with x of
-        exact type tp, may run Python code (the call is written in the
-        bytes spec, so it may call what the spec imports)."""
-        _, facts, _, analyzer = self.analyzer()
-        found = facts.Facts()
-        analyzer.call(ast.parse(expr, mode='eval').body, {'x': tp}, found)
-        return found.runs_python
-
-    def forwarding_cases(self):
-        import collections
-        import operator
-
-        class Mapping(collections.UserDict):
-            def __len__(self):
-                return 3
-
-            def __iter__(self):
-                return iter([1, 2, 3])
-
-        class Seq:
-            def __len__(self):
-                return 2
-
-            def __getitem__(self, i):
-                return [65, 66][i]
-
-        proxy = types.MappingProxyType(Mapping())
-        rev = reversed(Seq())
-        return [
-            ('PyObject_LengthHint(x, 0)', proxy, operator.length_hint),
-            ('PyObject_LengthHint(x, 0)', rev, operator.length_hint),
-            ('iter(x)', proxy, iter),
-        ]
-
-    def test_derivation_of_forwarding_types(self):
-        # The derivation used by the next test works for these types.
-        for expr, arg, run in self.forwarding_cases():
-            with self.subTest(expr=expr, type=type(arg)):
-                self.assertIn(self.derived_runs_python(expr, type(arg)),
-                              (True, False))
-
-    # F3: "an exact static type never runs Python code" is false for types
-    # that forward to another object.  The facts come from the spec of a
-    # type or the audited table of libclinic/pyspec/builtin_types.py,
-    # which does not list them.
-    def test_static_type_rule(self):
-        import pickle
-        for expr, arg, run in self.forwarding_cases():
-            with self.subTest(expr=expr, type=type(arg)):
-                _, _, ran = python_calls(run, arg)
-                self.assertNotEqual(ran, [])
-                self.assertTrue(self.derived_runs_python(expr, type(arg)))
-        # PickleBuffer forwards getbuffer to the object it wraps (a Python
-        # __buffer__ cannot be observed today because of an upstream bug,
-        # see review F7).
-        self.assertTrue(self.derived_runs_python('_PyBytes_FromBuffer(x)',
-                                                 pickle.PickleBuffer))
-        # The leaf types the table lists run none.
-        self.assertFalse(self.derived_runs_python('_PyBytes_FromBuffer(x)',
-                                                  bytearray))
-        self.assertFalse(self.derived_runs_python('PyObject_LengthHint(x, 0)',
-                                                  range))
-
-    def test_codec_subclass_result(self):
-        # F6: an encoding with a codec may return a bytes subclass, so
-        # neither bytes(str, encoding) nor PyUnicode_AsEncodedString() may
-        # claim an exact bytes result.
-        class B(bytes):
-            pass
-
-        def search(name):
-            if name != 'pyspec_facts_subclass':
-                return None
-            return codecs.CodecInfo(
-                name=name,
-                encode=lambda s, errors='strict': (B(s.encode()), len(s)),
-                decode=lambda b, errors='strict': (bytes(b).decode(), len(b)))
-
-        codecs.register(search)
-        self.addCleanup(codecs.unregister, search)
-        self.assertIs(type(bytes('x', 'pyspec_facts_subclass')), B)
-        self.assertIs(type('x'.encode('pyspec_facts_subclass')), B)
-
-        spec, _, partial_eval, analyzer = self.analyzer()
-        call = ast.parse('PyUnicode_AsEncodedString(x, "utf-8", NULL)',
-                         mode='eval').body
-        self.assertIsNone(analyzer.call_facts(call, {'x': str}).result_type)
-        env = {'cls': partial_eval.Value(bytes), 'source': str,
-               'encoding': partial_eval.NOTNULL, 'errors': partial_eval.NULL}
-        residual = partial_eval.specialize(spec, 'bytes.__new__', env)
-        facts = analyzer.facts(residual, env, ['source', 'encoding'])
-        self.assertIsNone(facts.result_type)
+                with self.subTest(spec=info.path, expr=fact['expr'],
+                                  env=fact['env']):
+                    _, _, ran = python_calls(fact['run'], fact['input']())
+                    self.assertEqual(bool(ran), fact['runs_python'], ran)
 
 
 if __name__ == '__main__':

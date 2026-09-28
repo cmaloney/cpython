@@ -647,12 +647,13 @@ static const _PySpecCall bytes_spec_methods[] = {
     },
 };
 
-/* Facts of the slots of the classes of the spec, derived from their Python
- * references, for self of exactly the class (see Include/internal/pycore_pyspec.h). */
+/* Facts of the slots of bytes (&PyBytes_Type), derived from their
+ * Python references, for self of exactly the class, keyed by slot
+ * (see Include/internal/pycore_pyspec.h). */
 static const _PySpecSlot bytes_spec_slots[] = {
     /* bytes.__buffer__(self, x): result is exactly memoryview; runs no Python code */
     {
-        .type = &PyBytes_Type,
+        .slot = _PySpec_SLOT(as_buffer.bf_getbuffer),
         .name = "__buffer__",
         .facts = {
             .nargs = 2,
@@ -665,7 +666,7 @@ static const _PySpecSlot bytes_spec_slots[] = {
     },
     /* bytes.__len__(self): result type not known exactly; runs no Python code */
     {
-        .type = &PyBytes_Type,
+        .slot = _PySpec_SLOT(as_mapping.mp_length),
         .name = "__len__",
         .facts = {
             .nargs = 1,
@@ -678,7 +679,7 @@ static const _PySpecSlot bytes_spec_slots[] = {
     },
     /* bytes.__getitem__(self, int): result is exactly int; runs no Python code */
     {
-        .type = &PyBytes_Type,
+        .slot = _PySpec_SLOT(as_mapping.mp_subscript),
         .name = "__getitem__",
         .facts = {
             .nargs = 2,
@@ -691,7 +692,7 @@ static const _PySpecSlot bytes_spec_slots[] = {
     },
     /* bytes.__getitem__(self, x): result type not known exactly; may run Python code */
     {
-        .type = &PyBytes_Type,
+        .slot = _PySpec_SLOT(as_mapping.mp_subscript),
         .name = "__getitem__",
         .facts = {
             .nargs = 2,
@@ -700,19 +701,6 @@ static const _PySpecSlot bytes_spec_slots[] = {
             .result_alias = -1,
             .arg_type = NULL,
             .result_type = NULL,
-        },
-    },
-    /* bytes_iterator.__next__(self): result is exactly int; runs no Python code */
-    {
-        .type = &PyBytesIter_Type,
-        .name = "__next__",
-        .facts = {
-            .nargs = 1,
-            .flags = 0,
-            .result_const = -1,
-            .result_alias = -1,
-            .arg_type = NULL,
-            .result_type = &PyLong_Type,
         },
     },
 };
@@ -725,6 +713,31 @@ const _PySpecCallTable _PySpec_bytes_calls = {
     .methods = bytes_spec_methods,
     .nslots = Py_ARRAY_LENGTH(bytes_spec_slots),
     .slots = bytes_spec_slots,
+};
+
+/* Facts of the slots of bytes_iterator (&PyBytesIter_Type), derived from their
+ * Python references, for self of exactly the class, keyed by slot
+ * (see Include/internal/pycore_pyspec.h). */
+static const _PySpecSlot bytes_iterator_spec_slots[] = {
+    /* bytes_iterator.__next__(self): result is exactly int; runs no Python code */
+    {
+        .slot = _PySpec_SLOT(ht_type.tp_iternext),
+        .name = "__next__",
+        .facts = {
+            .nargs = 1,
+            .flags = 0,
+            .result_const = -1,
+            .result_alias = -1,
+            .arg_type = NULL,
+            .result_type = &PyLong_Type,
+        },
+    },
+};
+
+const _PySpecCallTable _PySpec_bytes_iterator_calls = {
+    .type = &PyBytesIter_Type,
+    .nslots = Py_ARRAY_LENGTH(bytes_iterator_spec_slots),
+    .slots = bytes_iterator_spec_slots,
 };
 
 /* bytes_from_iterator() for it = iter(x), x of exact type list:

@@ -15,8 +15,9 @@ writes it; there is no separate command):
   (partial_eval.Specialization, e.g. bytes_from_iterator_list()) is that
   function.
 
-* ``const _PySpecCallTable _PySpec_<type>_calls`` (declared in
-  Include/internal/pycore_pyspec.h): per arity with object-only arguments
+* ``const _PySpecCallTable _PySpec_<class>_calls`` for each class of
+  table_classes() (declared in the registry of
+  Include/internal/pycore_pyspec.h, see below): per arity with object-only arguments
   and per argument type, the C function and facts about its result, all
   derived from the residual code; and the same facts for the other
   methods the spec implements (bytes.__bytes__, bytes.fromhex), per exact
@@ -38,28 +39,37 @@ writes it; there is no separate command):
     - _PySpec_ALWAYS_RAISES: no ``return`` is left;
     - _PySpec_MAY_RUN_PYTHON: some call on a path may run Python code.
 
-* ``const _PySpecSlot <type>_spec_slots[]``: the facts of the slots of
-  the classes of the spec that have a Python reference (``@c_implemented``
-  dunders: bytes.__getitem__, bytes_iterator.__next__), for self of
-  exactly the class: per slot, a generic entry, and an entry per exact
-  type of the argument after self whose facts differ from it (unless
-  it always raises).  They are
-  the facts of the special method as Python calls it.  A specialized uop
-  that does what a slot does (_BINARY_OP_SUBSCR_BYTES_INT for
-  bytes.__getitem__) takes its result facts from them
-  (_PySpec_FindSlot()).  The slots of all the classes of a spec are in
-  the table of its first type.
+* ``const _PySpecSlot <class>_spec_slots[]``: the facts of the slots of
+  the class that have a Python reference (``@c_implemented`` dunders:
+  bytes.__getitem__, bytes_iterator.__next__), for self of exactly the
+  class: per slot, a generic entry, and an entry per exact type of the
+  argument after self whose facts differ from it (unless it always
+  raises).  They are the facts of the special method as Python calls
+  it, keyed by its C slot: the first slot of the dunder in slotdefs[]
+  that the class fills, the one its wrapper calls
+  (``_PySpec_SLOT(as_mapping.mp_subscript)``, see slot_member()).  A
+  specialized uop that does what a slot does
+  (_BINARY_OP_SUBSCR_BYTES_INT for bytes.__getitem__) takes its result
+  facts from them (_PySpec_FindSlot()).
 
 The facts are those of facts.py, derived from the residual code and from
 the Python references of the C functions it calls.  They hold only for
 the exact argument types of their entry: a subclass instance uses the
 generic entry.
+
+The interpreter finds the table of a type in the registry: the generated
+part of Include/internal/pycore_pyspec.h, which declares every table and
+lists them in ``_PySpec_REGISTRY``.  Argument Clinic rewrites it while
+processing the C file of any spec of a core C file (registry_outputs()),
+from the syntax of all those specs (table_classes()): a new spec'd class
+is picked up without editing C.
 """
 
 import ast
-import builtins
+import os
 
-from . import builtin_types, emit, facts, partial_eval, slots
+from . import builtin_types, emit, facts, frontend, partial_eval, slots
+from . import specfiles
 from .partial_eval import NOTNULL, Value
 
 # Keep a type-specialized variant when its residual has at most this
@@ -143,40 +153,66 @@ def _entry(comment, nargs, facts, const, arg_type, func, arg_names=()):
     ]
 
 
+def table_classes(spec):
+    """The classes of *spec* that get a call table, in the order of the
+    spec: those with a __new__ or a method implemented by the spec, or a
+    slot with a Python reference (a @c_implemented dunder).
+
+    Only the syntax of the spec decides, so that the registry lists
+    exactly the tables generate() defines without generating them."""
+    if not spec.implemented_functions():
+        return []           # Argument Clinic generates no call table
+    out = []
+    for cls_name in spec.classes:
+        for meth in spec.entries(cls_name):
+            name = f'{cls_name}.{meth}'
+            node = spec.functions.get(name)
+            if spec.implemented(name) or (
+                    node is not None and slots.is_slot(meth)
+                    and frontend.is_c_implemented(node)):
+                out.append(cls_name)
+                break
+    return out
+
+
+def table_name(cls_name):
+    """The C name of the call table of spec class *cls_name*."""
+    return f'_PySpec_{cls_name}_calls'
+
+
 def generate(generator, descriptions):
     """C lines: the type-specialized variants and the call table of each
-    type with a clinic __new__ or methods implemented by the spec, in
-    *descriptions* (frontend.SpecFunction).
+    class of table_classes(), from *descriptions* (frontend.SpecFunction:
+    the implemented functions compiled unconditionally).
 
     *generator* is the emit.Generator of the spec."""
     out = []
-    by_type = {}            # type name -> [__new__ description, methods]
+    by_class = {}           # class name -> [__new__ description, methods]
     for description in descriptions:
         cls_name, _, meth = description.name.rpartition('.')
-        if builtin_types.by_name(cls_name) is None:
+        if not cls_name:
             continue
-        new, methods = by_type.setdefault(cls_name, [None, []])
+        entry = by_class.setdefault(cls_name, [None, []])
         if meth == '__new__':
-            by_type[cls_name][0] = description
+            entry[0] = description
         else:
-            methods.append(description)
-    slot_table = None
-    for type_name, (new, methods) in by_type.items():
-        calls = None
+            entry[1].append(description)
+    for cls_name in table_classes(generator.spec):
+        type_object = _class_type_object(generator, cls_name)
+        new, methods = by_class.get(cls_name, (None, []))
+        calls = method_table = None
         if new is not None:
             lines, calls = generate_calls(generator, new)
             out += lines
-        method_table = None
         if methods:
-            lines, method_table = generate_methods(generator, type_name,
+            lines, method_table = generate_methods(generator, cls_name,
                                                    methods)
             out += lines
-        if slot_table is None:
-            lines, slot_table = generate_slots(generator, type_name)
-            out += lines
+        lines, slot_table = generate_slots(generator, cls_name, type_object)
+        out += lines
         out += [
-            f'const _PySpecCallTable _PySpec_{type_name}_calls = {{',
-            f'    .type = {_type_object(builtin_types.by_name(type_name))},',
+            f'const _PySpecCallTable {table_name(cls_name)} = {{',
+            f'    .type = {type_object},',
         ]
         if calls:
             out += [f'    .ncalls = Py_ARRAY_LENGTH({calls}),',
@@ -187,9 +223,24 @@ def generate(generator, descriptions):
         if slot_table:
             out += [f'    .nslots = Py_ARRAY_LENGTH({slot_table}),',
                     f'    .slots = {slot_table},']
-            slot_table = ''
         out += ['};', '']
     return out
+
+
+def _class_type_object(generator, cls_name):
+    """The C type object of spec class *cls_name*: a builtin type's, or
+    the one its clinic class declaration in the C file names."""
+    tp = builtin_types.by_name(cls_name)
+    if tp is not None:
+        return _type_object(tp)
+    type_object = generator.type_objects.get(cls_name)
+    if type_object is None:
+        spec = generator.spec
+        raise emit.SpecError(spec.classes[cls_name],
+                             f'class {cls_name} has a call table: declare '
+                             f'it in the C file (class {cls_name} "T *" '
+                             '"&T_Type")')
+    return type_object
 
 
 def generate_calls(generator, description):
@@ -267,7 +318,9 @@ def generate_methods(generator, type_name, descriptions):
     described."""
     spec = generator.spec
     analyzer = facts.analyzer(spec)
-    type_value = getattr(builtins, type_name)
+    # The type as the partial evaluator knows it; None for a class that
+    # is not a builtin type (only its generic entries are derived).
+    type_value = builtin_types.by_name(type_name)
     entries = []
     for description in descriptions:
         name = description.name
@@ -295,6 +348,8 @@ def generate_methods(generator, type_name, descriptions):
             args = [first, *params]
             candidates = [type_value]
             on = ''
+        if type_value is None:
+            candidates = []
         if not args:
             continue
         arg_names = [a.name for a in args]
@@ -328,22 +383,31 @@ def generate_methods(generator, type_name, descriptions):
     return out, table
 
 
-def generate_slots(generator, type_name):
-    """(C lines, array name) of the facts of the slots of the classes of
-    the spec that have a Python reference, for self of exactly the class;
-    ([], '') when there are none."""
+def slot_member(spec, cls_name, dunder):
+    """The C slot that keys the facts of special method *dunder* of spec
+    class *cls_name*, as a member of PyHeapTypeObject
+    (``as_mapping.mp_subscript``, ``ht_type.tp_iternext``): the first slot
+    of the dunder in slotdefs[] that the class fills (all of them unless
+    its @c_name names some), which is the one its wrapper calls."""
+    _, named = spec.c_name(f'{cls_name}.{dunder}')
+    for slotdef in slots.candidates(dunder):
+        if not named or slotdef.slot in named:
+            return f'{slotdef.subtable or "ht_type"}.{slotdef.slot}'
+    raise ValueError(f'{cls_name}.{dunder} fills no slot')
+
+
+def generate_slots(generator, cls_name, type_object):
+    """(C lines, array name) of the facts of the slots of class
+    *cls_name* (whose type object is *type_object*) that have a Python
+    reference, for self of exactly the class; ([], '') when there are
+    none."""
     spec = generator.spec
     analyzer = facts.analyzer(spec)
-    dunders = {slotdef.name for slotdef in slots.slotdefs()}
+    tp = builtin_types.by_name(cls_name)
     entries = []
     for name in spec.c_implemented_functions():
-        cls_name, _, dunder = name.rpartition('.')
-        if dunder not in dunders:
-            continue
-        tp = builtin_types.by_name(cls_name)
-        type_object = (_type_object(tp) if tp is not None
-                       else generator.type_objects.get(cls_name))
-        if type_object is None:
+        owner, _, dunder = name.rpartition('.')
+        if owner != cls_name or not slots.is_slot(dunder):
             continue
         arg_names = spec.params(name)
         env = {arg_names[0]: tp or NOTNULL}
@@ -356,28 +420,28 @@ def generate_slots(generator, type_name):
                 # (An argument type that always raises is left to the
                 # generic entry: nothing uses that.)
                 if found.key() != generic.key() and not found.always_raises:
-                    entries.append((cls_name, dunder, type_object,
-                                    arg_names, arg_type, found))
-        entries.append((cls_name, dunder, type_object, arg_names, None,
-                        generic))
+                    entries.append((dunder, arg_names, arg_type, found))
+        entries.append((dunder, arg_names, None, generic))
     if not entries:
         return [], ''
-    table = f'{type_name}_spec_slots'
+    table = f'{cls_name}_spec_slots'
     out = [
-        '/* Facts of the slots of the classes of the spec, derived from '
-        'their Python',
-        ' * references, for self of exactly the class (see '
-        'Include/internal/pycore_pyspec.h). */',
+        f'/* Facts of the slots of {cls_name} ({type_object}), derived '
+        'from their',
+        ' * Python references, for self of exactly the class, keyed by '
+        'slot',
+        ' * (see Include/internal/pycore_pyspec.h). */',
         f'static const _PySpecSlot {table}[] = {{',
     ]
-    for cls_name, dunder, type_object, arg_names, arg_type, found in entries:
+    for dunder, arg_names, arg_type, found in entries:
         shown = ['self', getattr(arg_type, '__name__', 'x')][:len(arg_names)]
         # The entry of a call, without the function.
         entry = _entry(f'{cls_name}.{dunder}({", ".join(shown)})',
                        len(arg_names), found, None, arg_type, None,
                        arg_names)
+        member = slot_member(spec, cls_name, dunder)
         out += [entry[0], '    {',
-                f'        .type = {type_object},',
+                f'        .slot = _PySpec_SLOT({member}),',
                 f'        .name = "{dunder}",',
                 '        .facts = {',
                 *['    ' + line for line in entry[2:-1]],
@@ -408,3 +472,67 @@ def _variant(generator, description, c_name, residual, given, missing, tp,
         f'{tp.__name__}\n * ({described})',
         c_name, residual, [(p.name, p.ctype) for p in given],
         [p.name for p in missing])
+
+
+# -- the registry ------------------------------------------------------------
+
+REGISTRY_HEADER = os.path.join('Include', 'internal', 'pycore_pyspec.h')
+REGISTRY_START = '/*[pyspec registry start]*/'
+REGISTRY_END = '/*[pyspec registry end]*/'
+
+
+def registry(root):
+    """(table name, spec path relative to *root*) of the call table of
+    every class of table_classes() of the specs of the core C files."""
+    out = []
+    for spec_path, _ in specfiles.core_spec_files(root):
+        spec = frontend.Spec.load(spec_path)
+        rel = os.path.relpath(spec_path, root).replace(os.sep, '/')
+        out += [(table_name(cls_name), rel)
+                for cls_name in table_classes(spec)]
+    names = [name for name, _ in out]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise frontend.SpecError(f"two spec classes have the call table "
+                                 f"{', '.join(duplicates)}: rename one")
+    return out
+
+
+def registry_text(entries):
+    """The generated part of the registry header, between the markers."""
+    lines = [
+        '/* Generated by Argument Clinic (Tools/clinic/libclinic/pyspec/'
+        'call_table.py)',
+        ' * from the specs of the core C files; do not edit: run clinic on '
+        'a spec\'d',
+        ' * C file. */',
+    ]
+    spec = None
+    for name, rel in entries:
+        if rel != spec:
+            spec = rel
+            lines.append(f'/* {rel} */')
+        lines.append(f'PyAPI_DATA(const _PySpecCallTable) {name};')
+    lines.append('#define _PySpec_REGISTRY(X)' + (' \\' if entries else ''))
+    for i, (name, _) in enumerate(entries):
+        lines.append(f'    X({name})' + (' \\' if i < len(entries) - 1
+                                          else ''))
+    return '\n'.join(lines) + '\n'
+
+
+def registry_outputs(filename):
+    """[(path, text)] of the registry header rewritten for the specs of
+    the tree of *filename*, a C file being processed by Argument Clinic:
+    [] unless it is a core C file (specfiles.is_core()) of a tree with the
+    header."""
+    filename = os.path.abspath(filename)
+    root = os.path.dirname(os.path.dirname(filename))
+    header = os.path.join(root, REGISTRY_HEADER)
+    if not specfiles.is_core(root, filename) or not os.path.exists(header):
+        return []
+    with open(header, encoding='utf-8') as f:
+        text = f.read()
+    start = text.index(REGISTRY_START) + len(REGISTRY_START) + 1
+    end = text.index(REGISTRY_END, start)
+    return [(header, text[:start] + registry_text(registry(root))
+             + text[end:])]

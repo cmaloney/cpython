@@ -266,6 +266,10 @@ impl_definition block
                     continue
 
         outputs += self.pyspec_outputs()
+        if self.pyspec is not None:
+            # The registry of the call tables of all specs (call_table.py).
+            from libclinic.pyspec import call_table
+            outputs += call_table.registry_outputs(self.filename)
         # Nothing is written unless every output could be generated (the
         # caller writes the C file itself last).
         for filename, text in outputs:

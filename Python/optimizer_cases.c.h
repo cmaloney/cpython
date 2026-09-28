@@ -1430,7 +1430,8 @@
             JitOptRef s;
             sub_st = stack_pointer[-1];
             bytes_st = stack_pointer[-2];
-            res = spec_slot_result(ctx, &PyBytes_Type, "__getitem__",
+            res = spec_slot_result(ctx, &PyBytes_Type,
+                               _PySpec_SLOT(as_mapping.mp_subscript),
                                &PyLong_Type, true);
             b = bytes_st;
             s = sub_st;
@@ -3875,7 +3876,8 @@
 
         case _ITER_NEXT_BYTES: {
             JitOptRef next;
-            next = spec_slot_result(ctx, &PyBytesIter_Type, "__next__", NULL,
+            next = spec_slot_result(ctx, &PyBytesIter_Type,
+                                _PySpec_SLOT(ht_type.tp_iternext), NULL,
                                 true);
             ASSERT_RESULT_FACTS(next, 0);
             CHECK_STACK_BOUNDS(1);

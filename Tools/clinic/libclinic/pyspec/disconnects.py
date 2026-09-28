@@ -44,15 +44,28 @@ import re
 import sys
 import tomllib
 
-from . import frontend
+from . import frontend, specfiles
 
-TYPES = {
-    'bytes': dict(cfile='Objects/bytesobject.c',
-                  prefixes=('PyBytes_', 'PyBytesWriter_', '_PyBytes_',
-                            '_PyBytesWriter_')),
-    'bytearray': dict(cfile='Objects/bytearrayobject.c',
-                      prefixes=('PyByteArray_', '_PyByteArray_')),
-}
+
+def spec_types(srcdir):
+    """{type name: dict(cfile=..., prefixes=...)} of the builtin types
+    described by a class of the spec of a core C file (found by
+    specfiles.spec_files()): their C file, and the prefixes of the names
+    of their C API, from their type object (&PyBytes_Type: PyBytes and
+    _PyBytes, which cover PyBytesWriter_ too)."""
+    out = {}
+    for spec_path, c_file in specfiles.core_spec_files(srcdir):
+        spec = frontend.Spec.load(spec_path)
+        for cls_name in spec.classes:
+            type_object = frontend.TYPE_OBJECTS.get(cls_name)
+            if type_object is None or \
+                    getattr(builtins, cls_name, None) is None:
+                continue
+            base = type_object.removeprefix('&').removesuffix('_Type')
+            out[cls_name] = dict(
+                cfile=os.path.relpath(c_file, srcdir).replace(os.sep, '/'),
+                prefixes=(base, '_' + base))
+    return out
 
 BASELINE_DIR = 'Tools/clinic/pyspec-baseline'
 DIMENSIONS = ('capi', 'docs', 'slots', 'docstrings', 'typeshed', 'c_calls')
@@ -251,7 +264,7 @@ def capi(srcdir):
     with open(os.path.join(srcdir, 'Misc', 'stable_abi.toml'), 'rb') as f:
         stable_abi = tomllib.load(f)['function']
     out = []
-    for tp, config in TYPES.items():
+    for tp, config in spec_types(srcdir).items():
         cfile = config['cfile']
         cdefs = {n: p for n, p in parse_c_definitions(srcdir, cfile).items()
                  if not p.static}
@@ -505,7 +518,8 @@ def runtime_signature(tp, name):
 
 def spec_signatures(srcdir, tp):
     """{method name: [Param]} of the spec of *tp*, or {} if it has none."""
-    path = frontend.spec_path(os.path.join(srcdir, TYPES[tp]['cfile']))
+    cfile = spec_types(srcdir)[tp]['cfile']
+    path = frontend.spec_path(os.path.join(srcdir, cfile))
     spec = frontend.Spec.load(path)
     if spec is None or tp not in spec.classes:
         return {}
@@ -566,7 +580,7 @@ def docs(srcdir):
     rel = 'Doc/builtins/stdtypes.rst'
     documented = parse_stdtypes(_read(srcdir, rel))
     out = []
-    for tp_name in TYPES:
+    for tp_name in spec_types(srcdir):
         tp = getattr(builtins, tp_name)
         spec = spec_signatures(srcdir, tp_name)
         for meth in ['__new__'] + public_methods(tp):
@@ -639,15 +653,17 @@ def slots(srcdir):
 # ---------------------------------------------------------------------------
 # Dimension: docstrings written twice
 
-DOCSTRING_FILES = [
-    'Objects/bytes_methods.c',
-    'Objects/bytesobject.c',
-    'Objects/bytearrayobject.c',
-    'Objects/pyspec/bytearrayobject.py',
-    'Objects/pyspec/bytesobject.py',
-    'Objects/stringlib/pyspec/ctype.py',
-    'Objects/stringlib/pyspec/transmogrify.py',
-]
+def docstring_files(srcdir):
+    """The files where the docstrings of methods are written: every spec
+    with a class (found by specfiles.spec_files()), and its C file."""
+    out = []
+    for spec_path, c_file in specfiles.spec_files(srcdir):
+        if not frontend.Spec.load(spec_path).classes:
+            continue
+        for path in (spec_path, c_file):
+            if path is not None:
+                out.append(os.path.relpath(path, srcdir).replace(os.sep, '/'))
+    return sorted(out)
 
 
 def _docstrings(srcdir, rel):
@@ -678,7 +694,7 @@ def _docstrings(srcdir, rel):
 
 def docstrings(srcdir):
     seen = {}
-    for rel in DOCSTRING_FILES:
+    for rel in docstring_files(srcdir):
         for label, text in _docstrings(srcdir, rel):
             key = ' '.join(inspect.cleandoc(text).split())
             seen.setdefault(key, []).append(f'{rel}:{label}')
@@ -713,7 +729,7 @@ def typeshed(srcdir, typeshed_dir):
               encoding='utf-8') as f:
         tree = ast.parse(f.read())
     out = []
-    for tp_name in TYPES:
+    for tp_name in spec_types(srcdir):
         tp = getattr(builtins, tp_name)
         stubs = _typeshed_class(tree, tp_name)
         spec = spec_signatures(srcdir, tp_name)
