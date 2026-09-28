@@ -114,12 +114,10 @@ def _excluding(fact: Fact | None, **more: tuple[type, ...]) -> Other:
 
 
 def refine(test: ast.expr, env: Env) -> tuple[Env, Env]:
-    """The environments of the body and of the else clause of ``if
-    test``, which *env* does not decide: ``type(x) is K`` gives x the
-    exact type K in the body (in the else clause for ``is not``), and in
-    the other clause, x is not exactly K; after a false
-    ``isinstance(x, K)``, x is no instance of K; ``x is NULL`` and ``x
-    is K`` (x is the type K) are decided."""
+    """The environments of the body and the else clause of ``if test``
+    (which *env* does not decide): after ``type(x) is K``, x is exactly K,
+    else not; after a false ``isinstance(x, K)``, no instance of K;
+    ``x is NULL`` and ``x is K`` (a type) are decided."""
     match test:
         case ast.UnaryOp(op=ast.Not(), operand=operand):
             body, orelse = refine(operand, env)

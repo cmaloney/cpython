@@ -59,10 +59,8 @@ def _clinic_decorator(*args: Any) -> Any:
     return lambda func: func
 
 
-# The Argument Clinic decorators other than @classmethod and @staticmethod
-# (see frontend.py): they only affect the generated C, so for Python they
-# are identity decorators.  (A spec imports them by name: ``from
-# libclinic.pyspec.runtime import text_signature``.)
+# The clinic decorators other than @classmethod and @staticmethod: for
+# Python, identity decorators.
 def _define_clinic_decorators() -> list[str]:
     from libclinic.dsl_parser import DSLParser
     names = [name for name in DSLParser.decorator_names()
@@ -76,9 +74,7 @@ CLINIC_DECORATORS = _define_clinic_decorators()
 
 
 def c_name(*args: str, **kwargs: str) -> Callable[[_F], _F]:
-    """``@c_name("x")`` / ``@c_name(slot="x")``: the C function of a
-    method (see frontend.py); on a class, the prefix of its C tables
-    (typeobj.py).  An identity decorator for Python."""
+    """The C name of a method, or the prefix of the tables of a class."""
     return lambda func: func
 
 
@@ -160,11 +156,9 @@ _checked: set[str] = set()
 
 
 def check_shadowed_builtins(tree: ast.Module, path: str) -> None:
-    """Raise a SpecError at the first use of a SHADOWED_BUILTINS name that
-    the spec *tree* does not import from this module: run as Python, it
-    would be the builtin, whose meaning is not the C's (isinstance()
-    honours __class__; a for loop over the builtin iter() calls __iter__
-    of the iterator), and the difftest would compare the wrong thing."""
+    """A SpecError at the first use of a SHADOWED_BUILTINS name that the
+    spec *tree* does not import from here: as Python it would be the
+    builtin, whose meaning is not the C's."""
     from libclinic.errors import SpecError
     imported = {alias.name for node in tree.body
                 if builtins.isinstance(node, ast.ImportFrom)
@@ -181,19 +175,11 @@ def check_shadowed_builtins(tree: ast.Module, path: str) -> None:
 
 
 def load(path: str) -> dict[str, Callable[..., Any]]:
-    """Execute the spec at *path*; return its functions and methods.
-
-    The result maps "PyBytes_FromObject" or "bytes.__new__" to the Python
-    function.  ``class T:`` in a spec describes the builtin type T, so once
-    the spec has run, the global T is the builtin again: bodies compare
-    with the real type.  Calls ``T.m(...)`` of spec methods call the spec
-    method, as in the generated C (except in the Python reference of a
-    @native function, which uses the builtin).  The specs it
-    imports (``from Objects.pyspec.abstract import PyNumber_AsSsize_t``)
-    are found from the source root (specfiles.import_root()).  The spec,
-    and every spec it imports, must import the SHADOWED_BUILTINS it uses
-    from this module (a SpecError otherwise).
-    """
+    """Run the spec at *path*: {"PyBytes_FromObject" or "bytes.__new__":
+    the Python function}.  Once the spec has run, a global T of ``class
+    T:`` is the builtin again (bodies compare with the real type), while
+    ``T.m(...)`` calls the spec method, as in the generated C (except in
+    a Python reference, which models with the builtin)."""
     from . import specfiles
     with open(path, encoding='utf-8') as f:
         tree = ast.parse(f.read(), path)
