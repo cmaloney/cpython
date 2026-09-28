@@ -219,8 +219,7 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
         return node.name, [OBJECT] * len(call.args), OBJECT
 
     def call_ctype(self, call: ast.expr) -> str:
-        if not isinstance(call, ast.Call):
-            raise spec_error(call, 'only call results can be assigned')
+        assert isinstance(call, ast.Call)       # (subset.Lowered.assign())
         function = self.c_function(call)
         if function is not None:
             return function[2]
@@ -403,12 +402,6 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
                 and isinstance(node.left, ast.NamedExpr)):
             named = node.left
             self.store(named.target, named.value, named)
-        for child in ast.walk(node):
-            if isinstance(child, ast.NamedExpr) and (
-                    not isinstance(node, ast.Compare)
-                    or child is not node.left):
-                raise spec_error(child,
-                                 'walrus only as the left operand of "is"')
 
     # -- statements --------------------------------------------------------
 
@@ -420,8 +413,7 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
         if name in self.live:
             raise spec_error(node, f'{name!r} is assigned again while it '
                              'holds a reference')
-        if not isinstance(value, ast.Call):
-            raise spec_error(value, 'only call results can be assigned')
+        assert isinstance(value, ast.Call)      # (subset.Lowered.assign())
         expr, ctype, convention = self.lower_call(value, target=name)
         if self.locals.get(name) != ctype:
             raise spec_error(node, f'{name!r} changes type')
@@ -649,14 +641,9 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
             raise spec_error(stmt, 'try around a call that cannot fail')
         matches = []
         for handler in stmt.handlers:
-            if handler.name is not None:
-                raise spec_error(handler,
-                                 '"except E as name" is not supported')
-            assert handler.type is not None
-            types = (handler.type.elts if isinstance(handler.type, ast.Tuple)
-                     else [handler.type])
+            types = subset.handler_names(handler) or []
             tests = tuple(ir.Call('PyErr_ExceptionMatches',
-                                  (self.lower_value(t),)) for t in types)
+                                  (ir.ExceptionType(t),)) for t in types)
             matches.append(tests[0] if len(tests) == 1
                            else ir.BoolOp('or', tests))
         # In the error branch the target holds no reference; in the other,
@@ -718,12 +705,10 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
                 # its items alive: borrowed, and the size and the items
                 # are read once.
                 kind, owned = ir.Items.SNAPSHOT, False
-            elif mark.iterable is list:
+            else:
                 # What the list iterator does: the size is read again for
                 # every item, since the loop body may change the list.
                 kind = ir.Items.LIST
-            else:
-                raise spec_error(stmt, f'no index loop for {mark.iterable!r}')
         else:
             on_error = self.error_exit()
         if owned:
