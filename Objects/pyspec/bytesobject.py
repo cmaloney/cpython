@@ -92,12 +92,15 @@ class bytes:
         # We'd like to call PyObject_Bytes here, but we need to check for an
         # integer argument before deferring to PyBytes_FromObject, something
         # PyObject_Bytes doesn't do.
-        if (func := _PyObject_LookupSpecial(source, "__bytes__")) is not NULL:
-            result = func()
-            if not isinstance(result, bytes):
-                raise TypeError(f"{fqname(type(source))}.__bytes__() must return "
-                                f"a bytes, not {fqname(type(result))}")
-            return result
+        # An exact int has no __bytes__: no lookup (a type-cache probe for
+        # every bytes(n) the tier-2 call table does not reach, and Sub(n)).
+        if type(source) is not int:
+            if (func := _PyObject_LookupSpecial(source, "__bytes__")) is not NULL:
+                result = func()
+                if not isinstance(result, bytes):
+                    raise TypeError(f"{fqname(type(source))}.__bytes__() must "
+                                    f"return a bytes, not {fqname(type(result))}")
+                return result
         if isinstance(source, str):
             raise TypeError("string argument without an encoding")
         # Is it an integer?

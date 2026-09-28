@@ -172,6 +172,13 @@ class IntSubclass(int):
     pass
 
 
+class IntWithBytes(int):
+    """Only an exact int skips the __bytes__ lookup."""
+
+    def __bytes__(self):
+        return b'iwb'
+
+
 def generator():
     yield 1
     yield 2
@@ -302,6 +309,7 @@ SOURCES = [
     lambda: call(0),
     lambda: call(True),
     lambda: call(IntSubclass(2)),
+    lambda: call(IntWithBytes(2)),
     lambda: call(-1),
     lambda: call(2**70),
     lambda: call(IndexOnly(2)),

@@ -211,11 +211,12 @@ bytes_new_nargs0(void)
 /* bytes_new() for exactly bytes with 1 positional argument(s):
  * if type(source) is bytes:
  *     return source
- * if (func := _PyObject_LookupSpecial(source, '__bytes__')) is not NULL:
- *     result = func()
- *     if not isinstance(result, bytes):
- *         raise TypeError(f'{fqname(type(source))}.__bytes__() must return a bytes, not {fqname(type(result))}')
- *     return result
+ * if type(source) is not int:
+ *     if (func := _PyObject_LookupSpecial(source, '__bytes__')) is not NULL:
+ *         result = func()
+ *         if not isinstance(result, bytes):
+ *             raise TypeError(f'{fqname(type(source))}.__bytes__() must return a bytes, not {fqname(type(result))}')
+ *         return result
  * if isinstance(source, str):
  *     raise TypeError('string argument without an encoding')
  * if hasattr(type(source), '__index__'):
@@ -256,24 +257,26 @@ bytes_new_nargs1(PyObject *source)
     if (PyBytes_CheckExact(source)) {
         return Py_NewRef(source);
     }
-    func = _PyObject_LookupSpecial(source, &_Py_ID(__bytes__));
-    if (func == NULL && PyErr_Occurred()) {
-        return NULL;
-    }
-    if (func != NULL) {
-        result = _PyObject_CallNoArgs(func);
-        if (result == NULL) {
-            Py_XDECREF(func);
+    if (!PyLong_CheckExact(source)) {
+        func = _PyObject_LookupSpecial(source, &_Py_ID(__bytes__));
+        if (func == NULL && PyErr_Occurred()) {
             return NULL;
         }
-        if (!PyBytes_Check(result)) {
-            PyErr_Format(PyExc_TypeError, "%T.__bytes__() must return a bytes, not %T", source, result);
-            Py_XDECREF(result);
+        if (func != NULL) {
+            result = _PyObject_CallNoArgs(func);
+            if (result == NULL) {
+                Py_XDECREF(func);
+                return NULL;
+            }
+            if (!PyBytes_Check(result)) {
+                PyErr_Format(PyExc_TypeError, "%T.__bytes__() must return a bytes, not %T", source, result);
+                Py_XDECREF(result);
+                Py_XDECREF(func);
+                return NULL;
+            }
             Py_XDECREF(func);
-            return NULL;
+            return result;
         }
-        Py_XDECREF(func);
-        return result;
     }
     if (PyUnicode_Check(source)) {
         PyErr_SetString(PyExc_TypeError, "string argument without an encoding");
