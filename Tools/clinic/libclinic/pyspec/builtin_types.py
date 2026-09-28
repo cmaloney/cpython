@@ -17,11 +17,16 @@ items of any type).  A type whose special method may run Python code
 __length_hint__ or PickleBuffer's __buffer__) is not in the table, or
 lists the method as PYTHON: nothing is claimed about it.
 
-A spec class that declares the slots of its type (bytes) describes the
-type itself; TypeFacts reads it instead of the table.
+A spec class that declares the slots of its type (bytes, in any spec of
+the tree) describes the type itself; TypeFacts reads it instead of the
+table.  The row of such a type lists only what no spec gives: its C
+names, constants, and the audited facts of the special methods its spec
+writes in C without a Python reference (``...``); test_clinic checks
+that a row repeats nothing a spec derives.
 """
 
 import builtins
+import functools
 import types
 
 
@@ -57,10 +62,11 @@ def _row(name, base=object, slots=None, constants=None, size=None,
 
 TABLE = {
     # The candidates first, in the order of the call table.
+    # bytes and bytearray have a spec (Objects/pyspec/): only the special
+    # methods it writes as ... are listed.
     bytes: _row('bytes', candidate=True,
                 constants={b'': 'Py_CONSTANT_EMPTY_BYTES'},
-                slots={'__buffer__': memoryview, '__bytes__': bytes,
-                       '__iter__': int, '__len__': int}),
+                slots={'__iter__': int}),
     bytearray: _row('bytearray', candidate=True,
                     slots={'__buffer__': memoryview, '__iter__': int,
                            '__len__': int, '__release_buffer__': None}),
@@ -117,22 +123,71 @@ def constant(value):
     return None if row is None else row.constants.get(value)
 
 
+@functools.cache
+def spec_classes():
+    """{builtin type: frontend.Spec} of the complete classes (see
+    TypeFacts.spec_class()) of the specs of the tree
+    (specfiles.spec_files())."""
+    from . import frontend, specfiles
+    out = {}
+    for path, _ in specfiles.spec_files():
+        spec = frontend.Spec.load(path)
+        for name in spec.classes:
+            tp = getattr(builtins, name, None)
+            if isinstance(tp, type) and spec.declares_slots(name):
+                out[tp] = spec
+    return out
+
+
 class TypeFacts:
     """What the tools know about builtin types: from the spec for its
-    complete classes, else from TABLE; nothing about other types.
-    Never from the Python running Argument Clinic."""
+    complete classes (of this spec, else of another spec of the tree),
+    else from TABLE; nothing about other types.  Never from the Python
+    running Argument Clinic."""
 
     def __init__(self, spec):
         self.spec = spec
+
+    def class_spec(self, tp):
+        """The spec with the complete class of builtin tp: this spec, or
+        another spec of the tree; None when there is none."""
+        if getattr(builtins, tp.__name__, None) is not tp:
+            return None
+        if (tp.__name__ in self.spec.classes
+                and self.spec.declares_slots(tp.__name__)):
+            return self.spec
+        return spec_classes().get(tp)
 
     def spec_class(self, tp):
         """The complete spec class of builtin tp, or None.  A class that
         declares a slot (a dunder of slotdefs[]) declares them all:
         test_clinic checks it against the slot wrappers of the type."""
-        node = self.spec.classes.get(tp.__name__)
-        if node is None or getattr(builtins, tp.__name__, None) is not tp:
-            return None
-        return node if self.spec.declares_slots(tp.__name__) else None
+        spec = self.class_spec(tp)
+        return None if spec is None else spec.classes[tp.__name__]
+
+    def derived(self, spec, tp, name):
+        """The TABLE value of special method *name* of builtin tp, whose
+        complete class is in *spec*, another spec: derived from its body
+        or Python reference; for a method written in C only (a stub, and
+        __iter__, whose value is the type of the items), the audited value
+        of the row of tp, else PYTHON."""
+        from . import facts, frontend, partial_eval
+        other, full = spec.declaration(f'{tp.__name__}.{name}')
+        node = other.functions[full]
+        if name != '__iter__' and not frontend.is_stub(node):
+            params = other.params(full)
+            env = {params[0]: tp} if params else {}
+            analyzer = facts.analyzer(other)
+            if frontend.is_c_implemented(node):
+                found = analyzer.reference_facts(full, env)
+            else:
+                residual = partial_eval.specialize(other, full, env)
+                found = analyzer.facts(residual, env, params)
+            return PYTHON if found.runs_python else found.result_type
+        row = TABLE.get(tp)
+        if row is not None and name in row.slots:
+            return row.slots[name]
+        return PYTHON
 
     def mro(self, tp):
         """The MRO of tp, or None when tp is not known."""
@@ -150,9 +205,10 @@ class TypeFacts:
 
     def defines(self, tp, name):
         """Whether tp itself defines special method *name* (in SPECIALS)."""
-        if self.spec_class(tp) is not None:
+        spec = self.class_spec(tp)
+        if spec is not None:
             full = f'{tp.__name__}.{name}'
-            return full in self.spec.functions or full in self.spec.shared
+            return full in spec.functions or full in spec.shared
         return name in TABLE[tp].slots
 
     def owner(self, tp, name):
@@ -173,14 +229,18 @@ class TypeFacts:
 
     def special(self, tp, name):
         """The special method *name* of exact type tp: (the spec function
-        that implements it, None) for a spec class, (None, its TABLE
-        value) for a table type, (None, False) when tp does not have it,
-        and None when not known."""
+        that implements it, None) for a class of this spec, (None, its
+        TABLE value) for a class of another spec (derived()) or a table
+        type, (None, False) when tp does not have it, and None when not
+        known."""
         owner = self.owner(tp, name)
         if owner is None:
             return None
         if owner is False:
             return None, False
-        if self.spec_class(owner) is not None:
+        spec = self.class_spec(owner)
+        if spec is self.spec:
             return f'{owner.__name__}.{name}', None
+        if spec is not None:
+            return None, self.derived(spec, owner, name)
         return None, TABLE[owner].slots[name]

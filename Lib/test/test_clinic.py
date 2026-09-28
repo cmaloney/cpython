@@ -7507,6 +7507,18 @@ class PyspecFactsTest(TestCase):
                 pass
             self.assertIsNone(facts.has(Unknown, '__len__'))
             self.assertIsNone(facts.has(object, '__add__'))
+        # The row of a type with a spec class repeats nothing the spec
+        # derives: it lists only the special methods the spec writes as
+        # ... (C only).
+        for tp, spec in bt.spec_classes().items():
+            row = bt.TABLE.get(tp)
+            for name in (row.slots if row else ()):
+                with self.subTest(tp=tp, name=name):
+                    other, full = spec.declaration(f'{tp.__name__}.{name}')
+                    self.assertTrue(
+                        pyspec_frontend.is_stub(other.functions[full]),
+                        f'{full} has a body or Python reference in the '
+                        'spec: delete it from its row of builtin_types.py')
 
     def test_independent_of_host(self):
         # The generated code does not depend on the builtins of the Python
