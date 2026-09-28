@@ -447,13 +447,13 @@ class Analyzer(subset.Walker[Flow, None]):
         """Facts of invoking special method *name* of type(obj)."""
         tp = known.exact_type(obj, env)
         special = self.types.special(tp, name)
-        if special is None:
+        if tp is None or special is None:
             return Facts(worst=True)
         spec_name, value = special
         if spec_name is None and value is False:
             return Facts()      # no such method: nothing is called
-        if spec_name is None and value is not builtin_types.PYTHON:
-            facts = Facts()
+        if spec_name is None and value != builtin_types.PYTHON:
+            facts = Facts()     # audited: runs no Python code
             facts.raises.add(ANY)
             return facts
         if spec_name is not None and frontend.is_native(
