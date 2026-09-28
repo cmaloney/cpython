@@ -73,12 +73,6 @@ def builtin_type(node: ast.expr) -> type | None:
     return None
 
 
-def is_type_call(node: ast.expr) -> bool:
-    """``type(x)``"""
-    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-            and node.func.id == 'type' and len(node.args) == 1)
-
-
 def exact_type(node: ast.expr, env: Env) -> type | None:
     """The exact type of name *node* in *env*, or None."""
     if isinstance(node, ast.Name):

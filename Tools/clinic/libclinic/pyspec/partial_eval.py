@@ -64,7 +64,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 from . import builtin_types, facts, frontend, marks, subset
 from .known import (FALLBACK, NOTNULL, NULL, SEQUENCES, Env, Fact, IterOf,
                     Other, Value, arg_fact, builtin_type, exact_type,
-                    fact_key, is_type_call, refine)
+                    fact_key, refine)
 from .marks import Specialization
 from .subset import assigned_names, loaded_names, terminates
 
@@ -121,51 +121,38 @@ def evaluate(expr: ast.expr, env: Env, ev: Evaluator) -> bool | None:
                 return False
             mro = tp and klass and ev.types.mro(tp)
             return klass in mro if mro else None
-        case ast.Call(func=ast.Name('hasattr'), args=[type_call, name]) \
-                if is_type_call(type_call):
-            assert isinstance(type_call, ast.Call)
+        case ast.Call(func=ast.Name('hasattr'), args=[
+                ast.Call(func=ast.Name('type'), args=[obj]), name]):
             attr = getattr(arg_fact(name, env), 'obj', None)
             if not isinstance(attr, str):
                 return None
-            return ev.types.has(exact_type(type_call.args[0], env), attr)
-        case ast.Name(name) if isinstance(env.get(name), Value):
-            return bool(getattr(env[name], 'obj'))
+            return ev.types.has(exact_type(obj, env), attr)
+        case ast.Name(name) if isinstance(fact := env.get(name), Value):
+            return bool(fact.obj)
     return None
 
 
 def _evaluate_is(left: ast.expr, right: ast.expr, env: Env,
                  ev: Evaluator) -> bool | None:
-    right_is_null = isinstance(right, ast.Name) and right.id == 'NULL'
-    if right_is_null and isinstance(left, ast.Name):
-        value = env.get(left.id)
-        if value == NULL:
-            return True
-        if value == NOTNULL or isinstance(value, (type, Value, IterOf,
-                                                  Other)):
-            return False
-        return None
-    if isinstance(left, ast.Name) and isinstance(env.get(left.id), Value):
-        klass = builtin_type(right)
-        if klass is None:
-            return None
-        return getattr(env[left.id], 'obj') is klass
-    if right_is_null and isinstance(left, ast.NamedExpr):
-        if isinstance(left.value, ast.Call) and _only_null(
-                ev.analyzer.call_facts(left.value, env)):
-            return True
-        return None
-    if isinstance(left, ast.Call) and is_type_call(left):
-        tp, klass = exact_type(left.args[0], env), builtin_type(right)
-        if klass is None:
-            return None
-        if tp is None:
-            other = (env.get(left.args[0].id)
-                     if isinstance(left.args[0], ast.Name) else None)
+    """``left is right``, or None when *env* does not decide it."""
+    klass = builtin_type(right)
+    match left, right:
+        case ast.Name(name), ast.Name('NULL'):
+            fact = env.get(name)
+            return None if fact is None else fact == NULL
+        case ast.Name(name), _ if isinstance(fact := env.get(name), Value):
+            return None if klass is None else fact.obj is klass
+        case ast.NamedExpr(value=ast.Call() as call), ast.Name('NULL'):
+            return True if _only_null(ev.analyzer.call_facts(call, env)) \
+                else None
+        case ast.Call(func=ast.Name('type'), args=[obj]), _ if klass:
+            tp = exact_type(obj, env)
+            if tp is not None:
+                return tp is klass
+            other = env.get(obj.id) if isinstance(obj, ast.Name) else None
             if isinstance(other, Other) and (klass in other.types
                                              or klass in other.instances):
                 return False
-            return None
-        return tp is klass
     return None
 
 

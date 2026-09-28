@@ -1,41 +1,23 @@
 """Facts derived from the bodies of a spec.
 
-The facts of a list of statements (Facts) are what every path does:
+The facts of statements (Facts) are what their paths do: per ``return``
+the exact type of the result and the argument it returns, if any
+(``return NULL`` is an absent result, not an error); whether some path
+may run Python code; which exceptions some path may raise.
 
-* returns: per ``return``, the exact type of the result (or None) and
-  the index of the argument it returns (or None); ``return NULL`` is an
-  absent result, not an error (returns_null);
-* runs_python: some path may run Python code;
-* raises: the exceptions some path may raise: the names of builtin
-  exception classes, or ANY.
+They come from the statements only.  A spec function called is analysed
+in turn, an @inline one through its body and a @native one through its
+Python reference, each partially evaluated for the facts of the call
+(partial_eval.py, through context.py).  In a reference, only the
+primitives (runtime.py) and the calls of C and spec functions have
+effects: the rest models the values the C computes.  ``calls(x,
+"__name__")``, ``len(x)`` and ``iter(x)`` run what the special method of
+type(x) runs (builtin_types.TypeFacts); a call of an object and a
+function about which nothing is known may do anything.
 
-They come from the statements only: a spec function called is analyzed
-in turn, an @inline function through its body, and a @native function
-through its Python reference, each partially evaluated for the facts
-known about the arguments of the call (partial_eval.py, through the
-context of the passes, context.py).  The primitives of runtime.py say
-what plain Python cannot: exact(T) and unknown() are new objects (of
-type T, or of a type not known exactly) and may fail with MemoryError;
-calls(x, "__name__") runs what the special method of type(x) runs
-(builtin_types.TypeFacts: the spec of the type, or the audited table of
-builtin_types.py; anything else may run Python code and raise anything);
-runs_python() may run Python code and raise anything.  ``len(x)`` and
-``iter(x)`` call ``__len__`` and ``__iter__``.  A call of an object (a
-method found, ``cls(result)``) and a function about which nothing is
-known (a body of ``...``) may do anything.
-
-In the Python reference of a @native function, what is not one of
-these is the model of the values the C computes: it has no effects (the
-effects of the C are the ones stated).  The c_calls dimension of
-disconnects.py checks them against the C: every call in the C function
-that may run Python code must be accounted for by one of them.
-
-Anything outside the subset this analysis follows (subset.py: a body
-outside the lowered subset, a reference with an effect where it is not
-followed, such as a primitive in a while loop or in the argument of a
-call) has the worst facts: any result, NULL or not, may raise anything,
-may run Python code.  Nothing here fails on a construct it does not
-know.
+Anything outside what this follows (subset.py) has the worst facts: any
+result, NULL or not, may raise anything, may run Python code.  Nothing
+here fails on a construct it does not know.
 """
 
 from __future__ import annotations
@@ -60,12 +42,11 @@ PURE_BUILTINS = ('isinstance', 'hasattr', 'type', 'tp_name', 'fqname')
 
 
 class Facts:
-    """Facts about the results of a list of statements; with *worst*,
-    those of code about which nothing is known."""
+    """The facts of statements; with *worst*, those of code about which
+    nothing is known."""
 
     def __init__(self, worst: bool = False) -> None:
-        # Per return: (exact type or None, index of the argument it
-        # returns or None).
+        # Per return: (exact type, index of the argument returned).
         self.returns: list[tuple[type | None, int | None]] = (
             [(None, None)] if worst else [])
         self.returns_null = worst
@@ -151,11 +132,8 @@ class Passes(Protocol):
 
 @dc.dataclass
 class Flow:
-    """The state of the analysis of a path: the facts about the names
-    (*env*), the facts found (shared by the paths), the names of the
-    arguments (a return of one is an alias of it), and whether the code
-    is a Python reference (where other code models values, without
-    effects)."""
+    """The state of the analysis of a path; *facts* are shared by the
+    paths."""
     env: Env
     facts: Facts
     params: Sequence[str] = ()
@@ -269,10 +247,8 @@ class Analyzer(subset.Walker[Flow, None]):
 
     def facts(self, stmts: list[ast.stmt], env: Env,
               params: Sequence[str] = (), reference: bool = False) -> Facts:
-        """Facts of *stmts*; *env* holds the facts about names (exact
-        types, NULL, ... see known.py); *params* are the names of the
-        call arguments, in order (a return of one of them is an alias
-        of that argument); *reference*: *stmts* are a Python reference."""
+        """Facts of *stmts* under *env*; *params*: the arguments, in
+        order; *reference*: *stmts* are a Python reference."""
         flow = Flow(dict(env), Facts(), params, reference)
         self.block(stmts, flow)
         return flow.facts
@@ -333,8 +309,7 @@ class Analyzer(subset.Walker[Flow, None]):
         self.block(stmt.orelse, flow.branch(flow.env))
         self.block(stmt.finalbody, flow)
 
-    def finally_(self, stmt: ast.Try, flow: Flow) -> None:
-        self.try_(stmt, flow)
+    finally_ = try_
 
     def with_(self, stmt: ast.With, flow: Flow) -> None:
         self.block(stmt.body, flow)
