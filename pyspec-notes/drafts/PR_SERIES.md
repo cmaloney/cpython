@@ -59,5 +59,5 @@ for `help()` parity.
 - Every B PR after B2 must leave `parity.txt` untouched (or change it on purpose, with
   the reason) and include the output of `Tools/clinic/pyspec_review.py`.
 - `pyspec-notes/` is experiment bookkeeping and is not part of any PR.
-- Tool code in B1–B12 will shrink after the simplification pass (workstream S of phase
-  4); the file lists above are those at `63ce50f2c9b`.
+- The file lists above are those at `63ce50f2c9b`; the simplification pass (workstream S
+  of phase 4) since then changed no file list, only sizes.

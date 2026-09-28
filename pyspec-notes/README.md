@@ -153,8 +153,8 @@ Debug JIT build `../build-exp` (srcdir: the main checkout at `63ce50f2c9b`):
    `drafts/call-str-1-UPSTREAM.md`, replace `gh-NNNNNN`), `_pylong` exact str
    (`fix-pylong-str-exact`), then `drafts/PR_SERIES.md` Part A.  Magic number: bump in the
    upstream specialization PR, not here (`reports/phase4_E.md` section 5).
-2. **Tool size**: `Tools/clinic/libclinic/pyspec/` 8,628 lines at `63ce50f2c9b`
-   (+ `pyspec_parity.py` 1,459, `pyspec_review.py` 390); workstream S simplifies it.
+2. **Tool size**: `Tools/clinic/libclinic/pyspec/` 7,794 lines (5,610 code) after workstream S
+   (was 8,628 after B2, 7,417 before it) + `pyspec_parity.py` 1,459, `pyspec_review.py` 390.
 3. **Parity record churn**: unrelated upstream changes can alter a section (inherited
    docstrings, other types' messages) and need a re-record; only Linux 64-bit blocks.
 4. **Not lowered yet**: keyword-only parameters, non-`NULL` defaults, converters other

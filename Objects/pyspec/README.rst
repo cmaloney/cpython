@@ -301,7 +301,7 @@ Adding a construct is a local change, in
    ``value()``, ``call()``; ``Analysed`` for references).  The kinds of
    statements are ``subset.Kind``; every pass over statements is a
    ``subset.Walker``, with a method per kind.  A new kind of statement
-   is a new ``Kind`` (and its default method in ``Walker``) and a method
+   is a new ``Kind`` and a method
    in each walker: ``facts.Analyzer``,
    ``partial_eval.Evaluator`` and ``emit.FunctionLowering`` (a kind
    without a method goes to ``other()``: the worst facts, and an error

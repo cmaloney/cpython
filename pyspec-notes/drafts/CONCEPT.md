@@ -308,12 +308,12 @@ against the C backend's interface.
 
 ## 8. Costs and open questions
 
-- **Tool size.**  `Tools/clinic/libclinic/pyspec/` is 8,628 lines at `63ce50f2c9b`
+- **Tool size.**  `Tools/clinic/libclinic/pyspec/` is 7,794 lines (5,610 lines of code)
   (front end, lowered-subset check, facts, partial evaluator, emitter, C backend, call
   tables, tables of types, disconnect checks), plus `pyspec_parity.py` (1,459),
   `pyspec_review.py` (390) and `pyspec_bench.py` (155); tests add about 4,200 lines.
   The partial evaluator is most of the cost of level 3; levels 1, 2 and 5 need little
-  of it.  A simplification pass is under way.
+  of it.
 - **The committed parity record churns.**  One digest per section per configuration
   (26 KB for three configurations) keeps reviewers from needing a build of main, but an
   unrelated change on main (a docstring inherited in `help()`, another type's error
