@@ -103,3 +103,25 @@ traceability), then F presentation (docs, Rust path, upstream PR series).
 - Report (<= 700 words): what changed (files, commits), design choices, what
   "adding the next type" now takes in your area, test commands + results, open
   problems, anything that conflicts with this brief.
+
+## Phase 2 ownership (after phase 1 merge a2aff724d86)
+Phase 1 results: A (one generated registry, data-driven tests, `specfiles.py`),
+B1 (`subset.py` is the one lowered/analysed boundary; one `SpecError`;
+`PyspecBindings`), D (`pyspec_review.py`, committed `parity.txt`, per-type
+`PARITY` data in `_cases.py`).  Known bug for B2: `except (A, B)` crashes
+partial_eval (`h.type.id`).
+- **C: native implementations (`@c_implemented`).**  Owns: the fast-path rule
+  in `partial_eval.py` (minimal edits; B2 refactors later), `facts.py`,
+  `subset.py` (analysed part), `runtime.py`/`frontend.py` (decorator only),
+  the `c_calls` part of `disconnects.py`, every spec file
+  (`*/pyspec/*.py` except `_cases.py` PARITY blocks), `HELPERS` data in
+  `_cases.py`, `Objects/pyspec/README.rst` (native section),
+  `MIGRATING.rst` level 3, a new test class in test_clinic.  May measure with
+  `Tools/clinic/pyspec_bench.py` (`perf stat -e instructions:u`, serially).
+- **E: cleanups.**  Owns: `Python/optimizer_bytecodes.c`,
+  `Python/optimizer_analysis.c`, `Python/bytecodes.c` (only readability),
+  `Tools/jit/template.c`, `Include/internal/pycore_tstate.h`, `Python/ceval.c`
+  (tripwire), `Lib/test/test_capi/test_opt.py`, brittle parts of
+  `Lib/test/test_pyspec_facts.py` and `Lib/test/test_clinic.py` (not C's new
+  class), `Tools/clinic/pyspec-baseline/*.txt` headers, magic number,
+  free-threaded build and test.
