@@ -7,12 +7,19 @@ an equal result of the same type, which is one of the arguments exactly
 when the interpreter's is.  It also checks that each class of the spec is
 the type TYPES names.  Add a case here when you change a spec body.
 
-The other names are data of the generic tests of the facts (see
-Objects/pyspec/README.rst, "Test data"): FACTS (test_clinic
-PyspecFactsTest), HELPERS, HELPER_CALLERS, NOT_CALLABLE, FACTS_ONLY and
-SLOT_USES (test_pyspec_facts).  The call-table entries of a class are
-called with the cases of CASES["<class>.__new__"] and
-CASES["<class>.<method>"] (test_pyspec_facts DirectCallTest).
+The other names are the data of the generic tests of the facts, the
+same in every <stem>_cases.py (all optional; this file is the reference
+example, each section below says what its names mean):
+
+  FACTS        facts derived from the spec (test_clinic PyspecFactsTest;
+               an entry with a run: test_pyspec_facts SoundnessTest)
+  HELPERS, HELPER_CALLERS, NOT_CALLABLE, FACTS_ONLY
+               the hand-written C functions (test_pyspec_facts HelperTest)
+  SLOT_USES    the uops that use the facts of a slot (SlotFactsTest)
+
+The call-table entries of a class are called with the cases of
+CASES["<class>.__new__"] and CASES["<class>.<method>"]
+(test_pyspec_facts DirectCallTest).
 """
 
 import array

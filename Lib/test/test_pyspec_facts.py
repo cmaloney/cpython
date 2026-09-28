@@ -6,8 +6,9 @@ tier-2 optimizer direct C entry points and facts about their results: an
 exact result type, a constant, an alias of an argument, and whether the
 call may run Python code.  The JIT trusts them.  These tests check them
 without the JIT, for every class of the registry and every spec, with
-the test data of the <stem>_cases.py next to each spec (see
-Objects/pyspec/README.rst, "Test data"); nothing here names a type:
+the test data of the <stem>_cases.py next to each spec (the names are
+described in Objects/pyspec/bytesobject_cases.py); nothing here names a
+type:
 
 * RegistryTest: the registry is the classes the tools give tables.
 * DirectCallTest calls every table entry directly (through

@@ -20,7 +20,9 @@ Files
 ``Objects/pyspec/foo.py``              the spec: signatures, docstrings,
                                        decorators, bodies, the methods
                                        and slots of its types
-``Objects/pyspec/foo_cases.py``        test data: ``CASES`` and ``TYPES``
+``Objects/pyspec/foo_cases.py``        test data: ``CASES``, ``TYPES``
+                                       and the names described in
+                                       ``bytesobject_cases.py``
 ``Objects/foo.c``                      one-line clinic block per spec
                                        method (``bytes.split``) above its
                                        impl, as with plain Argument Clinic
@@ -56,21 +58,23 @@ Call a C function from a    Call it by name.  Declare it, if no spec does
 spec body                   yet, in the spec of its C file, with
                             ``@c_implemented`` and its Python reference
                             (below), and import it (``from pyspec.abstract
-                            import PyObject_LengthHint``); add it to
-                            ``HelperTest`` of ``test_pyspec_facts``.
+                            import PyObject_LengthHint``); add its inputs
+                            to ``HELPERS`` of the ``_cases.py`` of its
+                            spec (``HelperTest`` of ``test_pyspec_facts``).
 Add or rename a slot        ``def __len__(self, /): ...`` in the class,
                             no docstring, with ``@c_name(...)`` if the C
                             function is not ``<class>_<slot>`` without the
                             slot's prefix (``bytes_repr``); write the C
                             function with the slot's typedef.
 Give the optimizer the      ``@c_implemented`` on the slot, with its Python
-facts of a slot             reference (``bytes.__getitem__``); add it to
-                            ``HelperTest``.  Clinic puts its facts in the
-                            call table; a uop that does what the slot does
-                            takes its result facts from
-                            ``_PySpec_FindSlot()`` (see
+facts of a slot             reference (``bytes.__getitem__``); add inputs
+                            to ``HELPERS`` in ``foo_cases.py``.  Clinic
+                            puts its facts in the call table of the class;
+                            a uop that does what the slot does takes its
+                            result facts from ``_PySpec_FindSlot()`` with
+                            ``_PySpec_SLOT(<member>)`` (see
                             ``_BINARY_OP_SUBSCR_BYTES_INT``) and is listed
-                            in ``SlotFactsTest.USES``.
+                            in ``SLOT_USES`` of ``foo_cases.py``.
 Add a hand-written          ``@c_name(METH_O="f")`` (or ``METH_NOARGS``,
 PyCFunction                 plus ``@classmethod`` for ``METH_CLASS``);
                             the docstring is ``__doc__`` as is.

@@ -226,13 +226,35 @@ Checklist:
 - [ ] ``make regen-cases`` leaves the tree clean;
 - [ ] instruction counts with the JIT on show the gain (section 3).
 
+A new type is data only: running clinic on its C file gives each class
+with facts its call table and its entry in the registry of
+``Include/internal/pycore_pyspec.h``, which the interpreter and the tests
+iterate over.  In ``foo_cases.py``:
+
+- [ ] ``TYPES`` names the type of every class; a class with a table that
+  is not a builtin type (an iterator) is declared in the C file
+  (``class T "..." "&T_Type"``);
+- [ ] ``CASES["T.__new__"]`` and ``CASES["T.meth"]`` have inputs for every
+  call-table entry (``DirectCallTest`` fails on an entry none reaches);
+- [ ] ``HELPERS`` has inputs for every ``@c_implemented`` function, or it
+  is in ``NOT_CALLABLE`` (static) or ``HELPER_CALLERS`` (hidden: its C
+  entry point); an exported or header one also needs its row in
+  ``pyspec_helpers`` of ``Modules/_testinternalcapi.c`` (its signature
+  is checked against the spec);
+- [ ] ``SLOT_USES`` lists each uop that takes the facts of a slot;
+  ``FACTS`` pins what the derivation must find;
+- [ ] the row of the type in ``builtin_types.py`` (if any) keeps only its
+  C names, constants and the facts of the dunders the spec writes as
+  ``...`` (``test_clinic`` checks it).
+
 Level 5: C API facts and the disconnect ratchet
 '''''''''''''''''''''''''''''''''''''''''''''''
 
-*Needs:* the type in ``TYPES`` of
-``Tools/clinic/libclinic/pyspec/disconnects.py`` (its C file and C API
-prefixes).  The first PR records what disagrees today in
-``Tools/clinic/pyspec-baseline/*.txt``; later PRs fix
+*Needs:* nothing to list: every builtin type described by a class of the
+spec of a core C file is checked (``spec_types()`` of
+``Tools/clinic/libclinic/pyspec/disconnects.py``: its C file, and its C
+API prefixes from its type object).  The first PR records what disagrees
+today in ``Tools/clinic/pyspec-baseline/*.txt``; later PRs fix
 ``Doc/c-api/*.rst``, ``Doc/data/refcounts.dat``,
 ``Doc/data/threadsafety.dat``, ``Misc/stable_abi.toml`` or the
 docstrings, and delete the lines.
