@@ -639,11 +639,11 @@ class Spec:
             raise self.error(node, f"{name}: a {convention} function takes "
                              f"{wanted}")
         flags = [convention]
-        for flag, given in (('METH_KEYWORDS', args.kwarg),
-                            ('METH_CLASS', 'classmethod' in decorators),
-                            ('METH_STATIC', static),
-                            ('METH_COEXIST', 'coexist' in decorators)):
-            if given:
+        for flag, on in (('METH_KEYWORDS', args.kwarg is not None),
+                         ('METH_CLASS', 'classmethod' in decorators),
+                         ('METH_STATIC', static),
+                         ('METH_COEXIST', 'coexist' in decorators)):
+            if on:
                 flags.append(flag)
         return PyCFunctionEntry(c_function, ' | '.join(flags))
 
