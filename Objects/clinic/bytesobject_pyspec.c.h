@@ -85,16 +85,16 @@ bytes_fromhex_impl(PyTypeObject *cls, PyObject *string)
     PyObject *result = NULL;
 
     /* Objects/pyspec/bytesobject.py:216 */
+    if (cls == &PyBytes_Type) {
+        return _PyBytes_FromHex(string, 0);
+    }
     result = _PyBytes_FromHex(string, 0);
     if (result == NULL) {
         return NULL;
     }
-    if (cls != &PyBytes_Type) {
-        PyObject *_return_value = PyObject_CallOneArg((PyObject *)cls, result);
-        Py_DECREF(result);
-        return _return_value;
-    }
-    return result;
+    PyObject *_return_value = PyObject_CallOneArg((PyObject *)cls, result);
+    Py_DECREF(result);
+    return _return_value;
 }
 
 PyObject *

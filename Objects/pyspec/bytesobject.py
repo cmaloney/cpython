@@ -213,10 +213,10 @@ class bytes:
         Spaces between two numbers are accepted.
         Example: bytes.fromhex('B9 01EF') -> b'\\xb9\\x01\\xef'.
         """
+        if cls is bytes:
+            return _PyBytes_FromHex(string, False)
         result = _PyBytes_FromHex(string, False)
-        if cls is not bytes:
-            return cls(result)
-        return result
+        return cls(result)
 
     def hex(self, sep: object = NULL, bytes_per_sep: Py_ssize_t = 1):
         r"""Create a string of hexadecimal numbers from a bytes object.
