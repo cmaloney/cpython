@@ -17,11 +17,14 @@ A spec gives three things:
 
 * the **signatures and docstrings** of the clinic functions, in Python
   syntax instead of the clinic DSL;
-* optionally, the **type object**: clinic generates the static
-  ``PyTypeObject``, its method table and its slot tables;
+* optionally, the **method and slot tables** of a type: clinic generates
+  its ``PyMethodDef`` array, its ``tp_as_*`` sub-tables and its
+  docstring; the ``PyTypeObject`` itself stays hand-written in C;
 * optionally, **bodies**: a method written in (a subset of) Python is
-  compiled to C, and the interpreter gets facts about it (for example that
-  ``bytes(b)`` returns ``b`` for an exact ``bytes``).
+  generated as C, and the interpreter gets facts about it (for example
+  that ``bytes(b)`` returns ``b`` for an exact ``bytes``); a C function
+  written by hand can carry a Python *reference* body (``@native``),
+  never compiled, from which clinic derives the facts of its calls.
 
 Everything else stays C, exactly as with plain Argument Clinic.
 
@@ -99,25 +102,20 @@ full block would give.  A spec method without a block in the C file is an
 error that shows the block to add.
 
 
-The type object
----------------
+Method and slot tables
+----------------------
 
-A class decorated with ``@static_type`` is a whole type::
+A class that declares a slot (a dunder) gets its tables generated::
 
-   @static_type(tp_basicsize="PyBytesObject_SIZE", tp_itemsize="sizeof(char)",
-                tp_dealloc="bytes_dealloc", tp_flags="Py_TPFLAGS_BYTES_SUBCLASS")
-   class bytes:
-       """bytes(iterable_of_ints) -> bytes ..."""
+   @c_name("striter")
+   class bytes_iterator:
+       @c_name("PyObject_SelfIter")
+       def __iter__(self, /): ...
 
-       def __repr__(self, /): ...
-
-       @c_name(mp_length="bytes_length", sq_length="bytes_length")
-       def __len__(self, /): ...
-
-       @c_name(METH_NOARGS="bytes_getnewargs")
-       def __getnewargs__(self, /): ...
-
-       center = transmogrify.B.center
+       @c_name(METH_NOARGS="striter_len")
+       def __length_hint__(self, /):
+           """Private method returning an estimate of len(list(it))."""
+           ...
 
 * The ``class bytes "PyBytesObject *" "&PyBytes_Type"`` directive in the C
   file names the C type and the type object.
@@ -132,22 +130,28 @@ A class decorated with ``@static_type`` is a whole type::
   PyCFunction (``@classmethod`` adds ``METH_CLASS``).
 * ``center = transmogrify.B.center`` shares a method declared once in
   ``Objects/stringlib/pyspec/transmogrify.py``.
-* ``@static_type(...)`` takes the members that cannot be derived, as C
-  expressions; ``@final`` means not subclassable.
 
-The type is generated at the end of ``Objects/clinic/bytesobject_pyspec.c.h``,
-which the C file includes as its last line.
+Clinic writes ``<prefix>_doc``, ``<prefix>_methods[]`` and
+``<prefix>_as_number`` (and the other sub-tables) into
+``Objects/clinic/bytesobject_pyspec.c.h``; the C file includes it and
+then defines its ``PyTypeObject`` structs, which name them as before.
+A class that declares no slot gets no tables: its C method table stays.
 
 
 Bodies
 ------
 
-A method or a top-level function with a real body is compiled to C.  The
-accepted subset is small: ``if``/``else``, ``return``, ``raise E("...")``,
-assignments of calls, ``try``/``except E``/``else``, ``for`` loops; tests
-on ``NULL``, exact types, ``isinstance()`` and integers; calls of C
-functions (``C.<escape>(...)``) and of other spec functions.  Anything else
-is an error pointing at ``Objects/pyspec/README.rst``.
+A method or a top-level function with a real body is generated as C.
+Only a subset is lowered: ``if``/``else``, ``return``, ``raise``,
+assignments of calls, ``try``/``except``/``else``/``finally``, ``for``
+loops; tests on ``NULL``, exact types, ``isinstance()`` and integers;
+calls of C functions by name and of other spec functions.  Any other
+Python is accepted by the spec language, and reported as "expressible,
+but not lowered to C yet" where clinic would have to generate it.  A C
+function a body calls is declared in the spec of its own C file with
+``@native``: its body is a Python reference of the C, never compiled,
+read for facts (the exact result type, whether it can raise, whether it
+may run Python code).
 
 Add cases for a new body to ``Objects/pyspec/<stem>_cases.py``:
 ``test_clinic`` runs the spec as Python on each case and compares the
@@ -159,11 +163,11 @@ Common tasks
 
 ``Objects/pyspec/README.rst`` has a one-page table of the common tasks:
 add a parameter, a C method, a spec-body method, a slot, a hand-written
-PyCFunction or a shared stringlib method, declare a type, regenerate and
-test.
+PyCFunction or a shared stringlib method, declare a type, regenerate,
+test and validate (``Tools/clinic/pyspec_review.py``).
 
 After changing a spec, run ``make clinic`` (or
 ``./python Tools/clinic/clinic.py Objects/bytesobject.c``), rebuild, and
 run ``./python -m test test_clinic``.  Clinic reports errors as
 ``path:line: error: message``, at the line of the spec when the mistake is
-in the spec, and writes nothing when anything fails.
+in the spec.
