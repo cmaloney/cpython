@@ -40,10 +40,6 @@ from .facts import Facts
 from .frontend import Spec, SpecFunction, SpecParameter
 from .known import NOTNULL, Env, Value
 
-# An entry of a call table: (arity, argument type, C function, facts,
-# constant result).
-Entry = tuple[int, type | None, str, Facts, str | None]
-
 # Keep a type-specialized variant when its residual has at most this
 # fraction of the AST nodes of the generic residual.
 KEEP_RATIO = 0.5
@@ -158,45 +154,41 @@ def generate(generator: emit.Generator,
     """The variants and the call table of each class of table_classes(),
     from *descriptions*, the implemented functions compiled
     unconditionally."""
-    out = []
+    out: list[str] = []
     news: dict[str, SpecFunction] = {}      # class name -> __new__
     methods: dict[str, list[SpecFunction]] = {}
     for description in descriptions:
         cls_name, _, meth = description.name.rpartition('.')
-        if not cls_name:
-            continue
         if meth == '__new__':
             news[cls_name] = description
-        else:
+        elif cls_name:
             methods.setdefault(cls_name, []).append(description)
     for cls_name in table_classes(generator.spec):
         type_object = _class_type_object(generator, cls_name)
-        new = news.get(cls_name)
-        calls = method_table = None
-        if new is not None:
-            lines, calls = generate_calls(generator, new)
-            out += lines
-        if methods.get(cls_name):
-            lines, method_table = generate_methods(generator, cls_name,
-                                                   methods[cls_name])
-            out += lines
-        lines, slot_table = generate_slots(generator, cls_name, type_object)
-        out += lines
-        out += [
-            f'const _PySpecCallTable {table_name(cls_name)} = {{',
-            f'    .type = {type_object},',
-        ]
-        if calls:
-            out += [f'    .ncalls = Py_ARRAY_LENGTH({calls}),',
-                    f'    .calls = {calls},']
-        if method_table:
-            out += [f'    .nmethods = Py_ARRAY_LENGTH({method_table}),',
-                    f'    .methods = {method_table},']
-        if slot_table:
-            out += [f'    .nslots = Py_ARRAY_LENGTH({slot_table}),',
-                    f'    .slots = {slot_table},']
+        arrays = {
+            'calls': generate_calls(generator, news[cls_name], out)
+            if cls_name in news else '',
+            'methods': generate_methods(generator, cls_name,
+                                        methods[cls_name], out)
+            if methods.get(cls_name) else '',
+            'slots': generate_slots(generator, cls_name, type_object, out),
+        }
+        out += [f'const _PySpecCallTable {table_name(cls_name)} = {{',
+                f'    .type = {type_object},']
+        for field, array in arrays.items():
+            if array:
+                out += [f'    .n{field} = Py_ARRAY_LENGTH({array}),',
+                        f'    .{field} = {array},']
         out += ['};', '']
     return out
+
+
+def _array(out: list[str], ctype: str, name: str, comment: list[str],
+           entries: list[str]) -> str:
+    """Add the C array *name* of *entries* after *comment* to *out*."""
+    out += [*comment, f'static const {ctype} {name}[] = {{', *entries,
+            '};', '']
+    return name
 
 
 def _class_type_object(generator: emit.Generator, cls_name: str) -> str:
@@ -215,30 +207,35 @@ def _class_type_object(generator: emit.Generator, cls_name: str) -> str:
     return type_object
 
 
-def generate_calls(generator: emit.Generator,
-                   description: SpecFunction) -> tuple[list[str], str]:
-    """The variants and the calls array of a clinic __new__."""
+def generate_calls(generator: emit.Generator, description: SpecFunction,
+                   out: list[str]) -> str:
+    """Add the variants and the calls array of a clinic __new__ to *out*;
+    the name of the array."""
     analyzer = generator.context.analyzer()
-    params = description.parameters[1:]
-    # The spec function ("bytes.__new__") and the C basename of its
-    # clinic function ("bytes_new").
     name = description.name
     basename = generator.c_basename(name)
-    out = []
-    entries: list[Entry] = []
+    entries: list[str] = []
+
+    def entry(nargs: int, tp: type | None, function: str, found: Facts,
+              const: str | None) -> None:
+        shown = '' if nargs == 0 else getattr(tp, '__name__', 'x')
+        entries.extend(_entry(
+            f'{description.new_type}({shown})', nargs, found, const, tp,
+            (f'f{nargs}', function),
+            [p.name for p in description.parameters[1:nargs + 1]]))
+
     for env, _, given, missing in generator.arities(description):
         nargs = len(given)
         if any(p.ctype != emit.OBJECT for p in given):
             continue
         arg_names = [p.name for p in given]
         generic = generator.residual(name, env)
-        generic_size = node_count(generic)
         if nargs == 1:
             functions: dict[str, str] = {}  # residual_key() -> C name
             for tp in builtin_types.CANDIDATES:
                 typed_env = env | {given[0].name: tp}
                 residual = generator.residual(name, typed_env)
-                if node_count(residual) > KEEP_RATIO * generic_size:
+                if node_count(residual) > KEEP_RATIO * node_count(generic):
                     continue
                 key = residual_key(residual)
                 found = analyzer.facts(residual, typed_env, arg_names)
@@ -254,49 +251,31 @@ def generate_calls(generator: emit.Generator,
                     out += _variant(generator, description, c_name,
                                     residual, given, missing, tp, found,
                                     const)
-                entries.append((nargs, tp, functions[key], found, const))
-        found = analyzer.facts(generic, env, arg_names)
-        entries.append((nargs, None, f'{basename}_nargs{nargs}', found,
-                        _const_name(generic)))
-
-    table = f'{basename}_spec_calls'
-    out += [
+                entry(nargs, tp, functions[key], found, const)
+        entry(nargs, None, f'{basename}_nargs{nargs}',
+              analyzer.facts(generic, env, arg_names), _const_name(generic))
+    return _array(out, '_PySpecCall', f'{basename}_spec_calls', [
         f'/* Call table of {description.new_type}() for the tier-2 '
         'optimizer, see',
         ' * Include/internal/pycore_pyspec.h.  Generated by '
         'Argument Clinic',
-        ' * (Tools/clinic/libclinic/pyspec/call_table.py). */',
-        f'static const _PySpecCall {table}[] = {{',
-    ]
-    for nargs, arg_type, function, found, const in entries:
-        shown = '' if nargs == 0 else getattr(arg_type, '__name__', 'x')
-        comment = f'{description.new_type}({shown})'
-        out += _entry(comment, nargs, found, const, arg_type,
-                      (f'f{nargs}', function),
-                      [p.name for p in params[:nargs]])
-    out += ['};', '']
-    return out, table
+        ' * (Tools/clinic/libclinic/pyspec/call_table.py). */'], entries)
 
 
 def generate_methods(generator: emit.Generator, type_name: str,
-                     descriptions: list[SpecFunction]
-                     ) -> tuple[list[str], str]:
-    """The facts of the methods and class methods of a type implemented by
-    the spec: per method, a generic entry, and an entry per exact type of
-    the first argument whose facts differ from it (for a class method,
-    called on exactly the type).
-
-    The arguments are those the C function sees besides the class: for a
-    method, self and the others; for a class method, the others (the class
-    is the type itself).  Only calls with all parameters, all objects, are
-    described."""
+                     descriptions: list[SpecFunction],
+                     out: list[str]) -> str:
+    """Add the facts of the methods and class methods of a type that the
+    spec implements to *out*: per method, a generic entry, and an entry
+    per exact type of the first argument whose facts differ (for a class
+    method, called on exactly the type).  The arguments are those the C
+    function sees besides the class; only calls with all of them, all
+    objects, are described."""
     spec = generator.spec
     analyzer = generator.context.analyzer()
-    # The type as the partial evaluator knows it; None for a class that
-    # is not a builtin type (only its generic entries are derived).
+    # None for a class that is not a builtin type: only generic entries.
     type_value = builtin_types.by_name(type_name)
-    entries: list[tuple[str, int, type | None, Facts, list[str], str,
-                        str]] = []
+    entries: list[str] = []
     for description in descriptions:
         name = description.name
         node = spec.functions[name]
@@ -305,8 +284,7 @@ def generate_methods(generator: emit.Generator, type_name: str,
         first, *params = description.parameters
         if any(p.optional or p.ctype != emit.OBJECT for p in params):
             continue
-        env: Env = {p.name: NOTNULL for p in params}
-        env[first.name] = NOTNULL
+        env: Env = {p.name: NOTNULL for p in description.parameters}
         if frontend.has_decorator(node, 'classmethod'):
             # The generic entry holds for any class (a subclass shares
             # the ml_meth); the others only when the class is the type
@@ -324,34 +302,25 @@ def generate_methods(generator: emit.Generator, type_name: str,
         if not args:
             continue
         arg_names = [a.name for a in args]
-        meth = f'(PyCFunction){generator.c_basename(name)}'
-        generic = generator.residual(name, env)
-        generic_facts = analyzer.facts(generic, env, arg_names)
+        meth = ('meth', f'(PyCFunction){generator.c_basename(name)}')
+        rest = ['_'] * (len(args) - 1)
+        generic = analyzer.facts(generator.residual(name, env), env,
+                                 arg_names)
         for tp in candidates:
             typed_env = typed_base | {args[0].name: tp}
-            residual = generator.residual(name, typed_env)
-            found = analyzer.facts(residual, typed_env, arg_names)
-            if found.key() != generic_facts.key():
-                entries.append((name, len(args), tp, found, arg_names, meth,
-                                on))
-        entries.append((name, len(args), None, generic_facts, arg_names,
-                        meth, ''))
-
-    table = f'{type_name}_spec_methods'
-    out = [
+            found = analyzer.facts(generator.residual(name, typed_env),
+                                   typed_env, arg_names)
+            if found.key() != generic.key():
+                entries += _entry(
+                    f'{name}({", ".join([tp.__name__, *rest])}){on}',
+                    len(args), found, None, tp, meth, arg_names)
+        entries += _entry(f'{name}({", ".join(["x", *rest])})', len(args),
+                          generic, None, None, meth, arg_names)
+    return _array(out, '_PySpecCall', f'{type_name}_spec_methods', [
         f'/* Facts of the {type_name} methods implemented by the spec, '
         'for the tier-2',
         ' * optimizer, keyed by ml_meth (see '
-        'Include/internal/pycore_pyspec.h). */',
-        f'static const _PySpecCall {table}[] = {{',
-    ]
-    for name, nargs, arg_type, found, arg_names, meth, on in entries:
-        shown = [getattr(arg_type, '__name__', 'x')] + ['_'] * (nargs - 1)
-        comment = f'{name}({", ".join(shown)}){on}'
-        out += _entry(comment, nargs, found, None, arg_type,
-                      ('meth', meth), arg_names)
-    out += ['};', '']
-    return out, table
+        'Include/internal/pycore_pyspec.h). */'], entries)
 
 
 def slot_member(spec: Spec, cls_name: str, dunder: str) -> str:
@@ -368,15 +337,31 @@ def slot_member(spec: Spec, cls_name: str, dunder: str) -> str:
 
 
 def generate_slots(generator: emit.Generator, cls_name: str,
-                   type_object: str) -> tuple[list[str], str]:
-    """(C lines, array name) of the facts of the slots of class
-    *cls_name* (whose type object is *type_object*) that have a Python
-    reference, for self of exactly the class; ([], '') when there are
-    none."""
+                   type_object: str, out: list[str]) -> str:
+    """Add the facts of the slots of class *cls_name* that have a Python
+    reference, for self of exactly the class, to *out*; the name of the
+    array, or '' when there are none."""
     spec = generator.spec
     analyzer = generator.context.analyzer()
     tp = builtin_types.by_name(cls_name)
-    entries: list[tuple[str, list[str], type | None, Facts]] = []
+    entries: list[str] = []
+
+    def entry(dunder: str, arg_names: list[str], arg_type: type | None,
+              found: Facts) -> None:
+        shown = ['self', getattr(arg_type, '__name__', 'x')][:len(arg_names)]
+        # The entry of a call, without the function.
+        lines = _entry(f'{cls_name}.{dunder}({", ".join(shown)})',
+                       len(arg_names), found, None, arg_type, None,
+                       arg_names)
+        member = slot_member(spec, cls_name, dunder)
+        entries.extend([lines[0], '    {',
+                        f'        .slot = _PySpec_SLOT({member}),',
+                        f'        .name = "{dunder}",',
+                        '        .facts = {',
+                        *['    ' + line for line in lines[2:-1]],
+                        '        },',
+                        '    },'])
+
     for name in spec.native_functions():
         owner, _, dunder = name.rpartition('.')
         if owner != cls_name or not slots.is_slot(dunder):
@@ -385,42 +370,22 @@ def generate_slots(generator: emit.Generator, cls_name: str,
         env: Env = {arg_names[0]: tp or NOTNULL}
         env |= {p: NOTNULL for p in arg_names[1:]}
         generic = analyzer.reference_facts(name, env)
-        if len(arg_names) > 1:
-            for candidate in builtin_types.CANDIDATES:
-                found = analyzer.reference_facts(
-                    name, env | {arg_names[1]: candidate})
-                # (An argument type that always raises is left to the
-                # generic entry: nothing uses that.)
-                if found.key() != generic.key() and not found.always_raises:
-                    entries.append((dunder, arg_names, candidate, found))
-        entries.append((dunder, arg_names, None, generic))
+        for candidate in builtin_types.CANDIDATES if arg_names[1:] else ():
+            found = analyzer.reference_facts(
+                name, env | {arg_names[1]: candidate})
+            # (An argument type that always raises is left to the
+            # generic entry: nothing uses that.)
+            if found.key() != generic.key() and not found.always_raises:
+                entry(dunder, arg_names, candidate, found)
+        entry(dunder, arg_names, None, generic)
     if not entries:
-        return [], ''
-    table = f'{cls_name}_spec_slots'
-    out = [
+        return ''
+    return _array(out, '_PySpecSlot', f'{cls_name}_spec_slots', [
         f'/* Facts of the slots of {cls_name} ({type_object}), derived '
         'from their',
         ' * Python references, for self of exactly the class, keyed by '
         'slot',
-        ' * (see Include/internal/pycore_pyspec.h). */',
-        f'static const _PySpecSlot {table}[] = {{',
-    ]
-    for dunder, arg_names, arg_type, found in entries:
-        shown = ['self', getattr(arg_type, '__name__', 'x')][:len(arg_names)]
-        # The entry of a call, without the function.
-        entry = _entry(f'{cls_name}.{dunder}({", ".join(shown)})',
-                       len(arg_names), found, None, arg_type, None,
-                       arg_names)
-        member = slot_member(spec, cls_name, dunder)
-        out += [entry[0], '    {',
-                f'        .slot = _PySpec_SLOT({member}),',
-                f'        .name = "{dunder}",',
-                '        .facts = {',
-                *['    ' + line for line in entry[2:-1]],
-                '        },',
-                '    },']
-    out += ['};', '']
-    return out, table
+        ' * (see Include/internal/pycore_pyspec.h). */'], entries)
 
 
 def _just_calls(residual: list[ast.stmt], given: list[SpecParameter]
