@@ -79,9 +79,6 @@ SSIZE = 'Py_ssize_t'
 TYPE = frontend.TYPE_CTYPE
 TYPE_OBJECTS = frontend.TYPE_OBJECTS
 
-COMPARE_OPS = {ast.Lt: '<', ast.LtE: '<=', ast.Gt: '>', ast.GtE: '>=',
-               ast.Eq: '==', ast.NotEq: '!='}
-
 # The lines that follow the functions of a spec (call_table.generate()).
 Tables = Callable[['Generator', list['SpecFunction']], list[str]]
 
@@ -97,11 +94,6 @@ def spec_error(node: ast.AST | None, message: str,
     this emitter cannot lower; NOT_LOWERED, a construct outside the
     lowered subset (subset.py reports those first)."""
     return SpecError.at(node, message, kind)
-
-
-def _is_exception(name: str) -> bool:
-    value = getattr(builtins, name, None)
-    return isinstance(value, type) and issubclass(value, BaseException)
 
 
 class FunctionLowering(subset.Walker[frozenset[str], None]):
@@ -343,9 +335,9 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
             return ir.Call(size, values()), SSIZE, None
         spec_target = self.spec.call_target(call.func)
         if spec_target is not None:
-            args = subset.call_arguments(self.spec, spec_target, call)
+            spec_args = subset.call_arguments(self.spec, spec_target, call)
             return (ir.Call(self.generator.c_name(spec_target),
-                            tuple(self.lower_value(a) for a in args)),
+                            tuple(self.lower_value(a) for a in spec_args)),
                     OBJECT, ir.Convention.NULL)
         if isinstance(call.func, ast.Name):
             name = call.func.id
@@ -378,7 +370,7 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
                 return ir.Name(id)
             case ast.Name(id) if id in TYPE_OBJECTS:
                 return ir.TypeObject(id)
-            case ast.Name(id) if _is_exception(id):
+            case ast.Name(id) if subset.is_exception(id):
                 return ir.ExceptionType(id)
             case ast.Constant(bool() as value):
                 return ir.Int(int(value))
@@ -433,8 +425,8 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
                     if name in subset.HASATTR_SLOTS:
                 return ir.HasSlot(name, self.lower_value(obj))
             case ast.Compare(left=left, ops=[op], comparators=[right]) \
-                    if type(op) in COMPARE_OPS:
-                return ir.Compare(COMPARE_OPS[type(op)],
+                    if type(op) in subset.COMPARE_OPS:
+                return ir.Compare(subset.COMPARE_OPS[type(op)],
                                   self.lower_value(left),
                                   self.lower_value(right))
         raise spec_error(node, f'unsupported condition {ast.unparse(node)}',

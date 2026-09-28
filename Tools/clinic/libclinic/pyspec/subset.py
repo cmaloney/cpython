@@ -83,13 +83,13 @@ NOT_LOWERED_DECORATORS = ('critical_section', 'staticmethod', 'getter',
 
 # The builtin types a condition may test (``type(x) is K``,
 # ``isinstance(x, K)``): the rows of builtin_types.py with C checks.
-TYPE_CHECKS = {tp.__name__: (row.check, row.check_exact)
-               for tp, row in builtin_types.TABLE.items()}
+TYPE_CHECKS = builtin_types.CHECKS
 
 # The dunders ``hasattr(type(x), "__dunder__")`` is lowered for.
 HASATTR_SLOTS = ('__index__', '__buffer__')
 
-COMPARE_OPS = (ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.Eq, ast.NotEq)
+COMPARE_OPS = {ast.Lt: '<', ast.LtE: '<=', ast.Gt: '>', ast.GtE: '>=',
+               ast.Eq: '==', ast.NotEq: '!='}
 
 
 def is_struct(ctype: str) -> bool:
@@ -285,12 +285,12 @@ def handler_names(handler: ast.ExceptHandler) -> list[str] | None:
     types = (handler.type.elts if isinstance(handler.type, ast.Tuple)
              else [handler.type])
     names = [t.id for t in types if isinstance(t, ast.Name)]
-    if types and len(names) == len(types) and all(map(_is_exception, names)):
+    if types and len(names) == len(types) and all(map(is_exception, names)):
         return names
     return None
 
 
-def _is_exception(name: str) -> bool:
+def is_exception(name: str) -> bool:
     value = getattr(builtins, name, None)
     return isinstance(value, type) and issubclass(value, BaseException)
 
@@ -444,7 +444,7 @@ class Lowered(Walker[None, None]):
                 self.arguments(call)
             case ast.Raise(exc=ast.Call(func=ast.Name(exc), args=[message],
                                         keywords=[]),
-                           cause=None) if _is_exception(exc):
+                           cause=None) if is_exception(exc):
                 self.message(message)
             case _:
                 self.unsupported(stmt, f'raise statement {_text(stmt)!r}')
@@ -547,7 +547,7 @@ class Lowered(Walker[None, None]):
             case ast.Call() if self.spec.c_function(node) is not None:
                 self.arguments(node)
             case ast.Compare(left=left, ops=[op], comparators=[right]) \
-                    if isinstance(op, COMPARE_OPS):
+                    if type(op) in COMPARE_OPS:
                 self.value(left)
                 self.value(right)
             case _:
@@ -563,7 +563,7 @@ class Lowered(Walker[None, None]):
                                     or name in self.params
                                     or name in self.locals
                                     or name in _type_objects()
-                                    or _is_exception(name)):
+                                    or is_exception(name)):
                 pass
             case ast.Constant(value=bool() | int()):
                 pass
@@ -671,9 +671,9 @@ def _kind(stmt: ast.stmt) -> str:
     return names.get(type(stmt), type(stmt).__name__)
 
 
-def _type_objects() -> set[str]:
+def _type_objects() -> dict[str, str]:
     """The builtin types a spec class may describe (with a C check)."""
-    return {name for name, (check, _) in TYPE_CHECKS.items() if check}
+    return builtin_types.TYPE_OBJECTS
 
 
 # -- the Python reference of a C function ---------------------------------------

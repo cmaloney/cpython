@@ -126,6 +126,13 @@ SPECIALS = ('__buffer__', '__bytes__', '__index__', '__iter__', '__len__',
 
 CANDIDATES = [tp for tp, row in TABLE.items() if row.candidate]
 
+# By name: the C checks of the types, (check, exact check); the type
+# objects of those a spec class may describe (with a check).
+CHECKS = {tp.__name__: (row.check, row.check_exact)
+          for tp, row in TABLE.items()}
+TYPE_OBJECTS = {tp.__name__: row.type_object for tp, row in TABLE.items()
+                if row.check is not None}
+
 
 def by_name(name: str) -> type | None:
     """The builtin type called *name* that the table knows, or None."""

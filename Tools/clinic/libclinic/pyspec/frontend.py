@@ -152,9 +152,7 @@ is_struct = subset.is_struct
 TYPE_CTYPE = 'PyTypeObject *'
 
 # Builtin types a spec class may describe, and their C type objects.
-TYPE_OBJECTS = {tp.__name__: row.type_object
-                for tp, row in builtin_types.TABLE.items()
-                if row.check is not None}
+TYPE_OBJECTS = builtin_types.TYPE_OBJECTS
 
 # Clinic decorators that are also Python's: they set the kind of the
 # method.  Any other decorator is a clinic-only one (see "Decorators"),

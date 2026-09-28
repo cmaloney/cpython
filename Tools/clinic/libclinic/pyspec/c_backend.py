@@ -15,14 +15,6 @@ from . import builtin_types, ir
 OBJECT = 'PyObject *'
 INDENT = '    '
 
-# The C checks of the builtin types: name -> (check, exact check).
-TYPE_CHECKS = {tp.__name__: (row.check, row.check_exact)
-               for tp, row in builtin_types.TABLE.items()}
-
-# The type objects of the builtin types, by name.
-TYPE_OBJECTS = {tp.__name__: row.type_object
-                for tp, row in builtin_types.TABLE.items()}
-
 # ``hasattr(type(x), "__dunder__")``: whether the type fills the slot.
 SLOT_CHECKS = {
     '__index__': '_PyIndex_Check({0})',
@@ -226,7 +218,7 @@ class CBackend:
             case ir.Int(value):
                 return str(value)
             case ir.TypeObject(name):
-                return TYPE_OBJECTS[name]
+                return builtin_types.TYPE_OBJECTS[name]
             case ir.ExceptionType(name):
                 return f'PyExc_{name}'
             case ir.Identifier(text):
@@ -251,7 +243,7 @@ class CBackend:
             case ir.Compare(op, left, right):
                 return f'{self.expr(left)} {op} {self.expr(right)}'
             case ir.TypeCheck(type_name, exact, value):
-                check = TYPE_CHECKS[type_name][1 if exact else 0]
+                check = builtin_types.CHECKS[type_name][1 if exact else 0]
                 return f'{check}({self.expr(value)})'
             case ir.HasSlot(dunder, value):
                 return SLOT_CHECKS[dunder].format(self.expr(value))
