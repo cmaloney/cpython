@@ -31,7 +31,7 @@ Level  What moves                         Parity check
 =====  =================================  ==============================
 1      signatures and docstrings          ``Objects/clinic/foo.c.h``
                                           byte-identical
-2      method and slot tables, tp_doc     type dump identical
+2      method and slot tables, tp_doc     ``pyspec_parity.py`` (below)
 3      function internals (spec bodies)   difftest, ``HelperTest``,
                                           ``c_calls``, section 3 below
 4      facts used by the specializer      ``test_opt``,
@@ -51,6 +51,51 @@ are up to date, runs the spec as Python against the interpreter on the
 ``CASES`` of ``foo_cases.py``, checks each class against ``TYPES``, and
 checks that each type has exactly the slot wrappers its class declares.
 When it says "the spec and the interpreter differ", rebuild first.
+
+Checking parity with the interpreter before the migration
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+``Tools/clinic/pyspec_parity.py`` records everything observable about a
+type and compares it with a build of the tree before the migration.  It
+records:
+
+- the Python surface: ``vars()`` in order, docstrings, text signatures
+  and ``help()``;
+- the C layout: which slots are set, and whether each is inherited,
+  generic or shared; every ``PyMethodDef``'s flags and doc; the members
+  and getsets;
+- a few thousand probed calls per type (about 2,700 for ``bytes``):
+  each method at each arity,
+  with keywords and with a pool of argument values, one parameter at a
+  time.  It keeps the exact result, or the exception type and message,
+  and any warnings;
+- operators, subscripts, conversions, iteration, hashing, pickling and
+  copying of sample instances.
+
+Keep a build of the tree before the migration (``../build-main``), then
+after rebuilding::
+
+    ./python Tools/clinic/pyspec_parity.py compare ../build-main/python
+
+With no type names it checks every type in the ``TYPES`` of a
+``_cases.py``, so add the migrated class there first.  It prints a
+unified diff of what changed, and ``no difference`` otherwise.  If the
+old build is gone, capture on it before migrating and check later::
+
+    ../build-main/python Tools/clinic/pyspec_parity.py capture list -o list.parity
+    ./python Tools/clinic/pyspec_parity.py check list.parity
+
+The same check runs in the test suite when ``PYSPEC_PARITY_BASELINE``
+names the old python::
+
+    PYSPEC_PARITY_BASELINE=../build-main/python ./python -m test test_tools.test_pyspec_parity
+
+Both builds must be the same Python version and configuration (debug,
+free-threaded).  A difference the migration makes on purpose goes into
+``KNOWN_DIFFERENCES`` of the tool, with the reason; so far that is only
+``bytes``'s vectorcall.  A type the tool cannot construct needs sample
+instances in its ``SAMPLES``.  This checks that nothing changed; the
+type's own tests (``test_bytes``, ...) still check that it is right.
 
 Level 1: signatures and docstrings
 ''''''''''''''''''''''''''''''''''
