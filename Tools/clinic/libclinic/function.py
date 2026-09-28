@@ -157,8 +157,10 @@ class Function:
     docstring_line_number: int | None = None
     vectorcall: bool = False
     # When a pyspec method implements this function (see
-    # libclinic.pyspec): its C basename, or None.
+    # libclinic.pyspec): its C basename, or None; and the comment of the
+    # block saying where its impl is generated from.
     pyspec: str | None = None
+    pyspec_origin: str = ''
 
     def __post_init__(self) -> None:
         self.parent = self.cls or self.module

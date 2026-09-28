@@ -5677,7 +5677,9 @@ class PyspecTest(PyspecTestBase):
         self.generate(spec, self.BLOCK)
         with open(self.output_path, encoding='utf-8') as f:
             output = f.read()
+        # Each group of lines of the spec is named before its C.
         self.assertIn("\nPyObject *\nPyFoo_Get(PyObject *x)\n{\n"
+                      "    /* pyspec/foo.py:8 */\n"
                       "    return Py_NewRef(x);\n}\n", output)
         self.assertNotIn("PyFoo_Stub", output)
         self.assertNotIn("PyFoo_Documented", output)
@@ -5770,8 +5772,22 @@ class PyspecTest(PyspecTestBase):
             output = f.read()
         self.assertIn("static PyObject *\n"
                       "bytes___bytes___impl(PyBytesObject *self)\n{\n"
+                      "    /* pyspec/foo.py:5 */\n"
                       "    if (PyBytes_CheckExact(self)) {\n"
                       "        return Py_NewRef(self);\n"
+                      "    }\n", output)
+        # The block says where the impl is generated.
+        self.assertIn("    return return_value;\n}\n\n"
+                      "/* bytes_fromhex_impl() is generated from "
+                      "pyspec/foo.py:10,\n   in clinic/foo_pyspec.c.h. */\n"
+                      "/*[clinic end generated code:", generated)
+        # A local known not NULL is released with Py_DECREF, after the
+        # result is computed.
+        self.assertIn("    if (cls != &PyBytes_Type) {\n"
+                      "        PyObject *_return_value = "
+                      "PyObject_CallOneArg((PyObject *)cls, result);\n"
+                      "        Py_DECREF(result);\n"
+                      "        return _return_value;\n"
                       "    }\n", output)
         self.assertIn("static PyObject *\n"
                       "bytes_fromhex_impl(PyTypeObject *cls, "
@@ -5814,6 +5830,7 @@ class PyspecTest(PyspecTestBase):
                       "static PyObject *\n"
                       "bytes_meth_impl(PyBytesObject *self, PyObject *a)\n"
                       "{\n"
+                      "    /* pyspec/foo.py:5 */\n"
                       "    return Py_NewRef(a);\n"
                       "}\n"
                       "#endif /* defined(CONDITION) */\n", output)

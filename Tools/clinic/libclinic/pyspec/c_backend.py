@@ -139,12 +139,9 @@ class CBackend:
             case ir.Return(value, []):
                 return [f'{pad}return {self.expr(value)};']
             case ir.Return(value, after):
-                return [f'{pad}{{',
-                        f'{pad}{INDENT}PyObject *_return_value = '
-                        f'{self.expr(value)};',
-                        *self.block(after, depth + 1),
-                        f'{pad}{INDENT}return _return_value;',
-                        f'{pad}}}']
+                return [f'{pad}PyObject *_return_value = {self.expr(value)};',
+                        *self.block(after, depth),
+                        f'{pad}return _return_value;']
             case ir.Release(name, maybe_null):
                 return [f'{pad}Py_{"X" if maybe_null else ""}DECREF({name});']
             case ir.ForIndex():
@@ -168,6 +165,8 @@ class CBackend:
         raise AssertionError(stmt)
 
     def if_(self, stmt: ir.If, depth: int, keyword: str = 'if') -> list[str]:
+        """``if``, ``else if`` for an else clause that is one if (after
+        the comment of its location), ``else``."""
         pad = INDENT * depth
         out = [f'{pad}{keyword} ({self.expr(stmt.test)}) {{',
                *self.block(stmt.body, depth + 1),
@@ -175,8 +174,10 @@ class CBackend:
         match stmt.orelse:
             case []:
                 pass
-            case [ir.If() as nested] if stmt.chain:
-                out += self.if_(nested, depth, 'else if')
+            case [*where, ir.If() as nested] if all(
+                    isinstance(s, ir.Location) for s in where):
+                out += [*self.block(where, depth),
+                        *self.if_(nested, depth, 'else if')]
             case orelse:
                 out += [f'{pad}else {{', *self.block(orelse, depth + 1),
                         f'{pad}}}']
@@ -259,5 +260,5 @@ class CBackend:
             case ir.Failed(value, convention):
                 return FAILED[convention].format(self.expr(value))
             case ir.Fallback():
-                return 'Py_None'
+                return 'Py_NotImplemented'
         raise AssertionError(node)

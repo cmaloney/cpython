@@ -155,6 +155,9 @@ def evaluate(expr: ast.expr, env: Env, ev: Evaluator) -> bool | None:
             return value != isinstance(op, ast.IsNot)
         case ast.Call(func=ast.Name('isinstance'), args=[obj, cls]):
             tp, klass = exact_type(obj, env), builtin_type(cls)
+            other = env.get(obj.id) if isinstance(obj, ast.Name) else None
+            if isinstance(other, Other) and klass in other.instances:
+                return False
             mro = tp and klass and ev.types.mro(tp)
             return klass in mro if mro else None
         case ast.Call(func=ast.Name('hasattr'), args=[type_call, name]) \
@@ -199,7 +202,8 @@ def _evaluate_is(left: ast.expr, right: ast.expr, env: Env,
         if tp is None:
             other = (env.get(left.args[0].id)
                      if isinstance(left.args[0], ast.Name) else None)
-            if isinstance(other, Other) and klass in other.types:
+            if isinstance(other, Other) and (klass in other.types
+                                             or klass in other.instances):
                 return False
             return None
         return tp is klass
@@ -588,8 +592,9 @@ class Evaluator(subset.Walker[_Block, None]):
                 return with_value(value, env)
             assert isinstance(decided, ast.expr)
             body_env, else_env = refine(decided, env)
-            branch = ast.If(decided, with_value(value, body_env),
-                            paths_from(i + 1, else_env))
+            branch = ast.copy_location(
+                ast.If(decided, with_value(value, body_env),
+                       paths_from(i + 1, else_env)), stmt)
             if i == 0:
                 marks.put(branch, marks.FirstPath(
                     first.id if isinstance(first, ast.Name) else None))
@@ -675,7 +680,8 @@ class Evaluator(subset.Walker[_Block, None]):
                                          *(tp for tp, _ in branches)))
         out = self.block(tail, env | {name: other}, depth, inline)
         for tp, residual in reversed(branches):
-            out = [ast.If(_type_test(name, tp), residual, out)]
+            out = [ast.copy_location(ast.If(_type_test(name, tp), residual,
+                                            out), tail[0])]
         return out
 
     def loop(self, stmt: ast.For, env: Env, depth: int,

@@ -1502,7 +1502,7 @@ class ParseArgsCodeGen:
             self.impl_prototype += ";"
         if self.func.pyspec:
             # libclinic.pyspec.emit generates the impl from the spec.
-            self.impl_definition = ""
+            self.impl_definition = self.func.pyspec_origin
 
         self.parser_definition = self.parser_definition.replace("{return_value_declaration}", self.return_value_declaration)
         if self.parser_helper:

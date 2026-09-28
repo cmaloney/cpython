@@ -169,7 +169,6 @@ class If:
     test: Expr
     body: list[Stmt]
     orelse: list[Stmt] = dc.field(default_factory=list)
-    chain: bool = False
 
 
 @dc.dataclass

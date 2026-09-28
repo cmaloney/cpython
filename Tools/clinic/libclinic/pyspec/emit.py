@@ -65,11 +65,11 @@ from collections.abc import Callable, Collection, Iterable
 from typing import TYPE_CHECKING
 
 from libclinic.errors import SpecError, SpecErrorKind
-from . import (builtin_types, c_backend, frontend, ir, known, marks, subset,
-               typeobj)
+from . import (builtin_types, c_backend, frontend, ir, known, marks,
+               specfiles, subset, typeobj)
 from .context import Context
 from .known import NOTNULL, NULL, Env, Value
-from .subset import loaded_names, terminates
+from .subset import Kind, loaded_names, terminates
 
 if TYPE_CHECKING:
     from .frontend import PyspecBindings, Spec, SpecFunction
@@ -84,6 +84,10 @@ COMPARE_OPS = {ast.Lt: '<', ast.LtE: '<=', ast.Gt: '>', ast.GtE: '>=',
 
 # The lines that follow the functions of a spec (call_table.generate()).
 Tables = Callable[['Generator', list['SpecFunction']], list[str]]
+
+# What a branch leaves: (the owned locals that may hold a value, those of
+# them known not NULL), or None when it exits.
+Branch = tuple[set[str], set[str]] | None
 
 
 def spec_error(node: ast.AST | None, message: str,
@@ -115,10 +119,13 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
         # Object locals, in declaration order.
         self.owned: list[str] = []
         self.live: set[str] = set()     # owned locals that may hold a value
+        self.nonnull: set[str] = set()  # locals known not NULL
         self.loop_vars: list[str] = []  # owned variables of enclosing loops
         # The finally clauses around the statement lowered, innermost last.
         self.finally_blocks: list[list[ast.stmt]] = []
         self.body: list[ir.Stmt] = []
+        # (spec, last line) of the statement lowered last: see locate().
+        self.located: tuple[str, int] = ('', 0)
 
     # -- output ------------------------------------------------------------
 
@@ -151,7 +158,7 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
                 out.append(ir.Eval(expr))
         for name in self.owned:
             if name in self.live and name != keep and name not in null:
-                out.append(ir.Release(name, maybe_null=True))
+                out.append(ir.Release(name, name not in self.nonnull))
         return out
 
     def release_dead(self, used: Collection[str]) -> None:
@@ -168,6 +175,34 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
     def error_check(self, name: str, convention: ir.Convention) -> None:
         self.add(ir.If(ir.Failed(ir.Name(name), convention),
                        self.error_exit(null={name})))
+        if convention == ir.Convention.NULL:
+            self.nonnull.add(name)
+
+    def locate(self, stmt: ast.stmt) -> None:
+        """Say where *stmt* is in the spec (ir.Location), unless it
+        directly follows the statement lowered before it there (with only
+        blank lines, comments or ``else:`` between them)."""
+        if not getattr(stmt, 'lineno', 0) or subset.kind(stmt) is Kind.PASS:
+            return
+        path = marks.scope(stmt) or self.spec.filename
+        match stmt:
+            case ast.If(test=header) | ast.For(iter=header):
+                # (The test of an @inline function is from its spec.)
+                end = header.end_lineno or 0
+                last = (end if stmt.lineno <= end <= (stmt.end_lineno or 0)
+                        else stmt.lineno)
+            case ast.Try() | ast.With():
+                last = stmt.lineno
+            case _:
+                last = stmt.end_lineno or stmt.lineno
+        before, self.located = self.located, (path, last)
+        if before[0] == path and before[1] <= stmt.lineno and all(
+                line.strip() in ('', 'else:', 'try:')
+                or line.lstrip().startswith('#')
+                for line in self.spec.load_spec(path).source.splitlines()[
+                    before[1]:stmt.lineno - 1]):
+            return
+        self.add(ir.Location(specfiles.display_path(path), stmt.lineno))
 
     # -- declarations ------------------------------------------------------
 
@@ -440,6 +475,7 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
                            self.error_exit()))
             return name, ctype, convention
         self.add(ir.Assign(name, expr))
+        self.nonnull.discard(name)
         if ctype == OBJECT:
             self.live.add(name)
         if later is not None:
@@ -456,25 +492,30 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
         for i, stmt in enumerate(stmts):
             rest = frozenset(later).union(*uses[i + 1:])
             self.release_dead(rest | uses[i])
+            self.locate(stmt)
             self.statement(stmt, rest)
         if not terminates(stmts):
             self.release_dead(later)
 
     def block(self, stmts: list[ast.stmt], null: Collection[str] = (),
-              later: Collection[str] = frozenset()
-              ) -> tuple[list[ir.Stmt], set[str] | None]:
-        """A nested block, and its live set, or None if it exits."""
-        saved = self.live
-        self.live = saved - set(null)
+              later: Collection[str] = frozenset(),
+              nonnull: Collection[str] = ()) -> tuple[list[ir.Stmt], Branch]:
+        """A nested block, where the locals *null* are NULL and *nonnull*
+        are not, and what it leaves (see Branch)."""
+        saved = self.live, self.nonnull
+        self.live = saved[0] - set(null)
+        self.nonnull = saved[1] - set(null) | set(nonnull)
         body = self.collect(lambda: self.statements(stmts, later))
-        live = None if terminates(stmts) else self.live
-        self.live = saved
-        return body, live
+        left = None if terminates(stmts) else (self.live, self.nonnull)
+        self.live, self.nonnull = saved
+        return body, left
 
-    def join(self, branches: list[set[str] | None]) -> None:
+    def join(self, branches: list[Branch]) -> None:
         """Continue after branches; None marks a branch that exits."""
-        falling = [live for live in branches if live is not None]
-        self.live = set().union(*falling) if falling else set()
+        falling = [branch for branch in branches if branch is not None]
+        self.live = set().union(*(live for live, _ in falling))
+        self.nonnull = (set.intersection(*(nonnull for _, nonnull in falling))
+                        if falling else set())
 
     def other(self, stmt: ast.stmt, later: frozenset[str]) -> None:
         raise spec_error(stmt, f'unsupported statement {ast.unparse(stmt)}',
@@ -487,17 +528,23 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
         test = stmt.test
         self.hoist_named(test)
         null_in_body, null_in_else = self.null_refinement(test)
+        # A name NULL in one branch is not NULL in the other (but the
+        # FALLBACK of a snapshot is not NULL either).
+        nonnull_in_body, nonnull_in_else = self.null_refinement(test, True)
         condition = self.lower_condition(test)
-        body, live = self.block(stmt.body, null_in_body, later)
-        branches = [live]
+        body, left = self.block(stmt.body, null_in_body, later,
+                                nonnull_in_body)
+        branches = [left]
         dying = [name for name in self.loop_vars
                  if name in self.live and name not in later]
         orelse: list[ir.Stmt] = []
         if stmt.orelse or dying:
-            orelse, live = self.block(stmt.orelse, null_in_else, later)
-            branches.append(live)
+            orelse, left = self.block(stmt.orelse, null_in_else, later,
+                                      nonnull_in_else)
+            branches.append(left)
         else:
-            branches.append(self.live - null_in_else)
+            branches.append((self.live - null_in_else,
+                             self.nonnull | nonnull_in_else))
         self.add(ir.If(condition, body, orelse))
         self.join(branches)
 
@@ -629,25 +676,27 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
                                   (self.lower_value(t),)) for t in types)
             matches.append(tests[0] if len(tests) == 1
                            else ir.BoolOp('or', tests))
-        # In the error branch the target holds no reference.
+        # In the error branch the target holds no reference; in the other,
+        # it holds one (not NULL if NULL is an error).
         saved = self.live
         self.live = saved - {name}
-        branches: list[set[str] | None] = []
+        branches: list[Branch] = []
         handlers = []
         for handler, test in zip(stmt.handlers, matches):
-            body, live = self.block(handler.body)
-            branches.append(live)
+            body, left = self.block(handler.body, {name})
+            branches.append(left)
             handlers.append((test, [ir.Eval(ir.Call('PyErr_Clear')), *body]))
         failed = self.error_exit()
         self.live = saved
         for test, body in reversed(handlers):
-            failed = [ir.If(test, body, failed, chain=True)]
+            failed = [ir.If(test, body, failed)]
+        nonnull = {name} if convention == ir.Convention.NULL else set()
         orelse: list[ir.Stmt] = []
         if stmt.orelse:
-            orelse, live = self.block(stmt.orelse)
-            branches.append(live)
+            orelse, left = self.block(stmt.orelse, nonnull=nonnull)
+            branches.append(left)
         else:
-            branches.append(set(saved))
+            branches.append((set(saved), self.nonnull | nonnull))
         self.add(ir.If(ir.Failed(ir.Name(name), convention), failed, orelse))
         self.join(branches)
         return None
@@ -696,6 +745,7 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
             on_error = self.error_exit()
         if owned:
             self.live.add(item)
+            self.nonnull.add(item)
             self.loop_vars.append(item)
         # The names used by the next iterations stay alive.
         body = self.collect(lambda: self.statements(
@@ -739,17 +789,20 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
         return None
 
     @staticmethod
-    def null_refinement(test: ast.expr) -> tuple[set[str], set[str]]:
-        """Names known NULL in the (body, else) of ``if test``."""
+    def null_refinement(test: ast.expr, nonnull: bool = False
+                        ) -> tuple[set[str], set[str]]:
+        """Names known NULL in the (body, else) of ``if test`` (the
+        FALLBACK of a snapshot is not a reference either); with
+        *nonnull*, the names known not NULL."""
         match test:
             case ast.Compare(left=left, ops=[ast.Is() | ast.IsNot() as op],
-                             comparators=[ast.Name('NULL'
-                                                   | known.FALLBACK)]):
-                # The FALLBACK of a snapshot is not a reference either.
+                             comparators=[ast.Name(null)]) \
+                    if null == 'NULL' or null == known.FALLBACK \
+                    and not nonnull:
                 if isinstance(left, ast.NamedExpr):
                     left = left.target
                 if isinstance(left, ast.Name):
-                    if isinstance(op, ast.IsNot):
+                    if isinstance(op, ast.IsNot) != nonnull:
                         return set(), {left.id}
                     return {left.id}, set()
         return set(), set()
@@ -906,7 +959,8 @@ class Generator:
         if special.lock is not None:
             what += (f', the snapshot: called in the critical section of '
                      f'{special.lock}, runs no Python code; FALLBACK '
-                     '(Py_None) when that could run Python code')
+                     f'({self.backend.expr(ir.Fallback())}) when that could '
+                     'run Python code')
         return self.commented_function(what, special.name, special.body,
                                        params)
 

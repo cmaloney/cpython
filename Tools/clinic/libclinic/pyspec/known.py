@@ -138,6 +138,9 @@ def refine(test: ast.expr, env: Env) -> tuple[Env, Env]:
     ``isinstance(x, K)``, x is no instance of K; ``x is NULL`` and ``x
     is K`` (x is the type K) are decided."""
     match test:
+        case ast.UnaryOp(op=ast.Not(), operand=operand):
+            body, orelse = refine(operand, env)
+            return orelse, body
         case ast.Compare(left=ast.Name(name),
                          ops=[ast.Is() | ast.IsNot() as op],
                          comparators=[right]) if env.get(name) is None:
@@ -166,6 +169,14 @@ def refine(test: ast.expr, env: Env) -> tuple[Env, Env]:
                 if isinstance(op, ast.IsNot):
                     return other, known
                 return known, other
+        case ast.Call(func=ast.Name('isinstance'),
+                      args=[ast.Name(name), cls]):
+            klass = builtin_type(cls)
+            fact = env.get(name)
+            if klass is not None and (fact in (None, NOTNULL)
+                                      or isinstance(fact, Other)):
+                return env, env | {name: _excluding(fact,
+                                                    instances=(klass,))}
         case ast.BoolOp(op=ast.And(), values=values):
             body = env
             for value in values:
