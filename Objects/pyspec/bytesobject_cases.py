@@ -384,3 +384,40 @@ CASES = {
         [lambda cls=cls, s=s: call(cls, s)
          for cls in (bytes, BytesSubclass) for s in HEX_STRINGS],
 }
+
+
+# For Tools/clinic/pyspec_parity.py (MIGRATING.rst, "Checking parity"),
+# per class of TYPES: sample instances, more argument values, and what
+# the migration changed on purpose, with the reason: lines of the
+# capture ("known") and C names in the generated files ("generated").
+PARITY = {
+    'bytes': {
+        'samples': {
+            "b'a b'": lambda: b'a b',
+            "b''": lambda: b'',
+            "b'\\x00\\xffAz \\t'": lambda: b'\x00\xffAz \t',
+        },
+        'pool': {
+            "b' '": lambda: b' ',
+            "b'\\x00'": lambda: b'\x00',
+            "'strict'": lambda: 'strict',
+            "'ascii'": lambda: 'ascii',
+        },
+        'known': {
+            r'^C tp_vectorcall$':
+                'bytes() is called through the vectorcall the spec '
+                'generates',
+        },
+        'generated': {
+            r'^bytes_(new|vectorcall)':
+                'bytes.__new__ has a spec body: clinic generates its '
+                'vectorcall and per-arity entries around the parser',
+        },
+    },
+    'bytes_iterator': {
+        'samples': {
+            "iter(b'abc')": lambda: iter(b'abc'),
+            "iter(b'')": lambda: iter(b''),
+        },
+    },
+}
