@@ -39,7 +39,6 @@ from __future__ import annotations
 import ast
 import builtins
 import dataclasses as dc
-import glob
 import inspect
 import os
 import re
@@ -756,39 +755,10 @@ def typeshed(srcdir, typeshed_dir):
 # ---------------------------------------------------------------------------
 # Dimension: the native code of the @native functions
 #
-# A @native function is implemented natively in the file its spec
-# describes (Objects/foo.c for Objects/pyspec/foo.py), and its Python
-# reference describes that code.  The checker of the file's language
-# reads the native code (NATIVE_CHECKERS, by the file's extension; the
-# C checker today).  A checker provides (see NativeChecker):
-#
-#   function(name)        the code of the function *name* of the file,
-#                         or None;
-#   calls(code)           the names of the functions *code* calls;
-#   escaping_calls(code)  those of them that may run Python code, by an
-#                         analysis of the language, a call through a slot
-#                         by the slot's name (tp_iternext);
-#   runs_no_python(name)  whether a call of *name* was audited to run no
-#                         Python code (NO_PYTHON);
-#   special_method(name)  the special method whose Python code the call
-#                         of *name* runs, if that is the only Python code
-#                         it runs (SLOT_CALLS, slotdefs[]).
-#
-# native_calls() then checks every language the same way: each escaping
-# call is accounted for by the reference (a call of the same function, a
-# calls(x, "__name__") of the special method it runs, runs_python()), or
-# calls a @native function whose reference runs no Python code, or a
-# function of the file, read in turn; a reference that cannot fail has
-# no escaping call; and each native function the reference calls is
-# called by the native code.
-#
-# A Rust checker would read Objects/foo.rs: function() finds ``fn name``
-# (a tokenizer like the cases generator's lexer), calls() lists the calls
-# by path, escaping_calls() those not audited to run no Python code (its
-# NO_PYTHON: the C API functions it binds and Rust functions that call
-# none), and special_method() maps the C API calls that run one special
-# method (PyObject_GetIter...), as for C.  Its dimension would be a ratchet
-# of its own (rust_calls, next to c_calls).
+# The checker of the language of the native file (NATIVE_CHECKERS, by
+# extension) reads the native code; native_calls() checks every language
+# the same way (see NativeChecker, and "Checking a reference against its
+# native code" in Objects/pyspec/README.rst).
 
 # C functions that run Python code only through a special method of an
 # argument: the calls(x, "__name__") that accounts for them.  A call
@@ -821,24 +791,32 @@ NO_PYTHON = {
 
 
 class NativeChecker:
-    """Reads the native code of one file (see the comment above)."""
+    """Reads the native code of one file.  A Rust checker would read
+    Objects/foo.rs the same way, with a ratchet dimension of its own."""
 
     def __init__(self, path: str) -> None:
         self.path = path
 
     def function(self, name: str) -> object | None:
+        """The code of function *name* of the file, or None."""
         raise NotImplementedError
 
     def calls(self, code: object) -> set[str]:
+        """The names of the functions *code* calls."""
         raise NotImplementedError
 
     def escaping_calls(self, code: object) -> set[str]:
+        """Those that may run Python code (a call through a slot: the
+        slot, ``tp_iternext``)."""
         raise NotImplementedError
 
     def runs_no_python(self, name: str) -> bool:
+        """Whether a call of *name* was audited to run no Python code."""
         raise NotImplementedError
 
     def special_method(self, name: str) -> set[str]:
+        """The special methods whose Python code a call of *name* runs, if
+        that is all the Python code it runs."""
         raise NotImplementedError
 
 
@@ -960,24 +938,20 @@ class CChecker(NativeChecker):
 NATIVE_CHECKERS = {'.c': CChecker, '.h': CChecker}
 
 
-def _spec_files(srcdir):
-    for top in ('Objects', 'Python', 'Include'):
-        yield from sorted(path for path in glob.glob(os.path.join(
-            srcdir, top, '**', 'pyspec', '*.py'), recursive=True)
-            if not path.endswith('_cases.py'))
-
-
 def native_calls(srcdir, extensions):
     """The disconnects of the @native functions whose native file (the
     file their spec describes) has one of *extensions*, by the checker of
     NATIVE_CHECKERS for its language (see the comment above)."""
     from . import context
-    specs = [frontend.Spec.load(path) for path in _spec_files(srcdir)]
+    specs = [frontend.Spec.load(path)
+             for path, _ in specfiles.spec_files(srcdir)]
     contexts: dict[frontend.Spec, context.Context] = {}
 
-    def reference_facts(spec, name):
-        """The facts of @native function *name* of *spec*, for any
-        arguments."""
+    def reference_facts(name, spec=None):
+        """The facts of @native function *name* (of *spec*, else of the
+        spec defining it), for any arguments."""
+        if spec is None:
+            spec = next(s.resolve(name) for s in specs if s.resolve(name))[0]
         if spec not in contexts:
             contexts[spec] = context.Context(spec)
         return contexts[spec].analyzer(spec).reference_facts(name, {})
@@ -997,11 +971,11 @@ def native_calls(srcdir, extensions):
             os.path.join(srcdir, found))
         for name in spec.native_functions():
             out += _check_native(spec, name, checker, found, rel, native,
-                                 specs, reference_facts)
+                                 reference_facts)
     return sorted(out)
 
 
-def _check_native(spec, name, checker, native_file, rel, native, specs,
+def _check_native(spec, name, checker, native_file, rel, native,
                   reference_facts):
     node = spec.functions[name]
     positional, keywords = spec.c_name(name)
@@ -1038,9 +1012,7 @@ def _check_native(spec, name, checker, native_file, rel, native, specs,
             if callee in native:
                 # Its facts; whether its native code agrees is its own
                 # check.
-                found = next(s.resolve(callee) for s in specs
-                             if s.resolve(callee))
-                if not reference_facts(found[0], callee).runs_python:
+                if not reference_facts(callee).runs_python:
                     continue
                 out.append(f'{where}: calls {callee}(), which may '
                            'run Python code, and its reference does '
@@ -1069,14 +1041,12 @@ def _check_native(spec, name, checker, native_file, rel, native, specs,
     # A reference that cannot fail: the native code calls nothing that
     # can (a native function whose reference cannot fail cannot).
     def may_fail(callee):
-        found = callee in native and next(
-            s.resolve(callee) for s in specs if s.resolve(callee))
-        return not found or reference_facts(found[0], callee).raises
+        return callee not in native or reference_facts(callee).raises
     returns = subset.c_signature(node)[1] if '.' not in name \
         else 'void'
     failing = sorted(filter(may_fail, calls))
     if (returns != 'void' and not subset.is_struct(returns)
-            and failing and not reference_facts(spec, name).raises):
+            and failing and not reference_facts(name, spec).raises):
         out.append(f'{where}: its reference cannot fail, but the C '
                    f'calls {", ".join(failing)}')
     return out
