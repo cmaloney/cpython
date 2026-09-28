@@ -5682,6 +5682,41 @@ class PyspecTest(PyspecTestBase):
         self.assertNotIn("PyFoo_Stub", output)
         self.assertNotIn("PyFoo_Documented", output)
 
+    def test_except_tuple(self):
+        # except (E1, E2): a handler for either, dropped when the call
+        # raises neither.
+        spec = dedent(self.SPEC) + dedent("""
+            def PyFoo_Iter(x: object):
+                try:
+                    it = iter(x)
+                except (TypeError, ValueError):
+                    return x
+                return it
+
+            def PyFoo_Copy(x: object):
+                try:
+                    y = foo_copy(x)
+                except (TypeError, ValueError):
+                    return x
+                return y
+
+            @native
+            def foo_copy(x: object):
+                return exact(bytes, bytes(x))
+        """)
+        self.generate(spec, self.BLOCK)
+        with open(self.output_path, encoding='utf-8') as f:
+            output = f.read()
+        self.assertIn("    it = PyObject_GetIter(x);\n"
+                      "    if (it == NULL) {\n"
+                      "        if (PyErr_ExceptionMatches(PyExc_TypeError) || "
+                      "PyErr_ExceptionMatches(PyExc_ValueError)) {\n"
+                      "            PyErr_Clear();\n", output)
+        # foo_copy() raises only MemoryError: no handler can run.
+        copy = output[output.index("PyFoo_Copy(PyObject *x)"):]
+        self.assertIn("y = foo_copy(x);\n    if (y == NULL) {", copy)
+        self.assertNotIn("PyErr_ExceptionMatches", copy)
+
     def test_method_and_class_method(self):
         # A method or class method with a body: clinic's parsing code
         # calls NAME_impl(), generated from the spec with clinic's self
@@ -7887,10 +7922,10 @@ class PyspecLanguageTest(PyspecTestBase):
          "    raise TypeError('x') from None",
          "raise statement \"raise TypeError('x') from None\"", 2),
         ("def __new__(cls, a: object, /):\n    try:\n        b = iter(a)\n"
-         "    except (TypeError, ValueError):\n        return a\n"
+         "    except (TypeError, len):\n        return a\n"
          "    return b",
-         "except clause (TypeError, ValueError) (lowered: except E, E a "
-         "builtin exception)", 4),
+         "except clause (TypeError, len) (lowered: except E, except (E1, "
+         "E2), builtin exceptions)", 4),
         ("def __new__(cls, a: object, /):\n    return",
          "return of nothing", 2),
         ("def __new__(cls, a: object, /):\n    a += 1\n    return a",

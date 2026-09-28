@@ -113,15 +113,13 @@ class Facts:
 
 
 def caught(handlers: list[ast.ExceptHandler]) -> list[str]:
-    """The names of the exceptions *handlers* catch (``except E:``, and
-    ``except (E1, E2):``); a name that is not a builtin exception is kept
-    as is (Facts.raises_any() then assumes it is raised)."""
+    """The names of the exceptions *handlers* catch (``except E:`` and
+    ``except (E1, E2):``, subset.handler_names()); anything else is kept
+    as its text, which Facts.raises_any() takes as any exception."""
     out = []
     for handler in handlers:
-        types = (handler.type.elts if isinstance(handler.type, ast.Tuple)
-                 else [handler.type])
-        out += [ast.unparse(t) if t is not None else 'BaseException'
-                for t in types]
+        names = subset.handler_names(handler)
+        out += names if names is not None else [ast.unparse(handler)]
     return out
 
 

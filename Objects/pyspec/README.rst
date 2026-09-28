@@ -241,7 +241,8 @@ Statements                ``if``/``else``; ``x = call(...)``;
                           setting the exception), ``raise E("...")``,
                           ``raise E(f"...{fqname(type(x))}...")`` (also
                           ``tp_name``); ``try: x = call(...)`` ``except
-                          E:`` ... ``else:`` ...; ``try:`` ...
+                          E:`` (or ``except (E1, E2):``) ... ``else:``
+                          ...; ``try:`` ...
                           ``finally:`` <calls of C functions>; ``for
                           item in it:`` (no ``else``); ``pass``
 Conditions                ``x is [not] NULL``, ``(v := call(...)) is

@@ -266,10 +266,13 @@ def assigned_names(stmts: list[ast.stmt]) -> set[str]:
 
 
 def handler_names(handler: ast.ExceptHandler) -> list[str] | None:
-    """The builtin exceptions ``except E:`` catches, or None if it is
-    not in the subset."""
-    if isinstance(handler.type, ast.Name) and _is_exception(handler.type.id):
-        return [handler.type.id]
+    """The builtin exceptions ``except E:`` or ``except (E1, E2):``
+    catches, or None if it is not in the subset."""
+    types = (handler.type.elts if isinstance(handler.type, ast.Tuple)
+             else [handler.type])
+    names = [t.id for t in types if isinstance(t, ast.Name)]
+    if types and len(names) == len(types) and all(map(_is_exception, names)):
+        return names
     return None
 
 
@@ -442,8 +445,8 @@ class Lowered(Walker[None, None]):
                     if handler_names(handler) is None:
                         self.unsupported(handler, 'except clause '
                                          f'{_text(handler.type or stmt)} '
-                                         '(lowered: except E, E a builtin '
-                                         'exception)')
+                                         '(lowered: except E, except (E1, '
+                                         'E2), builtin exceptions)')
                     if handler.name is not None:
                         self.unsupported(handler, f'except ... as '
                                          f'{handler.name}')
@@ -734,7 +737,8 @@ class Analysed:
                                | ast.Expr()],
                          handlers=[_, *_] as handlers, orelse=orelse,
                          finalbody=[]) if all(
-                    isinstance(h.type, ast.Name) for h in handlers):
+                    isinstance(h.type, (ast.Name, ast.Tuple))
+                    for h in handlers):
                 self.statements(stmt.body)
                 for handler in handlers:
                     self.statements(handler.body)
