@@ -265,6 +265,20 @@ def assigned_names(stmts: list[ast.stmt]) -> set[str]:
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)}
 
 
+def call_arguments(spec: Spec, name: str, call: ast.Call) -> list[ast.expr]:
+    """The arguments of *call*, a call of spec function *name*, one per
+    parameter: an omitted one is its default, NULL (the only default of
+    the lowered subset).  A SpecError for too few or too many."""
+    args = spec.functions[name].args
+    params = len(args.posonlyargs + args.args)
+    if not params - len(args.defaults) <= len(call.args) <= params:
+        raise spec.error(call, f'{ast.unparse(call.func)}() takes '
+                         f'{params - len(args.defaults)} to {params} '
+                         f'arguments, not {len(call.args)}')
+    return [*call.args, *[ast.Name('NULL', ast.Load())
+                          for _ in range(params - len(call.args))]]
+
+
 def handler_names(handler: ast.ExceptHandler) -> list[str] | None:
     """The builtin exceptions ``except E:`` or ``except (E1, E2):``
     catches, or None if it is not in the subset."""

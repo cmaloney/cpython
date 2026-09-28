@@ -362,14 +362,17 @@ class Evaluator(subset.Walker[_Block, None]):
     docstring); one method per kind of statement (subset.Kind)."""
 
     def __init__(self, context: Context, spec: Spec,
-                 arities: Sequence[Arity] = ()) -> None:
+                 arities: Sequence[Arity] = (),
+                 function: str | None = None) -> None:
         self.context = context
         self.spec = spec
         self.types = context.types(spec)
         self.analyzer = context.analyzer(spec)
         self._suffix = itertools.count(1)
-        # (facts, C function, arguments): see arity_call().
+        # The __new__ evaluated, and the (facts, C function, arguments)
+        # of its arity functions: see arity_call() and dispatch().
         self.arities = arities
+        self.function = function
 
     def block(self, stmts: Sequence[ast.stmt], env: Env, depth: int = 0,
               inline: bool = True, top: bool = False) -> list[ast.stmt]:
@@ -536,12 +539,46 @@ class Evaluator(subset.Walker[_Block, None]):
         inline = self.spec.inline_function(call)
         if inline:
             return self.expand(stmt, call, inline, env), env
+        if self.arities and self.spec.call_target(call.func) == self.function:
+            return self.dispatch(stmt, call, env), env
         if not self.spec.c_function(call):
             return [stmt], env
         callee = self.analyzer.mark_call(call, env)
         if isinstance(stmt, ast.Assign) and _only_null(callee):
             return [], env | {ast.unparse(stmt.targets[0]): NULL}
         return [stmt], env
+
+    def dispatch(self, stmt: ast.stmt, call: ast.Call,
+                 env: Env) -> list[ast.stmt]:
+        """*stmt*, whose call *call* calls the __new__ evaluated (``T.
+        __new__(T, ...)``), as the vectorcall of T would call it: under
+        ``if`` tests of which arguments are NULL, the call of the arity
+        function (NAME_nargsN()) whose facts they are, and else *call*."""
+        args = subset.call_arguments(self.spec, self.function or '', call)
+        params = self.spec.params(self.function or '')
+        out = [stmt]
+        for facts_, c_name, given in reversed(self.arities):
+            tests: list[ast.expr] = []
+            for param, arg in zip(params, args):
+                want, have = facts_[param], arg_fact(arg, env)
+                if fact_key(want) == fact_key(have) or (
+                        want is NOTNULL and have not in (None, NULL)):
+                    continue
+                if not (want in (NULL, NOTNULL) and have is None
+                        and isinstance(arg, ast.Name)):
+                    break       # not the facts of this arity function
+                tests.append(ast.Compare(
+                    arg, [ast.Is() if want is NULL else ast.IsNot()],
+                    [ast.Name('NULL', ast.Load())]))
+            else:
+                arity = ast.Call(ast.Name(c_name, ast.Load()),
+                                 [args[params.index(p)] for p in given], [])
+                marks.put(arity, marks.ArityCall(c_name))
+                body = [_with_call(stmt, arity)]
+                out = body if not tests else [ast.copy_location(ast.If(
+                    tests[0] if len(tests) == 1
+                    else ast.BoolOp(ast.And(), tests), body, out), stmt)]
+        return out
 
     def mark(self, node: ast.AST, env: Env) -> None:
         """Mark the calls of @native functions in *node* (a
@@ -610,7 +647,8 @@ class Evaluator(subset.Walker[_Block, None]):
         assert name is not None
         params = self.spec.params(name)
         body = self.spec.body(name)
-        mapping: dict[str, ast.expr] = dict(zip(params, call.args))
+        mapping: dict[str, ast.expr] = dict(zip(
+            params, subset.call_arguments(self.spec, name, call)))
         suffix = next(self._suffix)
         for local in assigned_names(body) - set(params):
             mapping[local] = ast.Name(f'{local}_{suffix}', ast.Load())
@@ -1045,6 +1083,6 @@ def specialize(context: Context, spec: Spec, name: str, env: Env,
     except where the block is versioned.  *arities*: (facts, C function,
     arguments) of the arity functions of a __new__ (see
     Evaluator.arity_call())."""
-    residual = Evaluator(context, spec, arities).block(
+    residual = Evaluator(context, spec, arities, name).block(
         spec.body(name), env, inline=inline, top=True)
     return remove_dead_iterators(residual)

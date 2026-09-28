@@ -5684,6 +5684,43 @@ class PyspecTest(PyspecTestBase):
         self.assertNotIn("PyFoo_Stub", output)
         self.assertNotIn("PyFoo_Documented", output)
 
+    def test_call_with_defaults(self):
+        # A spec function called with fewer arguments than parameters:
+        # the others are their defaults (NULL); the __new__ calling itself
+        # for its class calls the arity function of the arguments given,
+        # as the vectorcall would.
+        spec = """
+            class bytes:
+                def __new__(cls, a: object, b: str = NULL, /):
+                    if cls is not bytes:
+                        value = bytes.__new__(bytes, a)
+                        return bytes_subtype_new(cls, value)
+                    return a
+
+            def PyFoo_New(x: object):
+                return bytes.__new__(bytes, x)
+
+            @native
+            def bytes_subtype_new(type: 'PyTypeObject *', tmp: object):
+                return unknown(tmp)
+        """
+        self.generate(spec, self.BLOCK)
+        with open(self.output_path, encoding='utf-8') as f:
+            output = f.read()
+        self.assertIn("    if (cls != &PyBytes_Type) {\n"
+                      "        if (a != NULL) {\n"
+                      "            value = foo_new_nargs1(a);\n", output)
+        self.assertIn("        else {\n"
+                      "            value = foo_new_impl(&PyBytes_Type, a, "
+                      "NULL);\n", output)
+        self.assertIn("    return foo_new_impl(&PyBytes_Type, x, NULL);\n",
+                      output)
+        exc = self.expect_located_failure(
+            spec.replace("bytes.__new__(bytes, x)",
+                         "bytes.__new__(bytes, x, NULL, NULL)"),
+            self.BLOCK, "bytes.__new__() takes 2 to 3 arguments, not 4", 10)
+        self.assertEqual(exc.kind, SpecErrorKind.INVALID)
+
     def test_except_tuple(self):
         # except (E1, E2): a handler for either, dropped when the call
         # raises neither.

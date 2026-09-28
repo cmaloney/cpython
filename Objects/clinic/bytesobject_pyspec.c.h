@@ -18,9 +18,35 @@ bytes_new_impl(PyTypeObject *cls, PyObject *source, const char *encoding, const 
 
     /* Objects/pyspec/bytesobject.py:72 */
     if (cls != &PyBytes_Type) {
-        value = bytes_new_impl(&PyBytes_Type, source, encoding, errors);
-        if (value == NULL) {
-            return NULL;
+        if ((source == NULL) && (encoding == NULL) && (errors == NULL)) {
+            value = bytes_new_nargs0();
+            if (value == NULL) {
+                return NULL;
+            }
+        }
+        else if ((source != NULL) && (encoding == NULL) && (errors == NULL)) {
+            value = bytes_new_nargs1(source);
+            if (value == NULL) {
+                return NULL;
+            }
+        }
+        else if ((source != NULL) && (encoding != NULL) && (errors == NULL)) {
+            value = bytes_new_nargs2(source, encoding);
+            if (value == NULL) {
+                return NULL;
+            }
+        }
+        else if ((source != NULL) && (encoding != NULL) && (errors != NULL)) {
+            value = bytes_new_nargs3(source, encoding, errors);
+            if (value == NULL) {
+                return NULL;
+            }
+        }
+        else {
+            value = bytes_new_impl(&PyBytes_Type, source, encoding, errors);
+            if (value == NULL) {
+                return NULL;
+            }
         }
         PyObject *_return_value = bytes_subtype_new(cls, value);
         Py_DECREF(value);

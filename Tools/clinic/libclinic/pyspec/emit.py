@@ -343,7 +343,9 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
             return ir.Call(size, values()), SSIZE, None
         spec_target = self.spec.call_target(call.func)
         if spec_target is not None:
-            return (ir.Call(self.generator.c_name(spec_target), values()),
+            args = subset.call_arguments(self.spec, spec_target, call)
+            return (ir.Call(self.generator.c_name(spec_target),
+                            tuple(self.lower_value(a) for a in args)),
                     OBJECT, ir.Convention.NULL)
         if isinstance(call.func, ast.Name):
             name = call.func.id
