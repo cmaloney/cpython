@@ -64,7 +64,7 @@ typedef struct {
 
 /* The key of a slot: the offset of its member in PyHeapTypeObject, as in
  * slotdefs[] of Objects/typeobject.c, e.g.
- * _PySpec_SLOT(as_mapping.mp_subscript) or _PySpec_SLOT(ht_type.tp_iternext). */
+ * _PySpec_SLOT(as_mapping.mp_subscript), _PySpec_SLOT(ht_type.tp_iternext). */
 #define _PySpec_SLOT(MEMBER) ((uint16_t)offsetof(PyHeapTypeObject, MEMBER))
 
 /* The facts of a slot of a spec'd class that has a Python reference (a
