@@ -11,3 +11,27 @@ TYPES = {
 }
 
 CASES = {}
+
+# For Tools/clinic/pyspec_parity.py: see bytesobject_cases.py.
+PARITY = {
+    'bytearray': {
+        'samples': {
+            "bytearray(b'a b')": lambda: bytearray(b'a b'),
+            'bytearray()': lambda: bytearray(),
+            "bytearray(b'\\x00\\xffAz \\t')":
+                lambda: bytearray(b'\x00\xffAz \t'),
+        },
+        'pool': {
+            "b' '": lambda: b' ',
+            "b'\\x00'": lambda: b'\x00',
+            "'strict'": lambda: 'strict',
+            "'ascii'": lambda: 'ascii',
+        },
+    },
+    'bytearray_iterator': {
+        'samples': {
+            "iter(bytearray(b'abc'))": lambda: iter(bytearray(b'abc')),
+            'iter(bytearray())': lambda: iter(bytearray()),
+        },
+    },
+}
