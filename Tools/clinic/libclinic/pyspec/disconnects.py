@@ -49,11 +49,9 @@ from . import frontend, specfiles, subset
 
 
 def spec_types(srcdir):
-    """{type name: dict(cfile=..., prefixes=...)} of the builtin types
-    described by a class of the spec of a core C file (found by
-    specfiles.spec_files()): their C file, and the prefixes of the names
-    of their C API, from their type object (&PyBytes_Type: PyBytes and
-    _PyBytes, which cover PyBytesWriter_ too)."""
+    """{type name: dict(cfile=..., prefixes=...)} of the builtin types a
+    class of a core spec describes: their C file, and the prefixes of
+    their C API (&PyBytes_Type: PyBytes and _PyBytes)."""
     out = {}
     for spec_path, c_file in specfiles.core_spec_files(srcdir):
         spec = frontend.Spec.load(spec_path)
@@ -80,14 +78,12 @@ def read_baseline(srcdir, dimension):
 
 
 def _read(srcdir, rel):
-    """The text of *rel*, a path relative to *srcdir* written with '/'
-    (the paths in the disconnect lines)."""
+    """The text of *rel*, a path relative to *srcdir* with '/'."""
     with open(os.path.join(srcdir, rel), encoding='utf-8') as f:
         return f.read()
 
 
-# ---------------------------------------------------------------------------
-# C prototypes
+# -- C prototypes
 
 @dc.dataclass
 class Proto:
@@ -253,8 +249,7 @@ def parse_refcounts(srcdir):
     return out
 
 
-# ---------------------------------------------------------------------------
-# Dimension: C API
+# -- Dimension: C API
 
 def capi(srcdir):
     headers, macros = parse_headers(srcdir)
@@ -329,8 +324,7 @@ def capi(srcdir):
     return sorted(out)
 
 
-# ---------------------------------------------------------------------------
-# Signatures
+# -- Signatures
 
 UNKNOWN = object()          # a default with no Python value (NULL, ...)
 
@@ -538,8 +532,7 @@ def public_methods(tp):
                   if not name.startswith('_') and callable(value))
 
 
-# ---------------------------------------------------------------------------
-# Dimension: Doc/builtins/stdtypes.rst
+# -- Dimension: Doc/builtins/stdtypes.rst
 
 _DIRECTIVE_RE = re.compile(r'^(?P<indent> *)\.\. (?P<kind>method|classmethod|'
                            r'staticmethod|class):: (?P<sig>.*)$')
@@ -613,8 +606,7 @@ def docs(srcdir):
     return sorted(out)
 
 
-# ---------------------------------------------------------------------------
-# Dimension: Doc/c-api/typeobj.rst vs slotdefs[]
+# -- Dimension: Doc/c-api/typeobj.rst vs slotdefs[]
 
 def slots(srcdir):
     source = _read(srcdir, 'Objects/typeobject.c')
@@ -651,12 +643,10 @@ def slots(srcdir):
     return sorted(out)
 
 
-# ---------------------------------------------------------------------------
-# Dimension: docstrings written twice
+# -- Dimension: docstrings written twice
 
 def docstring_files(srcdir):
-    """The files where the docstrings of methods are written: every spec
-    with a class (found by specfiles.spec_files()), and its C file."""
+    """Every spec with a class, and its C file."""
     out = []
     for spec_path, c_file in specfiles.spec_files(srcdir):
         if not frontend.Spec.load(spec_path).classes:
@@ -703,8 +693,7 @@ def docstrings(srcdir):
                   if len(where) > 1)
 
 
-# ---------------------------------------------------------------------------
-# Dimension: typeshed (optional)
+# -- Dimension: typeshed (optional)
 
 def _typeshed_class(tree, name):
     """{method: [[Param], ...]} of class *name* of a .pyi, taking the
@@ -752,13 +741,8 @@ def typeshed(srcdir, typeshed_dir):
     return sorted(out)
 
 
-# ---------------------------------------------------------------------------
-# Dimension: the native code of the @native functions
-#
-# The checker of the language of the native file (NATIVE_CHECKERS, by
-# extension) reads the native code; native_calls() checks every language
-# the same way (see NativeChecker, and "Checking a reference against its
-# native code" in Objects/pyspec/README.rst).
+# -- Dimension: the native code of the @native functions (README.rst,
+# "Checking a reference against its native code")
 
 # C functions that run Python code only through a special method of an
 # argument: the calls(x, "__name__") that accounts for them.  A call
@@ -769,10 +753,9 @@ SLOT_CALLS = {'PyObject_GetBuffer': '__buffer__',
               'PyObject_Length': '__len__', 'PyObject_Size': '__len__',
               'PyObject_GetIter': '__iter__', 'PyIter_Next': '__next__'}
 
-# Audited: C functions without a spec (and not in the file of the function
-# checked, which is read) that run no Python code.  Errors, memory, the
-# objects of exact builtin types; a fatal error does not return; tp_alloc
-# has no special method (Python code cannot define it).
+# Audited: C functions without a spec, outside the file checked, that run
+# no Python code (errors, memory, exact builtin types; a fatal error does
+# not return; Python code cannot define tp_alloc).
 NO_PYTHON = {
     'PyErr_Format', 'PyErr_SetString', 'PyErr_NoMemory', 'PyErr_Clear',
     'PyErr_Occurred', 'PyErr_GivenExceptionMatches', '_PyErr_Format',
@@ -940,8 +923,7 @@ NATIVE_CHECKERS = {'.c': CChecker, '.h': CChecker}
 
 def native_calls(srcdir, extensions):
     """The disconnects of the @native functions whose native file (the
-    file their spec describes) has one of *extensions*, by the checker of
-    NATIVE_CHECKERS for its language (see the comment above)."""
+    file their spec describes) has one of *extensions*."""
     from . import context
     specs = [frontend.Spec.load(path)
              for path, _ in specfiles.spec_files(srcdir)]
@@ -1053,10 +1035,5 @@ def _check_native(spec, name, checker, native_file, rel, native,
 
 
 def c_calls(srcdir):
-    """For each @native function implemented in C: every call in its C
-    (and in the functions of its file it calls) that may run Python code
-    is one its Python reference makes, a calls(x, "__name__") of the
-    special method it invokes, or covered by runs_python(); and it calls
-    the native functions its reference calls (the C checker,
-    native_calls())."""
+    """The disconnects of the @native functions implemented in C."""
     return native_calls(srcdir, ('.c', '.h'))

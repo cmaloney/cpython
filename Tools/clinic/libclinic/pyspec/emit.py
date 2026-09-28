@@ -65,10 +65,8 @@ Branch = tuple[set[str], set[str]] | None
 
 def spec_error(node: ast.AST | None, message: str,
                kind: SpecErrorKind = SpecErrorKind.LOWERING) -> SpecError:
-    """A SpecError at *node*, in the spec it was written in (app.py fills
-    in the spec of the C file): LOWERING, a use of the lowered subset
-    this emitter cannot lower; NOT_LOWERED, a construct outside the
-    lowered subset (subset.py reports those first)."""
+    """A SpecError at *node*, in the spec it was written in: LOWERING by
+    default, a use of the lowered subset this emitter cannot lower."""
     return SpecError.at(node, message, kind)
 
 
@@ -80,23 +78,18 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
         self.generator = generator
         self.spec = generator.spec
         self.analyzer = generator.context.analyzer()
-        # name -> C type; parameters are borrowed references
-        self.params = dict(params)
+        self.params = dict(params)          # name -> C type (borrowed)
         self.known_null = set(known_null)
         self.locals: dict[str, str] = {}    # name -> C type
-        # Object locals, in declaration order.
-        self.owned: list[str] = []
+        self.owned: list[str] = []      # object locals, in order
         self.live: set[str] = set()     # owned locals that may hold a value
         self.nonnull: set[str] = set()  # locals known not NULL
         self.loop_vars: list[str] = []  # owned variables of enclosing loops
         # The finally clauses around the statement lowered, innermost last.
         self.finally_blocks: list[list[ast.stmt]] = []
         self.body: list[ir.Stmt] = []
-        # (spec, last line) of the statement lowered last: see locate().
-        self.located: tuple[str, int] = ('', 0)
-        # The local whose error check follows the if chain lowered (see
-        # if_()).
-        self.checked_after: str | None = None
+        self.located: tuple[str, int] = ('', 0)     # see locate()
+        self.checked_after: str | None = None       # see if_()
 
     # -- output ------------------------------------------------------------
 
@@ -213,8 +206,8 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
 
     def c_function(self, call: ast.Call
                    ) -> tuple[str, list[str], str] | None:
-        """(C name, parameter C types, return C type) of the hand-written
-        C function *call* calls, or None."""
+        """(C name, parameter C types, return C type) of the C function
+        *call* calls, or None."""
         found = self.spec.c_function(call)
         if found is None:
             return None
@@ -237,12 +230,10 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
 
     def convention(self, call: ast.Call,
                    returns: str) -> ir.Convention | None:
-        """The error convention of a call of a hand-written C function
-        (see the module docstring)."""
+        """The error convention of a call of a C function."""
         check = marks.get(call, marks.CallCheck)
         if check is None:
-            # Not marked by the partial evaluator: the facts for any
-            # arguments.
+            # Not marked by the evaluator: the facts for any arguments.
             self.analyzer.mark_call(call, {})
             check = marks.get(call, marks.CallCheck)
             assert check is not None
@@ -275,10 +266,8 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
 
     def lower_call(self, call: ast.Call, target: str | None = None
                    ) -> tuple[ir.Expr, str, ir.Convention | None]:
-        """Return (expression, C type, error convention).
-
-        *target*: the local assigned, for a C function that initializes
-        it in place (then the expression is an int status)."""
+        """(expression, C type, error convention) of *call*; *target*: the
+        local assigned, for a C function initializing it in place."""
         def values() -> tuple[ir.Expr, ...]:
             return tuple(self.lower_value(a) for a in call.args)
 
@@ -426,9 +415,7 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
     def store(self, target: ast.expr, value: ast.expr, node: ast.AST,
               check: bool = True, later: Collection[str] | None = None
               ) -> tuple[str, str, ir.Convention | None]:
-        """``target = value``.  *later*: the names used after this
-        statement (see statements()), to release the loop variables used
-        last here."""
+        """``target = value``; *later*: see statements()."""
         name = ast.unparse(target)
         if name in self.live:
             raise spec_error(node, f'{name!r} is assigned again while it '
@@ -456,8 +443,8 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
 
     def statements(self, stmts: list[ast.stmt],
                    later: Collection[str] = frozenset()) -> None:
-        """*later*: the names used after *stmts*.  Loop variables no
-        longer used are released before each statement, and at the end."""
+        """*later*: the names used after *stmts*; loop variables no longer
+        used are released before each statement, and at the end."""
         uses = [loaded_names([stmt]) for stmt in stmts]
         for i, stmt in enumerate(stmts):
             rest = frozenset(later).union(*uses[i + 1:])
@@ -759,9 +746,8 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
         return None
 
     def with_(self, stmt: ast.With, later: frozenset[str]) -> None:
-        """``with critical_section(x): v = f(...)``: the critical section
-        of x (the partial evaluator writes it for snapshots).  The error
-        check comes after its end, so it is always closed."""
+        """``with critical_section(x): v = f(...)`` (of a snapshot); the
+        error check comes after its end."""
         match stmt:
             case ast.With(items=[ast.withitem(
                     context_expr=ast.Call(func=ast.Name('critical_section'),
@@ -897,10 +883,8 @@ class Generator:
         out.append('')
 
         for description in descriptions:
-            # Nothing is known about the arguments; the evaluator still
-            # specializes loops (see partial_eval.py), but keeps calls
-            # of other spec functions as calls.  Where the rest of a
-            # __new__ is an arity function, it is called.
+            # For any arguments: calls of spec functions stay calls,
+            # loops are specialized, arity functions are called.
             body = self.residual(
                 description.name, {}, inline=False,
                 arities=[(env, name, [p.name for p in given])
@@ -968,7 +952,7 @@ class Generator:
                 ) -> list[tuple[Env, str, list[frontend.SpecParameter],
                                 list[frontend.SpecParameter]]]:
         """(facts, C name, given, missing parameters) of the NAME_nargsN()
-        functions of a __new__ (none for other functions)."""
+        functions of a __new__."""
         if description.new_type is None:
             return []
         cls, *params = description.parameters
@@ -985,10 +969,9 @@ class Generator:
         return out
 
     def generate_arities(self, description: SpecFunction) -> list[str]:
-        """NAME_nargsN() for each allowed N: the __new__ spec partially
-        evaluated for exactly its class and a call with N positional
-        arguments; the rest are NULL.  Argument Clinic declares them and
-        calls them from the vectorcall with converted values."""
+        """NAME_nargsN() for each allowed N: the __new__ for exactly its
+        class and N positional arguments, the rest NULL (clinic's
+        vectorcall calls them)."""
         basename = self.c_basename(description.name)
         out = []
         for env, name, given, missing in self.arities(description):
@@ -1004,11 +987,7 @@ class Generator:
 
 def generate(spec: Spec, spec_path: str, bindings: PyspecBindings,
              tables: Tables | None = None) -> str:
-    """C for the implemented functions of *spec*, a frontend.Spec, bound
-    to the clinic functions of the C file by *bindings*; *tables*: what
-    follows the functions and their arity functions, before the shared
-    specializations they call (call_table.generate()).
-
-    *spec_path* is only named in the header comment.
-    """
+    """The C of the implemented functions of *spec*, bound to the clinic
+    functions of the C file by *bindings*; *tables*: what follows them,
+    before the shared specializations (call_table.generate())."""
     return Generator(Context(spec), bindings).generate(spec_path, tables)
