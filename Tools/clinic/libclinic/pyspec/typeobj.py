@@ -78,9 +78,8 @@ def _text_signature(node: ast.FunctionDef) -> str:
 
 
 def _c_stub(spec: frontend.Spec, name: str, kind: str) -> ast.FunctionDef:
-    """The def of a method implemented in C by hand, with the fixed C
-    signature of its *kind* (a slot or a PyCFunction): a body of ``...``,
-    or its Python reference with @native."""
+    """The def of a method written in C with the fixed signature of its
+    *kind* (a slot or a PyCFunction): ``...`` or @native."""
     node = spec.functions[name]
     if not (frontend.is_stub(node) or frontend.is_native(node)):
         raise spec.error(node, f"{name} is a {kind} implemented in C: its "
@@ -100,9 +99,8 @@ def _c_stub(spec: frontend.Spec, name: str, kind: str) -> ast.FunctionDef:
     return node
 
 
-# ``critical_section(module.Class.meth)``: the C function calling a shared
-# method in a critical section on self, by calling convention: its
-# parameters after self, and the arguments it passes on.
+# ``critical_section(module.Class.meth)``, by calling convention: the
+# parameters after self of the wrapper, and the arguments it passes on.
 LOCKED_WRAPPERS = {
     'METH_NOARGS': ('PyObject *Py_UNUSED(ignored)', 'NULL'),
     'METH_O': ('PyObject *arg', 'arg'),
@@ -118,9 +116,8 @@ _METHODDEF_FLAGS = r'\s*\\\n\s*\{"\w+",\s*[^,]+,\s*([\w|]+),'
 
 def _clinic_flags(spec: frontend.Spec, c_basename: str,
                   error: Callable[[str], SpecError]) -> str:
-    """The calling convention of clinic function *c_basename*, declared
-    by *spec*: the flags of the ``*_METHODDEF`` clinic generated for the
-    C file of *spec* (``stringlib/clinic/transmogrify.h.h``)."""
+    """The flags of the ``*_METHODDEF`` of clinic function *c_basename*
+    in the clinic output of the C file of *spec*."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(spec.filename)))
     stem = os.path.splitext(os.path.basename(spec.filename))[0]
     paths = [os.path.join(root, 'clinic', f'{stem}{ext}.h')
@@ -156,9 +153,7 @@ class TypeGenerator:
                      kind: str = 'PyCFunction'
                      ) -> tuple[list[str], str, str, str]:
         """(docstring definition, C function, flags, docstring name) of a
-        hand-written PyCFunction of *spec*, or of the entry of a slot
-        (*kind*).  With @text_signature, the docstring starts with the
-        signature, as clinic writes it."""
+        hand-written PyCFunction of *spec* (or the entry of a slot)."""
         node = _c_stub(spec, name, kind)
         entry = spec.pycfunction(name)
         assert entry is not None

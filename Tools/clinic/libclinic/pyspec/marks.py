@@ -1,11 +1,9 @@
 """Typed marks: what the passes know about a node beyond its syntax.
 
-Residual code (partial_eval.py) is Python ast.  What the partial
-evaluator decides about a node, for the facts analysis (facts.py) and
-the emitter (emit.py), is a mark: a small immutable dataclass, at most
-one of each kind per node, kept in one attribute of the node (ATTRIBUTE)
-so that a copy of the node (copy.deepcopy()) has the marks of the
-original.  get() reads a mark, put() sets one.
+What the partial evaluator decides about a node of residual code (ast),
+for facts.py and emit.py, is a mark: a small immutable dataclass, at
+most one of each kind per node, kept in one attribute of the node so
+that a copy of the node has the marks of the original.
 """
 
 from __future__ import annotations
@@ -51,10 +49,8 @@ def of(node: ast.AST) -> list[Mark]:
 
 @dc.dataclass(frozen=True)
 class Scope(Mark):
-    """A node written in the spec *filename*, copied into the code of
-    another (the body of an @inline function): its calls use the names
-    of that spec (frontend.Spec.c_function()) and its errors are reported
-    in it (SpecError.at())."""
+    """A node written in the spec *filename*, copied into another (an
+    @inline body): its calls resolve, and its errors are reported, there."""
     filename: str
 
 
@@ -65,8 +61,7 @@ def scope(node: ast.AST | None) -> str | None:
 
 
 def scoped(node: ast.AST, filename: str) -> ast.AST:
-    """*node*, every node of it marked as written in *filename* (unless
-    already marked)."""
+    """*node*, its nodes not marked yet marked as written in *filename*."""
     for child in ast.walk(node):
         if get(child, Scope) is None:
             put(child, Scope(filename))
@@ -75,32 +70,29 @@ def scoped(node: ast.AST, filename: str) -> ast.AST:
 
 @dc.dataclass(frozen=True)
 class CallCheck(Mark):
-    """A call of a native function, with its facts at the call: whether
-    it may raise, and whether it may return NULL without an exception (an
-    absent result).  They decide its error check (emit.py)."""
+    """A call of a native function: whether it may raise, and whether it
+    may return NULL without an exception.  They decide its error check."""
     raises: bool
     null: bool
 
 
 @dc.dataclass(frozen=True)
 class Length(Mark):
-    """``len(x)`` of x of exact type *tp*, whose size is read inline
-    (builtin_types.Row.size)."""
+    """``len(x)`` of x of exact type *tp*, read inline (Row.size)."""
     tp: type
 
 
 @dc.dataclass(frozen=True)
 class ArityCall(Mark):
-    """A call of the arity function *c_name* of a __new__
-    (NAME_nargsN(), emit.py)."""
+    """A call of the arity function *c_name* (NAME_nargsN()) of a
+    __new__."""
     c_name: str
 
 
 @dc.dataclass(frozen=True)
 class Specialized(Mark):
-    """A call of a spec function for which *special* was made: with
-    *called*, the call calls it; else the call calls the generic function,
-    with the facts of *special*."""
+    """A call of a spec function for which *special* was made: it calls
+    *special* if *called*, else the generic function with its facts."""
     special: Specialization = dc.field(repr=False)
     called: bool
     name: str = ''
@@ -111,10 +103,9 @@ class Specialized(Mark):
 
 @dc.dataclass(frozen=True)
 class Loop(Mark):
-    """A ``for`` loop over an object of exact type *iterable* (None if
-    not known); *by_index*: it iterates a list or tuple by index (``for
-    item in x:``); *snapshot*: in the snapshot of a list, where no
-    Python code runs (partial_eval.py)."""
+    """A ``for`` loop over an object of exact type *iterable* (or None);
+    *by_index*: over a list or tuple by index; *snapshot*: in the snapshot
+    of a list, where no Python code runs."""
     iterable: type | None
     by_index: bool
     snapshot: bool = False
@@ -123,8 +114,7 @@ class Loop(Mark):
 @dc.dataclass(frozen=True)
 class FirstPath(Mark):
     """The ``if`` of the first fast path of an @inline call whose first
-    argument is the name *buffer* (None if it is not a name): see
-    "Capacity" in partial_eval.py."""
+    argument is the name *buffer* ("Capacity" in partial_eval.py)."""
     buffer: str | None
 
 
@@ -134,14 +124,10 @@ class PureIter(Mark):
 
 
 class Specialization:
-    """Spec function *callee* partially evaluated for the facts *env*
-    about its parameters: the C function *name*(*params*) whose body is
-    *body* (partial_eval.py).  *params* are the parameters the body uses,
-    in order.
-
-    *index_params*: the parameters iterated by index.  *lock*: for a
-    snapshot (the body may return FALLBACK), the parameter whose critical
-    section the caller holds."""
+    """Spec function *callee* partially evaluated for the facts *env*:
+    the C function *name*(*params*, the parameters *body* uses).
+    *index_params*: those iterated by index; *lock*: for a snapshot, the
+    parameter whose critical section the caller holds."""
 
     def __init__(self, name: str, callee: str, params: list[str],
                  env: Env, body: list[ast.stmt],
