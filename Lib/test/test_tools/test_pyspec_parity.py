@@ -1,4 +1,4 @@
-"""Tests for Tools/clinic/pyspec_parity.py.
+"""Tests for Tools/clinic/pyspec_parity.py and Tools/clinic/pyspec_review.py.
 
 RecordTest compares the types the specs describe with the committed
 record (Tools/clinic/pyspec-baseline/parity.txt), when it has a block for
@@ -23,6 +23,7 @@ from test.test_tools import imports_under_tool, skip_if_missing
 skip_if_missing('clinic')
 with imports_under_tool('clinic'):
     import pyspec_parity
+    import pyspec_review
 
 
 def make_class(message='x must be an int', arity=1, length=None,
@@ -208,6 +209,46 @@ class ToolTest(unittest.TestCase):
                 status = pyspec_parity.main(['check', path])
             self.assertEqual(status, 0)
             self.assertIn('no difference in bytes_iterator', out.getvalue())
+
+
+class ReviewTest(unittest.TestCase):
+    OLD = '''\
+PyDoc_STRVAR(f__doc__,
+"f()");
+
+#define F_METHODDEF    \\
+    {"f", (PyCFunction)f, METH_NOARGS, f__doc__},
+
+static PyObject *
+f_impl(PyObject *module);
+
+static PyObject *
+g(PyObject *module)
+{
+    return g_impl(module);
+}
+'''
+
+    def test_changed_names(self):
+        new = self.OLD.replace('return g_impl(module);',
+                               'return g_impl(module, 1);')
+        new += 'static PyObject *\nh(void);\n'
+        names, added, removed = pyspec_review.changed_names(self.OLD, new)
+        self.assertEqual(names, ['g', 'h'])
+        self.assertEqual((added, removed), (3, 1))
+        new = self.OLD.replace('"f()"', '"f(x)"')
+        self.assertEqual(pyspec_review.changed_names(self.OLD, new)[0],
+                         ['f'])
+        new = self.OLD.replace('METH_NOARGS', 'METH_O')
+        self.assertEqual(pyspec_review.changed_names(self.OLD, new)[0],
+                         ['f'])
+
+    def test_explain(self):
+        reasons, unexplained = pyspec_review.explain(
+            ['bytes_new', 'bytes_vectorcall', 'bytes_split'])
+        self.assertEqual(list(reasons.values()),
+                         [['bytes_new', 'bytes_vectorcall']])
+        self.assertEqual(unexplained, ['bytes_split'])
 
 
 @support.requires_subprocess()
