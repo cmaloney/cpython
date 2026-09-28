@@ -660,25 +660,22 @@ class Evaluator(subset.Walker[_Block, None]):
              inline: bool) -> ast.For:
         """``for item in it:``, marked (marks.Loop) with the exact type
         iterated and whether it iterates a list or tuple by index."""
-        if (stmt.orelse or not isinstance(stmt.target, ast.Name)
-                or not isinstance(stmt.iter, ast.Name)):
-            raise ValueError(f'unsupported loop {ast.unparse(stmt)}')
-        item = stmt.target.id
+        # (subset.py: ``for item in it:``, no else.)
+        assert isinstance(stmt.target, ast.Name)
+        assert isinstance(stmt.iter, ast.Name)
         new = copy.copy(stmt)
         fact = env.get(stmt.iter.id)
-        iterable = None
-        sequence = False
         if isinstance(fact, IterOf):
-            iterable = fact.tp
-            if iterable in SEQUENCES:
-                new.iter = ast.Name(fact.source, ast.Load())
-                sequence = True
-        elif isinstance(fact, type) and fact in SEQUENCES:
-            iterable = fact
-            sequence = True
+            iterable: type | None = fact.tp
+        else:
+            iterable = (fact if isinstance(fact, type) and fact in SEQUENCES
+                        else None)
+        sequence = iterable in SEQUENCES
+        if sequence and isinstance(fact, IterOf):
+            new.iter = ast.Name(fact.source, ast.Load())
         item_type: Fact = self.analyzer.iteration(iterable)[1] or NOTNULL
-        new.body = self.block(stmt.body, env | {item: item_type}, depth,
-                              inline)
+        new.body = self.block(stmt.body, env | {stmt.target.id: item_type},
+                              depth, inline)
         marks.put(new, marks.Loop(iterable, sequence))
         return new
 
