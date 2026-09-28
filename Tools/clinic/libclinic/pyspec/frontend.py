@@ -1043,15 +1043,10 @@ def complete_block(spec: Spec, function_line: str, head: list[str],
         left, arrow, right = function_line.partition('->')
         function_line = (f'{left.rstrip()} as {c_name}'
                          + (f' {arrow}{right}' if arrow else ''))
-    if accessor:
-        node = spec.accessors[name][accessor]
-        location = (spec.filename, node.lineno)
-    elif name in spec.shared:
-        node = decl_spec.functions[decl_name]
-        location = (spec.filename, spec.shared[name].lineno)
-    else:
-        node = spec.functions[name]
-        location = (spec.filename, node.lineno)
+    node = (spec.accessors[name][accessor] if accessor
+            else decl_spec.functions[decl_name])
+    location = (spec.filename, spec.shared[name].lineno
+                if name in spec.shared else node.lineno)
     indent = function_line[:len(function_line) - len(function_line.lstrip())]
     return SpecBlock(
         name, [*spec_decorators,
