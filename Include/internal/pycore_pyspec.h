@@ -190,7 +190,15 @@ _PySpec_FindSlot(PyTypeObject *tp, uint16_t slot_id, PyTypeObject *arg_type)
  * _PyEval_EvalFrameDefault() calls _PySpec_CheckPythonAllowed(): every
  * Python function, method, slot wrapper, generator or finalizer runs
  * through it, so a wrong fact is a fatal error at the call that ran Python.
- * In release builds these do nothing. */
+ * In release builds these do nothing.
+ *
+ * Like the facts (whose C-side check treats a reference release as running
+ * no Python code), the tripwire assumes that no decref inside the call runs
+ * Python code.  If one did (a __del__ or a weakref callback run by the
+ * release of a last reference inside the call), a debug build would stop
+ * with the fatal error although no optimization went wrong: the direct-call
+ * uops still escape (HAS_ESCAPES_FLAG), so no symbol the optimizer keeps
+ * across the call depends on "runs no Python code". */
 #ifdef Py_DEBUG
 static inline int
 _PySpec_EnterNoPython(PyThreadState *tstate)
