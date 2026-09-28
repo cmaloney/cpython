@@ -12,7 +12,8 @@ import weakref
 import _opcode
 
 from test.support import (script_helper, requires_specialization,
-                          import_helper, Py_GIL_DISABLED, requires_jit_enabled,
+                          import_helper, Py_DEBUG, Py_GIL_DISABLED,
+                          requires_jit_enabled,
                           reset_code, SHORT_TIMEOUT, isolation)
 
 _testinternalcapi = import_helper.import_module("_testinternalcapi")
@@ -3256,6 +3257,20 @@ class TestUopsOptimization(unittest.TestCase):
         self.assertNotIn("_GUARD_TOS_INT", uops)
         self.assertIn("_POP_TOP_NOP", uops)
 
+    @unittest.skipUnless(Py_DEBUG, "debug builds only")
+    def test_call_len_result_type_asserted(self):
+        # Debug builds check the optimizer's exact result type of len() at
+        # run time, right after the call.
+        def testfunc(n):
+            a = [1, 2, 3, 4]
+            for _ in range(n):
+                _ = len(a) - 1
+
+        _, ex = self._run_with_optimizer(testfunc, TIER2_THRESHOLD)
+        uops = [op for op, *_ in ex if op != "_SPILL_OR_RELOAD"]
+        i = uops.index("_CALL_LEN")
+        self.assertTrue(uops[i + 1].startswith("_ASSERT_RESULT_TYPE"), uops)
+
     def test_check_is_not_py_callable(self):
         def testfunc(n):
             total = 0
@@ -3379,6 +3394,21 @@ class TestUopsOptimization(unittest.TestCase):
         uops = get_opnames(ex)
         self.assertIn("_CALL_BUILTIN_CLASS", uops)
         self.assertNotIn("_GUARD_CALLABLE_BUILTIN_CLASS", uops)
+
+    def test_call_builtin_class_no_args_pops_nothing(self):
+        # A call without arguments has no arguments to pop.
+        def testfunc(n):
+            x = 0
+            for _ in range(n):
+                x += len(list())
+            return x
+
+        res, ex = self._run_with_optimizer(testfunc, TIER2_THRESHOLD)
+        self.assertEqual(res, 0)
+        self.assertIsNotNone(ex)
+        uops = get_opnames(ex)
+        self.assertIn("_CALL_BUILTIN_CLASS", uops)
+        self.assertNotIn("_POP_TOP_OPARG", uops)
 
     def test_call_builtin_class_pyspec_direct_call(self):
         # bytes() has a pyspec call table: the call goes directly to the
