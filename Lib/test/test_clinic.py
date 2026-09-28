@@ -6522,8 +6522,8 @@ class PyspecStubTest(PyspecTestBase):
             spec, self.block("bytes.meth\n"), "bytes.meth(): "
             "@critical_section is expressible, but not lowered to C yet; "
             'see "The lowered subset" in Objects/pyspec/README.rst; a '
-            "hand-written C function keeps this as its Python reference "
-            "with @native", 3)
+            "function implemented natively (in C) keeps this as its Python "
+            "reference with @native", 3)
         self.assertEqual(exc.kind, SpecErrorKind.NOT_LOWERED)
         # So is a syntax error.
         self.expect_located_failure("class bytes:\n  def f(self):\n"
@@ -7911,9 +7911,9 @@ class PyspecLanguageTest(PyspecTestBase):
                     spec, block,
                     f"bytes.{name}(): {what} is expressible, but not "
                     'lowered to C yet; see "The lowered subset" in '
-                    "Objects/pyspec/README.rst; a hand-written C function "
-                    "keeps this as its Python reference with "
-                    "@native", line + 1)
+                    "Objects/pyspec/README.rst; a function implemented "
+                    "natively (in C) keeps this as its Python reference "
+                    "with @native", line + 1)
                 self.assertEqual(exc.kind, SpecErrorKind.NOT_LOWERED)
 
     def test_all_not_lowered(self):
