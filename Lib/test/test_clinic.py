@@ -42,9 +42,11 @@ with test_tools.imports_under_tool('clinic'):
     from libclinic.pyspec import runtime as pyspec_runtime
     from libclinic.pyspec import (builtin_types as pyspec_builtin_types,
                                   call_table as pyspec_call_table,
+                                  context as pyspec_context,
                                   facts as pyspec_facts,
                                   frontend as pyspec_frontend,
-                                  partial_eval as pyspec_partial_eval,
+                                  known as pyspec_known,
+                                  marks as pyspec_marks,
                                   slots as pyspec_slots,
                                   specfiles as pyspec_specfiles,
                                   subset as pyspec_subset)
@@ -7370,16 +7372,16 @@ class PyspecFactsTest(TestCase):
 
     @staticmethod
     def env(cases, env):
-        """The facts of partial_eval for the markers of a FACTS env."""
-        pe = pyspec_partial_eval
+        """The facts (known.py) for the markers of a FACTS env."""
+        known = pyspec_known
         out = {}
         for name, value in env.items():
             if value is getattr(cases, 'NULL', None):
-                out[name] = pe.NULL
+                out[name] = known.NULL
             elif value is getattr(cases, 'ANY', None):
-                out[name] = pe.NOTNULL
+                out[name] = known.NOTNULL
             elif isinstance(value, tuple) and value[:1] == ('is',):
-                out[name] = pe.Value(value[1])
+                out[name] = known.Value(value[1])
             else:
                 out[name] = value
         return out
@@ -7402,8 +7404,9 @@ class PyspecFactsTest(TestCase):
             loop, = [node for stmt in body for node in ast.walk(stmt)
                      if isinstance(node, ast.For)]
             sequence, iterable = expected['loop']
-            self.assertIs(loop.pyspec_sequence, sequence)
-            self.assertIs(loop.pyspec_iterable, iterable)
+            mark = pyspec_marks.get(loop, pyspec_marks.Loop)
+            self.assertIs(mark.by_index, sequence)
+            self.assertIs(mark.iterable, iterable)
             where = [loop]
         calls = {ast.unparse(node.func) for stmt in where
                  for node in ast.walk(stmt) if isinstance(node, ast.Call)}
@@ -7413,14 +7416,14 @@ class PyspecFactsTest(TestCase):
             self.assertNotIn(name, calls)
 
     def check_fact(self, spec, cases, fact):
-        pe = pyspec_partial_eval
-        analyzer = pyspec_facts.analyzer(spec)
+        context = pyspec_context.Context(spec)
+        analyzer = context.analyzer()
         env = self.env(cases, fact['env'])
         residual = None
         if 'expr' in fact:
             effects = pyspec_facts.Facts()
             call = ast.parse(fact['expr'], mode='eval').body
-            result_type = analyzer.call(call, env, effects)
+            result_type = analyzer.call(call, pyspec_facts.Flow(env, effects))
             found = types.SimpleNamespace(
                 result_type=result_type, runs_python=effects.runs_python)
         elif fact.get('reference'):
@@ -7432,7 +7435,8 @@ class PyspecFactsTest(TestCase):
             if 'arities' in fact:
                 options['arities'] = [(self.env(cases, e), name, given)
                                       for e, name, given in fact['arities']]
-            residual = pe.specialize(spec, fact['function'], env, **options)
+            residual = context.residual(spec, fact['function'], env,
+                                        **options)
             found = None
             if 'args' in fact:
                 found = analyzer.facts(residual, env, fact['args'])
@@ -7450,11 +7454,11 @@ class PyspecFactsTest(TestCase):
             self.assertEqual(ast.unparse(residual[-1]), fact['last'])
         self.check_code(code, fact)
         if 'called' in fact:
-            special = pe.specialization_of(spec, residual[-1].value,
-                                           facts=True)
+            special = pyspec_marks.get(residual[-1].value,
+                                       pyspec_marks.Specialized).special
             self.check_body(special.body, fact['called'])
         for name, expected in fact.get('specializations', {}).items():
-            special = pe.specialization(spec, name)
+            special = context.specializations()[name]
             if 'params' in expected:
                 self.assertEqual(special.params, expected['params'])
             if 'lock' in expected:
@@ -7516,7 +7520,7 @@ class PyspecFactsTest(TestCase):
         bt = pyspec_builtin_types
         for spec_path, _ in spec_files():
             spec = pyspec_frontend.Spec.load(spec_path)
-            facts = bt.TypeFacts(spec)
+            facts = pyspec_context.Context(spec).types()
             tps = [*bt.TABLE]
             tps += [tp for name in spec.classes
                     if (tp := getattr(builtins, name, None)) is not None
@@ -7538,7 +7542,7 @@ class PyspecFactsTest(TestCase):
         # The row of a type with a spec class repeats nothing the spec
         # derives: it lists only the special methods the spec writes as
         # ... (C only).
-        for tp, spec in bt.spec_classes().items():
+        for tp, spec in pyspec_frontend.spec_classes().items():
             row = bt.TABLE.get(tp)
             for name in (row.slots if row else ()):
                 with self.subTest(tp=tp, name=name):
@@ -7596,7 +7600,7 @@ class PyspecFactsTest(TestCase):
             def g(x: object):
                 ...
         """))
-        facts = pyspec_facts.analyzer(spec).function_facts('f')
+        facts = pyspec_context.Context(spec).analyzer().function_facts('f')
         self.assertTrue(facts.runs_python)
         self.assertIn(pyspec_facts.ANY, facts.raises)
         self.assertIsNone(facts.result_type)
@@ -7982,7 +7986,7 @@ class PyspecLanguageTest(PyspecTestBase):
                     pass
                 return x
         """))
-        analyzer = pyspec_facts.analyzer(spec)
+        analyzer = pyspec_context.Context(spec).analyzer()
         # A loop without effects is a model of the value.
         model = analyzer.reference_facts('model', {})
         self.assertEqual((model.result_type, model.runs_python,

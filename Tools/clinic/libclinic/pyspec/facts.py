@@ -12,16 +12,17 @@ The facts of a list of statements (Facts) are what every path does:
 They come from the statements only: a spec function called is analyzed
 in turn, an @inline function through its body, and a @native function
 through its Python reference, each partially evaluated for the facts
-known about the arguments of the call (partial_eval.py).  The primitives of runtime.py say what plain Python
-cannot: exact(T) and unknown() are new objects (of type T, or of a type
-not known exactly) and may fail with MemoryError; calls(x, "__name__")
-runs what the special method of type(x) runs (builtin_types.TypeFacts:
-the spec of the type, or the audited table of builtin_types.py; anything
-else may run Python code and raise anything); runs_python() may run
-Python code and raise anything.  ``len(x)`` and ``iter(x)`` call
-``__len__`` and ``__iter__``.  A call of an object (a method found,
-``cls(result)``) and a function about which nothing is known (a body of
-``...``) may do anything.
+known about the arguments of the call (partial_eval.py, through the
+context of the passes, context.py).  The primitives of runtime.py say
+what plain Python cannot: exact(T) and unknown() are new objects (of
+type T, or of a type not known exactly) and may fail with MemoryError;
+calls(x, "__name__") runs what the special method of type(x) runs
+(builtin_types.TypeFacts: the spec of the type, or the audited table of
+builtin_types.py; anything else may run Python code and raise anything);
+runs_python() may run Python code and raise anything.  ``len(x)`` and
+``iter(x)`` call ``__len__`` and ``__iter__``.  A call of an object (a
+method found, ``cls(result)``) and a function about which nothing is
+known (a body of ``...``) may do anything.
 
 In the Python reference of a @native function, what is not one of
 these is the model of the values the C computes: it has no effects (the
@@ -41,15 +42,15 @@ from __future__ import annotations
 
 import ast
 import builtins
-import weakref
+import dataclasses as dc
 from collections.abc import Callable, Hashable, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Protocol
 
-from . import builtin_types, frontend, partial_eval, subset
+from . import builtin_types, frontend, known, marks, subset
+from .known import Env
 
-# The facts partial_eval.py keeps about names: NULL, NOTNULL, an exact
-# type, Value, IterOf or Other.
-Env = dict[str, Any]
+if TYPE_CHECKING:
+    from .frontend import Spec
 
 # Raises any exception.
 ANY = 'ANY'
@@ -111,6 +112,19 @@ class Facts:
                 self.alias)
 
 
+def caught(handlers: list[ast.ExceptHandler]) -> list[str]:
+    """The names of the exceptions *handlers* catch (``except E:``, and
+    ``except (E1, E2):``); a name that is not a builtin exception is kept
+    as is (Facts.raises_any() then assumes it is raised)."""
+    out = []
+    for handler in handlers:
+        types = (handler.type.elts if isinstance(handler.type, ast.Tuple)
+                 else [handler.type])
+        out += [ast.unparse(t) if t is not None else 'BaseException'
+                for t in types]
+    return out
+
+
 def _exception_name(node: ast.expr | None, env: Env) -> str:
     """The builtin exception class ``raise node`` raises, or ANY."""
     if isinstance(node, ast.Call):
@@ -124,24 +138,44 @@ def _exception_name(node: ast.expr | None, env: Env) -> str:
     return ANY
 
 
-_analyzers: weakref.WeakKeyDictionary[frontend.Spec, Analyzer] = (
-    weakref.WeakKeyDictionary())
+class Passes(Protocol):
+    """What the analysis needs of the other passes: the context of the
+    passes (context.Context)."""
+
+    def analyzer(self, spec: Spec | None = None) -> Analyzer: ...
+
+    def types(self, spec: Spec | None = None) -> builtin_types.TypeFacts:
+        ...
+
+    def residual(self, spec: Spec, name: str, env: Env) -> list[ast.stmt]:
+        ...
 
 
-def analyzer(spec: frontend.Spec) -> Analyzer:
-    """The Analyzer of *spec*, kept as long as the spec."""
-    if spec not in _analyzers:
-        _analyzers[spec] = Analyzer(spec)
-    return _analyzers[spec]
+@dc.dataclass
+class Flow:
+    """The state of the analysis of a path: the facts about the names
+    (*env*), the facts found (shared by the paths), the names of the
+    arguments (a return of one is an alias of it), and whether the code
+    is a Python reference (where other code models values, without
+    effects)."""
+    env: Env
+    facts: Facts
+    params: Sequence[str] = ()
+    reference: bool = False
+
+    def branch(self, env: Env) -> Flow:
+        return dc.replace(self, env=dict(env))
 
 
-class Analyzer:
-    def __init__(self, spec: frontend.Spec) -> None:
+class Analyzer(subset.Walker[Flow, None]):
+    """The facts of the code of one spec; made by the context of the
+    passes, which keeps one per spec."""
+
+    def __init__(self, context: Passes, spec: Spec) -> None:
+        self.context = context
         self.spec = spec
-        self.types = builtin_types.TypeFacts(spec)
+        self.types = context.types(spec)
         self._cache: dict[Hashable, Facts] = {}
-        self.params: list[str] = []
-        self.reference = False
 
     def _cached(self, key: Hashable, compute: Callable[[], Facts]) -> Facts:
         """compute(), once; the worst while computing (recursion)."""
@@ -150,13 +184,17 @@ class Analyzer:
             self._cache[key] = compute()
         return self._cache[key]
 
+    def _key(self, *prefix: Hashable, name: str, env: Env) -> Hashable:
+        return (*prefix, name, *(known.fact_key(env.get(p))
+                                 for p in self.spec.params(name)))
+
     # -- whole functions ----------------------------------------------------
 
     def function_facts(self, name: str,
-                       special: partial_eval.Specialization | None = None
+                       special: marks.Specialization | None = None
                        ) -> Facts:
         """Facts of spec function *name* for any arguments, or of the
-        partial_eval.Specialization *special* for its facts."""
+        Specialization *special* for its facts."""
         if special is None:
             if subset.lowered(self.spec, name):
                 return Facts(worst=True)
@@ -169,41 +207,37 @@ class Analyzer:
         """Facts of @native function *name* of this spec, called
         with the facts *env* about its parameters: of its Python
         reference, partially evaluated for them."""
-        params = self.spec.params(name)
         if subset.analysed(self.spec, name):
             # Code facts.py cannot follow: the worst facts.
             return Facts(worst=True)
-
-        def compute() -> Facts:
-            residual = partial_eval.specialize(self.spec, name, env)
-            saved, self.reference = self.reference, True
-            try:
-                return self.facts(residual, env, params)
-            finally:
-                self.reference = saved
-        return self._cached(
-            (name, *(partial_eval.fact_key(env.get(p)) for p in params)),
-            compute)
+        return self._cached(self._key(name=name, env=env), lambda: self.facts(
+            self.context.residual(self.spec, name, env), env,
+            self.spec.params(name), reference=True))
 
     def inline_facts(self, name: str, env: Env) -> Facts:
         """Facts of @inline function *name* of this spec, called with the
         facts *env* about its parameters: of its body, partially
         evaluated for them, as generated into the caller."""
-        params = self.spec.params(name)
         if subset.inline(self.spec, name):
             return Facts(worst=True)
+        return self._cached(self._key('inline', name=name, env=env),
+                            lambda: self.facts(
+            self.context.residual(self.spec, name, env), env,
+            self.spec.params(name)))
 
-        def compute() -> Facts:
-            residual = partial_eval.specialize(self.spec, name, env)
-            saved, self.reference = self.reference, False
-            try:
-                return self.facts(residual, env, params)
-            finally:
-                self.reference = saved
-        return self._cached(
-            ('inline', name,
-             *(partial_eval.fact_key(env.get(p)) for p in params)),
-            compute)
+    def method_facts(self, name: str, tp: type) -> Facts | None:
+        """Facts of method *name* ("T.meth") of this spec for self of
+        exact type tp, from its body or its Python reference; None for a
+        method written in C only (builtin_types.TypeFacts.derived())."""
+        node = self.spec.functions[name]
+        if frontend.is_stub(node):
+            return None
+        params = self.spec.params(name)
+        env: Env = {params[0]: tp} if params else {}
+        if frontend.is_native(node):
+            return self.reference_facts(name, env)
+        return self.facts(self.context.residual(self.spec, name, env), env,
+                          params)
 
     def call_facts(self, call: ast.Call, env: Env) -> Facts | None:
         """Facts of the call of a hand-written C function (@native,
@@ -218,136 +252,163 @@ class Analyzer:
             return Facts(worst=True)
         callee_env: Env = {}
         for param, arg in zip(spec.params(node.name), call.args):
-            fact = partial_eval.arg_fact(arg, env)
+            fact = known.arg_fact(arg, env)
             if fact is not None:
                 callee_env[param] = fact
+        analyzer = self.context.analyzer(spec)
         if inline:
-            return analyzer(spec).inline_facts(node.name, callee_env)
-        return analyzer(spec).reference_facts(node.name, callee_env)
+            return analyzer.inline_facts(node.name, callee_env)
+        return analyzer.reference_facts(node.name, callee_env)
+
+    def mark_call(self, call: ast.Call, env: Env) -> Facts | None:
+        """call_facts(), and the mark of *call* with its error check
+        (marks.CallCheck), which emit.py reads."""
+        callee = self.call_facts(call, env)
+        if callee is not None:
+            marks.put(call, marks.CallCheck(bool(callee.raises),
+                                            callee.returns_null))
+        return callee
 
     def facts(self, stmts: list[ast.stmt], env: Env,
-              params: Sequence[str] = ()) -> Facts:
+              params: Sequence[str] = (), reference: bool = False) -> Facts:
         """Facts of *stmts*; *env* holds the facts about names (exact
-        types, NULL, ... see partial_eval.py); *params* are the names of
-        the call arguments, in order (a return of one of them is an alias
-        of that argument)."""
-        facts = Facts()
-        saved, self.params = self.params, list(params)
-        try:
-            self.block(stmts, dict(env), facts)
-        finally:
-            self.params = saved
-        return facts
+        types, NULL, ... see known.py); *params* are the names of the
+        call arguments, in order (a return of one of them is an alias
+        of that argument); *reference*: *stmts* are a Python reference."""
+        flow = Flow(dict(env), Facts(), params, reference)
+        self.block(stmts, flow)
+        return flow.facts
 
     # -- statements ---------------------------------------------------------
 
-    def block(self, stmts: list[ast.stmt], env: Env, facts: Facts) -> None:
+    def block(self, stmts: list[ast.stmt], flow: Flow) -> None:
         for stmt in stmts:
-            self.statement(stmt, env, facts)
+            self.statement(stmt, flow)
 
-    def statement(self, stmt: ast.stmt, env: Env, facts: Facts) -> None:
-        match stmt:
-            case ast.Pass() | ast.Expr(ast.Constant()):
-                pass
-            case ast.If(test=test, body=body, orelse=orelse):
-                self.expression(test, env, facts)
-                body_env, else_env = partial_eval.refine(test, env)
-                self.block(body, dict(body_env), facts)
-                self.block(orelse, dict(else_env), facts)
-            case ast.Assign(targets=[ast.Name(name)], value=value):
-                tp = self.value_type(value, env, facts)
-                env.pop(name, None)
-                if tp is not None:
-                    env[name] = tp
-            case ast.Return(value=ast.Name(partial_eval.FALLBACK)):
+    def other(self, stmt: ast.stmt, flow: Flow) -> None:
+        if not flow.reference:
+            flow.facts.python()
+            flow.facts.returns.append((None, None))
+        # (In a Python reference: the model of a value, no effects.)
+
+    def pass_(self, stmt: ast.stmt, flow: Flow) -> None:
+        pass
+
+    def if_(self, stmt: ast.If, flow: Flow) -> None:
+        self.expression(stmt.test, flow)
+        body_env, else_env = known.refine(stmt.test, flow.env)
+        self.block(stmt.body, flow.branch(body_env))
+        self.block(stmt.orelse, flow.branch(else_env))
+
+    def assign(self, stmt: ast.Assign, flow: Flow) -> None:
+        name = ast.unparse(stmt.targets[0])
+        tp = self.value_type(stmt.value, flow)
+        flow.env.pop(name, None)
+        if tp is not None:
+            flow.env[name] = tp
+
+    def return_(self, stmt: ast.Return, flow: Flow) -> None:
+        match stmt.value:
+            case ast.Name(known.FALLBACK):
                 # A snapshot restarts: the caller returns another result.
                 pass
-            case ast.Return(value=ast.Name('NULL')):
-                facts.returns_null = True
-            case ast.Return(value=value):
-                alias = (self.params.index(value.id)
+            case ast.Name('NULL'):
+                flow.facts.returns_null = True
+            case value:
+                alias = (list(flow.params).index(value.id)
                          if isinstance(value, ast.Name)
-                         and value.id in self.params else None)
-                facts.returns.append((self.value_type(value, env, facts),
-                                      alias))
-            case ast.Raise(exc=ast.Call() as call) \
-                    if self.spec.c_function(call):
-                self.call(call, env, facts)
-            case ast.Raise(exc=exc):
-                # Building the message only formats type names.
-                facts.raises.add(_exception_name(exc, env))
-            case ast.Try(body=body, handlers=handlers, orelse=orelse,
-                         finalbody=finalbody):
-                self.block(body, env, facts)
-                for handler in handlers:
-                    self.block(handler.body, dict(env), facts)
-                self.block(orelse, dict(env), facts)
-                self.block(finalbody, env, facts)
-            case ast.With(body=body):
-                self.block(body, env, facts)
-            case ast.Expr(value=ast.Call() as call):
-                self.call(call, env, facts)
-            case ast.For(target=ast.Name(item), body=body):
-                # The partial evaluator marks the exact type of the
-                # iterated object when it knows it (see partial_eval.py).
-                known, item_type = self.iteration(
-                    getattr(stmt, 'pyspec_iterable', None))
-                if not known:
-                    facts.python()
-                self.block(body, env | {
-                    item: item_type or partial_eval.NOTNULL}, facts)
-            case _ if not self.reference:
-                facts.python()
-                facts.returns.append((None, None))
-            # (In a Python reference: the model of a value, no effects.)
+                         and value.id in flow.params else None)
+                flow.facts.returns.append((self.value_type(value, flow),
+                                           alias))
 
-    def expression(self, node: ast.expr, env: Env, facts: Facts) -> None:
+    def raise_(self, stmt: ast.Raise, flow: Flow) -> None:
+        if isinstance(stmt.exc, ast.Call) and self.spec.c_function(stmt.exc):
+            self.call(stmt.exc, flow)
+        else:
+            # Building the message only formats type names.
+            flow.facts.raises.add(_exception_name(stmt.exc, flow.env))
+
+    def try_(self, stmt: ast.Try, flow: Flow) -> None:
+        self.block(stmt.body, flow)
+        for handler in stmt.handlers:
+            self.block(handler.body, flow.branch(flow.env))
+        self.block(stmt.orelse, flow.branch(flow.env))
+        self.block(stmt.finalbody, flow)
+
+    def finally_(self, stmt: ast.Try, flow: Flow) -> None:
+        self.try_(stmt, flow)
+
+    def with_(self, stmt: ast.With, flow: Flow) -> None:
+        self.block(stmt.body, flow)
+
+    def call_(self, stmt: ast.Expr, flow: Flow) -> None:
+        assert isinstance(stmt.value, ast.Call)
+        self.call(stmt.value, flow)
+
+    def for_(self, stmt: ast.For, flow: Flow) -> None:
+        if not isinstance(stmt.target, ast.Name):
+            return self.other(stmt, flow)
+        # The partial evaluator marks the exact type of the iterated
+        # object when it knows it (see partial_eval.py).
+        loop = marks.get(stmt, marks.Loop)
+        is_known, item_type = self.iteration(loop.iterable if loop else None)
+        if not is_known:
+            flow.facts.python()
+        item: known.Fact = item_type or known.NOTNULL
+        self.block(stmt.body, dc.replace(flow, env=flow.env | {
+            stmt.target.id: item}))
+        return None
+
+    def expression(self, node: ast.expr, flow: Flow) -> None:
         """Account for the calls a condition makes."""
         named = [child.value for child in ast.walk(node)
                  if isinstance(child, ast.NamedExpr)]
         for child in ast.walk(node):
             if isinstance(child, ast.NamedExpr):
-                self.value_type(child.value, env, facts)
+                self.value_type(child.value, flow)
             elif (isinstance(child, ast.Call)
                     and not any(child is value for value in named)
                     and not (isinstance(child.func, ast.Name)
                              and child.func.id in PURE_BUILTINS)):
-                self.call(child, env, facts)
+                self.call(child, flow)
 
     def iteration(self, tp: type | None) -> tuple[bool, type | None]:
         """(iterating an object of exact type tp runs no Python code, the
         exact type of the items or None)."""
-        if tp in partial_eval.SEQUENCES:
+        if tp in known.SEQUENCES:
             return True, None
         special = self.types.special(tp, '__iter__') if tp else None
         if special is None or special[0] is not None or special[1] in (
                 False, None, builtin_types.PYTHON):
             return False, None
-        return True, (None if special[1] is object else special[1])
+        items = special[1]
+        return True, (items if isinstance(items, type) and items is not object
+                      else None)
 
     # -- values -------------------------------------------------------------
 
-    def value_type(self, node: ast.expr | None, env: Env,
-                   facts: Facts) -> type | None:
-        """The exact type of *node*, or None; its effects go to *facts*."""
+    def value_type(self, node: ast.expr | None, flow: Flow) -> type | None:
+        """The exact type of *node*, or None; its effects go to the
+        facts of *flow*."""
         match node:
             case ast.Constant(value=value):
                 return type(value)
             case ast.Name(name):
-                value = env.get(name)
-                return value if isinstance(value, type) else None
+                fact = flow.env.get(name)
+                return fact if isinstance(fact, type) else None
             case ast.Call():
-                return self.call(node, env, facts)
-        if not self.reference:
-            facts.python()
+                return self.call(node, flow)
+        if not flow.reference:
+            flow.facts.python()
         return None
 
-    def call(self, node: ast.Call, env: Env, facts: Facts) -> type | None:
-        """Exact result type of call *node*; its effects go to *facts*."""
-        special = partial_eval.specialization_of(self.spec, node,
-                                                 facts=True)
-        callee = (self.function_facts(special.callee, special) if special
-                  else self.call_facts(node, env))
+    def call(self, node: ast.Call, flow: Flow) -> type | None:
+        """Exact result type of call *node*; its effects go to the facts
+        of *flow*."""
+        facts, env = flow.facts, flow.env
+        mark = marks.get(node, marks.Specialized)
+        callee = (self.function_facts(mark.special.callee, mark.special)
+                  if mark else self.call_facts(node, env))
         if callee is None and (name := self.spec.call_target(node.func)):
             callee = self.function_facts(name)      # a spec function
         if callee is not None:
@@ -357,8 +418,7 @@ class Analyzer:
         match name, node.args:
             case 'exact', [ast.Name(tp_name), *_]:
                 facts.raises.add('MemoryError')
-                tp: type | None = builtin_types.by_name(tp_name)
-                return tp
+                return builtin_types.by_name(tp_name)
             case 'unknown', _:
                 facts.raises.add('MemoryError')
             case 'runs_python', []:
@@ -366,20 +426,20 @@ class Analyzer:
             case 'calls', [obj, ast.Constant(str() as special)]:
                 facts.add(self.special_facts(obj, special, env))
             case 'len', [ast.Name() as obj]:
-                row = builtin_types.TABLE.get(
-                    partial_eval.exact_type(obj, env))
+                tp = known.exact_type(obj, env)
+                row = builtin_types.TABLE.get(tp) if tp else None
                 if row is None or row.size is None:
                     facts.add(self.special_facts(obj, '__len__', env))
                 return int
             case 'iter', [ast.Name() as obj]:
-                tp = partial_eval.exact_type(obj, env)
+                tp = known.exact_type(obj, env)
                 if self.iteration(tp)[0]:
                     facts.raises.add('MemoryError')
                 elif self.types.special(tp, '__iter__') == (None, False):
                     facts.raises.add('TypeError')
                 else:
                     facts.add(self.special_facts(obj, '__iter__', env))
-            case _ if not (name in PURE_BUILTINS or self.reference):
+            case _ if not (name in PURE_BUILTINS or flow.reference):
                 # A call of an object: a method found, cls(result), ...
                 facts.python()
             # (In a Python reference, other calls model a value.)
@@ -387,16 +447,19 @@ class Analyzer:
 
     def special_facts(self, obj: ast.expr, name: str, env: Env) -> Facts:
         """Facts of invoking special method *name* of type(obj)."""
-        tp = partial_eval.exact_type(obj, env)
-        match None if tp is None else self.types.special(tp, name):
-            case (None, False):
-                return Facts()      # no such method: nothing is called
-            case (None, value) if value is not builtin_types.PYTHON:
-                facts = Facts()
-                facts.raises.add(ANY)
-                return facts
-            case (spec_name, None) if frontend.is_native(
-                    self.spec.functions[spec_name]):
-                params = self.spec.params(spec_name)
-                return self.reference_facts(spec_name, {params[0]: tp})
+        tp = known.exact_type(obj, env)
+        special = None if tp is None else self.types.special(tp, name)
+        if special is None or tp is None:
+            return Facts(worst=True)
+        spec_name, value = special
+        if spec_name is None and value is False:
+            return Facts()      # no such method: nothing is called
+        if spec_name is None and value is not builtin_types.PYTHON:
+            facts = Facts()
+            facts.raises.add(ANY)
+            return facts
+        if spec_name is not None and frontend.is_native(
+                self.spec.functions[spec_name]):
+            params = self.spec.params(spec_name)
+            return self.reference_facts(spec_name, {params[0]: tp})
         return Facts(worst=True)

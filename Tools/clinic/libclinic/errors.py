@@ -73,10 +73,10 @@ class SpecError(ClinicError):
            filename: str | None = None) -> 'SpecError':
         """An error at the line of *node*, in the spec it was written in:
         a node copied from another spec (the body of an @inline function,
-        partial_eval.py) is marked with that spec (``pyspec_scope``), else
+        partial_eval.py) is marked with that spec (marks.Scope), else
         *filename*."""
-        return cls(message, kind=kind,
-                   filename=getattr(node, 'pyspec_scope', None) or filename,
+        from libclinic.pyspec.marks import scope
+        return cls(message, kind=kind, filename=scope(node) or filename,
                    lineno=getattr(node, 'lineno', None) or None)
 
 
