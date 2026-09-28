@@ -139,7 +139,7 @@ def _clinic_flags(spec: frontend.Spec, c_basename: str,
 
 class TypeGenerator:
     def __init__(self, spec: frontend.Spec, cls_name: str,
-                 functions: dict[str, tuple[str, str | None]]):
+                 functions: dict[str, str]):
         self.spec = spec
         self.cls_name = cls_name
         self.node = spec.classes[cls_name]
@@ -178,7 +178,7 @@ class TypeGenerator:
     def _clinic_entry(self, name: str) -> str:
         node = self.spec.functions[name]
         try:
-            c_basename, _ = self.functions[name]
+            c_basename = self.functions[name]
         except KeyError:
             raise self.spec.error(node, f"{name} is not a clinic function "
                                   "of the C file") from None
@@ -190,7 +190,7 @@ class TypeGenerator:
         spec = self.spec
         if name in self.functions:
             # It has a block in the C file: a clinic function of the class.
-            c_basename, _ = self.functions[name]
+            c_basename = self.functions[name]
             return [], f'    {c_basename.upper()}_METHODDEF'
         shared = spec.shared[name]
         other, other_name = spec.declaration(name)
@@ -209,7 +209,7 @@ class TypeGenerator:
         elif kind == CLINIC:
             docs = []
             if other is spec:
-                c_basename, _ = self.functions[other_name]
+                c_basename = self.functions[other_name]
             else:
                 c_basename = (other.c_name(other_name)[0]
                               or other_name.replace('.', '_'))
@@ -413,15 +413,10 @@ def header(spec_path: str) -> str:
 
 
 def generate(spec: frontend.Spec, classes: set[str],
-             functions: dict[str, tuple[str, str | None]]) -> str | None:
-    """The tables of the classes of *spec*, the spec of a C file, that
-    the C file declares (clinic *classes*) and that declare slots
-    (Spec.declares_slots()), or None.
-
-    *functions* maps the clinic functions of the C file ("bytes.split")
-    to (C basename, vectorcall C name or None).  They are the end of
-    Objects/clinic/<stem>_pyspec.c.h.
-    """
+             functions: dict[str, str]) -> str | None:
+    """The tables of the classes of *spec* that the C file declares
+    (clinic *classes*) and that declare slots, or None.  *functions*:
+    {clinic function ("bytes.split"): C basename} of the C file."""
     out = []
     for cls_name in spec.classes:
         class_prefix(spec, cls_name)    # checks the class decorators
