@@ -1058,14 +1058,21 @@ def _check_native(spec, name, checker, native_file, rel, native, specs,
     for callee in sorted(called & native - everything):
         out.append(f'{where}: its reference calls {callee}(), which its '
                    'native code does not')
-    # A reference that cannot fail: the native code cannot either.
+    # A reference that cannot fail: the native code calls nothing that
+    # can (a native function whose reference cannot fail cannot).
+    def may_fail(callee):
+        found = callee in native and next(
+            s.resolve(callee) for s in specs if s.resolve(callee))
+        return not found or facts.analyzer(found[0]).reference_facts(
+            callee, {}).raises
     returns = frontend.c_signature(node)[1] if '.' not in name \
         else 'void'
+    failing = sorted(filter(may_fail, calls))
     if (returns != 'void' and not frontend.is_struct(returns)
-            and calls and not facts.analyzer(spec).reference_facts(
+            and failing and not facts.analyzer(spec).reference_facts(
                 name, {}).raises):
         out.append(f'{where}: its reference cannot fail, but the C '
-                   f'calls {", ".join(sorted(calls))}')
+                   f'calls {", ".join(failing)}')
     return out
 
 
