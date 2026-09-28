@@ -26,7 +26,7 @@ import ast
 import builtins
 import dataclasses as dc
 from collections.abc import Callable, Hashable, Sequence
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from . import builtin_types, frontend, known, marks, subset
 from .known import Env
@@ -68,14 +68,11 @@ class Facts:
 
     @property
     def result_type(self) -> type | None:
-        types = {tp for tp, _ in self.returns}
-        return types.pop() if len(types) == 1 and None not in types else None
+        return _only({tp for tp, _ in self.returns})
 
     @property
     def alias(self) -> int | None:
-        aliases = {alias for _, alias in self.returns}
-        return (aliases.pop() if len(aliases) == 1 and None not in aliases
-                else None)
+        return _only({alias for _, alias in self.returns})
 
     def raises_any(self, names: Sequence[str]) -> bool:
         """Whether it may raise an exception that ``except names`` (the
@@ -91,6 +88,14 @@ class Facts:
     def key(self) -> tuple[bool, bool, type | None, int | None]:
         return (self.runs_python, self.always_raises, self.result_type,
                 self.alias)
+
+
+T = TypeVar('T')
+
+
+def _only(values: set[T | None]) -> T | None:
+    """The one value of *values*, if it is not None."""
+    return values.pop() if len(values) == 1 and None not in values else None
 
 
 def caught(handlers: list[ast.ExceptHandler]) -> list[str]:
@@ -176,25 +181,18 @@ class Analyzer(subset.Walker[Flow, None]):
         return self._cached(('specialization', special.name),
                             lambda: self.facts(special.body, special.env))
 
-    def reference_facts(self, name: str, env: Env) -> Facts:
-        """Facts of a call of @native function *name* with the facts *env*:
-        of its Python reference, partially evaluated for them."""
-        if subset.analysed(self.spec, name):
+    def reference_facts(self, name: str, env: Env,
+                        inline: bool = False) -> Facts:
+        """Facts of a call of @native function *name* with the facts *env*
+        (of an @inline one, with *inline*): of its Python reference (its
+        body), partially evaluated for them."""
+        if (subset.inline if inline else subset.analysed)(self.spec, name):
             # Code facts.py cannot follow: the worst facts.
             return Facts(worst=True)
-        return self._cached(self._key(name=name, env=env), lambda: self.facts(
-            self.context.residual(self.spec, name, env), env,
-            self.spec.params(name), reference=True))
-
-    def inline_facts(self, name: str, env: Env) -> Facts:
-        """Facts of a call of @inline function *name* with the facts *env*:
-        of its body, partially evaluated for them."""
-        if subset.inline(self.spec, name):
-            return Facts(worst=True)
-        return self._cached(self._key('inline', name=name, env=env),
+        return self._cached(self._key(inline, name=name, env=env),
                             lambda: self.facts(
             self.context.residual(self.spec, name, env), env,
-            self.spec.params(name)))
+            self.spec.params(name), reference=not inline))
 
     def method_facts(self, name: str, tp: type) -> Facts | None:
         """Facts of method *name* ("T.meth") for self of exact type tp; None
@@ -224,10 +222,8 @@ class Analyzer(subset.Walker[Flow, None]):
             fact = known.arg_fact(arg, env)
             if fact is not None:
                 callee_env[param] = fact
-        analyzer = self.context.analyzer(spec)
-        if inline:
-            return analyzer.inline_facts(node.name, callee_env)
-        return analyzer.reference_facts(node.name, callee_env)
+        return self.context.analyzer(spec).reference_facts(
+            node.name, callee_env, inline=bool(inline))
 
     def mark_call(self, call: ast.Call, env: Env) -> Facts | None:
         """call_facts(), and *call* marked with them (marks.CallCheck)."""
