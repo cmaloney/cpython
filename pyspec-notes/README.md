@@ -124,8 +124,10 @@ cycles.  `@inline` test cost +6..+11 instructions where it fails (within noise).
 End to end: pyflate −3.1 % instructions, −1.2..−2.2 % cycles (perf stat), ~−0.4 % wall
 clock inside pyperformance noise; no bytes-attributable pyperformance change elsewhere;
 startup neutral.  bytes machine code +1.3 KB vs main (measured in phase 1).
-**Not re-measured under PGO+LTO:** B2's generated-code changes (`73525613207`,
-`ec33bf398b0`: subclass `__new__` calls the arity entry, fewer error checks).
+**Final PGO+LTO check** (`reports/phase4_final_perf.md`): the finished branch is at or
+below main on 40 statements at seeds 0/1/7 after the `bytes.fromhex` tail-call fix;
+`bytearray(b16)` +24 was a PGO profile artifact (non-atomic counters; a rebuild of the
+same source is below main); +1–2 remain on three shapes with code identical to main.
 
 ## Test status (`63ce50f2c9b`, workstream F)
 Debug JIT build `../build-exp` (srcdir: the main checkout at `63ce50f2c9b`):

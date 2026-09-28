@@ -234,10 +234,14 @@ main = `ee1bbf037ff`, branch = `edd5f1f6cfd`.
 A/A noise between two builds of one commit: ±9 instructions, ±3 % cycles.  The
 `@inline` fast paths cost 6–11 instructions on the shapes where their test fails
 (0.04–0.8 %, within noise) and save 30 where it succeeds; no "must inline" marker was
-needed.  `Sub(l16)` is the thinnest margin (−0.1 to −1.1 % across seeds).  The last
-change of the generated code (`ec33bf398b0`: a subclass's `__new__` calls the arity
-entry instead of the whole impl) came after these measurements and was not re-measured
-under PGO+LTO.
+needed.  A final PGO+LTO run of the finished branch against main over 40 statements
+(`reports/phase4_final_perf.md`, seeds 0, 1 and 7) found one real regression, fixed in
+the spec (`bytes.fromhex` now tail-calls, 20 → 15 instructions); a +24 on
+`bytearray(b16)` was a PGO profile artifact (non-atomic training counters made clang
+treat unchanged code as cold; a second build of the same source is below main).  What
+remains is +1–2 instructions on three shapes whose code is identical to main's, within
+the ±9 between two builds of one commit.  `Sub(l16)` is the thinnest margin (−1.1 to
+−1.9 %).
 
 **End to end** (`reports/phase3a_slot_specializations.md`, `reports/ws6.md`): `bytes`
 calls are under 1 % of every pyperformance benchmark, and pyperformance shows no
