@@ -167,7 +167,8 @@ class TypeGenerator:
         doc_name = 'NULL'
         if doc is not None:
             doc_name = f'{self.prefix}_{meth}__doc__'
-            docs = [f'PyDoc_STRVAR({doc_name},', docstring_for_c_string(doc) + ');', '']
+            docs = [f'PyDoc_STRVAR({doc_name},',
+                    docstring_for_c_string(doc) + ');', '']
         return docs, entry.c_function, entry.flags, doc_name
 
     def _clinic_entry(self, name: str) -> str:
@@ -342,7 +343,8 @@ class TypeGenerator:
                                        and spec.pycfunction(name)):
                 # (A slot with an entry: METH_COEXIST.)
                 doc, c_func, flag, doc_name = self._pycfunction(
-                    spec, name, meth, 'slot' if kind == SLOT else 'PyCFunction')
+                    spec, name, meth,
+                    'slot' if kind == SLOT else 'PyCFunction')
                 docs += doc
                 table.append(_method_def(meth, c_func, flag, doc_name))
             elif kind == SHARED:
