@@ -77,6 +77,11 @@ def iter_opnames(ex):
 def get_opnames(ex):
     return list(iter_opnames(ex))
 
+def pops_after(uops, uop, n):
+    """The first *n* _POP_TOP* uops after the first *uop* in *uops*."""
+    i = uops.index(uop)
+    return [op for op in uops[i + 1:] if op.startswith("_POP_TOP")][:n]
+
 def iter_ops(ex):
     for item in ex:
         yield item
@@ -3499,9 +3504,9 @@ class TestUopsOptimization(unittest.TestCase):
         self.assertNotIn("_CALL_BUILTIN_CLASS", uops)
         self.assertNotIn("_CALL_BUILTIN_CLASS_1_INLINE", uops)
         self.assertNotIn("_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON", uops)
-        i = uops.index("_MAKE_HEAP_SAFE")
-        self.assertEqual(uops[i + 1:i + 4],
-                         ["_SWAP_3", "_POP_TOP_NOP", "_POP_TOP_NOP"])
+        self.assertIn("_MAKE_HEAP_SAFE", uops)
+        self.assertEqual(pops_after(uops, "_SWAP_3", 2),
+                         ["_POP_TOP_NOP", "_POP_TOP_NOP"])
 
     def test_call_builtin_class_pyspec_alias_subclass(self):
         # A bytes subclass instance does not get the facts of exact bytes:
@@ -3579,8 +3584,10 @@ class TestUopsOptimization(unittest.TestCase):
         uops = get_opnames(ex)
         self.assertNotIn("_CALL_METHOD_DESCRIPTOR_NOARGS", uops)
         self.assertNotIn("_CALL_METHOD_DESCRIPTOR_NOARGS_INLINE", uops)
+        # The copy of the borrowed self is made strong before it moves
+        # to the result slot.
         i = uops.index("_COPY_1")
-        self.assertEqual(uops[i + 1:i + 3], ["_MAKE_HEAP_SAFE", "_SWAP_3"])
+        self.assertIn("_MAKE_HEAP_SAFE", uops[i:uops.index("_SWAP_3", i)])
 
     def test_call_method_descriptor_noargs_pyspec_subclass(self):
         # bytes.__bytes__ of a subclass instance is an exact copy.

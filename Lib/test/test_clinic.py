@@ -7277,45 +7277,54 @@ class PyspecFilesTest(TestCase):
 
     def test_types_mismatch(self):
         # The C of a type and the dunders of its spec class disagree: a
-        # dunder of the type missing from the class, or one too many.
+        # dunder of the type missing from the class, or one too many.  The
+        # class is made up from the type (a stub per wrapper and method),
+        # for each type of a spec class that declares slots.
         checked = 0
         for spec_path, c_file in spec_files():
             if c_file is None or not c_file.endswith('.c'):
                 continue
-            with open(spec_path, encoding='utf-8') as f:
-                source = f.read()
-            lines = source.splitlines(keepends=True)
-            spec = pyspec_frontend.Spec(source, spec_path)
-            for cls_name, node in spec.classes.items():
+            spec = pyspec_frontend.Spec.load(spec_path)
+            for cls_name in spec.classes:
                 if not spec.declares_slots(cls_name):
                     continue
                 tp = load_cases(spec_path).TYPES[cls_name]
-                stubs = [f for f in node.body
-                         if isinstance(f, ast.FunctionDef)
-                         and f.lineno == f.end_lineno and not f.decorator_list
-                         and spec.method_kind(f'{cls_name}.{f.name}')
-                         == pyspec_frontend.SLOT]
-                if not stubs:
-                    continue
-                line = stubs[0].lineno - 1
+                wrappers = [name for name, value in vars(tp).items()
+                            if isinstance(value,
+                                          types.WrapperDescriptorType)]
+                methods = [name for name, value in vars(tp).items()
+                           if name not in wrappers
+                           and name not in ('__doc__', '__module__',
+                                            '__new__')
+                           and not (name == '__hash__' and value is None)
+                           and not isinstance(
+                               value, (types.GetSetDescriptorType,
+                                       types.MemberDescriptorType))]
                 extra = next(s.name for s in pyspec_slots.slotdefs()
                              if s.name not in vars(tp)
                              and pyspec_slots.is_slot(s.name))
-                indent = ' ' * stubs[0].col_offset
+
+                def made_up(dunders):
+                    return pyspec_frontend.Spec(
+                        f'class {cls_name}:\n' + ''.join(
+                            f'    def {name}(self, /): ...\n'
+                            for name in dunders + methods), spec_path)
+
+                # As is, the dunders agree (the docstrings do not).
+                try:
+                    self.check_type(made_up(wrappers), cls_name, tp)
+                except AssertionError as exc:
+                    self.assertNotIn('and the dunders of the spec',
+                                     str(exc))
                 changes = {
-                    f'missing {stubs[0].name}':
-                        lines[:line] + lines[line + 1:],
-                    f'extra {extra}':
-                        lines[:line] + [f'{indent}def {extra}(self, /): '
-                                        '...\n'] + lines[line:],
+                    f'missing {wrappers[0]}': wrappers[1:],
+                    f'extra {extra}': wrappers + [extra],
                 }
-                for change, text in changes.items():
+                for change, dunders in changes.items():
                     with self.subTest(cls=cls_name, change=change):
-                        changed = pyspec_frontend.Spec(''.join(text),
-                                                       spec_path)
                         with self.assertRaisesRegex(
                                 AssertionError, 'and the dunders of the spec'):
-                            self.check_type(changed, cls_name, tp)
+                            self.check_type(made_up(dunders), cls_name, tp)
                 checked += 1
         self.assertGreater(checked, 0)
 
