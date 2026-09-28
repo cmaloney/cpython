@@ -118,6 +118,9 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
         self.body: list[ir.Stmt] = []
         # (spec, last line) of the statement lowered last: see locate().
         self.located: tuple[str, int] = ('', 0)
+        # The local whose error check follows the if chain lowered (see
+        # if_()).
+        self.checked_after: str | None = None
 
     # -- output ------------------------------------------------------------
 
@@ -519,6 +522,41 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
         pass
 
     def if_(self, stmt: ast.If, later: frozenset[str]) -> None:
+        """An if; one error check after an if chain whose every branch
+        assigns the same local a call with the same error convention (the
+        dispatch of a __new__ by arity, partial_eval.py)."""
+        convention = None
+        if self.checked_after is None:
+            target, convention = self.chain(stmt)
+            self.checked_after = target
+        self.if_else(stmt, later)
+        if convention is not None:
+            self.error_check(self.checked_after or '', convention)
+            self.checked_after = None
+
+    def chain(self, stmt: ast.If) -> tuple[str | None, ir.Convention | None]:
+        """(target, convention) of an if chain (see if_()), else None."""
+        assigns: list[tuple[str, ast.Call]] = []
+        branches: list[list[ast.stmt]] = [stmt.body, stmt.orelse]
+        while branches:
+            match branches.pop():
+                case [ast.If(body=body, orelse=orelse)]:
+                    branches += [body, orelse]
+                case [ast.Assign(targets=[ast.Name(target)],
+                                 value=ast.Call() as call)]:
+                    assigns.append((target, call))
+                case _:
+                    return None, None
+        found = {(target, *self.lower_call(call, target)[1:])
+                 for target, call in assigns}
+        if len(found) != 1:
+            return None, None
+        (target, ctype, convention), = found
+        if convention is None or subset.is_struct(ctype):
+            return None, None
+        return target, convention
+
+    def if_else(self, stmt: ast.If, later: frozenset[str]) -> None:
         test = stmt.test
         self.hoist_named(test)
         null_in_body, null_in_else = self.null_refinement(test)
@@ -543,7 +581,8 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
         self.join(branches)
 
     def assign(self, stmt: ast.Assign, later: frozenset[str]) -> None:
-        self.store(stmt.targets[0], stmt.value, stmt, later=later)
+        self.store(stmt.targets[0], stmt.value, stmt, later=later,
+                   check=ast.unparse(stmt.targets[0]) != self.checked_after)
 
     def call_(self, stmt: ast.Expr, later: frozenset[str]) -> None:
         """``f(...)`` as a statement: a C function returning void or an

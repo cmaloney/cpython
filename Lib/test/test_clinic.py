@@ -5710,9 +5710,12 @@ class PyspecTest(PyspecTestBase):
         self.assertIn("    if (cls != &PyBytes_Type) {\n"
                       "        if (a != NULL) {\n"
                       "            value = foo_new_nargs1(a);\n", output)
+        # (One error check after the calls.)
         self.assertIn("        else {\n"
                       "            value = foo_new_impl(&PyBytes_Type, a, "
-                      "NULL);\n", output)
+                      "NULL);\n"
+                      "        }\n"
+                      "        if (value == NULL) {\n", output)
         self.assertIn("    return foo_new_impl(&PyBytes_Type, x, NULL);\n",
                       output)
         exc = self.expect_located_failure(
