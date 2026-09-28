@@ -1,68 +1,31 @@
-"""Generate the call table of a spec'd type for the tier-2 optimizer.
+"""The call tables of the spec'd types, for the tier-2 optimizer.
 
-For a clinic __new__ implemented by a spec (``def __new__(cls, ...)`` in
-``class bytes:``, the clinic function bytes.__new__, C basename
-bytes_new), emit.py generates NAME_nargsN(): the spec partially evaluated
-for exactly that type and N positional arguments.  generate() here adds
-to the same generated file, after them (emit.generate() calls it back;
-Argument Clinic writes the file; there is no separate command):
+emit.generate() calls generate() after the functions of a spec, in the
+same generated file.  For each class of table_classes():
 
-* NAME_nargs1_T(): NAME_nargs1 partially evaluated for an argument of
-  exact type T, for the candidates of builtin_types.py.  A variant is kept
-  only when its residual code is much smaller than the generic one
-  (KEEP_RATIO); variants with identical code share one C function, and a
-  variant that would only call a shared specialization
-  (marks.Specialization, e.g. bytes_from_iterator_list()) is that
-  function.
+* NAME_nargs1_T(): the NAME_nargs1() of a __new__ partially evaluated for
+  an argument of exact type T, for the candidates of builtin_types.py,
+  kept when its residual is at most KEEP_RATIO of the generic one;
+  variants with the same code share one C function, and one that only
+  calls a shared specialization is that function;
+* ``_PySpec_<class>_calls``: per arity of the __new__ (object arguments)
+  and per argument type, the C function and the facts of its result;
+  the same facts for the other methods the spec implements, per exact
+  type of their first argument, keyed by ml_meth (the generic entry of a
+  class method holds for a subclass, which shares the ml_meth); and per
+  slot with a Python reference (a @native dunder), for self of exactly
+  the class, keyed by the slot the dunder's wrapper calls
+  (slot_member()), which a uop that does what the slot does reads
+  (_BINARY_OP_SUBSCR_BYTES_INT and _PySpec_FindSlot()).
 
-* ``const _PySpecCallTable _PySpec_<class>_calls`` for each class of
-  table_classes() (declared in the registry of
-  Include/internal/pycore_pyspec.h, see below): per arity with object-only arguments
-  and per argument type, the C function and facts about its result, all
-  derived from the residual code; and the same facts for the other
-  methods the spec implements (bytes.__bytes__, bytes.fromhex), per exact
-  type of their first argument, keyed by their ml_meth.  The generic
-  entry of a class method holds for any class (a subclass shares the
-  ml_meth), the others only for the type itself
-  (_PySpec_FindMethod()):
+The facts (facts.py) hold only for the exact argument types of their
+entry: a constant result, a result that is argument k, the exact type
+of the result, "always raises", "may run Python code".
 
-    - result_const: the residual is just ``return <constant>``: no side
-      effects, and the constant is immortal;
-    - result_alias: every ``return`` returns argument k itself (a new
-      reference to it), e.g. ``return self`` under ``type(self) is
-      bytes``;
-    - result_type: every ``return`` gives an object of that exact type:
-      a constant, a call whose own returns all do (``exact(T)`` in the
-      Python reference of a C function), or a name whose exact type the
-      path proves (``type(x) is K`` or the argument's known type).
-      ``isinstance`` checks allow subclasses and prove nothing;
-    - _PySpec_ALWAYS_RAISES: no ``return`` is left;
-    - _PySpec_MAY_RUN_PYTHON: some call on a path may run Python code.
-
-* ``const _PySpecSlot <class>_spec_slots[]``: the facts of the slots of
-  the class that have a Python reference (``@native`` dunders:
-  bytes.__getitem__, bytes_iterator.__next__), for self of exactly the
-  class: per slot, a generic entry, and an entry per exact type of the
-  argument after self whose facts differ from it (unless it always
-  raises).  They are the facts of the special method as Python calls
-  it, keyed by its C slot: the first slot of the dunder in slotdefs[]
-  that the class fills, the one its wrapper calls
-  (``_PySpec_SLOT(as_mapping.mp_subscript)``, see slot_member()).  A
-  specialized uop that does what a slot does
-  (_BINARY_OP_SUBSCR_BYTES_INT for bytes.__getitem__) takes its result
-  facts from them (_PySpec_FindSlot()).
-
-The facts are those of facts.py, derived from the residual code and from
-the Python references of the C functions it calls.  They hold only for
-the exact argument types of their entry: a subclass instance uses the
-generic entry.
-
-The interpreter finds the table of a type in the registry: the generated
-part of Include/internal/pycore_pyspec.h, which declares every table and
-lists them in ``_PySpec_REGISTRY``.  Argument Clinic rewrites it while
-processing the C file of any spec of a core C file (registry_outputs()),
-from the syntax of all those specs (table_classes()): a new spec'd class
-is picked up without editing C.
+The interpreter finds the tables in the registry, the generated part of
+Include/internal/pycore_pyspec.h, which clinic rewrites from the syntax
+of all the core specs (registry_outputs()): a new spec'd class is picked
+up without editing C.
 """
 
 from __future__ import annotations
@@ -192,11 +155,9 @@ def table_name(cls_name: str) -> str:
 
 def generate(generator: emit.Generator,
              descriptions: list[SpecFunction]) -> list[str]:
-    """C lines: the type-specialized variants and the call table of each
-    class of table_classes(), from *descriptions* (frontend.SpecFunction:
-    the implemented functions compiled unconditionally).
-
-    *generator* is the emit.Generator of the spec."""
+    """The variants and the call table of each class of table_classes(),
+    from *descriptions*, the implemented functions compiled
+    unconditionally."""
     out = []
     news: dict[str, SpecFunction] = {}      # class name -> __new__
     methods: dict[str, list[SpecFunction]] = {}
@@ -339,31 +300,27 @@ def generate_methods(generator: emit.Generator, type_name: str,
     for description in descriptions:
         name = description.name
         node = spec.functions[name]
-        decorators = {d.id for d in node.decorator_list
-                      if isinstance(d, ast.Name)}
-        if 'staticmethod' in decorators:
+        if frontend.has_decorator(node, 'staticmethod'):
             continue
         first, *params = description.parameters
         if any(p.optional or p.ctype != emit.OBJECT for p in params):
             continue
         env: Env = {p.name: NOTNULL for p in params}
         env[first.name] = NOTNULL
-        if 'classmethod' in decorators:
+        if frontend.has_decorator(node, 'classmethod'):
             # The generic entry holds for any class (a subclass shares
             # the ml_meth); the others only when the class is the type
             # (_PySpec_FindMethod() checks the class the method is bound
             # to).
             typed_base = env | {first.name: Value(type_value)}
             args = params
-            candidates = builtin_types.CANDIDATES
+            candidates = builtin_types.CANDIDATES if type_value else []
             on = f', on exactly {type_name}'
         else:
             typed_base = env
             args = [first, *params]
             candidates = [type_value] if type_value else []
             on = ''
-        if type_value is None:
-            candidates = []
         if not args:
             continue
         arg_names = [a.name for a in args]
