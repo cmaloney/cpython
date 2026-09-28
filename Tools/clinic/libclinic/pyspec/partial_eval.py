@@ -51,7 +51,10 @@ for other types (VERSIONED_ITERABLES).
 
 Arity functions.  Where the rest of a __new__ body has the facts of one
 of its NAME_nargsN() functions (emit.py) and is that whole function, it
-calls the function (Evaluator.arity_call()).
+calls the function (Evaluator.arity_call()).  Where the __new__ calls
+itself for its type (``T.__new__(T, ...)``, to construct a subclass
+instance), it calls the arity function of the arguments that are not
+NULL, tested at run time as the vectorcall does (Evaluator.dispatch()).
 
 Shared specializations.  A tail call of a spec function whose residual
 for the facts of the call has a loop is not inlined: the residual becomes
