@@ -5819,7 +5819,7 @@ class PyspecTest(PyspecTestBase):
         # The block says where the impl is generated.
         self.assertIn("    return return_value;\n}\n\n"
                       "/* bytes_fromhex_impl() is generated from "
-                      "pyspec/foo.py:10,\n   in clinic/foo_pyspec.c.h. */\n"
+                      "pyspec/foo.py,\n   in clinic/foo_pyspec.c.h. */\n"
                       "/*[clinic end generated code:", generated)
         # A local known not NULL is released with Py_DECREF, after the
         # result is computed.

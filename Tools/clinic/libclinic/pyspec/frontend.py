@@ -197,7 +197,6 @@ class SpecFunction:
     # "PyBytes_FromObject", or "bytes.__new__" for a method.
     name: str
     path: str
-    lineno: int
     parameters: list[SpecParameter]
     # For a __new__: the Python name of its class.
     new_type: str | None = None
@@ -722,7 +721,7 @@ class Spec:
                     raise AssertionError('checked by subset.py')
             parameters.append(SpecParameter(arg.arg, ctype,
                                             i >= first_optional))
-        return SpecFunction(name, self.filename, node.lineno, parameters,
+        return SpecFunction(name, self.filename, parameters,
                             new_type)
 
     # -- kinds of methods and C names --------------------------------------
