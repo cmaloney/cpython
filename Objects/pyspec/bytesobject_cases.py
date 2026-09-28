@@ -560,7 +560,7 @@ FACTS = [
 # -- the hand-written C functions ------------------------------------------
 #
 # HELPERS (test_pyspec_facts HelperTest): the inputs of each C function of
-# the spec with a Python reference (@c_implemented) that can be called
+# the spec with a Python reference (@native) that can be called
 # from Python, as its reference takes them (a function making them when
 # they must be fresh); NULL is C NULL.  An exported function is called
 # through ctypes; a dunder through the slot wrapper of TYPES;
@@ -593,9 +593,9 @@ HELPER_CALLERS = {
 
 NOT_CALLABLE = {
     '_PyBytes_FromSize', '_PyBytes_FromBuffer', 'bytes_copy',
-    'bytes_subtype_new', 'bytes_appender_init', 'bytes_appender_append',
-    'bytes_appender_append_unchecked', 'bytes_appender_finish',
-    'bytes_appender_discard',
+    'bytes_subtype_new', 'bytes_appender_init', 'bytes_appender_has_room',
+    'bytes_appender_append', 'bytes_appender_append_unchecked',
+    'bytes_appender_finish', 'bytes_appender_discard',
 }
 
 FACTS_ONLY = {'bytes_iterator.__next__'}

@@ -31,8 +31,8 @@ from libclinic.pyspec.runtime import (
 from libclinic.pyspec.runtime import c_name
 
 # Methods declared by bytes, and by the stringlib templates.
-from pyspec import bytesobject
-from stringlib.pyspec import ctype, transmogrify
+from Objects.pyspec import bytesobject
+from Objects.stringlib.pyspec import ctype, transmogrify
 
 
 class bytearray:

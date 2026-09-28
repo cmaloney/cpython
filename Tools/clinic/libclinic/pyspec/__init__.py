@@ -5,16 +5,18 @@ For Objects/foo.c, Objects/pyspec/foo.py is its spec:
   frontend      reads the spec; turns a spec method into the clinic input
                 of the one-line clinic block naming it in the C file
   runtime       names a spec imports, with their meaning as Python: the
-                builtins with a C meaning, @c_implemented and the
+                builtins with a C meaning, @native, @inline and the
                 primitives exact(), unknown(), calls(), runs_python();
                 load() runs a spec as Python (for tests)
   subset        the lowered subset: what of a spec is generated as C and
                 analysed for facts, checked before partial evaluation
   builtin_types the one table of builtin types without a spec (C type
                 objects, checks, constants, audited special methods)
-  facts         derives the facts of statements and of the calls of C
-                functions from their Python references
-  partial_eval  folds a spec function for facts known at a call site
+  facts         derives the facts of statements and of the calls of
+                native functions from their Python references (which
+                are never compiled)
+  partial_eval  folds a spec function for facts known at a call site,
+                and generates @inline functions into their callers
   emit          generates C from the implemented spec functions
   call_table    adds the call table of each class for the tier-2
                 optimizer to that C, and writes the registry of all of
@@ -23,8 +25,10 @@ For Objects/foo.c, Objects/pyspec/foo.py is its spec:
                 data (<stem>_cases.py)
   disconnects   where the code and the files describing it by hand
                 disagree, per dimension (C API, docs, slots, docstrings,
-                typeshed); a ratchet run by Lib/test/test_pyspec_catalog.py
-                against Tools/clinic/pyspec-baseline/
+                typeshed, and the native code of @native functions, read
+                by the checker of its language); a ratchet run by
+                Lib/test/test_pyspec_catalog.py against
+                Tools/clinic/pyspec-baseline/
   slots         the dunder <-> slot table, read from slotdefs[] in
                 Objects/typeobject.c
   typeobj       generates the method and slot tables of the types of

@@ -10,9 +10,10 @@ impls into Objects/clinic/bytesobject_pyspec.c.h and, for the vectorcall
 of ``__new__``, bytes_new_nargsN(): ``__new__`` partially evaluated for
 exactly bytes and N positional arguments.  Top-level functions are C
 functions of the same name: generated from their body, or, with
-``@c_implemented``, written by hand in C, the body being their Python
-reference.  The C functions of other files the bodies call are imported
-from the specs of those files.
+``@native``, written by hand in C, the body being their Python
+reference (never compiled); an ``@inline`` function is generated into
+its callers.  The C functions of other files the bodies call are
+imported from the specs of those files.
 
 The classes are the whole types: clinic generates their docstring, method
 tables and slot tables at the end of Objects/clinic/bytesobject_pyspec.c.h,
@@ -29,21 +30,22 @@ interpreter on the cases of bytesobject_cases.py.
 import types
 
 from libclinic.pyspec.runtime import (
-    NULL, PY_SSIZE_T_MAX, c_implemented, calls, exact, fqname, isinstance,
-    iter, runs_python, tp_name, unknown)
+    NULL, PY_SSIZE_T_MAX, calls, exact, fqname, inline, isinstance, iter,
+    native, runs_python, tp_name, unknown)
 
 # Argument Clinic decorators (no-ops in Python).
 from libclinic.pyspec.runtime import permit_long_summary, text_signature
 from libclinic.pyspec.runtime import c_name
 
 # The C functions of other files the bodies call.
-from pyspec.abstract import PyNumber_AsSsize_t, PyObject_LengthHint
-from pyspec.typeobject import _PyObject_LookupSpecial
-from pyspec.unicodeobject import PyUnicode_AsEncodedString
+from Objects.pyspec.abstract import (
+    PyNumber_AsSsize_t, PyNumber_AsSsize_t_fast, PyObject_LengthHint_fast)
+from Objects.pyspec.typeobject import _PyObject_LookupSpecial
+from Objects.pyspec.unicodeobject import PyUnicode_AsEncodedString
 from Python.pyspec.errors import PyErr_BadInternalCall
 
 # Methods shared with bytearray (Objects/stringlib/pyspec/).
-from stringlib.pyspec import ctype, transmogrify
+from Objects.stringlib.pyspec import ctype, transmogrify
 
 
 class bytes:
@@ -101,7 +103,7 @@ class bytes:
         # Is it an integer?
         if hasattr(type(source), "__index__"):
             try:
-                size = PyNumber_AsSsize_t(source, OverflowError)
+                size = PyNumber_AsSsize_t_fast(source, OverflowError)
             except TypeError:
                 return PyBytes_FromObject(source)
             if size < 0:
@@ -526,7 +528,7 @@ class bytes:
     def __iter__(self, /): ...
 
     @c_name("bytes_buffer_getbuffer")
-    @c_implemented
+    @native
     def __buffer__(self, flags, /):
         return exact(memoryview, memoryview(self))
 
@@ -536,7 +538,7 @@ class bytes:
     def __rmod__(self, value, /): ...
 
     @c_name(mp_length="bytes_length", sq_length="bytes_length")
-    @c_implemented
+    @native
     def __len__(self, /):
         return len(bytes(self))
 
@@ -544,7 +546,7 @@ class bytes:
     # an exact int i (an exact int, no Python code; the only error is
     # IndexError) for _BINARY_OP_SUBSCR_BYTES_INT (see pycore_pyspec.h).
     @c_name(mp_subscript="bytes_subscript", sq_item="bytes_item")
-    @c_implemented
+    @native
     def __getitem__(self, key, /):
         if hasattr(type(key), "__index__"):
             i = PyNumber_AsSsize_t(key, IndexError)
@@ -580,7 +582,7 @@ class bytes_iterator:
     # Exact ints in range(256) (immortal small ints); NULL without an
     # exception when exhausted (tp_iternext).
     @c_name("striter_next")
-    @c_implemented
+    @native
     def __next__(self, /):
         return exact(int)
 
@@ -631,14 +633,14 @@ def PyBytes_FromObject(x: object):
 def bytes_from_iterator(it: object, x: object):
     """The bytes of the ints (or objects with __index__) of iterator it,
     iter(x)."""
-    size = PyObject_LengthHint(x, 64)
+    size = PyObject_LengthHint_fast(x, 64)
     writer = bytes_appender_init(size)
     try:
         for item in it:
-            value = PyNumber_AsSsize_t(item, NULL)
+            value = PyNumber_AsSsize_t_fast(item, NULL)
             if value < 0 or value >= 256:
                 raise ValueError("bytes must be in range(0, 256)")
-            bytes_appender_append(writer, value)
+            bytes_appender_append_fast(writer, value)
         return bytes_appender_finish(writer)
     finally:
         bytes_appender_discard(writer)
@@ -646,18 +648,18 @@ def bytes_from_iterator(it: object, x: object):
 
 # ---------------------------------------------------------------------------
 # The C functions of bytesobject.c the bodies above call.  Each is
-# @c_implemented: its C is the authority; the body is its Python
+# @native: its C is the authority; the body is its Python
 # reference, run when the spec runs as Python and read for the facts of
-# the calls (see Objects/pyspec/README.rst).
+# the calls, never compiled (see Objects/pyspec/README.rst).
 
 
-@c_implemented
+@native
 def _PyBytes_FromSize(size: Py_ssize_t, use_calloc: int):
     """size bytes: null bytes with use_calloc, else not initialized."""
     return exact(bytes, bytes(size))
 
 
-@c_implemented
+@native
 def _PyBytes_FromBuffer(x: object):
     """A copy of the buffer of x (in C order)."""
     calls(x, "__buffer__")
@@ -665,7 +667,7 @@ def _PyBytes_FromBuffer(x: object):
     return exact(bytes, memoryview(x).tobytes())
 
 
-@c_implemented
+@native
 def _PyBytes_FromHex(string: object, use_bytearray: int):
     """The bytes (a bytearray with use_bytearray) of the hexadecimal
     numbers in str or buffer string."""
@@ -677,13 +679,13 @@ def _PyBytes_FromHex(string: object, use_bytearray: int):
     return exact(bytes, bytes.fromhex(string))
 
 
-@c_implemented
+@native
 def bytes_copy(b: object):
     """An exact bytes copy of b, a bytes (or bytes subclass) instance."""
     return exact(bytes, bytes(memoryview(b)))
 
 
-@c_implemented
+@native
 def bytes_subtype_new(type: 'PyTypeObject *', tmp: object):
     """An instance of type, a subtype of bytes, with the bytes of tmp."""
     return unknown(bytes.__new__(type, tmp))
@@ -695,25 +697,19 @@ def bytes_subtype_new(type: 'PyTypeObject *', tmp: object):
 # exception), and the local is passed by address.  Here, a namespace with
 # the bytes written and the room left models it.
 
-@c_implemented
+@native
 def bytes_appender_init(size: Py_ssize_t) -> 'bytes_appender':
     """An appender with room for size bytes."""
     return unknown(types.SimpleNamespace(data=bytearray(), room=size))
 
 
-@c_implemented
-def bytes_appender_append(appender: 'bytes_appender *',
-                          value: 'unsigned char') -> int:
-    """Append a byte, growing the buffer first when it is full."""
-    if appender.room:
-        return bytes_appender_append_unchecked(appender, value)
-    if len(appender.data) == PY_SSIZE_T_MAX:
-        raise MemoryError()
-    appender.room = len(appender.data) + 1
-    return bytes_appender_append_unchecked(appender, value)
+@native
+def bytes_appender_has_room(appender: 'const bytes_appender *') -> int:
+    """Whether the buffer has room for one more byte."""
+    return appender.room > 0
 
 
-@c_implemented
+@native
 def bytes_appender_append_unchecked(appender: 'bytes_appender *',
                                     value: 'unsigned char') -> None:
     """Append a byte to a buffer that has room for it."""
@@ -721,14 +717,37 @@ def bytes_appender_append_unchecked(appender: 'bytes_appender *',
     appender.room -= 1
 
 
-@c_implemented
+@native
+def bytes_appender_append(appender: 'bytes_appender *',
+                          value: 'unsigned char') -> int:
+    """Append a byte, growing the buffer first when it is full."""
+    if not bytes_appender_has_room(appender):
+        if len(appender.data) == PY_SSIZE_T_MAX:
+            raise MemoryError()
+        appender.room = len(appender.data) + 1
+    bytes_appender_append_unchecked(appender, value)
+    return 0
+
+
+@inline
+def bytes_appender_append_fast(appender: 'bytes_appender *',
+                               value: 'unsigned char') -> int:
+    """bytes_appender_append(), in place where the buffer has room.  A
+    loop over a sequence the buffer was sized for takes the first path
+    without its test (Capacity in libclinic/pyspec/partial_eval.py)."""
+    if bytes_appender_has_room(appender):
+        return bytes_appender_append_unchecked(appender, value)
+    return bytes_appender_append(appender, value)
+
+
+@native
 def bytes_appender_finish(appender: 'bytes_appender *'):
     """The bytes written.  The appender is left empty."""
     data, appender.data = appender.data, None
     return exact(bytes, bytes(data))
 
 
-@c_implemented
+@native
 def bytes_appender_discard(appender: 'bytes_appender *') -> None:
     """Release the buffer of the appender, if it has one."""
     appender.data = None

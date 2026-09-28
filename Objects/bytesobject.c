@@ -2588,21 +2588,11 @@ bytes_appender_grow(PyBytesWriter *writer, char *str, char *end)
     return c;
 }
 
-/* Return 0, or -1 with an exception set. */
+/* Whether the buffer has room for one more byte. */
 static inline Py_ALWAYS_INLINE int
-bytes_appender_append(bytes_appender *appender, unsigned char value)
+bytes_appender_has_room(const bytes_appender *appender)
 {
-    if (appender->str == appender->end) {
-        bytes_appender_cursor c = bytes_appender_grow(
-            appender->writer, appender->str, appender->end);
-        appender->str = c.str;
-        appender->end = c.end;
-        if (appender->str == NULL) {
-            return -1;
-        }
-    }
-    *appender->str++ = (char)value;
-    return 0;
+    return appender->str != appender->end;
 }
 
 /* Append a byte where the buffer is known to have room for it. */
@@ -2611,6 +2601,23 @@ bytes_appender_append_unchecked(bytes_appender *appender, unsigned char value)
 {
     assert(appender->str < appender->end);
     *appender->str++ = (char)value;
+}
+
+/* Return 0, or -1 with an exception set. */
+static inline Py_ALWAYS_INLINE int
+bytes_appender_append(bytes_appender *appender, unsigned char value)
+{
+    if (!bytes_appender_has_room(appender)) {
+        bytes_appender_cursor c = bytes_appender_grow(
+            appender->writer, appender->str, appender->end);
+        appender->str = c.str;
+        appender->end = c.end;
+        if (appender->str == NULL) {
+            return -1;
+        }
+    }
+    bytes_appender_append_unchecked(appender, value);
+    return 0;
 }
 
 /* The bytes written, or NULL with an exception set.  The appender is

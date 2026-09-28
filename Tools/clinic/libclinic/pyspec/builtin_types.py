@@ -178,7 +178,7 @@ class TypeFacts:
             params = other.params(full)
             env = {params[0]: tp} if params else {}
             analyzer = facts.analyzer(other)
-            if frontend.is_c_implemented(node):
+            if frontend.is_native(node):
                 found = analyzer.reference_facts(full, env)
             else:
                 residual = partial_eval.specialize(other, full, env)

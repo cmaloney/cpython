@@ -273,11 +273,21 @@ Level 3: spec bodies
 ''''''''''''''''''''
 
 *Needs:* a body in the subset of `README.rst <README.rst>`__ instead of
-``...``; every C function the body calls declared ``@c_implemented``,
+``...``; every C function the body calls declared ``@native``,
 with its Python reference, in the spec of its own C file; cases in
 ``foo_cases.py``; each new helper in ``HelperTest`` of
 ``test_pyspec_facts``.  Only ``object`` and ``str`` parameters (and
 ``NULL`` defaults) are accepted.
+
+A reference describes its C and nothing more: it is never compiled.
+When the body should not call a C function for some arguments (read a
+compact int inline, the size of an exact tuple), write that fast path
+as an ``@inline`` function in the spec of the C function, returning the
+C function's call last, and call it from the body
+(``PyNumber_AsSsize_t_fast``, ``PyObject_LengthHint_fast``).  Never
+give a reference an ``if`` its C does not have to steer the generated
+code; if the C needs the same fast path, build both from the same C
+pieces (``bytes_appender_has_room()``), and say so in the reference.
 
 *Gives:* the C impl is generated; for ``__new__`` also a vectorcall,
 per-arity and per-type entries and the tier-2 call table; the logic is
@@ -296,7 +306,13 @@ Checklist:
 
 - [ ] section 3's decision recorded in the PR (numbers, not adjectives);
 - [ ] cases cover each branch of the body, errors included;
-- [ ] each reference models the exceptions of its C, messages included.
+- [ ] each reference models the exceptions of its C, messages included;
+- [ ] each reference describes only its C: no path the C does not have,
+  no constant of one build (``sys.int_info.bits_per_digit``, not 30),
+  and the native functions it calls are the ones the C calls
+  (``c_calls``);
+- [ ] a fast path is an ``@inline`` function, measured with section 3
+  where it is taken and where its test runs for nothing.
 
 Level 4: facts for the specializer and the JIT
 ''''''''''''''''''''''''''''''''''''''''''''''
@@ -335,7 +351,7 @@ iterate over.  In ``foo_cases.py``:
   (``class T "..." "&T_Type"``);
 - [ ] ``CASES["T.__new__"]`` and ``CASES["T.meth"]`` have inputs for every
   call-table entry (``DirectCallTest`` fails on an entry none reaches);
-- [ ] ``HELPERS`` has inputs for every ``@c_implemented`` function, or it
+- [ ] ``HELPERS`` has inputs for every ``@native`` function, or it
   is in ``NOT_CALLABLE`` (static) or ``HELPER_CALLERS`` (hidden: its C
   entry point); an exported or header one also needs its row in
   ``pyspec_helpers`` of ``Modules/_testinternalcapi.c`` (its signature
@@ -415,7 +431,7 @@ When not to migrate a function's internals (level 3): when nothing in
 section 3 comes out positive.  In practice: a method whose call
 overhead is a small part of its cost (most ``bytes`` methods: 0 to 8 %,
 WS6); logic that needs ``Py_buffer``, a struct, pointer arithmetic or a
-loop over raw memory (it ends up in ``@c_implemented`` helpers, so the
+loop over raw memory (it ends up in ``@native`` helpers, so the
 C just moves); anything whose fact has no consumer.  Levels 1 and 2
 cost no speed and apply to any class without the features above; level
 3 only where it pays.
@@ -571,7 +587,7 @@ The candidate: two methods whose C is a type-dispatch shell around a
             return self
         return bytes_copy(self)
 
-with three ``@c_implemented`` helpers in C (``bytes_prefix_len``,
+with three ``@native`` helpers in C (``bytes_prefix_len``,
 ``bytes_suffix_len``, ``bytes_trim``).  The first attempt kept the
 parameter ``prefix: Py_buffer`` and clinic refused it (``parameter
 'prefix' needs an annotation from ['object', 'str']``), so the buffer
@@ -644,19 +660,29 @@ line.  The common ones:
     The signature or the body of a function clinic would generate is
     outside the lowered subset of README.rst: a converter other than
     ``object`` and ``str`` (take ``object`` and convert in a
-    ``@c_implemented`` helper, see the worked example: that changes the
+    ``@native`` helper, see the worked example: that changes the
     generated parser), a default other than ``NULL``, a keyword-only
     parameter, a statement or expression the table does not list
     (assign a call to a local before comparing it).  Or keep the C:
-    ``...``, or ``@c_implemented`` with the body as its reference.
+    ``...``, or ``@native`` with the body as its reference.
 ``unsupported ...`` (the same hint)
     A use the partial evaluation produced that the emitter cannot lower
-    yet, e.g. a fast path of a reference in another spec (reported
-    there).
+    yet, e.g. in the body of an ``@inline`` function of another spec
+    (reported there).
+``f(): 'x = ...' in an @inline function (lowered: fast paths ...)``
+    The body of an ``@inline`` function is ``if <test>: return
+    <value>`` statements, then ``return <value>``.
+``isinstance() is the builtin here, not the C's: import it ...``
+    Running as Python, the spec (or a spec it imports) calls the builtin
+    ``isinstance()`` or ``iter()``: import them from
+    ``libclinic.pyspec.runtime``.
+``imported spec ... not found: a spec imports another by its path from the source root``
+    Write ``from Objects.pyspec.abstract import ...``, not ``from
+    pyspec.abstract import ...``.
 ``m: use ... as the body of a function implemented in C, not pass``
     Write ``...``.
-``the body of a @c_implemented function is its Python reference``
-    Give the reference a body, or drop ``@c_implemented``.
+``the body of a @native function is its Python reference``
+    Give the reference a body, or drop ``@native``.
 ``'T.x' is an accessor in ...: its block starts with @getter or @setter``
     Write ``@getter`` (or ``@setter``) above ``T.x`` in the block.
 ``conflicting types for 'x_impl'`` (C compiler)
@@ -667,10 +693,13 @@ A difftest failure on an exception message
     The reference does not model the C's error: raise the same
     exception and message in the reference.
 ``calls f(), which may run Python code: account for it with runs_python()`` (``test_pyspec_catalog``)
-    The C of a ``@c_implemented`` helper calls ``f``.  If ``f`` can run
+    The C of a ``@native`` helper calls ``f``.  If ``f`` can run
     Python code, add ``calls(x, "__slot__")`` or ``runs_python()`` to
     the reference.  If it cannot (``memcmp``), add it to the audited
     ``NO_PYTHON`` set of ``disconnects.py``.
+``its reference calls f(), which its native code does not`` (``test_pyspec_catalog``)
+    The reference says the C calls ``f``; the C (or a function of its
+    file it calls) does not.  Correct whichever is wrong.
 ``New disconnects: fix them (or ... add these lines to ...)``
     Fix the docs or data file; add a baseline line only on purpose.
 ``Fixed disconnects: delete these lines``

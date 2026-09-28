@@ -5711,11 +5711,11 @@ class PyspecTest(PyspecTestBase):
                         return cls(result)
                     return result
 
-            @c_implemented
+            @native
             def bytes_copy(b: object):
                 return exact(bytes, bytes(b))
 
-            @c_implemented
+            @native
             def _PyBytes_FromHex(string: object, use_bytearray: int):
                 calls(string, "__buffer__")
                 return exact(bytes, bytes.fromhex(string))
@@ -5781,8 +5781,8 @@ class PyspecTest(PyspecTestBase):
                       "}\n"
                       "#endif /* defined(CONDITION) */\n", output)
 
-    def test_c_implemented(self):
-        # A @c_implemented function: C by hand, never generated.  Its
+    def test_native(self):
+        # A @native function: C by hand, never generated.  Its
         # annotations are C types; the error check of a call comes from
         # what its Python reference can do.
         spec = dedent("""
@@ -5795,20 +5795,20 @@ class PyspecTest(PyspecTestBase):
                         return pair(a, "__name__")
                     return a
 
-            @c_implemented
+            @native
             def PyErr_BadInternalCall() -> None:
                 raise SystemError("bad argument")
 
-            @c_implemented
+            @native
             def size_of(x: object) -> Py_ssize_t:
                 calls(x, "__len__")
                 return len(x)
 
-            @c_implemented
+            @native
             def at_most(n: Py_ssize_t, m: 'long') -> int:
                 return n <= m
 
-            @c_implemented
+            @native
             def pair(x: object, name: object):
                 if x is NULL:
                     return NULL
@@ -5829,16 +5829,16 @@ class PyspecTest(PyspecTestBase):
         # The facts of the call table come from the references too.
         self.assertIn("/* bytes(x): result type not known exactly; may run "
                       "Python code */", output)
-        self.check_error_c_implemented()
+        self.check_error_native()
 
-    def check_error_c_implemented(self):
+    def check_error_native(self):
         spec = dedent(self.SPEC) + dedent("""
-            @c_implemented
+            @native
             def f(x: object):
                 ...
         """)
         self.expect_failure(spec, self.BLOCK, "f: the body of a "
-                            "@c_implemented function is its Python "
+                            "@native function is its Python "
                             "reference")
 
     def test_missing_block(self):
@@ -6522,8 +6522,8 @@ class PyspecStubTest(PyspecTestBase):
             spec, self.block("bytes.meth\n"), "bytes.meth(): "
             "@critical_section is expressible, but not lowered to C yet; "
             'see "The lowered subset" in Objects/pyspec/README.rst; a '
-            "hand-written C function keeps this as its Python reference "
-            "with @c_implemented", 3)
+            "function implemented natively (in C) keeps this as its Python "
+            "reference with @native", 3)
         self.assertEqual(exc.kind, SpecErrorKind.NOT_LOWERED)
         # So is a syntax error.
         self.expect_located_failure("class bytes:\n  def f(self):\n"
@@ -6792,8 +6792,8 @@ class PyspecTypeTest(PyspecTestBase):
             class bytes:
                 @cname("bytes_r")
                 def __repr__(self, /): ...
-        """, "bytes.__repr__: a slot takes only @c_implemented and "
-             "@c_name and @coexist and @text_signature, not "
+        """, "bytes.__repr__: a slot takes only @c_name and "
+             "@coexist and @native and @text_signature, not "
              "@cname('bytes_r')")
         self.check_error("""
             class bytes:
@@ -6801,8 +6801,8 @@ class PyspecTypeTest(PyspecTestBase):
                 @permit_long_summary
                 @c_name(METH_NOARGS="f")
                 def meth(self, /): ...
-        """, "bytes.meth: a PyCFunction takes only @c_implemented and "
-             "@c_name and @classmethod and @coexist and @staticmethod and "
+        """, "bytes.meth: a PyCFunction takes only @c_name and "
+             "@classmethod and @coexist and @native and @staticmethod and "
              "@text_signature, not @permit_long_summary")
         # @classmethod is METH_CLASS.
         header = self.types_header("""
@@ -6858,7 +6858,7 @@ class PyspecTypeTest(PyspecTestBase):
                      "import tm'")
         self.check_error("""
             import transmogrify as tm
-        """, "import a spec as 'from stringlib.pyspec import "
+        """, "import a spec as 'from Objects.stringlib.pyspec import "
              "transmogrify'")
         self.check_error("""
             class bytes:
@@ -7765,12 +7765,12 @@ class PyspecLanguageTest(PyspecTestBase):
         """, self.blocks(stubs[0]), "bytes.nbytes(): an accessor with a "
                                     "body is expressible, but not lowered")
 
-    def test_c_implemented_method(self):
+    def test_native_method(self):
         # A clinic method whose C is written by hand, with a Python
         # reference in any Python and any signature: plain clinic output.
         self.check("""
             class bytes:
-                @c_implemented
+                @native
                 def meth(self, *args: tuple, sep: object = None):
                     '''Summary.'''
                     out = []
@@ -7896,7 +7896,7 @@ class PyspecLanguageTest(PyspecTestBase):
          "value 'x' (lowered: names, NULL, types, exceptions, bool and int "
          "constants)", 2),
         ("def __new__(cls, a: object, /):\n    return exact(bytes, a)",
-         "exact() outside the Python reference of a @c_implemented "
+         "exact() outside the Python reference of a @native "
          "function", 2),
         ("@staticmethod\ndef meth(a: object, /):\n    return a",
          "@staticmethod", 1),
@@ -7920,9 +7920,9 @@ class PyspecLanguageTest(PyspecTestBase):
                     spec, block,
                     f"bytes.{name}(): {what} is expressible, but not "
                     'lowered to C yet; see "The lowered subset" in '
-                    "Objects/pyspec/README.rst; a hand-written C function "
-                    "keeps this as its Python reference with "
-                    "@c_implemented", line + 1)
+                    "Objects/pyspec/README.rst; a function implemented "
+                    "natively (in C) keeps this as its Python reference "
+                    "with @native", line + 1)
                 self.assertEqual(exc.kind, SpecErrorKind.NOT_LOWERED)
 
     def test_all_not_lowered(self):
@@ -7947,7 +7947,7 @@ class PyspecLanguageTest(PyspecTestBase):
             spec = pyspec_frontend.Spec.load(path)
             for name, node in spec.functions.items():
                 with self.subTest(spec=path, function=name):
-                    if pyspec_frontend.is_c_implemented(node):
+                    if pyspec_frontend.is_native(node):
                         self.assertEqual(
                             pyspec_subset.analysed(spec, name), [])
                     elif spec.implemented(name):
@@ -7957,20 +7957,20 @@ class PyspecLanguageTest(PyspecTestBase):
     # -- facts: the worst case outside the subset -------------------------------
 
     REFERENCES = """
-        @c_implemented
+        @native
         def model(x: object):
             n = 0
             while n < 3:
                 n += 1
             return exact(bytes, bytes(n))
 
-        @c_implemented
+        @native
         def effect_in_loop(x: object):
             while x:
                 calls(x, "__len__")
             return exact(bytes, x)
 
-        @c_implemented
+        @native
         def nested_effect(x: object):
             return exact(bytes, unknown(x))
     """
@@ -8023,15 +8023,15 @@ class PyspecLanguageTest(PyspecTestBase):
     # -- errors -------------------------------------------------------------
 
     def test_error_in_the_spec_it_is_written_in(self):
-        # A fast path copied from another spec is reported there.
+        # An @inline function of another spec is reported there.
         other = os.path.join(self.tmp_dir, 'pyspec', 'other.py')
         with open(other, 'w', encoding='utf-8') as f:
             f.write(dedent("""\
-                @c_implemented
+                @inline
                 def helper(x: object):
                     if type(x) is bytes:
                         return x.upper()
-                    return unknown(x)
+                    return x
             """))
         spec = """
             from pyspec.other import helper
@@ -8046,7 +8046,7 @@ class PyspecLanguageTest(PyspecTestBase):
             self.generate(spec, PyspecTest.BLOCK)
         exc = cm.exception
         self.assertEqual((exc.filename, exc.lineno), (other, 4))
-        self.assertStartsWith(exc.message, "unsupported call a.upper()")
+        self.assertStartsWith(exc.message, "helper(): call x.upper() ")
         self.assertEqual(exc.kind, SpecErrorKind.NOT_LOWERED)
 
     def test_error_kinds(self):
@@ -8093,6 +8093,278 @@ class PyspecLanguageTest(PyspecTestBase):
         self.assertIn('libclinic.pyspec.frontend', modules)
         self.assertNotIn('libclinic.pyspec.emit', modules)
         self.assertNotIn('libclinic.pyspec.typeobj', modules)
+
+
+class PyspecNativeTest(PyspecTestBase):
+    """Native implementations (@native) and generated fast paths
+    (@inline): one source for every piece of code that runs.  The Python
+    reference of a native function only describes it (facts, the
+    difftest) and is never compiled; a fast path is an @inline spec
+    function, generated from its one definition into each caller; and the
+    checks catch a reference that disagrees with its native code."""
+
+    def generated(self, spec):
+        self.generate(spec, PyspecTest.BLOCK)
+        with open(self.output_path, encoding='utf-8') as f:
+            return f.read()
+
+    @staticmethod
+    def function(source, name):
+        """The C definition of *name* in *source*."""
+        start = source.index(f"\n{name}(")
+        return source[start:source.index("\n}\n", start)]
+
+    # -- a reference is never compiled ---------------------------------------
+
+    CALLER = """
+        class bytes:
+            def __new__(cls, a: object, /):
+                if type(a) is bytes:
+                    return helper(a)
+                return helper(a)
+
+        @native
+        def copy_exact(x: object):
+            return exact(bytes, bytes(x))
+    """
+
+    def test_reference_is_never_compiled(self):
+        # A leading "if <test>: return <value>" of a reference is not a
+        # fast path: where the caller knows the test holds, the generated
+        # code still calls the native function.
+        with_if = self.generated(self.CALLER + """
+        @native
+        def helper(x: object):
+            if type(x) is bytes:
+                return copy_exact(x)
+            return exact(bytes, bytes(x))
+        """)
+        bytes_entry = self.function(with_if, "foo_new_nargs1_bytes")
+        self.assertIn("return helper(a);", bytes_entry)
+        self.assertNotIn("copy_exact", with_if)
+        # Another reference with the same facts: the same C.
+        without_if = self.generated(self.CALLER + """
+        @native
+        def helper(x: object):
+            return exact(bytes, bytes(memoryview(x)))
+        """)
+        self.assertEqual(with_if, without_if)
+
+    # -- a fast path is generated from one definition -------------------------
+
+    INLINE = """
+        @native
+        def copy_exact(x: object):
+            return exact(bytes, bytes(x))
+
+        @native
+        def slow(x: object):
+            runs_python()
+            return unknown(bytes(x))
+
+        @inline
+        def fast(x: object):
+            if type(x) is bytes:
+                return copy_exact(x)
+            return slow(x)
+
+        def other(x: object):
+            y = fast(x)
+            return y
+
+        class bytes:
+            def __new__(cls, a: object, /):
+                return fast(a)
+    """
+
+    def test_inline_generated_into_each_caller(self):
+        out = self.generated(self.INLINE)
+        # Never a C function of its own.
+        self.assertNotRegex(out, r"\bfast\(")
+        # Each caller has its body, the tests the facts decide folded.
+        for name, arg in (("other", "x"), ("foo_new_nargs1", "a")):
+            with self.subTest(caller=name):
+                body = self.function(out, name)
+                self.assertIn(f"if (PyBytes_CheckExact({arg}))", body)
+                self.assertIn(f"copy_exact({arg})", body)
+                self.assertIn(f"slow({arg})", body)
+        body = self.function(out, "foo_new_nargs1_bytes")
+        self.assertIn("return copy_exact(a);", body)
+        self.assertNotIn("slow", body)
+        self.assertNotIn("PyBytes_CheckExact", body)
+        # Its facts are those of the path taken.
+        self.assertIn("/* bytes(bytes): result is exactly bytes; runs no "
+                      "Python code */", out)
+        # One definition: changing it changes every caller.
+        changed = self.generated(self.INLINE.replace(
+            "return copy_exact(x)", "return slow(x)"))
+        self.assertNotIn("copy_exact(", changed)
+        self.assertIn("return slow(a);",
+                      self.function(changed, "foo_new_nargs1_bytes"))
+
+    def test_inline_errors(self):
+        cases = [
+            ("@native\n@inline\ndef f(x: object):\n    return x\n",
+             "f: @native (a native function, its body only describes it) "
+             "and @inline (a body generated into its callers) exclude "
+             "each other"),
+            ("@inline\ndef f(x: object):\n    ...\n",
+             "f: an @inline function needs a body"),
+            ("class bytes:\n    @inline\n    def f(self, /):\n"
+             "        return self\n",
+             "bytes.f: only a top-level function can be @inline"),
+        ]
+        for spec, message in cases:
+            with self.subTest(spec=spec):
+                with self.assertRaises(SpecError) as cm:
+                    pyspec_frontend.Spec(spec)
+                self.assertStartsWith(cm.exception.message, message)
+        # A body that is not fast paths then a value: not lowered yet.
+        spec = pyspec_frontend.Spec(dedent("""
+            @inline
+            def f(x: object):
+                y = g(x)
+                return y
+        """))
+        with self.assertRaises(SpecError) as cm:
+            pyspec_subset.check_inline(spec, 'f')
+        self.assertEqual(cm.exception.kind, SpecErrorKind.NOT_LOWERED)
+        self.assertStartsWith(cm.exception.message, "f(): 'y = g(x)' in an "
+                              "@inline function (lowered: fast paths")
+
+    def test_tree_fast_paths(self):
+        # The fast paths of the tree are @inline, in the lowered subset;
+        # no native reference is read for code.
+        inline = []
+        for path, _ in spec_files():
+            spec = pyspec_frontend.Spec.load(path)
+            for name, node in spec.functions.items():
+                if pyspec_frontend.is_inline(node):
+                    inline.append(name)
+                    with self.subTest(spec=path, function=name):
+                        self.assertEqual(
+                            pyspec_subset.inline(spec, name), [])
+        self.assertIn('PyNumber_AsSsize_t_fast', inline)
+        # bytes(): PyNumber_AsSsize_t_fast() of Objects/pyspec/abstract.py
+        # is generated into each loop; in a loop over a tuple, or a list
+        # in its critical section, the buffer was sized for every item and
+        # the first path of bytes_appender_append_fast() is taken without
+        # its test.
+        path = os.path.join(pyspec_specfiles.srcdir(), 'Objects', 'clinic',
+                            'bytesobject_pyspec.c.h')
+        with open(path, encoding='utf-8') as f:
+            generated = f.read()
+        compact = ("(PyLong_CheckExact(item) || PyBool_Check(item)) "
+                   "&& _PyLong_IsCompact((const PyLongObject *)item)")
+        for name in ('bytes_from_iterator_tuple',
+                     'bytes_from_iterator_list_lock_held'):
+            with self.subTest(name):
+                body = self.function(generated, name)
+                self.assertIn(compact, body)
+                self.assertIn("bytes_appender_append_unchecked(&writer, "
+                              "value);", body)
+                self.assertNotIn("bytes_appender_has_room", body)
+        body = self.function(generated, 'bytes_from_iterator')
+        self.assertIn(compact, body)
+        self.assertIn("if (bytes_appender_has_room(&writer)) {", body)
+
+    # -- drift between a reference and its native code is caught ------------
+
+    def c_checker_disconnects(self, spec, c_code):
+        """The C checker (the c_calls ratchet) on a tree with the spec
+        Objects/pyspec/foo.py and the C file Objects/foo.c."""
+        from libclinic.pyspec import disconnects
+        root = os.path.join(self.tmp_dir, 'tree')
+        os.makedirs(os.path.join(root, 'Objects', 'pyspec'), exist_ok=True)
+        with open(os.path.join(root, 'Objects', 'pyspec', 'foo.py'), 'w',
+                  encoding='utf-8') as f:
+            f.write(dedent(spec))
+        with open(os.path.join(root, 'Objects', 'foo.c'), 'w',
+                  encoding='utf-8') as f:
+            f.write(dedent(c_code))
+        return disconnects.c_calls(root)
+
+    def test_drift_caught_by_the_c_checker(self):
+        spec = """
+            @native
+            def helper(x: object) -> int:
+                return 0
+
+            @native
+            def outer(x: object) -> int:
+                return helper(x)
+        """
+        agree = """
+            static int helper(PyObject *x) { return 0; }
+            static int outer(PyObject *x) { return helper(x); }
+        """
+        self.assertEqual(self.c_checker_disconnects(spec, agree), [])
+        # The C no longer calls what the reference says, and calls what may
+        # run Python code, which the reference does not say.
+        drifted = agree.replace("return helper(x);",
+                                "return PyObject_IsTrue(x);")
+        self.assertEqual(self.c_checker_disconnects(spec, drifted), [
+            'Objects/pyspec/foo.py: outer: calls PyObject_IsTrue(), which '
+            'may run Python code: account for it with runs_python()',
+            'Objects/pyspec/foo.py: outer: its reference calls helper(), '
+            'which its native code does not',
+            'Objects/pyspec/foo.py: outer: its reference cannot fail, but '
+            'the C calls PyObject_IsTrue',
+        ])
+
+    def test_compact_bound_follows_the_digit_size(self):
+        # HelperTest compares the reference of _PyLong_IsCompact() with the
+        # C at the bounds of both digit sizes; the reference takes the size
+        # of the interpreter, not a constant.
+        path = os.path.join(pyspec_specfiles.srcdir(), 'Include', 'cpython',
+                            'pyspec', 'longintrepr.py')
+        is_compact = pyspec_runtime.load(path)['_PyLong_IsCompact']
+        bits = sys.int_info.bits_per_digit
+        self.assertTrue(is_compact(2**bits - 1))
+        self.assertFalse(is_compact(2**bits))
+        other = 15 if bits == 30 else 30
+        fake = types.SimpleNamespace(
+            int_info=types.SimpleNamespace(bits_per_digit=other))
+        with support.swap_item(is_compact.__globals__, 'sys', fake):
+            self.assertTrue(is_compact(2**other - 1))
+            self.assertFalse(is_compact(2**other))
+
+    # -- the builtins the runtime shadows -------------------------------------
+
+    def test_shadowed_builtin_must_be_imported(self):
+        # isinstance() and iter() have their C meaning only when imported
+        # from the runtime; a spec that forgets it fails to load, instead
+        # of running the builtins in the difftest.
+        for name, use in (('isinstance', 'isinstance(x, bytes)'),
+                          ('iter', 'iter(x)')):
+            with self.subTest(name):
+                with open(self.spec_path, 'w', encoding='utf-8') as f:
+                    f.write(f"def f(x: object):\n    return {use}\n")
+                with self.assertRaises(SpecError) as cm:
+                    pyspec_runtime.load(self.spec_path)
+                self.assertEqual((cm.exception.filename,
+                                  cm.exception.lineno),
+                                 (self.spec_path, 2))
+                self.assertEqual(
+                    cm.exception.message,
+                    f"{name}() is the builtin here, not the C's: import it "
+                    f"with 'from libclinic.pyspec.runtime import {name}'")
+                with open(self.spec_path, 'w', encoding='utf-8') as f:
+                    f.write(f"from libclinic.pyspec.runtime import {name}\n"
+                            f"def f(x: object):\n    return {use}\n")
+                self.assertIn('f', pyspec_runtime.load(self.spec_path))
+        # So does a spec that imports one that forgets it.
+        other = os.path.join(self.tmp_dir, 'pyspec', 'other.py')
+        with open(other, 'w', encoding='utf-8') as f:
+            f.write("def g(x: object):\n    return iter(x)\n")
+        with open(self.spec_path, 'w', encoding='utf-8') as f:
+            f.write("from pyspec.other import g\n")
+        from test.support import import_helper
+        with import_helper.isolated_modules():
+            with self.assertRaises(SpecError) as cm:
+                pyspec_runtime.load(self.spec_path)
+        self.assertEqual((cm.exception.filename, cm.exception.lineno),
+                         (other, 2))
 
 
 class VectorcallFunctionalTest(unittest.TestCase):

@@ -10,13 +10,18 @@ A spec may contain any Python.  Only part of it is *wired up*:
   Its signature and its statements must be in the lowered subset;
   lowered() lists what is not, and check_lowered() reports the first as
   "expressible, but not lowered to C yet", before any partial evaluation;
-* the Python reference of a hand-written C function (``@c_implemented``)
-  is never lowered, but read for facts (facts.py): its control flow is
-  followed, and every effect (a call of a primitive or of a C function,
-  ``return``, ``raise``) must be where facts.py and partial_eval.py
-  follow it.  analysed() lists what is not; facts.py then gives the
-  function the worst facts (any result, may raise anything, may run
-  Python code) instead of reading the reference;
+* the body of an ``@inline`` function is lowered into each of its
+  callers: fast paths ``if <condition>: return <value>``, then
+  ``return <value>``, with the conditions and values of the lowered
+  subset; its signature is that of a native function (C types).
+  check_inline() reports what is not;
+* the Python reference of a native function (``@native``) is never
+  lowered, not even in part, but read for facts (facts.py): its control
+  flow is followed, and every effect (a call of a primitive or of a C
+  function, ``return``, ``raise``) must be where facts.py follows it.
+  analysed() lists what is not; facts.py then gives the function the
+  worst facts (any result, may raise anything, may run Python code)
+  instead of reading the reference;
 * anything else (a stub, ``...``) is C about which nothing is known.
 
 The checks are syntactic (with the names the spec defines): the emitter
@@ -189,7 +194,8 @@ class Lowered:
                 self.unsupported(value, f'assignment of {_text(value)} '
                                  '(lowered: of a call)')
             case ast.Expr(value=ast.Call() as call) \
-                    if self.spec.c_function(call) is not None:
+                    if (self.spec.c_function(call) is not None
+                        or self.spec.inline_function(call) is not None):
                 self.arguments(call)
             case ast.For(target=ast.Name(), iter=ast.Name(), body=body,
                          orelse=[]):
@@ -358,10 +364,12 @@ class Lowered:
 
     def call(self, call: ast.Call) -> None:
         """A call whose result is used: of a hand-written C function, of
-        another spec function (``f(...)``, ``T.meth(...)``), iter() or
-        len(), or of a local object or type (``f()``, ``cls(x)``)."""
+        an @inline function, of another spec function (``f(...)``,
+        ``T.meth(...)``), iter() or len(), or of a local object or type
+        (``f()``, ``cls(x)``)."""
         func = call.func
-        if self.spec.c_function(call) is not None:
+        if (self.spec.c_function(call) is not None
+                or self.spec.inline_function(call) is not None):
             self.arguments(call)
         elif self.spec.call_target(func) is not None:
             self.arguments(call, strings=False)
@@ -374,12 +382,57 @@ class Lowered:
             self.arguments(call, strings=False)
         elif (isinstance(func, ast.Name) and func.id in PRIMITIVES):
             self.unsupported(call, f'{func.id}() outside the Python '
-                             'reference of a @c_implemented function')
+                             'reference of a @native function')
         else:
             self.unsupported(call, f'call {_text(call)} (lowered: of C '
                              'functions, spec functions, iter(), len(), '
                              'and of local objects with at most one '
                              'argument)')
+
+
+class Inline(Lowered):
+    """The body of an @inline function, which partial_eval.py generates
+    into each caller: fast paths ``if <condition>: return <value>``, then
+    ``return <value>``; a value is a call (Lowered.call()) or an operand
+    (Lowered.value()).  Its signature is that of a native function: any
+    C types (frontend.c_signature()), positional parameters without
+    defaults."""
+
+    def signature(self) -> None:
+        from .frontend import c_signature
+        args = self.node.args
+        if args.vararg:
+            self.unsupported(args.vararg, f'*{args.vararg.arg}')
+        for arg in args.kwonlyargs:
+            self.unsupported(arg, f'keyword-only parameter {arg.arg!r}')
+        if args.kwarg:
+            self.unsupported(args.kwarg, f'**{args.kwarg.arg}')
+        for default in args.defaults:
+            self.unsupported(default, f'default {_text(default)} (an '
+                             '@inline function has none)')
+        c_signature(self.node)      # a SpecError if not C types
+
+    def statements(self, stmts: list[ast.stmt]) -> None:
+        for i, stmt in enumerate(stmts):
+            last = i == len(stmts) - 1
+            match stmt:
+                case ast.If(test=test, body=[ast.Return(value=value)],
+                            orelse=[]) if not last and value is not None:
+                    self.condition(test)
+                    self.result(value)
+                case ast.Return(value=value) if last and value is not None:
+                    self.result(value)
+                case _:
+                    self.unsupported(stmt, f'{_text(stmt)!r} in an @inline '
+                                     'function (lowered: fast paths "if '
+                                     '<condition>: return <value>", then '
+                                     '"return <value>")')
+
+    def result(self, value: ast.expr) -> None:
+        if isinstance(value, ast.Call):
+            self.call(value)
+        else:
+            self.value(value)
 
 
 def _kind(stmt: ast.stmt) -> str:
@@ -408,7 +461,7 @@ def _type_objects() -> dict[str, str]:
 # -- the Python reference of a C function ---------------------------------------
 
 class Analysed:
-    """What facts.py follows in the Python reference of a @c_implemented
+    """What facts.py follows in the Python reference of a @native
     function: control flow of the lowered subset, with every effect where
     facts.py accounts for it; any other code is a model of the values the
     C computes (facts.py: it has no effects), and must have none.
@@ -437,6 +490,7 @@ class Analysed:
                 # (``T.meth(...)`` in a reference is the builtin's: a
                 # model, see runtime.load().)
                 return (self.spec.c_function(call) is not None
+                        or self.spec.inline_function(call) is not None
                         or self.spec.call_target(call.func) is not None)
         return False
 
@@ -511,6 +565,8 @@ _lowered_cache: weakref.WeakKeyDictionary[Spec, dict[str, list[Unsupported]]]
 _lowered_cache = weakref.WeakKeyDictionary()
 _analysed_cache: weakref.WeakKeyDictionary[Spec, dict[str, list[Unsupported]]]
 _analysed_cache = weakref.WeakKeyDictionary()
+_inline_cache: weakref.WeakKeyDictionary[Spec, dict[str, list[Unsupported]]]
+_inline_cache = weakref.WeakKeyDictionary()
 
 
 def lowered(spec: Spec, name: str) -> list[Unsupported]:
@@ -523,7 +579,7 @@ def lowered(spec: Spec, name: str) -> list[Unsupported]:
 
 
 def analysed(spec: Spec, name: str) -> list[Unsupported]:
-    """What of the Python reference of @c_implemented function *name*
+    """What of the Python reference of @native function *name*
     facts.py cannot follow, in order: if anything, its facts are the
     worst."""
     cache = _analysed_cache.setdefault(spec, {})
@@ -536,6 +592,25 @@ def check_lowered(spec: Spec, name: str) -> None:
     """Raise a SpecError (NOT_LOWERED) at the first construct of spec
     function *name* outside the lowered subset."""
     found = lowered(spec, name)
+    if found:
+        node, what = found[0]
+        raise spec.error(node, f"{name}(): {what} is expressible, but not "
+                         "lowered to C yet", SpecErrorKind.NOT_LOWERED)
+
+
+def inline(spec: Spec, name: str) -> list[Unsupported]:
+    """What of @inline function *name* (its signature and body) is outside
+    the lowered subset, in order."""
+    cache = _inline_cache.setdefault(spec, {})
+    if name not in cache:
+        cache[name] = Inline(spec, name).check()
+    return cache[name]
+
+
+def check_inline(spec: Spec, name: str) -> None:
+    """Raise a SpecError (NOT_LOWERED) at the first construct of @inline
+    function *name* outside the lowered subset."""
+    found = inline(spec, name)
     if found:
         node, what = found[0]
         raise spec.error(node, f"{name}(): {what} is expressible, but not "

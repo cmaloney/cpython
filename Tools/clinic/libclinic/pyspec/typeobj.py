@@ -44,9 +44,9 @@ SUBTABLE_ORDER = ['as_async', 'as_number', 'as_sequence', 'as_mapping',
 
 # The decorators a method implemented in C by hand may have, by kind.
 C_DECORATORS = {
-    'slot': {'c_name', 'c_implemented', 'coexist', 'text_signature'},
+    'slot': {'c_name', 'native', 'coexist', 'text_signature'},
     'PyCFunction': {'c_name', 'classmethod', 'staticmethod', 'coexist',
-                    'text_signature', 'c_implemented'},
+                    'text_signature', 'native'},
 }
 
 
@@ -95,12 +95,12 @@ def _c_string(text: str) -> str:
 def _c_stub(spec: frontend.Spec, name: str, kind: str) -> ast.FunctionDef:
     """The def of a method implemented in C by hand, with the fixed C
     signature of its *kind* (a slot or a PyCFunction): a body of ``...``,
-    or its Python reference with @c_implemented."""
+    or its Python reference with @native."""
     node = spec.functions[name]
-    if not (frontend.is_stub(node) or frontend.is_c_implemented(node)):
+    if not (frontend.is_stub(node) or frontend.is_native(node)):
         raise spec.error(node, f"{name} is a {kind} implemented in C: its "
                          "body is ..., or its Python reference with "
-                         "@c_implemented")
+                         "@native")
     for decorator in node.decorator_list:
         if frontend.decorator_name(decorator) not in C_DECORATORS[kind]:
             allowed = ' and '.join(f'@{d}' for d in

@@ -18,7 +18,7 @@ type:
   and by calling the entry in the debug-build tripwire
   (_testinternalcapi.pyspec_no_python()).
 * HelperTest calls the hand-written C functions the specs call
-  (@c_implemented, HELPERS) directly, compares them with their Python
+  (@native, HELPERS) directly, compares them with their Python
   references, and checks the facts derived from the references the same
   way.
 * SlotFactsTest checks the slot facts that specialized uops use
@@ -335,11 +335,11 @@ NO_NULL = object()
 
 @functools.cache
 def helpers():
-    """{C function: SpecInfo of its spec} of every @c_implemented function
+    """{C function: SpecInfo of its spec} of every @native function
     of the specs."""
     defined = {}
     for info in specs():
-        for name in info.spec.c_implemented_functions():
+        for name in info.spec.native_functions():
             defined[name] = info
     return defined
 
@@ -354,7 +354,7 @@ def c_shape(node):
 
 
 class HelperTest(unittest.TestCase):
-    """Every hand-written C function a spec calls (@c_implemented) that
+    """Every hand-written C function a spec calls (@native) that
     can be called from Python, called directly with the HELPERS of its
     spec's cases: the same outcome as its Python reference, and the facts
     derived from the reference for the exact types of the arguments hold

@@ -9,10 +9,14 @@ uses:
 
 * builtins with a fixed C meaning: ``NULL``, ``isinstance`` (the real
   type), ``iter`` (PyObject_GetIter()), ``tp_name`` and ``fqname`` (type
-  names in error messages);
+  names in error messages).  Clinic gives ``isinstance`` and ``iter`` their
+  C meaning by name, so a spec that calls them without importing them
+  from here would run the builtins as Python: load() refuses it
+  (SHADOWED_BUILTINS);
 * the Argument Clinic decorators, and ``@c_name`` (frontend.py,
   typeobj.py): identity decorators for Python;
-* ``@c_implemented`` and a few primitives that say what plain Python
+* ``@inline``: a function generated into each caller (a fast path);
+* ``@native`` and a few primitives that say what plain Python
   cannot, placed where the effect happens, so that the control flow
   around them gives their conditions (see Objects/pyspec/README.rst):
 
@@ -41,8 +45,12 @@ _F = TypeVar('_F', bound=Callable[..., Any])
 
 __all__ = [
     'NULL', 'PY_SSIZE_T_MAX', 'isinstance', 'iter', 'tp_name', 'fqname',
-    'c_implemented', 'exact', 'unknown', 'calls', 'runs_python',
+    'native', 'inline', 'exact', 'unknown', 'calls', 'runs_python',
 ]
+
+# The builtins this module redefines with their C meaning: a spec that
+# uses one must import it from here (check_shadowed_builtins()).
+SHADOWED_BUILTINS = ('isinstance', 'iter')
 
 
 class _Null:
@@ -91,11 +99,18 @@ def c_name(*args: str, **kwargs: str) -> Callable[[_F], _F]:
     return lambda func: func
 
 
-def c_implemented(func: _F) -> _F:
-    """The C function of the same name is written by hand and is the
-    authority; the body is its Python reference: run when the spec runs
-    as Python, and read for the facts of its calls.  It is never lowered
-    to C."""
+def native(func: _F) -> _F:
+    """The function of the same name is implemented natively (in C, by
+    hand) and is the authority; the body is its Python reference: run
+    when the spec runs as Python, and read for the facts of its calls.
+    It describes the native code and is never compiled, not even in
+    part."""
+    return func
+
+
+def inline(func: _F) -> _F:
+    """The body is generated into each caller (a fast path of a native
+    function, say), never as a C function of its own."""
     return func
 
 
@@ -164,6 +179,31 @@ def fqname(tp: type) -> str:
     return f'{tp.__module__}.{tp.__qualname__}'
 
 
+# The imported specs check_shadowed_builtins() accepted.
+_checked: set[str] = set()
+
+
+def check_shadowed_builtins(tree: ast.Module, path: str) -> None:
+    """Raise a SpecError at the first use of a SHADOWED_BUILTINS name that
+    the spec *tree* does not import from this module: run as Python, it
+    would be the builtin, whose meaning is not the C's (isinstance()
+    honours __class__; a for loop over the builtin iter() calls __iter__
+    of the iterator), and the difftest would compare the wrong thing."""
+    from libclinic.errors import SpecError
+    imported = {alias.name for node in tree.body
+                if builtins.isinstance(node, ast.ImportFrom)
+                and node.module == __name__
+                for alias in node.names
+                if alias.asname in (None, alias.name)}
+    for node in ast.walk(tree):
+        if (builtins.isinstance(node, ast.Name)
+                and node.id in SHADOWED_BUILTINS
+                and node.id not in imported):
+            raise SpecError(f"{node.id}() is the builtin here, not the C's: "
+                            f"import it with 'from {__name__} import "
+                            f"{node.id}'", filename=path, lineno=node.lineno)
+
+
 def load(path: str) -> dict[str, Callable[..., Any]]:
     """Execute the spec at *path*; return its functions and methods.
 
@@ -172,17 +212,19 @@ def load(path: str) -> dict[str, Callable[..., Any]]:
     the spec has run, the global T is the builtin again: bodies compare
     with the real type.  Calls ``T.m(...)`` of spec methods call the spec
     method, as in the generated C (except in the Python reference of a
-    @c_implemented function, which uses the builtin).  The specs it
-    imports (``from pyspec.abstract import PyNumber_AsSsize_t``) are found
-    relative to the directory of the C file, or to the source root
-    (frontend.py).
+    @native function, which uses the builtin).  The specs it
+    imports (``from Objects.pyspec.abstract import PyNumber_AsSsize_t``)
+    are found from the source root (specfiles.import_root()).  The spec,
+    and every spec it imports, must import the SHADOWED_BUILTINS it uses
+    from this module (a SpecError otherwise).
     """
+    from . import specfiles
     with open(path, encoding='utf-8') as f:
         tree = ast.parse(f.read(), path)
+    check_shadowed_builtins(tree, path)
     classes = {node.name for node in tree.body
                if builtins.isinstance(node, ast.ClassDef)}
-    base = os.path.dirname(os.path.dirname(os.path.abspath(path)))
-    bases = [base, os.path.dirname(base)]
+    bases = [specfiles.import_root(path)]
 
     class SpecCalls(ast.NodeTransformer):
         def visit_ClassDef(self, node: ast.ClassDef) -> ast.ClassDef:
@@ -198,7 +240,7 @@ def load(path: str) -> dict[str, Callable[..., Any]]:
             # The Python reference of a C function models it with the
             # builtins.
             if any(builtins.isinstance(d, ast.Name)
-                   and d.id == 'c_implemented'
+                   and d.id == 'native'
                    for d in node.decorator_list):
                 return node
             return self.generic_visit(node)
@@ -223,6 +265,16 @@ def load(path: str) -> dict[str, Callable[..., Any]]:
     finally:
         for entry in bases:
             sys.path.remove(entry)
+    # The specs it imported, which the import system ran.
+    for name, imported in list(sys.modules.items()):
+        spec_path = getattr(imported, '__file__', None)
+        if (spec_path and 'pyspec' in name.split('.')
+                and not name.startswith('libclinic.')
+                and spec_path not in _checked):
+            with open(spec_path, encoding='utf-8') as f:
+                check_shadowed_builtins(ast.parse(f.read(), spec_path),
+                                        spec_path)
+            _checked.add(spec_path)
     functions: dict[str, Any] = {}
     for node in tree.body:
         if builtins.isinstance(node, ast.FunctionDef):

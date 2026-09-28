@@ -139,9 +139,19 @@ bytes_from_iterator(PyObject *it, PyObject *x)
     PyObject *item = NULL;
     Py_ssize_t value;
 
-    size = PyObject_LengthHint(x, 64);
-    if (size == -1 && PyErr_Occurred()) {
-        return NULL;
+    if (PyList_CheckExact(x)) {
+        size = PyList_GET_SIZE(x);
+    }
+    else {
+        if (PyTuple_CheckExact(x)) {
+            size = PyTuple_GET_SIZE(x);
+        }
+        else {
+            size = PyObject_LengthHint(x, 64);
+            if (size == -1 && PyErr_Occurred()) {
+                return NULL;
+            }
+        }
     }
     if (bytes_appender_init(&writer, size) < 0) {
         return NULL;
@@ -172,9 +182,14 @@ bytes_from_iterator(PyObject *it, PyObject *x)
             bytes_appender_discard(&writer);
             return NULL;
         }
-        if (bytes_appender_append(&writer, value) < 0) {
-            bytes_appender_discard(&writer);
-            return NULL;
+        if (bytes_appender_has_room(&writer)) {
+            bytes_appender_append_unchecked(&writer, value);
+        }
+        else {
+            if (bytes_appender_append(&writer, value) < 0) {
+                bytes_appender_discard(&writer);
+                return NULL;
+            }
         }
     }
     {
@@ -204,10 +219,13 @@ bytes_new_nargs0(void)
  * if isinstance(source, str):
  *     raise TypeError('string argument without an encoding')
  * if hasattr(type(source), '__index__'):
- *     try:
- *         size = PyNumber_AsSsize_t(source, OverflowError)
- *     except TypeError:
- *         return PyBytes_FromObject(source)
+ *     if (type(source) is int or type(source) is bool) and _PyLong_IsCompact(source):
+ *         size = _PyLong_CompactValue(source)
+ *     else:
+ *         try:
+ *             size = PyNumber_AsSsize_t(source, OverflowError)
+ *         except TypeError:
+ *             return PyBytes_FromObject(source)
  *     if size < 0:
  *         raise ValueError('negative count')
  *     return _PyBytes_FromSize(size, True)
@@ -262,14 +280,19 @@ bytes_new_nargs1(PyObject *source)
         return NULL;
     }
     if (_PyIndex_Check(source)) {
-        size = PyNumber_AsSsize_t(source, PyExc_OverflowError);
-        if (size == -1 && PyErr_Occurred()) {
-            if (PyErr_ExceptionMatches(PyExc_TypeError)) {
-                PyErr_Clear();
-                return PyBytes_FromObject(source);
-            }
-            else {
-                return NULL;
+        if ((PyLong_CheckExact(source) || PyBool_Check(source)) && _PyLong_IsCompact((const PyLongObject *)source)) {
+            size = _PyLong_CompactValue((const PyLongObject *)source);
+        }
+        else {
+            size = PyNumber_AsSsize_t(source, PyExc_OverflowError);
+            if (size == -1 && PyErr_Occurred()) {
+                if (PyErr_ExceptionMatches(PyExc_TypeError)) {
+                    PyErr_Clear();
+                    return PyBytes_FromObject(source);
+                }
+                else {
+                    return NULL;
+                }
             }
         }
         if (size < 0) {

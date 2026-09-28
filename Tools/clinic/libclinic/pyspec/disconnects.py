@@ -19,11 +19,13 @@ slots       The slot tables of Doc/c-api/typeobj.rst vs slotdefs[] in
 docstrings  The same docstring written by hand in two places.
 typeshed    Optional: typeshed's stdlib/builtins.pyi vs the signatures of
             the spec (the runtime's for methods without a spec).
-c_calls     The C of each @c_implemented function vs its Python reference:
-            every call that may run Python code (by the token-level escape
-            analysis of Tools/cases_generator/analyzer.py) is accounted for
-            by the reference: a call of the same function, a calls() of
-            the special method it invokes, or runs_python().
+c_calls     The C of each @native function vs its Python reference (the
+            C checker of native_calls()): every call that may run Python
+            code (by the token-level escape analysis of
+            Tools/cases_generator/analyzer.py) is accounted for by the
+            reference: a call of the same function, a calls() of the
+            special method it invokes, or runs_python(); and the C calls
+            the native functions the reference calls.
 
 Signatures are compared by shape: the kind and optionality of each
 parameter, its name unless it is positional-only, and its default when
@@ -752,7 +754,41 @@ def typeshed(srcdir, typeshed_dir):
 
 
 # ---------------------------------------------------------------------------
-# Dimension: the C of the @c_implemented functions
+# Dimension: the native code of the @native functions
+#
+# A @native function is implemented natively in the file its spec
+# describes (Objects/foo.c for Objects/pyspec/foo.py), and its Python
+# reference describes that code.  The checker of the file's language
+# reads the native code (NATIVE_CHECKERS, by the file's extension; the
+# C checker today).  A checker provides (see NativeChecker):
+#
+#   function(name)        the code of the function *name* of the file,
+#                         or None;
+#   calls(code)           the names of the functions *code* calls;
+#   escaping_calls(code)  those of them that may run Python code, by an
+#                         analysis of the language, a call through a slot
+#                         by the slot's name (tp_iternext);
+#   runs_no_python(name)  whether a call of *name* was audited to run no
+#                         Python code (NO_PYTHON);
+#   special_method(name)  the special method whose Python code the call
+#                         of *name* runs, if that is the only Python code
+#                         it runs (SLOT_CALLS, slotdefs[]).
+#
+# native_calls() then checks every language the same way: each escaping
+# call is accounted for by the reference (a call of the same function, a
+# calls(x, "__name__") of the special method it runs, runs_python()), or
+# calls a @native function whose reference runs no Python code, or a
+# function of the file, read in turn; a reference that cannot fail has
+# no escaping call; and each native function the reference calls is
+# called by the native code.
+#
+# A Rust checker would read Objects/foo.rs: function() finds ``fn name``
+# (a tokenizer like the cases generator's lexer), calls() lists the calls
+# by path, escaping_calls() those not audited to run no Python code (its
+# NO_PYTHON: the C API functions it binds and Rust functions that call
+# none), and special_method() maps the C API calls that run one special
+# method (PyObject_GetIter...), as for C.  Its dimension would be a ratchet
+# of its own (rust_calls, next to c_calls).
 
 # C functions that run Python code only through a special method of an
 # argument: the calls(x, "__name__") that accounts for them.  A call
@@ -784,6 +820,28 @@ NO_PYTHON = {
 }
 
 
+class NativeChecker:
+    """Reads the native code of one file (see the comment above)."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+
+    def function(self, name: str) -> object | None:
+        raise NotImplementedError
+
+    def calls(self, code: object) -> set[str]:
+        raise NotImplementedError
+
+    def escaping_calls(self, code: object) -> set[str]:
+        raise NotImplementedError
+
+    def runs_no_python(self, name: str) -> bool:
+        raise NotImplementedError
+
+    def special_method(self, name: str) -> set[str]:
+        raise NotImplementedError
+
+
 # Comments, literals and preprocessor lines, blanked before lexing (the
 # lexer of the cases generator does not know them all, and a macro body is
 # not code).
@@ -796,68 +854,110 @@ def _blank(match):
     return '0' + '\n' * match.group().count('\n')
 
 
-def _c_function(lexer, text, name):
-    """The tokens of the body of the C function *name* in *text*, or
-    None."""
-    # Its name, after its return type (on this line or the one before),
-    # then its parameters and ``{``.
-    for match in re.finditer(rf'^[^;{{}}()=\n]*?\b{name}\(', text, re.M):
-        parens, depth, body = 0, 0, []
-        for tkn in lexer.tokenize(text[match.end() - len(name) - 1:]):
-            if not body and parens == 0 and tkn.kind not in (
-                    'IDENTIFIER', 'LPAREN', 'LBRACE'):
-                break           # a declaration or a call
-            parens += {'LPAREN': 1, 'RPAREN': -1}.get(tkn.kind, 0)
-            depth += {'LBRACE': 1, 'RBRACE': -1}.get(tkn.kind, 0)
-            if depth or body:
-                body.append(tkn)
-            if body and not depth:
-                return body
-    return None
-
-
 # A macro-style name (PyBytes_AS_STRING, Py_SET_SIZE, _PyBytes_CAST): an
 # accessor, or the release of a reference (Py_DECREF): the functions
 # checked release only references they made or whose object their caller
 # keeps alive, so no finalizer runs.
 _ACCESSOR = re.compile(r'_?[A-Za-z]+_[A-Z0-9_]+')
 
+_C_KEYWORDS = {'if', 'while', 'for', 'switch', 'return', 'sizeof',
+               'defined', '_Alignof', 'alignof'}
 
-def _escaping_calls(analyzer, parsing, body, slot_fields):
-    """The calls the token-level escape analysis of the cases generator
-    (analyzer.escaping_call_in_simple_stmt()) reports in *body*: the names
-    called, with a call through a slot as the slot."""
-    aliases = {}
-    for i, tkn in enumerate(body[:-3]):
-        # x = ... ->slot ...; : a local set from a slot.
-        if tkn.kind == 'IDENTIFIER' and body[i + 1].kind == 'EQUALS':
-            for j in range(i + 2, len(body) - 1):
-                if body[j].kind == 'SEMI':
-                    break
-                if (body[j].kind == 'ARROW'
-                        and body[j + 1].text in slot_fields):
-                    aliases[tkn.text] = body[j + 1].text
-    names = set()
-    skip = 0            # the end of an assert(...): a check, not code
-    for i, (tkn, after) in enumerate(zip(body, body[1:])):
-        if i < skip:
-            continue
-        if tkn.text == 'assert':
-            depth = 0
-            for skip in range(i + 1, len(body)):
-                depth += {'LPAREN': 1, 'RPAREN': -1}.get(body[skip].kind, 0)
-                if depth == 0:
-                    break
-            continue
-        if (tkn.kind != 'IDENTIFIER' or after.kind != 'LPAREN'
-                or _ACCESSOR.fullmatch(tkn.text)):
-            continue
-        found = {}
-        analyzer.escaping_call_in_simple_stmt(
-            parsing.SimpleStmt([tkn, after]), found)
-        if found:
-            names.add(aliases.get(tkn.text, tkn.text))
-    return names
+
+class CChecker(NativeChecker):
+    """The checker of a C file (or header): the token-level escape
+    analysis of the cases generator (Tools/cases_generator/analyzer.py,
+    escaping_call_in_simple_stmt()) on the tokens of its lexer."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(path)
+        tools = os.path.join(specfiles.srcdir(), 'Tools', 'cases_generator')
+        sys.path.insert(0, tools)
+        try:
+            import analyzer, lexer, parsing
+        finally:
+            sys.path.remove(tools)
+        self.analyzer, self.lexer, self.parsing = analyzer, lexer, parsing
+        with open(path, encoding='utf-8') as f:
+            self.text = _LITERALS.sub(_blank, f.read())
+        self.dunders: dict[str, set[str]] = {}
+        from . import slots
+        for slotdef in slots.slotdefs():
+            self.dunders.setdefault(slotdef.slot, set()).add(slotdef.name)
+        self.dunders['tp_descr_get'] = {'__get__'}
+
+    def function(self, name):
+        """The tokens of the body of the C function *name*, or None."""
+        # Its name, after its return type (on this line or the one before),
+        # then its parameters and ``{``.
+        text = self.text
+        for match in re.finditer(rf'^[^;{{}}()=\n]*?\b{name}\(', text,
+                                 re.M):
+            parens, depth, body = 0, 0, []
+            for tkn in self.lexer.tokenize(text[match.end() - len(name)
+                                                - 1:]):
+                if not body and parens == 0 and tkn.kind not in (
+                        'IDENTIFIER', 'LPAREN', 'LBRACE'):
+                    break           # a declaration or a call
+                parens += {'LPAREN': 1, 'RPAREN': -1}.get(tkn.kind, 0)
+                depth += {'LBRACE': 1, 'RBRACE': -1}.get(tkn.kind, 0)
+                if depth or body:
+                    body.append(tkn)
+                if body and not depth:
+                    return body
+        return None
+
+    def calls(self, code):
+        return {tkn.text for tkn, after in zip(code, code[1:])
+                if tkn.kind == 'IDENTIFIER' and after.kind == 'LPAREN'
+                and tkn.text not in _C_KEYWORDS}
+
+    def escaping_calls(self, code):
+        """The calls the escape analysis reports in *code*: the names
+        called, with a call through a slot as the slot."""
+        body = code
+        aliases = {}
+        for i, tkn in enumerate(body[:-3]):
+            # x = ... ->slot ...; : a local set from a slot.
+            if tkn.kind == 'IDENTIFIER' and body[i + 1].kind == 'EQUALS':
+                for j in range(i + 2, len(body) - 1):
+                    if body[j].kind == 'SEMI':
+                        break
+                    if (body[j].kind == 'ARROW'
+                            and body[j + 1].text in self.dunders):
+                        aliases[tkn.text] = body[j + 1].text
+        names = set()
+        skip = 0            # the end of an assert(...): a check, not code
+        for i, (tkn, after) in enumerate(zip(body, body[1:])):
+            if i < skip:
+                continue
+            if tkn.text == 'assert':
+                depth = 0
+                for skip in range(i + 1, len(body)):
+                    depth += {'LPAREN': 1, 'RPAREN': -1}.get(
+                        body[skip].kind, 0)
+                    if depth == 0:
+                        break
+                continue
+            if (tkn.kind != 'IDENTIFIER' or after.kind != 'LPAREN'
+                    or _ACCESSOR.fullmatch(tkn.text)):
+                continue
+            found = {}
+            self.analyzer.escaping_call_in_simple_stmt(
+                self.parsing.SimpleStmt([tkn, after]), found)
+            if found:
+                names.add(aliases.get(tkn.text, tkn.text))
+        return names
+
+    def runs_no_python(self, name):
+        return name in NO_PYTHON
+
+    def special_method(self, name):
+        return self.dunders.get(name, {SLOT_CALLS.get(name)}) - {None}
+
+
+# The checker of each language, by the extension of the native file.
+NATIVE_CHECKERS = {'.c': CChecker, '.h': CChecker}
 
 
 def _spec_files(srcdir):
@@ -867,93 +967,120 @@ def _spec_files(srcdir):
             if not path.endswith('_cases.py'))
 
 
-def c_calls(srcdir):
-    """For each @c_implemented function: every call in its C (and in the
-    functions of its file it calls) that may run Python code is one its
-    Python reference makes, a calls(x, "__name__") of the special method
-    it invokes, or covered by runs_python()."""
-    sys.path.insert(0, os.path.join(srcdir, 'Tools', 'cases_generator'))
-    try:
-        import analyzer, lexer, parsing
-    finally:
-        del sys.path[0]
-    from . import facts, slots
-    dunders = {}
-    for slotdef in slots.slotdefs():
-        dunders.setdefault(slotdef.slot, set()).add(slotdef.name)
-    dunders['tp_descr_get'] = {'__get__'}
+def native_calls(srcdir, extensions):
+    """The disconnects of the @native functions whose native file (the
+    file their spec describes) has one of *extensions*, by the checker of
+    NATIVE_CHECKERS for its language (see the comment above)."""
+    from . import facts
     specs = [frontend.Spec.load(path) for path in _spec_files(srcdir)]
-    implemented = {name for spec in specs
-                   for name in spec.c_implemented_functions()}
+    native = {name for spec in specs for name in spec.native_functions()}
     out = []
     for spec in specs:
         rel = os.path.relpath(spec.filename, srcdir).replace(os.sep, '/')
         # Objects/pyspec/foo.py describes Objects/foo.c (or foo.h).
         base = rel.replace('/pyspec/', '/').removesuffix('.py')
-        cfile = next((base + ext for ext in ('.c', '.h')
+        found = next((base + ext for ext in extensions
                       if os.path.exists(os.path.join(srcdir, base + ext))),
                      None)
-        if cfile is None:
+        if found is None or not spec.native_functions():
             continue
-        text = _LITERALS.sub(_blank, _read(srcdir, cfile))
-        for name in spec.c_implemented_functions():
-            node = spec.functions[name]
-            positional, keywords = spec.c_name(name)
-            c_name = positional or next(iter(keywords.values()), name)
-            where = f'{rel}: {name}'
-            body = _c_function(lexer, text, c_name)
-            if body is None:
-                out.append(f'{where}: no C function {c_name} in {cfile}')
-                continue
-            called = set()
-            specials = set()
-            for call in ast.walk(node):
-                match call:
-                    case ast.Call(func=ast.Name('calls'),
-                                  args=[_, ast.Constant(str() as special)]):
-                        specials.add(special)
-                    case ast.Call(func=ast.Name('len' | 'iter' as f),
-                                  args=[ast.Name()]):
-                        specials.add(f'__{f}__')
-                    case ast.Call(func=ast.Name(f)):
-                        called.add(f)
-            # The calls of the C function, and of the functions of its file
-            # it calls (read in turn) unless accounted for.
-            todo, seen, calls = [body], set(), set()
-            while todo:
-                for callee in _escaping_calls(analyzer, parsing, todo.pop(),
-                                              dunders):
-                    calls.add(callee)
-                    need = dunders.get(callee, {SLOT_CALLS.get(callee)})
-                    if (callee in called or callee in NO_PYTHON
-                            or 'runs_python' in called or need & specials
-                            or callee in seen):
-                        continue
-                    seen.add(callee)
-                    if callee in implemented:
-                        # Its facts; whether its C agrees is its own check.
-                        found = next(s.resolve(callee) for s in specs
-                                     if s.resolve(callee))
-                        if not facts.analyzer(found[0]).reference_facts(
-                                callee, {}).runs_python:
-                            continue
-                        out.append(f'{where}: calls {callee}(), which may '
-                                   'run Python code, and its reference does '
-                                   'not')
-                    elif (inner := _c_function(lexer, text, callee)):
-                        todo.append(inner)
-                    else:
-                        what = ''.join(f'calls(x, "{d}") or '
-                                       for d in sorted(need - {None}))
-                        out.append(f'{where}: calls {callee}(), which may '
-                                   'run Python code: account for it with '
-                                   f'{what}runs_python()')
-            # A reference that cannot fail: the C cannot either.
-            returns = frontend.c_signature(node)[1] if '.' not in name \
-                else 'void'
-            if (returns != 'void' and not frontend.is_struct(returns)
-                    and calls and not facts.analyzer(spec).reference_facts(
-                        name, {}).raises):
-                out.append(f'{where}: its reference cannot fail, but the C '
-                           f'calls {", ".join(sorted(calls))}')
+        checker = NATIVE_CHECKERS[os.path.splitext(found)[1]](
+            os.path.join(srcdir, found))
+        for name in spec.native_functions():
+            out += _check_native(spec, name, checker, found, rel, native,
+                                 specs, facts)
     return sorted(out)
+
+
+def _check_native(spec, name, checker, native_file, rel, native, specs,
+                  facts):
+    node = spec.functions[name]
+    positional, keywords = spec.c_name(name)
+    c_name = positional or next(iter(keywords.values()), name)
+    where = f'{rel}: {name}'
+    code = checker.function(c_name)
+    if code is None:
+        return [f'{where}: no function {c_name} in {native_file}']
+    out = []
+    called = set()
+    specials = set()
+    for call in ast.walk(node):
+        match call:
+            case ast.Call(func=ast.Name('calls'),
+                          args=[_, ast.Constant(str() as special)]):
+                specials.add(special)
+            case ast.Call(func=ast.Name('len' | 'iter' as f),
+                          args=[ast.Name()]):
+                specials.add(f'__{f}__')
+            case ast.Call(func=ast.Name(f)):
+                called.add(f)
+    # The calls of the native function, and of the functions of its file
+    # it calls (read in turn) unless accounted for.
+    todo, seen, calls = [code], set(), set()
+    while todo:
+        for callee in checker.escaping_calls(todo.pop()):
+            calls.add(callee)
+            if (callee in called or checker.runs_no_python(callee)
+                    or 'runs_python' in called
+                    or checker.special_method(callee) & specials
+                    or callee in seen):
+                continue
+            seen.add(callee)
+            if callee in native:
+                # Its facts; whether its native code agrees is its own
+                # check.
+                found = next(s.resolve(callee) for s in specs
+                             if s.resolve(callee))
+                if not facts.analyzer(found[0]).reference_facts(
+                        callee, {}).runs_python:
+                    continue
+                out.append(f'{where}: calls {callee}(), which may '
+                           'run Python code, and its reference does '
+                           'not')
+            elif (inner := checker.function(callee)) is not None:
+                todo.append(inner)
+            else:
+                what = ''.join(f'calls(x, "{d}") or ' for d in
+                               sorted(checker.special_method(callee)))
+                out.append(f'{where}: calls {callee}(), which may '
+                           'run Python code: account for it with '
+                           f'{what}runs_python()')
+    # The native functions the reference calls: the native code calls
+    # them, or a function of its file does (the reference describes what
+    # it calls).
+    todo, everything = [checker.function(c_name)], {c_name}
+    while todo:
+        for callee in checker.calls(todo.pop()) - everything:
+            everything.add(callee)
+            if (callee not in native
+                    and (inner := checker.function(callee)) is not None):
+                todo.append(inner)
+    for callee in sorted(called & native - everything):
+        out.append(f'{where}: its reference calls {callee}(), which its '
+                   'native code does not')
+    # A reference that cannot fail: the native code calls nothing that
+    # can (a native function whose reference cannot fail cannot).
+    def may_fail(callee):
+        found = callee in native and next(
+            s.resolve(callee) for s in specs if s.resolve(callee))
+        return not found or facts.analyzer(found[0]).reference_facts(
+            callee, {}).raises
+    returns = frontend.c_signature(node)[1] if '.' not in name \
+        else 'void'
+    failing = sorted(filter(may_fail, calls))
+    if (returns != 'void' and not frontend.is_struct(returns)
+            and failing and not facts.analyzer(spec).reference_facts(
+                name, {}).raises):
+        out.append(f'{where}: its reference cannot fail, but the C '
+                   f'calls {", ".join(failing)}')
+    return out
+
+
+def c_calls(srcdir):
+    """For each @native function implemented in C: every call in its C
+    (and in the functions of its file it calls) that may run Python code
+    is one its Python reference makes, a calls(x, "__name__") of the
+    special method it invokes, or covered by runs_python(); and it calls
+    the native functions its reference calls (the C checker,
+    native_calls())."""
+    return native_calls(srcdir, ('.c', '.h'))
