@@ -33,7 +33,7 @@ that may run Python code must be accounted for by one of them.
 import ast
 import builtins
 
-from . import builtin_types, frontend, partial_eval
+from . import builtin_types, frontend, partial_eval, subset
 
 # Raises any exception.
 ANY = 'ANY'
@@ -132,6 +132,8 @@ class Analyzer:
         """Facts of spec function *name* for any arguments, or of the
         partial_eval.Specialization *special* for its facts."""
         if special is None:
+            if subset.lowered(self.spec, name):
+                return Facts(worst=True)
             return self._cached(name, lambda: self.facts(
                 self.spec.body(name), {}))
         return self._cached(('specialization', special.name),
@@ -142,6 +144,9 @@ class Analyzer:
         with the facts *env* about its parameters: of its Python
         reference, partially evaluated for them."""
         params = self.spec.params(name)
+        if subset.analysed(self.spec, name):
+            # Code facts.py cannot follow: the worst facts.
+            return Facts(worst=True)
 
         def compute():
             residual = partial_eval.specialize(self.spec, name, env)

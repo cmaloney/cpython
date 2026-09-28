@@ -66,10 +66,18 @@ def _clinic_decorator(*args):
 
 # The Argument Clinic decorators other than @classmethod and @staticmethod
 # (see frontend.py): they only affect the generated C, so for Python they
-# are identity decorators.
-coexist = critical_section = deleter = disable = getter = _clinic_decorator
-permit_long_docstring_body = permit_long_summary = _clinic_decorator
-setter = text_signature = vectorcall = _clinic_decorator
+# are identity decorators.  (A spec imports them by name: ``from
+# libclinic.pyspec.runtime import text_signature``.)
+def _define_clinic_decorators() -> list[str]:
+    from libclinic.dsl_parser import DSLParser
+    names = [name for name in DSLParser.decorator_names()
+             if name not in ('classmethod', 'staticmethod')]
+    for name in names:
+        globals()[name] = _clinic_decorator
+    return names
+
+
+CLINIC_DECORATORS = _define_clinic_decorators()
 
 
 def c_name(*args, **kwargs):

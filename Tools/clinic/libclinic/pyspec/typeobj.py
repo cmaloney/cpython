@@ -10,9 +10,10 @@ end of the C file, after every function it names):
 * the method table ``<prefix>_methods[]``: one entry per method of the
   class that is not a slot, in the order of the spec.  A clinic function
   is its ``*_METHODDEF`` macro; a hand-written PyCFunction
-  (``@c_name(METH_NOARGS="f")``) is written out with its docstring; a
-  shared method is the entry the other spec declares (see
-  _shared_entry());
+  (``@c_name(METH_NOARGS="f")``, frontend.Spec.pycfunction()) is written
+  out with its docstring, as is a slot that also has one
+  (``@c_name(mp_subscript="f", METH_O="f")`` and ``@coexist``); a shared
+  method is the entry the other spec declares (see _shared_entry());
 * the sub-tables ``<prefix>_as_number`` etc. holding the slots of the
   dunders (see slots.py).
 
@@ -40,8 +41,9 @@ SUBTABLE_ORDER = ['as_async', 'as_number', 'as_sequence', 'as_mapping',
 
 # The decorators a method implemented in C by hand may have, by kind.
 C_DECORATORS = {
-    'slot': {'c_name', 'c_implemented'},
-    'PyCFunction': {'c_name', 'classmethod', 'c_implemented'},
+    'slot': {'c_name', 'c_implemented', 'coexist', 'text_signature'},
+    'PyCFunction': {'c_name', 'classmethod', 'staticmethod', 'coexist',
+                    'text_signature', 'c_implemented'},
 }
 
 
@@ -161,33 +163,28 @@ class TypeGenerator:
 
     # -- methods -----------------------------------------------------------
 
-    def _pycfunction(self, spec: frontend.Spec, name: str, meth: str
+    def _pycfunction(self, spec: frontend.Spec, name: str, meth: str,
+                     kind: str = 'PyCFunction'
                      ) -> tuple[list[str], str, str, str]:
         """(docstring definition, C function, flags, docstring name) of a
-        hand-written PyCFunction of *spec*."""
-        node = _c_stub(spec, name, 'PyCFunction')
-        _, keywords = spec.c_name(name)
-        (flag, c_func), = keywords.items()
-        nparams = frontend.PYCFUNCTION_FLAGS[flag]
-        args = node.args
-        first = 'self'
-        if any(frontend.decorator_name(d) == 'classmethod'
-               for d in node.decorator_list):
-            first = 'cls'
-            flag += ' | METH_CLASS'
-        wanted = f'({first}, /)' if nparams == 0 else f'({first}, arg, /)'
-        if (args.args or args.vararg or args.kwonlyargs or args.kwarg
-                or args.defaults
-                or len(args.posonlyargs) != nparams + 1):
-            raise spec.error(node, f"{name}: a {flag} function takes "
-                             f"{wanted}")
+        hand-written PyCFunction of *spec*, or of the entry of a slot
+        (*kind*).  With @text_signature, the docstring starts with the
+        signature, as clinic writes it."""
+        node = _c_stub(spec, name, kind)
+        entry = spec.pycfunction(name)
+        assert entry is not None
         doc = spec.docstring(name)
+        for decorator in node.decorator_list:
+            match decorator:
+                case ast.Call(func=ast.Name('text_signature'),
+                              args=[ast.Constant(str() as signature)]):
+                    doc = f'{meth}{signature}\n--\n\n{doc or ""}'
         docs = []
         doc_name = 'NULL'
         if doc is not None:
             doc_name = f'{self.prefix}_{meth}__doc__'
             docs = [f'PyDoc_STRVAR({doc_name},', _c_string(doc) + ');', '']
-        return docs, c_func, flag, doc_name
+        return docs, entry.c_function, entry.flags, doc_name
 
     def _clinic_entry(self, name: str) -> str:
         node = self.spec.functions[name]
@@ -289,12 +286,17 @@ class TypeGenerator:
         for meth in dunders:
             name = f'{self.cls_name}.{meth}'
             node = _c_stub(spec, name, 'slot')
-            if frontend._docstring(node.body) is not None:
+            has_entry = spec.pycfunction(name) is not None
+            if frontend.docstring_of(node.body) is not None \
+                    and not has_entry:
                 raise spec.error(node, f"{name}: a slot has no docstring: "
                                  "its wrapper's comes from slotdefs in "
                                  "Objects/typeobject.c")
             candidates = [s.slot for s in slots.candidates(meth)]
             positional, keywords = spec.c_name(name)
+            # A METH_ keyword: the entry of the slot in the method table.
+            keywords = {k: v for k, v in keywords.items()
+                        if k not in frontend.PYCFUNCTION_FLAGS}
             if keywords:
                 for slot, c_name in keywords.items():
                     if slot not in candidates:
@@ -351,21 +353,19 @@ class TypeGenerator:
         for meth in spec.entries(self.cls_name):
             name = f'{self.cls_name}.{meth}'
             kind = spec.method_kind(name)
-            node = spec.functions.get(name)
-            if node is not None and any(
-                    frontend.decorator_name(d) in ('getter', 'setter')
-                    for d in node.decorator_list):
-                raise spec.error(node, f"{name}: accessors (@getter, "
-                                 "@setter) are not supported yet; see "
-                                 f"{README}")
             if kind == SLOT:
                 dunders.append(meth)
+                if spec.pycfunction(name) is not None:
+                    # Also in the method table (METH_COEXIST).
+                    doc, c_func, flag, doc_name = self._pycfunction(
+                        spec, name, meth, 'slot')
+                    docs += doc
+                    table.append(_method_def(meth, c_func, flag, doc_name))
             elif kind == PYCFUNCTION:
                 doc, c_func, flag, doc_name = self._pycfunction(spec, name,
                                                                 meth)
                 docs += doc
-                table.append(f'    {{"{meth}", {c_func}, {flag}, '
-                             f'{doc_name}}},')
+                table.append(_method_def(meth, c_func, flag, doc_name))
             elif kind == SHARED:
                 doc, entry = self._shared_entry(name, meth)
                 docs += doc
@@ -375,7 +375,7 @@ class TypeGenerator:
                 table.append(self._clinic_entry(name))
 
         out = [f'/* {self.cls_name} */', '']
-        class_doc = frontend._docstring(self.node.body)
+        class_doc = frontend.docstring_of(self.node.body)
         if class_doc is not None:
             lines = spec._clean_docstring(self.node.body[0], class_doc)
             out += [f'PyDoc_STRVAR({self.prefix}_doc,',
@@ -402,6 +402,13 @@ class TypeGenerator:
                 out.append(f'    .{slot} = {by_subtable[subtable][slot]},')
             out += ['};', '']
         return out if len(out) > 2 else []
+
+
+def _method_def(meth: str, c_func: str, flags: str, doc_name: str) -> str:
+    """The PyMethodDef of a hand-written PyCFunction."""
+    if flags.split(' | ')[0] not in ('METH_NOARGS', 'METH_O'):
+        c_func = f'_PyCFunction_CAST({c_func})'
+    return f'    {{"{meth}", {c_func}, {flags}, {doc_name}}},'
 
 
 def _in_struct_order(slot_funcs: dict[str, str]) -> list[str]:

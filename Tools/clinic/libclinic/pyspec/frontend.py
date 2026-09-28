@@ -106,20 +106,18 @@ import os
 import shlex
 import sys
 
-from libclinic.errors import ClinicError
-from . import builtin_types, slots
+from collections.abc import Collection
 
+from libclinic.errors import PYSPEC_README as README
+from libclinic.errors import SpecError, SpecErrorKind
+from . import builtin_types, slots, subset
 
-# Where errors about unsupported spec code send the reader.
-README = 'Objects/pyspec/README.rst'
 
 # Annotations of the parameters of implemented spec functions, and the C
-# type they stand for.  For methods, the annotations are clinic converters;
-# Argument Clinic checks that they agree.
-SPEC_CTYPES = {
-    'object': 'PyObject *',
-    'str': 'const char *',
-}
+# type they stand for (the lowered subset, subset.py).  For methods, the
+# annotations are clinic converters; Argument Clinic checks that they
+# agree.
+SPEC_CTYPES = subset.LOWERED_CTYPES
 
 # The C types of the annotations of a @c_implemented function: these, and
 # a string, which is the C type itself ('PyTypeObject *').
@@ -135,22 +133,32 @@ TYPE_OBJECTS = {tp.__name__: row.type_object
 
 # Clinic decorators that are also Python's: they set the kind of the
 # method.  Any other decorator is a clinic-only one (see "Decorators"),
-# except the spec's own: @c_name.
+# except the spec's own: @c_name and @c_implemented.
 METHOD_DECORATORS = ('classmethod', 'staticmethod')
-SPEC_DECORATORS = ('c_name',)
+SPEC_DECORATORS = ('c_name', 'c_implemented')
 
-# The C calling conventions of a hand-written PyCFunction entry, with the
-# number of parameters after self.
-PYCFUNCTION_FLAGS = {'METH_NOARGS': 0, 'METH_O': 1}
+# The clinic decorators that make a def an accessor: in the C file, its
+# one-line block names the accessor with the same decorator.
+ACCESSOR_DECORATORS = ('getter', 'setter')
+
+# The C calling conventions of a hand-written PyCFunction entry
+# (``@c_name(METH_O="f")``), with the Python parameters after self each
+# takes: none, one positional-only, or ``*args`` (and ``**kwargs``, which
+# adds METH_KEYWORDS).
+PYCFUNCTION_FLAGS = {
+    'METH_NOARGS': '(self, /)',
+    'METH_O': '(self, arg, /)',
+    'METH_VARARGS': '(self, /, *args[, **kwargs])',
+    'METH_FASTCALL': '(self, /, *args[, **kwargs])',
+}
 
 # Kinds of the methods of a spec class (see "Methods that are not clinic
 # functions").
-CLINIC, SLOT, PYCFUNCTION, SHARED = 'clinic', 'slot', 'pycfunction', 'shared'
+CLINIC, SLOT, PYCFUNCTION, SHARED, ACCESSOR = (
+    'clinic', 'slot', 'pycfunction', 'shared', 'accessor')
 
-
-class SpecError(ClinicError):
-    """An error in a spec file, located at its line, reported by clinic
-    as ``path:line: error: message``."""
+# Where a line is written: (file, line number).
+Location = tuple[str, int]
 
 
 @dc.dataclass
@@ -172,6 +180,38 @@ class SpecFunction:
     new_type: str | None = None
 
 
+@dc.dataclass
+class PyCFunctionEntry:
+    """A hand-written PyCFunction of a method table
+    (``@c_name(METH_O="f")``)."""
+    c_function: str
+    # METH_NOARGS, METH_O, METH_VARARGS or METH_FASTCALL.
+    convention: str
+    # The flags of its PyMethodDef: "METH_VARARGS | METH_KEYWORDS".
+    flags: str
+
+
+@dc.dataclass
+class SpecBinding:
+    """How clinic binds an implemented spec method to the clinic function
+    of its block in the C file (DSLParser.bind_spec())."""
+    c_basename: str
+    # The C type of clinic's self (or class) parameter.
+    self_ctype: str
+    # The #if condition of the block, or ''.
+    condition: str = ''
+
+
+@dc.dataclass
+class PyspecBindings:
+    """What clinic learns from the C file for the C it generates from the
+    spec (emit.py, typeobj.py): the bindings of the implemented spec
+    methods ("bytes.__new__"), and the type object of each clinic class
+    ("bytes": "&PyBytes_Type")."""
+    functions: dict[str, SpecBinding] = dc.field(default_factory=dict)
+    type_objects: dict[str, str] = dc.field(default_factory=dict)
+
+
 def spec_path(filename: str) -> str:
     """Path of the spec file for the C file *filename*."""
     dirname, basename = os.path.split(filename)
@@ -186,7 +226,8 @@ def output_path(filename: str) -> str:
     return os.path.join(dirname, 'clinic', stem + '_pyspec.c.h')
 
 
-def _docstring(body: list[ast.stmt]) -> str | None:
+def docstring_of(body: list[ast.stmt]) -> str | None:
+    """The docstring of a def or class with *body*, or None."""
     if (body and isinstance(body[0], ast.Expr)
             and isinstance(body[0].value, ast.Constant)
             and isinstance(body[0].value.value, str)):
@@ -201,8 +242,8 @@ def _quote(word: str) -> str:
     return '"' + word.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
-def _without_docstring(node: ast.FunctionDef) -> list[ast.stmt]:
-    return node.body[1:] if _docstring(node.body) is not None else node.body
+def without_docstring(node: ast.FunctionDef) -> list[ast.stmt]:
+    return node.body[1:] if docstring_of(node.body) is not None else node.body
 
 
 def is_stub(node: ast.FunctionDef) -> bool:
@@ -211,7 +252,7 @@ def is_stub(node: ast.FunctionDef) -> bool:
     A stub is a function implemented in C by hand about which nothing is
     known: it is never lowered to C, and a call of it may do anything.
     """
-    body = _without_docstring(node)
+    body = without_docstring(node)
     return not body or (len(body) == 1 and isinstance(body[0], ast.Expr)
                         and isinstance(body[0].value, ast.Constant)
                         and body[0].value.value is Ellipsis)
@@ -221,7 +262,7 @@ def is_placeholder(node: ast.FunctionDef) -> bool:
     """True for ``def meth(self): ...``: only the place of a method whose
     signature depends on #if, which keeps its full clinic block in C."""
     args = node.args
-    return (is_stub(node) and _docstring(node.body) is None
+    return (is_stub(node) and docstring_of(node.body) is None
             and len(args.posonlyargs + args.args) == 1
             and not (args.vararg or args.kwonlyargs or args.kwarg))
 
@@ -231,6 +272,16 @@ def decorator_name(decorator: ast.expr) -> str | None:
     if isinstance(decorator, ast.Call):
         decorator = decorator.func
     return decorator.id if isinstance(decorator, ast.Name) else None
+
+
+def accessor_kind(node: ast.FunctionDef) -> str:
+    """'getter' or 'setter' for an accessor (``@getter``, ``@setter``),
+    else ''."""
+    for decorator in node.decorator_list:
+        name = decorator_name(decorator)
+        if name in ACCESSOR_DECORATORS:
+            return name
+    return ''
 
 
 def is_c_implemented(node: ast.FunctionDef) -> bool:
@@ -298,6 +349,8 @@ class Spec:
         self.functions: dict[str, ast.FunctionDef] = {}
         self.classes: dict[str, ast.ClassDef] = {}
         self.shared: dict[str, Shared] = {}
+        # Accessors by "T.name": {"getter": def, "setter": def}.
+        self.accessors: dict[str, dict[str, ast.FunctionDef]] = {}
         # Specs imported with ``from pkg import module``: name -> path.
         self.imports: dict[str, str] = {}
         self._specs: dict[str, Spec] = {}     # load_spec()
@@ -321,28 +374,50 @@ class Spec:
                                      "(a path relative to the directory of "
                                      "the C file)")
 
-    def error(self, node: ast.AST | None, message: str) -> SpecError:
-        """A SpecError at the line of *node*."""
-        return SpecError(message, filename=self.filename,
-                         lineno=getattr(node, 'lineno', None))
+    def error(self, node: ast.AST | None, message: str,
+              kind: SpecErrorKind = SpecErrorKind.INVALID) -> SpecError:
+        """A SpecError at the line of *node*, in this spec unless *node*
+        was copied from another (see SpecError.at())."""
+        return SpecError.at(node, message, kind, self.filename)
 
-    def _add_function(self, name: str, node: ast.FunctionDef) -> None:
+    def _check_def(self, name: str, node: ast.FunctionDef) -> None:
         if is_c_implemented(node) and is_stub(node):
             raise self.error(node, f"{name}: the body of a @c_implemented "
                              "function is its Python reference; write ... "
                              "without @c_implemented for a C function "
                              "about which nothing is known")
-        if name in self.functions or name in self.shared:
-            hint = ''
-            if any(decorator_name(d) in ('getter', 'setter')
-                   for d in node.decorator_list):
-                hint = f" (accessors are not supported yet: see {README})"
-            raise self.error(node, f"{name} is defined twice{hint}")
-        body = _without_docstring(node)
+        body = without_docstring(node)
         if len(body) == 1 and isinstance(body[0], ast.Pass):
             raise self.error(body[0], f"{name}: use ... as the body of a "
                              "function implemented in C, not pass")
+
+    def _add_function(self, name: str, node: ast.FunctionDef) -> None:
+        self._check_def(name, node)
+        if (name in self.functions or name in self.shared
+                or name in self.accessors):
+            raise self.error(node, f"{name} is defined twice")
         self.functions[name] = node
+
+    def _add_accessor(self, name: str, kind: str,
+                      node: ast.FunctionDef) -> None:
+        """``@getter def attr(self)`` / ``@setter def attr(self, value)``
+        in a class: the accessors of attribute *name* ("T.attr"), each a
+        clinic function whose one-line block in the C file starts with
+        the same decorator."""
+        self._check_def(name, node)
+        if sum(decorator_name(d) in ACCESSOR_DECORATORS
+               for d in node.decorator_list) > 1:
+            raise self.error(node, f"{name}: only one of @getter and "
+                             "@setter")
+        accessors = self.accessors.setdefault(name, {})
+        if kind in accessors or name in self.functions \
+                or name in self.shared:
+            raise self.error(node, f"{name} is defined twice")
+        if not (is_stub(node) or is_c_implemented(node)):
+            raise self.error(node, f"{name}(): an accessor with a body is "
+                             "expressible, but not lowered to C yet",
+                             SpecErrorKind.NOT_LOWERED)
+        accessors[kind] = node
 
     def _add_import(self, node: ast.ImportFrom) -> None:
         """``from stringlib.pyspec import transmogrify``: the spec
@@ -433,6 +508,9 @@ class Spec:
                     pass
                 case ast.Pass():
                     pass
+                case ast.FunctionDef(name=name) if accessor_kind(stmt):
+                    self._add_accessor(f'{node.name}.{name}',
+                                       accessor_kind(stmt), stmt)
                 case ast.FunctionDef(name=name):
                     self._add_function(f'{node.name}.{name}', stmt)
                 case ast.Assign(targets=[ast.Name(name)], value=value) \
@@ -518,23 +596,21 @@ class Spec:
     # -- implemented functions ---------------------------------------------
 
     def implemented(self, name: str) -> bool:
-        """Whether spec function *name* has a body lowered to C."""
+        """Whether spec function *name* has a body lowered to C: a
+        top-level function or a clinic method with a body other than
+        ``...``, not @c_implemented.  (Slots and hand-written
+        PyCFunctions are C: typeobj.py rejects a body.)"""
         node = self.functions.get(name)
         if node is None or is_stub(node) or is_c_implemented(node):
             return False
-        # Slots and hand-written PyCFunctions are C: typeobj.py rejects a
-        # body.
-        try:
-            return '.' not in name or self.method_kind(name) == CLINIC
-        except SpecError:
-            return True
+        return '.' not in name or self.method_kind(name) == CLINIC
 
     def implemented_functions(self) -> list[str]:
         return [name for name in self.functions if self.implemented(name)]
 
     def body(self, name: str) -> list[ast.stmt]:
         """Statements of function *name*, without its docstring."""
-        return _without_docstring(self.functions[name])
+        return without_docstring(self.functions[name])
 
     def params(self, name: str) -> list[str]:
         args = self.functions[name].args
@@ -560,56 +636,35 @@ class Spec:
                 if is_c_implemented(node)]
 
     def describe(self, name: str,
-                 self_ctype: str | None = None) -> SpecFunction:
+                 self_ctype: str = 'PyObject *') -> SpecFunction:
         """The C signature of implemented spec function *name*: a
-        top-level function, a __new__, or, with *self_ctype* (the C type
-        of clinic's implicit self or class parameter, e.g.
-        "PyBytesObject *"), another method."""
+        top-level function, a __new__ (its class is a PyTypeObject *), or
+        another method, whose self (or class) parameter has C type
+        *self_ctype* (clinic's, see SpecBinding).
+
+        First, the signature and the body must be in the lowered subset
+        (subset.py): else a SpecError (NOT_LOWERED) says what is not."""
+        subset.check_lowered(self, name)
         node = self.functions[name]
         args = node.args
         cls_name, _, meth = name.rpartition('.')
-
-        def error(node: ast.AST, message: str) -> SpecError:
-            return self.error(node, f"{name}(): {message}")
-
-        if cls_name and meth != '__new__' and self_ctype is None:
-            raise error(node, "a spec can only implement __new__")
-        others = [args.vararg, *args.kwonlyargs, args.kwarg]
-        for other in others:
-            if other is not None:
-                raise error(other, "a spec needs positional parameters "
-                            f"only; {other.arg!r} is not")
         positional = args.posonlyargs + args.args
         first_optional = len(positional) - len(args.defaults)
         parameters = []
         new_type = None
         for i, arg in enumerate(positional):
             if cls_name and i == 0:
-                if arg.annotation is not None:
-                    raise error(arg, f"the self (or class) parameter "
-                                f"{arg.arg!r} must not be annotated")
                 if meth == '__new__':
-                    if cls_name not in TYPE_OBJECTS:
-                        raise error(node, f"unknown type {cls_name!r}; "
-                                    f"known: {sorted(TYPE_OBJECTS)}")
                     new_type, self_ctype = cls_name, TYPE_CTYPE
                 parameters.append(SpecParameter(arg.arg, self_ctype, False))
                 continue
             match arg.annotation:
-                case ast.Name(conv) | ast.Call(func=ast.Name(conv)) \
-                        if conv in SPEC_CTYPES:
+                case ast.Name(conv) | ast.Call(func=ast.Name(conv)):
                     ctype = SPEC_CTYPES[conv]
                 case _:
-                    raise error(arg, f"parameter {arg.arg!r} needs an "
-                                f"annotation from {sorted(SPEC_CTYPES)}")
-            optional = i >= first_optional
-            if optional:
-                default = args.defaults[i - first_optional]
-                if not (isinstance(default, ast.Name)
-                        and default.id == 'NULL'):
-                    raise error(arg, f"parameter {arg.arg!r} may only "
-                                "default to NULL")
-            parameters.append(SpecParameter(arg.arg, ctype, optional))
+                    raise AssertionError('checked by subset.py')
+            parameters.append(SpecParameter(arg.arg, ctype,
+                                            i >= first_optional))
         return SpecFunction(name, self.filename, node.lineno, parameters,
                             new_type)
 
@@ -630,26 +685,80 @@ class Spec:
                 case ast.Call(func=ast.Name('c_name'), args=args,
                               keywords=keywords):
                     values = [*args, *(kw.value for kw in keywords)]
-                    if not all(isinstance(v, ast.Constant)
-                               and isinstance(v.value, str)
-                               for v in values):
+                    strings = [v.value for v in values
+                               if isinstance(v, ast.Constant)
+                               and isinstance(v.value, str)]
+                    if len(strings) != len(values) \
+                            or any(kw.arg is None for kw in keywords):
                         raise self.error(decorator, "the arguments of "
                                          "@c_name are strings")
                     if len(args) > 1 or (args and keywords) or not values:
                         raise self.error(decorator, "write @c_name(\"x\") "
                                          "or @c_name(slot=\"x\", ...)")
-                    positional = args[0].value if args else None
-                    return positional, {kw.arg: kw.value.value
-                                        for kw in keywords}
+                    if args:
+                        return strings[0], {}
+                    return None, {str(kw.arg): value
+                                  for kw, value in zip(keywords, strings)}
                 case ast.Name('c_name'):
                     raise self.error(decorator, "@c_name needs the C name")
         return None, {}
 
+    def pycfunction(self, name: str) -> PyCFunctionEntry | None:
+        """The hand-written PyCFunction entry of method *name*
+        (``@c_name(METH_O="f")``), or None.  The parameters of the def
+        after self give its calling convention; @classmethod,
+        @staticmethod and @coexist add METH_CLASS, METH_STATIC and
+        METH_COEXIST."""
+        _, keywords = self.c_name(name)
+        given = [(k, v) for k, v in keywords.items()
+                 if k in PYCFUNCTION_FLAGS]
+        if not given:
+            return None
+        node = self.functions[name]
+        if len(given) > 1:
+            raise self.error(node, f"{name}: one calling convention of "
+                             f"{sorted(PYCFUNCTION_FLAGS)} in @c_name")
+        (convention, c_function), = given
+        decorators = [decorator_name(d) for d in node.decorator_list]
+        static = 'staticmethod' in decorators
+        args = node.args
+        positional = args.posonlyargs + args.args
+        if not static:
+            positional = positional[1:]
+        match convention:
+            case 'METH_NOARGS':
+                ok = not positional
+            case 'METH_O':
+                ok = len(positional) == 1
+            case _:
+                ok = not positional and args.vararg is not None
+        if (not ok or args.kwonlyargs or args.defaults
+                or (args.kwarg and convention in ('METH_NOARGS', 'METH_O'))
+                or (args.vararg and convention in ('METH_NOARGS', 'METH_O'))
+                or args.args):
+            wanted = PYCFUNCTION_FLAGS[convention]
+            if static:
+                wanted = wanted.replace('self, ', '').replace('self', '')
+            raise self.error(node, f"{name}: a {convention} function takes "
+                             f"{wanted}")
+        flags = [convention]
+        if args.kwarg:
+            flags.append('METH_KEYWORDS')
+        if 'classmethod' in decorators:
+            flags.append('METH_CLASS')
+        if static:
+            flags.append('METH_STATIC')
+        if 'coexist' in decorators:
+            flags.append('METH_COEXIST')
+        return PyCFunctionEntry(c_function, convention, ' | '.join(flags))
+
     def method_kind(self, name: str) -> str:
-        """CLINIC, SLOT, PYCFUNCTION or SHARED (see "Methods that are not
-        clinic functions")."""
+        """CLINIC, SLOT, PYCFUNCTION, SHARED or ACCESSOR (see "Methods
+        that are not clinic functions")."""
         if name in self.shared:
             return SHARED
+        if name in self.accessors:
+            return ACCESSOR
         meth = name.rpartition('.')[2]
         if slots.is_slot(meth):
             return SLOT
@@ -664,11 +773,12 @@ class Spec:
 
     def entries(self, cls_name: str) -> list[str]:
         """Names of all the methods and shared methods of class
-        *cls_name*, in order."""
+        *cls_name*, in order (not its accessors: their table, tp_getset,
+        is written in C)."""
         names = []
         for stmt in self.classes[cls_name].body:
             match stmt:
-                case ast.FunctionDef(name=name):
+                case ast.FunctionDef(name=name) if not accessor_kind(stmt):
                     names.append(name)
                 case ast.Assign(targets=[ast.Name(name)]):
                     names.append(name)
@@ -687,7 +797,7 @@ class Spec:
         """The docstring of method *name* as __doc__ shows it (the
         indentation of the source removed), or None."""
         node = self.functions[name]
-        doc = _docstring(node.body)
+        doc = docstring_of(node.body)
         if doc is None:
             return None
         return '\n'.join(self._clean_docstring(node.body[0], doc))
@@ -705,17 +815,19 @@ class Spec:
         return [meth for meth in self.entries(cls_name)
                 if self.method_kind(f'{cls_name}.{meth}') == CLINIC]
 
-    def clinic_input(self, name: str
+    def clinic_input(self, name: str, accessor: str = ''
                      ) -> tuple[list[tuple[str, int]], str,
                                 list[tuple[str, int]]]:
-        """Clinic DSL for spec method *name*.
+        """Clinic DSL for spec method *name*, or for its *accessor*
+        ('getter' or 'setter', which the block in the C file names).
 
         Return (decorator lines, text to append to the function line,
         the lines after the function line); each line comes with the line
         of the spec it is taken from, where clinic reports its errors.
         """
-        node = self.functions[name]
-        decorators, kind = self._decorators(node)
+        node = (self.accessors[name][accessor] if accessor
+                else self.functions[name])
+        decorators, kind = self._decorators(node, skip=accessor)
         suffix = ''
         if node.returns is not None:
             suffix = f' -> {self._segment(node.returns, "return converter")}'
@@ -723,7 +835,7 @@ class Spec:
         names = [pname for _, pname, _ in params if pname]
         param_docs: dict[str, list[str]] = {}
         docstring: list[str] = []
-        doc = _docstring(node.body)
+        doc = docstring_of(node.body)
         doc_lineno = node.body[0].lineno
         if doc is not None:
             lines = self._clean_docstring(node.body[0], doc)
@@ -757,14 +869,15 @@ class Spec:
         raise self.error(decorator, "a spec decorator is a clinic "
                          "decorator: @name or @name(args)")
 
-    def _decorators(self, node: ast.FunctionDef
+    def _decorators(self, node: ast.FunctionDef, skip: str = ''
                     ) -> tuple[list[tuple[str, int]], str]:
         """Clinic decorator lines of *node*, in order, with their line in
-        the spec, and the kind of *node*."""
+        the spec, and the kind of *node*.  *skip*: a decorator written
+        in the block of the C file (@getter, @setter)."""
         kind = 'method'
         decorators = []
         for decorator in node.decorator_list:
-            if decorator_name(decorator) in SPEC_DECORATORS:
+            if decorator_name(decorator) in (*SPEC_DECORATORS, skip):
                 continue
             line = self._decorator_line(decorator)
             if line[1:] in METHOD_DECORATORS:
@@ -917,3 +1030,154 @@ class Spec:
                                  "signature)")
             return [lines[0], '', *lines[i + 1:]], param_docs
         return lines[:1], param_docs
+
+
+# -- one-line clinic blocks completed from the spec ---------------------------
+
+@dc.dataclass
+class SpecBlock:
+    """A one-line clinic block of the C file completed from the spec."""
+    # The spec method: "T.meth".
+    name: str
+    # The lines replacing the function line, with where each is written.
+    lines: list[tuple[str, Location]]
+    # Where the method is declared: its def, or the shared method.
+    location: Location
+    # Where each clinic decorator of the method is written: {name: where}.
+    decorators: dict[str, Location]
+
+
+def _valid_line(line: str) -> bool:
+    """A line of the start of a block that is not blank or a comment."""
+    return bool(line.strip()) and not line.lstrip().startswith('#')
+
+
+def function_line_index(lines: list[str],
+                        directives: Collection[str]) -> int | None:
+    """The index of the function line of a block, if the block is only
+    that line (and directives, and @getter or @setter): such a block may
+    take the rest of its input from the spec (complete_block()).  A
+    function line that clones (``=``) does not qualify."""
+    stub = None
+    for index, line in enumerate(lines):
+        if not _valid_line(line):
+            continue
+        if stub is not None:
+            # Parameters or a docstring: a complete block.
+            return None
+        name = shlex.split(line)[0]
+        if name == '@deleter':
+            return None
+        if name not in directives:
+            stub = index
+    if stub is None or '=' in lines[stub]:
+        return None
+    return stub
+
+
+def _binding_error(message: str) -> SpecError:
+    """An error of a block of the C file: clinic reports it there."""
+    return SpecError(message, kind=SpecErrorKind.BINDING)
+
+
+def complete_block(spec: Spec, function_line: str, head: list[str],
+                   cls_name: str | None, directives: Collection[str]
+                   ) -> SpecBlock | None:
+    """The rest of a one-line block from the spec method it names, if it
+    names a method of a class of the spec: the lines replacing
+    *function_line* (the clinic decorators of the method, the function
+    line, and the parameters and docstring).  None for a function of a
+    class the spec does not declare.
+
+    *head* holds the lines of the block before the function line;
+    *cls_name* is the clinic class of the function; *directives* are the
+    clinic directives and decorators (DSLParser.directives).  The
+    checksum of the block is still computed on the input in the C file.
+    """
+    names = function_line.partition('->')[0].partition(' as ')[0].strip()
+    meth = names.rpartition('.')[2]
+    if cls_name is None or cls_name not in spec.classes:
+        return None
+    name = f'{cls_name}.{meth}'
+    accessor = ''
+    for line in head:
+        if _valid_line(line) and line.lstrip().startswith('@'):
+            decorator = shlex.split(line)[0]
+            if decorator[1:] in ACCESSOR_DECORATORS and not accessor:
+                accessor = decorator[1:]
+                continue
+            raise _binding_error(f"{names!r}: {decorator} of a spec method "
+                                 f"is written in {spec.filename}")
+    # A shared method with a block is a clinic function of this class
+    # declared by the method it names.
+    decl_spec, decl_name = spec, name
+    if accessor:
+        if accessor not in spec.accessors.get(name, {}):
+            raise _binding_error(f"{names!r} has no parameters or "
+                                 f"docstring, and class {cls_name} in "
+                                 f"{spec.filename} has no @{accessor} "
+                                 f"{meth!r} to take them from")
+    elif name in spec.shared:
+        decl_spec, decl_name = spec.declaration(name)
+        kind = decl_spec.method_kind(decl_name)
+        if kind != CLINIC:
+            raise _binding_error(f"{names!r} is not a clinic function: it "
+                                 f"shares {decl_name}, a {kind} of "
+                                 f"{decl_spec.filename}; remove its block")
+        if spec.c_name(name)[1]:
+            raise _binding_error(f"{names!r} is a clinic function: its "
+                                 f"@c_name in {spec.filename} takes no "
+                                 "keyword")
+    elif name in spec.accessors:
+        raise _binding_error(f"{names!r} is an accessor in {spec.filename}: "
+                             "its block starts with @getter or @setter")
+    elif name in spec.functions:
+        kind = spec.method_kind(name)
+        if kind != CLINIC:
+            raise _binding_error(f"{names!r} is not a clinic function: it is "
+                                 f"a {kind} of {spec.filename}; remove its "
+                                 "block")
+    if not accessor and not decl_spec.has_method(decl_name):
+        raise _binding_error(f"{names!r} has no parameters or docstring, "
+                             f"and class {cls_name} in {spec.filename} has "
+                             f"no method {meth!r} to take them from")
+    decl_decorators, suffix, rest = decl_spec.clinic_input(decl_name,
+                                                           accessor)
+    where = decl_spec.filename
+    spec_decorators = [(line, (where, lineno))
+                       for line, lineno in decl_decorators]
+    if name in spec.shared:
+        spec_decorators += [(line, (spec.filename, lineno)) for line, lineno
+                            in spec.shared_decorators(name)]
+    for line, (filename, lineno) in spec_decorators:
+        decorator = line.split()[0]
+        if decorator not in directives:
+            raise SpecError(f"{names!r}: unknown clinic decorator "
+                            f"{decorator}", filename=filename, lineno=lineno)
+    if suffix.startswith(' -> ') and '->' in function_line:
+        raise _binding_error(f"{names!r}: the return converter is written "
+                             f"in {spec.filename}")
+    c_name, _ = spec.c_name(name)
+    if c_name is not None:
+        if ' as ' in function_line:
+            raise _binding_error(f"{names!r}: the C name is written in "
+                                 f"{spec.filename} (@c_name)")
+        left, arrow, right = function_line.partition('->')
+        function_line = (f'{left.rstrip()} as {c_name}'
+                         + (f' {arrow}{right}' if arrow else ''))
+    if accessor:
+        node = spec.accessors[name][accessor]
+        location = (spec.filename, node.lineno)
+    elif name in spec.shared:
+        node = decl_spec.functions[decl_name]
+        location = (spec.filename, spec.shared[name].lineno)
+    else:
+        node = spec.functions[name]
+        location = (spec.filename, node.lineno)
+    indent = function_line[:len(function_line) - len(function_line.lstrip())]
+    return SpecBlock(
+        name, [*spec_decorators,
+               (function_line.rstrip() + suffix, (where, node.lineno)),
+               *[(indent + line if line else line, (where, lineno))
+                 for line, lineno in rest]],
+        location, {line.split()[0][1:]: loc for line, loc in spec_decorators})

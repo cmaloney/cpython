@@ -82,6 +82,7 @@ released by the ``finally`` clause the spec writes around its use.
 import ast
 import builtins
 
+from libclinic.errors import SpecError, SpecErrorKind
 from . import builtin_types, call_table, facts, frontend, partial_eval
 from .partial_eval import NOTNULL, NULL, Value
 
@@ -131,11 +132,12 @@ def c_not(expr):
     return f'!{expr}' if _atomic(expr) else f'!({expr})'
 
 
-class SpecError(Exception):
-    def __init__(self, node, message):
-        self.lineno = getattr(node, 'lineno', None)
-        self.message = message
-        super().__init__(f'line {self.lineno or "?"}: {message}')
+def spec_error(node, message, kind=SpecErrorKind.LOWERING):
+    """A SpecError at *node*, in the spec it was written in (app.py fills
+    in the spec of the C file): LOWERING, a use of the lowered subset
+    this emitter cannot lower; NOT_LOWERED, a construct outside the
+    lowered subset (subset.py reports those first)."""
+    return SpecError.at(node, message, kind)
 
 
 def c_string(text):
@@ -188,8 +190,8 @@ class FunctionEmitter:
                                                              ast.Call):
                     expr, _, convention = self.lower_call(stmt.value)
                 if expr is None or convention is not None:
-                    raise SpecError(stmt, 'a finally clause only calls C '
-                                    'functions that cannot fail')
+                    raise spec_error(stmt, 'a finally clause only calls C '
+                                     'functions that cannot fail')
                 self.emit(f'{expr};')
         for name in self.owned:
             if name in self.live and name != keep and name not in null:
@@ -226,12 +228,12 @@ class FunctionEmitter:
     def declare(self, target, ctype, node):
         name = target.id
         if name in self.params:
-            raise SpecError(node, f'{name!r} is a parameter')
+            raise spec_error(node, f'{name!r} is a parameter')
         if name in self.locals:
             # Assigned again (e.g. in both branches of an if): assign()
             # checks that it holds no reference then.
             if self.locals[name] != ctype:
-                raise SpecError(node, f'{name!r} changes type')
+                raise spec_error(node, f'{name!r} changes type')
             return
         self.locals[name] = ctype
         if ctype == OBJECT:
@@ -249,8 +251,8 @@ class FunctionEmitter:
                                  node)
                 elif isinstance(node, ast.For):
                     if not isinstance(node.target, ast.Name):
-                        raise SpecError(node, 'the loop variable must be a '
-                                        'name')
+                        raise spec_error(node, 'the loop variable must be a '
+                                         'name')
                     self.declare(node.target, OBJECT, node)
 
     def declarations(self):
@@ -279,7 +281,7 @@ class FunctionEmitter:
 
     def call_ctype(self, call):
         if not isinstance(call, ast.Call):
-            raise SpecError(call, 'only call results can be assigned')
+            raise spec_error(call, 'only call results can be assigned')
         function = self.c_function(call)
         if function is not None:
             return function[2]
@@ -339,13 +341,13 @@ class FunctionEmitter:
         if function is not None:
             name, params, returns = function
             if len(params) != len(call.args):
-                raise SpecError(call, f'{name}() takes {len(params)} '
-                                'arguments')
+                raise spec_error(call, f'{name}() takes {len(params)} '
+                                 'arguments')
             args = [self.lower_arg(a, t) for a, t in zip(call.args, params)]
             if frontend.is_struct(returns):
                 if target is None:
-                    raise SpecError(call, f'the result of {name}() must '
-                                    'be assigned to a local')
+                    raise spec_error(call, f'the result of {name}() must '
+                                     'be assigned to a local')
                 args.insert(0, f'&{target}')
             return (f'{name}({", ".join(args)})', returns,
                     self.convention(call, returns))
@@ -371,7 +373,8 @@ class FunctionEmitter:
                     f'(PyObject *){name}')
                 return (f'PyObject_CallOneArg({callable_}, '
                         f'{self.lower_value(call.args[0])})', OBJECT, ERR_NULL)
-        raise SpecError(call, f'unsupported call {ast.unparse(call)}')
+        raise spec_error(call, f'unsupported call {ast.unparse(call)}',
+                         SpecErrorKind.NOT_LOWERED)
 
     @staticmethod
     def error_condition(var, ctype, convention):
@@ -406,7 +409,8 @@ class FunctionEmitter:
                 return '1' if value else '0'
             case ast.Constant(int() as value):
                 return str(value)
-        raise SpecError(node, f'unsupported value {ast.unparse(node)}')
+        raise spec_error(node, f'unsupported value {ast.unparse(node)}',
+                         SpecErrorKind.NOT_LOWERED)
 
     def lower_condition(self, node):
         match node:
@@ -431,8 +435,8 @@ class FunctionEmitter:
             case ast.Call() if self.c_function(node) is not None:
                 expr, _, convention = self.lower_call(node)
                 if convention is not None:
-                    raise SpecError(node, 'a call in a condition cannot '
-                                    f'fail: {ast.unparse(node)}')
+                    raise spec_error(node, 'a call in a condition cannot '
+                                     f'fail: {ast.unparse(node)}')
                 return expr
             case ast.Compare(left=ast.Call(func=ast.Name('type'), args=[obj]),
                              ops=[ast.Is() | ast.IsNot() as op],
@@ -459,7 +463,8 @@ class FunctionEmitter:
                     if type(op) in COMPARE_OPS:
                 return (f'{self.lower_value(left)} {COMPARE_OPS[type(op)]} '
                         f'{self.lower_value(right)}')
-        raise SpecError(node, f'unsupported condition {ast.unparse(node)}')
+        raise spec_error(node, f'unsupported condition {ast.unparse(node)}',
+                         SpecErrorKind.NOT_LOWERED)
 
     def hoist_named(self, node):
         """Emit the assignment of a walrus that leads an if condition."""
@@ -471,8 +476,8 @@ class FunctionEmitter:
             if isinstance(child, ast.NamedExpr) and (
                     not isinstance(node, ast.Compare)
                     or child is not node.left):
-                raise SpecError(child,
-                                'walrus only as the left operand of "is"')
+                raise spec_error(child,
+                                 'walrus only as the left operand of "is"')
 
     # -- statements --------------------------------------------------------
 
@@ -481,14 +486,14 @@ class FunctionEmitter:
         statements()), to release the loop variables used last here."""
         name = target.id
         if name in self.live:
-            raise SpecError(node, f'{name!r} is assigned again while it '
-                            'holds a reference')
+            raise spec_error(node, f'{name!r} is assigned again while it '
+                             'holds a reference')
         expr, ctype, convention = self.lower_call(value, target=name)
         if self.locals.get(name) != ctype:
-            raise SpecError(node, f'{name!r} changes type')
+            raise spec_error(node, f'{name!r} changes type')
         if frontend.is_struct(ctype):
             if not check:
-                raise SpecError(node, 'cannot initialize a C local here')
+                raise spec_error(node, 'cannot initialize a C local here')
             self.emit(f'if ({expr} < 0) {{')
             self.indent += 1
             self.error_exit()
@@ -509,13 +514,13 @@ class FunctionEmitter:
         int status."""
         function = self.c_function(call)
         if function is None or function[2] not in ('void', 'int'):
-            raise SpecError(node, 'only a C function returning void or an '
-                            'int status can be called as a statement')
+            raise spec_error(node, 'only a C function returning void or an '
+                             'int status can be called as a statement')
         expr, _, convention = self.lower_call(call)
         if convention is None:
             self.emit(f'{expr};')
         elif convention != ERR_NEGATIVE:
-            raise SpecError(node, 'a status must be negative on error')
+            raise spec_error(node, 'a status must be negative on error')
         else:
             self.emit(f'if ({expr} < 0) {{')
             self.indent += 1
@@ -597,8 +602,9 @@ class FunctionEmitter:
                     optional_vars=None)], body=body):
                 self.with_(obj, body, stmt)
             case _:
-                raise SpecError(stmt,
-                                f'unsupported statement {ast.unparse(stmt)}')
+                raise spec_error(stmt,
+                                 f'unsupported statement {ast.unparse(stmt)}',
+                                 SpecErrorKind.NOT_LOWERED)
 
     def block(self, stmts, null=(), later=frozenset()):
         """Emit a nested block; return its live set, or None if it exits."""
@@ -646,14 +652,14 @@ class FunctionEmitter:
                 constant = ast.literal_eval(value)
                 name = builtin_types.constant(constant)
                 if name is None:
-                    raise SpecError(node, 'no Py_GetConstant() for '
-                                    f'{constant!r}')
+                    raise spec_error(node, 'no Py_GetConstant() for '
+                                     f'{constant!r}')
                 self.cleanup()
                 self.emit(f'return Py_GetConstant({name});')
             case ast.Call():
                 expr, ctype, convention = self.lower_call(value)
                 if ctype != OBJECT or convention not in (ERR_NULL, None):
-                    raise SpecError(node, 'can only return a new reference')
+                    raise spec_error(node, 'can only return a new reference')
                 if not self.live and not self.finally_blocks:
                     self.emit(f'return {expr};')
                     return
@@ -665,7 +671,8 @@ class FunctionEmitter:
                 self.indent -= 1
                 self.emit('}')
             case _:
-                raise SpecError(node, f'unsupported return {ast.unparse(value)}')
+                raise spec_error(node, f'unsupported return {ast.unparse(value)}',
+                                 SpecErrorKind.NOT_LOWERED)
 
     def raise_(self, exc, message, node):
         exc_c = self.lower_value(ast.Name(exc))
@@ -696,22 +703,23 @@ class FunctionEmitter:
                             args.append(
                                 f'Py_TYPE({self.lower_value(obj)})->tp_name')
                         case _:
-                            raise SpecError(node, 'unsupported f-string part '
-                                            f'{ast.unparse(part)}')
+                            raise spec_error(node, 'unsupported f-string part '
+                                             f'{ast.unparse(part)}',
+                                             SpecErrorKind.NOT_LOWERED)
                 call_args = ', '.join([exc_c, c_string(''.join(fmt)), *args])
                 self.emit(f'PyErr_Format({call_args});')
             case _:
-                raise SpecError(node, 'raise needs a str or f-string message')
+                raise spec_error(node, 'raise needs a str or f-string message')
         self.error_exit()
 
     def try_(self, target, value, handlers, orelse, node):
         name, ctype, convention = self.assign(target, value, node, check=False)
         if convention is None:
-            raise SpecError(node, 'try around a call that cannot fail')
+            raise spec_error(node, 'try around a call that cannot fail')
         matches = []
         for handler in handlers:
             if handler.name is not None:
-                raise SpecError(handler, '"except E as name" is not supported')
+                raise spec_error(handler, '"except E as name" is not supported')
             types = (handler.type.elts if isinstance(handler.type, ast.Tuple)
                      else [handler.type])
             matches.append(' || '.join(
@@ -795,7 +803,7 @@ class FunctionEmitter:
                 self.emit('    break;')
                 self.emit('}')
             else:
-                raise SpecError(stmt, f'no index loop for {tp!r}')
+                raise spec_error(stmt, f'no index loop for {tp!r}')
         else:
             self.emit('for (;;) {')
             self.indent += 1
@@ -818,9 +826,9 @@ class FunctionEmitter:
         if owned:
             self.loop_vars.pop()
         if self.live != live_before:
-            raise SpecError(stmt, 'a loop body must release what it '
-                            'assigns: ' + ', '.join(sorted(
-                                self.live ^ live_before)))
+            raise spec_error(stmt, 'a loop body must release what it '
+                             'assigns: ' + ', '.join(sorted(
+                                 self.live ^ live_before)))
         self.indent -= 1
         self.emit('}')
 
@@ -829,7 +837,7 @@ class FunctionEmitter:
         of x (the partial evaluator writes it for snapshots).  The error
         check comes after its end, so it is always closed."""
         if not (len(body) == 1 and isinstance(body[0], ast.Assign)):
-            raise SpecError(node, 'a with body assigns one call')
+            raise spec_error(node, 'a with body assigns one call')
         self.emit(f'Py_BEGIN_CRITICAL_SECTION({self.lower_value(obj)});')
         name, ctype, convention = self.assign(
             body[0].targets[0], body[0].value, body[0], check=False)
@@ -843,8 +851,8 @@ class FunctionEmitter:
         self.collect_locals(stmts)
         self.statements(stmts)
         if not partial_eval.terminates(stmts):
-            raise SpecError(stmts[-1] if stmts else None,
-                            f'{c_name}: control reaches the end')
+            raise spec_error(stmts[-1] if stmts else None,
+                             f'{c_name}: control reaches the end')
         params = ', '.join(c_decl(ctype, name)
                            for name, ctype in self.params.items()) or 'void'
         return [
@@ -888,13 +896,14 @@ class Generator:
     object ("&PyBytesIter_Type").
     """
 
-    def __init__(self, spec, c_basenames, self_ctypes=None, conditions=None,
-                 type_objects=None):
+    def __init__(self, spec, bindings):
         self.spec = spec
-        self.c_basenames = c_basenames
-        self.self_ctypes = self_ctypes or {}
-        self.conditions = conditions or {}
-        self.type_objects = type_objects or {}
+        functions = bindings.functions
+        self.c_basenames = {n: b.c_basename for n, b in functions.items()}
+        self.self_ctypes = {n: b.self_ctype for n, b in functions.items()}
+        self.conditions = {n: b.condition for n, b in functions.items()
+                           if b.condition}
+        self.type_objects = bindings.type_objects
         # The shared specializations the generated code calls, in order.
         self.specializations = []
 
@@ -904,14 +913,10 @@ class Generator:
             self.specializations.append(name)
 
     def describe(self, name):
-        try:
-            cls_name, _, meth = name.rpartition('.')
-            if cls_name and meth != '__new__':
-                self.c_basename(name)       # used by a clinic block?
-                return self.spec.describe(name, self.self_ctypes[name])
-            return self.spec.describe(name)
-        except frontend.SpecError as exc:
-            raise SpecError(self.spec.functions[name], str(exc)) from None
+        if '.' in name:
+            self.c_basename(name)       # used by a clinic block?
+            return self.spec.describe(name, self.self_ctypes[name])
+        return self.spec.describe(name)
 
     def c_basename(self, name):
         """C basename: the clinic one for a method, else the name."""
@@ -920,9 +925,10 @@ class Generator:
         try:
             return self.c_basenames[name]
         except KeyError:
-            raise SpecError(self.spec.functions[name],
-                            f'{name} has a body, but no clinic block in '
-                            'the C file uses it') from None
+            raise spec_error(self.spec.functions[name],
+                             f'{name} has a body, but no clinic block in '
+                             'the C file uses it',
+                             SpecErrorKind.BINDING) from None
 
     def guard(self, name, lines):
         """*lines* under the condition of the block of *name*, as clinic
@@ -1057,18 +1063,11 @@ class Generator:
 
 
 def generate(spec: frontend.Spec, spec_path: str,
-             c_basenames: dict[str, str],
-             self_ctypes: dict[str, str] | None = None,
-             conditions: dict[str, str] | None = None,
-             type_objects: dict[str, str] | None = None) -> str:
-    """C for the implemented functions of *spec*, a frontend.Spec.
+             bindings: frontend.PyspecBindings) -> str:
+    """C for the implemented functions of *spec*, a frontend.Spec, bound
+    to the clinic functions of the C file by *bindings*.
 
-    *spec_path* is only named in the header comment.  *self_ctypes* maps
-    the implemented spec methods other than __new__ to the C type of their
-    self (or class) parameter; *conditions* those under #if to the
-    condition of their block; *type_objects* the clinic classes of the C
-    file to their type object.
+    *spec_path* is only named in the header comment.
     """
-    text: str = Generator(spec, c_basenames, self_ctypes,
-                          conditions, type_objects).generate(spec_path)
+    text: str = Generator(spec, bindings).generate(spec_path)
     return text
