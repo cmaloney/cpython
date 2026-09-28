@@ -1803,7 +1803,7 @@ class DSLParser:
                                  os.path.dirname(self.clinic.filename))
         func.pyspec_origin = (
             f"/* {func.c_basename}_impl() is generated from "
-            f"{specfiles.display_path(description.path)}:{description.lineno},"
+            f"{specfiles.display_path(description.path)},"
             f"\n   in {output.replace(os.sep, '/')}. */")
         self.clinic.pyspec_bindings.functions[description.name] = (
             frontend.SpecBinding(func.c_basename, self_ctype,

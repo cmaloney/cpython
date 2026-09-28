@@ -380,11 +380,8 @@ impl_definition block
         if not self.filename.endswith('.c'):
             return None
         clinic_classes = self._clinic_classes(self, '')
-        functions = {
-            f'{path}.{f.name}': (
-                f.c_basename,
-                f.c_basename_vectorcall if f.vectorcall else None)
-            for path, cls in clinic_classes for f in cls.functions}
+        functions = {f'{path}.{f.name}': f.c_basename
+                     for path, cls in clinic_classes for f in cls.functions}
         return typeobj.generate(spec, {path for path, _ in clinic_classes},
                                 functions)
 

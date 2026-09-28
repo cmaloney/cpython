@@ -1,36 +1,19 @@
-"""Names a pyspec file may use, with their meaning as Python.
+"""The names a spec imports, with their meaning as Python.
 
-A pyspec file is ordinary Python: it imports these names with
-``from libclinic.pyspec.runtime import ...``.  Running it (see load())
-gives the reference behavior; Argument Clinic reads the same file with the
-ast module (frontend.py), derives facts from it (call_table.py) and lowers
-it to C (emit.py).  Besides the functions of the specs themselves, a spec
-uses:
+A spec imports them with ``from libclinic.pyspec.runtime import ...``;
+load() runs a spec as Python (the reference behaviour, for the tests),
+while clinic reads the same file with the ast module.  They are:
 
 * builtins with a fixed C meaning: ``NULL``, ``isinstance`` (the real
   type), ``iter`` (PyObject_GetIter()), ``tp_name`` and ``fqname`` (type
-  names in error messages).  Clinic gives ``isinstance`` and ``iter`` their
-  C meaning by name, so a spec that calls them without importing them
-  from here would run the builtins as Python: load() refuses it
-  (SHADOWED_BUILTINS);
-* the Argument Clinic decorators, and ``@c_name`` (frontend.py,
-  typeobj.py): identity decorators for Python;
-* ``@inline``: a function generated into each caller (a fast path);
-* ``@native`` and a few primitives that say what plain Python
-  cannot, placed where the effect happens, so that the control flow
-  around them gives their conditions (see Objects/pyspec/README.rst):
-
-  exact(T, value)       value is a new object of exactly type T
-  unknown(value)        value is a new object of a type not known exactly
-  calls(x, "__name__")  here the C invokes the special method of type(x):
-                        Python code runs only if that method is Python code
-  runs_python()         here the C may run any Python code
-  NULL                  returned: absent (not an error)
-
-  exact() and unknown() may fail (MemoryError); calls() and runs_python()
-  may raise anything.  When the spec runs as Python they only return
-  their value (exact() checks its type): the code around them models what
-  the C computes.
+  names in messages).  Clinic gives isinstance and iter their C meaning
+  by name, so a spec must import them (SHADOWED_BUILTINS);
+* the clinic decorators and ``@c_name``, ``@native``, ``@inline``:
+  identity decorators for Python;
+* the primitives of a Python reference, where the effect happens:
+  ``exact(T, value)``, ``unknown(value)``, ``calls(x, "__name__")``,
+  ``runs_python()`` (Objects/pyspec/README.rst, "Native functions").
+  As Python they only return their value (exact() checks its type).
 """
 
 import ast
@@ -76,10 +59,8 @@ def _clinic_decorator(*args: Any) -> Any:
     return lambda func: func
 
 
-# The Argument Clinic decorators other than @classmethod and @staticmethod
-# (see frontend.py): they only affect the generated C, so for Python they
-# are identity decorators.  (A spec imports them by name: ``from
-# libclinic.pyspec.runtime import text_signature``.)
+# The clinic decorators other than @classmethod and @staticmethod: for
+# Python, identity decorators.
 def _define_clinic_decorators() -> list[str]:
     from libclinic.dsl_parser import DSLParser
     names = [name for name in DSLParser.decorator_names()
@@ -93,24 +74,18 @@ CLINIC_DECORATORS = _define_clinic_decorators()
 
 
 def c_name(*args: str, **kwargs: str) -> Callable[[_F], _F]:
-    """``@c_name("x")`` / ``@c_name(slot="x")``: the C function of a
-    method (see frontend.py); on a class, the prefix of its C tables
-    (typeobj.py).  An identity decorator for Python."""
+    """The C name of a method, or the prefix of the tables of a class."""
     return lambda func: func
 
 
 def native(func: _F) -> _F:
-    """The function of the same name is implemented natively (in C, by
-    hand) and is the authority; the body is its Python reference: run
-    when the spec runs as Python, and read for the facts of its calls.
-    It describes the native code and is never compiled, not even in
-    part."""
+    """Implemented natively; the body is its Python reference, run as
+    Python and read for facts, never compiled."""
     return func
 
 
 def inline(func: _F) -> _F:
-    """The body is generated into each caller (a fast path of a native
-    function, say), never as a C function of its own."""
+    """The body is generated into each caller."""
     return func
 
 
@@ -154,12 +129,9 @@ class _Iterator:
 
 
 def iter(obj: Any) -> _Iterator:
-    """PyObject_GetIter().
-
-    ``for item in it:`` over its result is lowered to PyIter_Next() calls:
-    tp_iternext only.  A Python for loop would call ``it.__iter__()``
-    first, which C does not do; the wrapper makes the spec, run as
-    Python, do the same as C."""
+    """PyObject_GetIter().  ``for item in it:`` over the result is
+    PyIter_Next() calls in C; a Python for loop would first call
+    ``it.__iter__()``, which the wrapper makes a no-op, as in C."""
     return _Iterator(builtins.iter(obj))
 
 
@@ -184,11 +156,9 @@ _checked: set[str] = set()
 
 
 def check_shadowed_builtins(tree: ast.Module, path: str) -> None:
-    """Raise a SpecError at the first use of a SHADOWED_BUILTINS name that
-    the spec *tree* does not import from this module: run as Python, it
-    would be the builtin, whose meaning is not the C's (isinstance()
-    honours __class__; a for loop over the builtin iter() calls __iter__
-    of the iterator), and the difftest would compare the wrong thing."""
+    """A SpecError at the first use of a SHADOWED_BUILTINS name that the
+    spec *tree* does not import from here: as Python it would be the
+    builtin, whose meaning is not the C's."""
     from libclinic.errors import SpecError
     imported = {alias.name for node in tree.body
                 if builtins.isinstance(node, ast.ImportFrom)
@@ -205,19 +175,11 @@ def check_shadowed_builtins(tree: ast.Module, path: str) -> None:
 
 
 def load(path: str) -> dict[str, Callable[..., Any]]:
-    """Execute the spec at *path*; return its functions and methods.
-
-    The result maps "PyBytes_FromObject" or "bytes.__new__" to the Python
-    function.  ``class T:`` in a spec describes the builtin type T, so once
-    the spec has run, the global T is the builtin again: bodies compare
-    with the real type.  Calls ``T.m(...)`` of spec methods call the spec
-    method, as in the generated C (except in the Python reference of a
-    @native function, which uses the builtin).  The specs it
-    imports (``from Objects.pyspec.abstract import PyNumber_AsSsize_t``)
-    are found from the source root (specfiles.import_root()).  The spec,
-    and every spec it imports, must import the SHADOWED_BUILTINS it uses
-    from this module (a SpecError otherwise).
-    """
+    """Run the spec at *path*: {"PyBytes_FromObject" or "bytes.__new__":
+    the Python function}.  Once the spec has run, a global T of ``class
+    T:`` is the builtin again (bodies compare with the real type), while
+    ``T.m(...)`` calls the spec method, as in the generated C (except in
+    a Python reference, which models with the builtin)."""
     from . import specfiles
     with open(path, encoding='utf-8') as f:
         tree = ast.parse(f.read(), path)

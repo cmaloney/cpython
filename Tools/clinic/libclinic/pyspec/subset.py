@@ -1,46 +1,25 @@
 """The lowered subset of the spec language: the one place that says it.
 
-(For contributors: "The spec language" and "The lowered subset" in
-Objects/pyspec/README.rst.)
+A spec may contain any Python (Objects/pyspec/README.rst, "The spec
+language" and "The lowered subset").  Only part of it is wired up:
 
-A spec may contain any Python.  Only part of it is *wired up*:
+* an implemented body (``Spec.implemented()``) is lowered: partially
+  evaluated (partial_eval.py), then emitted (emit.py).  Its signature and
+  statements must be in the lowered subset (Lowered; check_lowered()
+  reports the first construct outside it, before any evaluation);
+* an ``@inline`` body is lowered into each caller: fast paths ``if
+  <condition>: return <value>``, then ``return <value>`` (Inline);
+* the Python reference of a ``@native`` function is never lowered, but
+  read for facts: its effects must be where facts.py follows them
+  (Analysed); else facts.py gives it the worst facts;
+* anything else (``...``) is C about which nothing is known.
 
-* a spec body that clinic generates as C (``Spec.implemented()``) is
-  lowered: partially evaluated (partial_eval.py), then emitted (emit.py).
-  Its signature and its statements must be in the lowered subset;
-  lowered() lists what is not, and check_lowered() reports the first as
-  "expressible, but not lowered to C yet", before any partial evaluation;
-* the body of an ``@inline`` function is lowered into each of its
-  callers: fast paths ``if <condition>: return <value>``, then
-  ``return <value>``, with the conditions and values of the lowered
-  subset; its signature is that of a native function (C types).
-  check_inline() reports what is not;
-* the Python reference of a native function (``@native``) is never
-  lowered, not even in part, but read for facts (facts.py): its control
-  flow is followed, and every effect (a call of a primitive or of a C
-  function, ``return``, ``raise``) must be where facts.py follows it.
-  analysed() lists what is not; facts.py then gives the function the
-  worst facts (any result, may raise anything, may run Python code)
-  instead of reading the reference;
-* anything else (a stub, ``...``) is C about which nothing is known.
+The checks are syntactic; the emitter still reports the uses it cannot
+lower (a local assigned two C types, SpecErrorKind.LOWERING).
 
-The checks are syntactic (with the names the spec defines): the emitter
-still reports the uses it cannot lower, e.g. a local assigned objects of
-two C types (SpecErrorKind.LOWERING).
-
-The statements of the subset have one vocabulary, Kind (kind()): a
-walker over them (Walker) has one method per kind, named by the value of
-the kind.  The walkers are Lowered here, the facts analysis
-(facts.Analyzer), the partial evaluator (partial_eval.Evaluator, and its
-snapshot) and the emitter (emit.FunctionLowering).
-
-To add a construct to the lowered subset: accept it here (the method of
-Lowered for its kind of node: a statement method, condition(), value(),
-call(), or signature(); a new kind of statement is a new Kind, with a
-method in each walker), lower it in emit.py, give its facts in facts.py
-if it has effects, evaluate it in partial_eval.py if the facts of a call
-site decide it, and add a row to "The lowered subset" in README.rst and
-a test to PyspecLanguageTest of Lib/test/test_clinic.py.
+The statements of the subset have one vocabulary, Kind: every pass over
+them is a Walker, with one method per kind (Lowered here, facts.Analyzer,
+partial_eval.Evaluator and its snapshot, emit.FunctionLowering).
 """
 
 from __future__ import annotations
@@ -48,7 +27,6 @@ from __future__ import annotations
 import ast
 import builtins
 import enum
-import weakref
 from collections.abc import Callable
 from typing import Generic, Protocol, TypeVar, cast
 
@@ -58,8 +36,7 @@ from . import builtin_types
 # One construct outside a subset: (node, what it is, for messages).
 Unsupported = tuple[ast.AST, str]
 
-# Converters (annotations) of the parameters of a lowered function, and
-# the C type of the argument.
+# The converters of the parameters of a lowered function: their C type.
 LOWERED_CTYPES = {
     'object': 'PyObject *',
     'str': 'const char *',
@@ -84,6 +61,8 @@ NOT_LOWERED_DECORATORS = ('critical_section', 'staticmethod', 'getter',
 # The builtin types a condition may test (``type(x) is K``,
 # ``isinstance(x, K)``): the rows of builtin_types.py with C checks.
 TYPE_CHECKS = builtin_types.CHECKS
+# The builtin types a spec class may describe (with a C check).
+TYPE_OBJECTS = builtin_types.TYPE_OBJECTS
 
 # The dunders ``hasattr(type(x), "__dunder__")`` is lowered for.
 HASATTR_SLOTS = ('__index__', '__buffer__')
@@ -93,18 +72,15 @@ COMPARE_OPS = {ast.Lt: '<', ast.LtE: '<=', ast.Gt: '>', ast.GtE: '>=',
 
 
 def is_struct(ctype: str) -> bool:
-    """Whether C type *ctype* (of c_signature()) is a C struct: neither a
-    pointer nor a scalar."""
+    """Whether *ctype* is a C struct: neither a pointer nor a scalar."""
     return '*' not in ctype and ctype not in C_CTYPES.values() \
         and ctype.split()[-1] not in ('char', 'short', 'int', 'long')
 
 
 def c_signature(node: ast.FunctionDef) -> tuple[list[tuple[str, str]], str]:
-    """([(parameter, C type)], C return type) of a @native or
-    @inline function: an annotation of C_CTYPES or a string (the C type); no
-    return annotation is ``PyObject *``.  A return type that is neither
-    a scalar nor a pointer is a C struct that the function initializes in
-    place (see emit.py)."""
+    """([(parameter, C type)], C return type) of a @native or @inline
+    function: annotations of C_CTYPES or strings; no return annotation is
+    ``PyObject *``; a struct result is initialized in place (emit.py)."""
     def ctype(annotation: ast.expr | None, default: str | None) -> str:
         match annotation:
             case None if default is not None:
@@ -143,9 +119,8 @@ class Spec(Protocol):
 # -- the statements ----------------------------------------------------------
 
 class Kind(enum.Enum):
-    """The kinds of statements of the lowered subset, and of the residual
-    code of the partial evaluator; the value is the name of the method of
-    a Walker for the kind."""
+    """The kinds of statements of the lowered subset and of residual code;
+    the value names the method of a Walker for the kind."""
     PASS = 'pass_'          # pass, a docstring
     IF = 'if_'
     ASSIGN = 'assign'       # x = <call>
@@ -190,46 +165,16 @@ R = TypeVar('R')
 
 class Walker(Generic[A, R]):
     """A pass over statements: statement() calls the method of the Kind
-    of the statement, with *arg*, the state of the walk; other() is for
-    a statement of no kind, and for a kind without a method."""
+    of the statement with *arg*, the state of the walk, or other() for a
+    statement of no kind or a kind the walker has no method for."""
 
     def statement(self, stmt: ast.stmt, arg: A) -> R:
         found = kind(stmt)
-        method = self.other if found is None else getattr(self, found.value)
+        method = getattr(self, found.value if found else '', self.other)
         return cast(Callable[[ast.stmt, A], R], method)(stmt, arg)
 
     def other(self, stmt: ast.stmt, arg: A) -> R:
         raise NotImplementedError(type(stmt).__name__)
-
-    def pass_(self, stmt: ast.stmt, arg: A) -> R:
-        return self.other(stmt, arg)
-
-    def if_(self, stmt: ast.If, arg: A) -> R:
-        return self.other(stmt, arg)
-
-    def assign(self, stmt: ast.Assign, arg: A) -> R:
-        return self.other(stmt, arg)
-
-    def call_(self, stmt: ast.Expr, arg: A) -> R:
-        return self.other(stmt, arg)
-
-    def return_(self, stmt: ast.Return, arg: A) -> R:
-        return self.other(stmt, arg)
-
-    def raise_(self, stmt: ast.Raise, arg: A) -> R:
-        return self.other(stmt, arg)
-
-    def try_(self, stmt: ast.Try, arg: A) -> R:
-        return self.other(stmt, arg)
-
-    def finally_(self, stmt: ast.Try, arg: A) -> R:
-        return self.other(stmt, arg)
-
-    def for_(self, stmt: ast.For, arg: A) -> R:
-        return self.other(stmt, arg)
-
-    def with_(self, stmt: ast.With, arg: A) -> R:
-        return self.other(stmt, arg)
 
 
 def blocks(stmt: ast.stmt) -> list[list[ast.stmt]]:
@@ -266,9 +211,8 @@ def assigned_names(stmts: list[ast.stmt]) -> set[str]:
 
 
 def call_arguments(spec: Spec, name: str, call: ast.Call) -> list[ast.expr]:
-    """The arguments of *call*, a call of spec function *name*, one per
-    parameter: an omitted one is its default, NULL (the only default of
-    the lowered subset).  A SpecError for too few or too many."""
+    """The arguments of *call* of spec function *name*, one per parameter
+    (NULL for an omitted one: the only default of the lowered subset)."""
     args = spec.functions[name].args
     params = len(args.posonlyargs + args.args)
     if not params - len(args.defaults) <= len(call.args) <= params:
@@ -336,18 +280,13 @@ class Lowered(Walker[None, None]):
         if cls_name and meth == '__init__':
             self.unsupported(node, '__init__ (an int-returning initproc)')
         if cls_name and meth == '__new__' \
-                and cls_name not in _type_objects():
+                and cls_name not in TYPE_OBJECTS:
             self.unsupported(node, f'__new__ of type {cls_name!r}, which '
                              'has no row in builtin_types.py (unknown type '
                              f'{cls_name!r}; known: '
-                             f'{sorted(_type_objects())})')
+                             f'{sorted(TYPE_OBJECTS)})')
         args = node.args
-        if args.vararg:
-            self.unsupported(args.vararg, f'*{args.vararg.arg}')
-        for arg in args.kwonlyargs:
-            self.unsupported(arg, f'keyword-only parameter {arg.arg!r}')
-        if args.kwarg:
-            self.unsupported(args.kwarg, f'**{args.kwarg.arg}')
+        self.positional_only()
         positional = args.posonlyargs + args.args
         defaults: list[ast.expr | None] = [None] * (
             len(positional) - len(args.defaults)) + list(args.defaults)
@@ -379,6 +318,16 @@ class Lowered(Walker[None, None]):
                 and node.returns.id == 'object'):
             what = 'return converter' if cls_name else 'return type'
             self.unsupported(node.returns, f'{what} {_text(node.returns)}')
+
+    def positional_only(self) -> None:
+        """No ``*args``, keyword-only parameters or ``**kwargs``."""
+        args = self.node.args
+        if args.vararg:
+            self.unsupported(args.vararg, f'*{args.vararg.arg}')
+        for arg in args.kwonlyargs:
+            self.unsupported(arg, f'keyword-only parameter {arg.arg!r}')
+        if args.kwarg:
+            self.unsupported(args.kwarg, f'**{args.kwarg.arg}')
 
     # -- statements ------------------------------------------------------------
 
@@ -533,7 +482,7 @@ class Lowered(Walker[None, None]):
             case ast.Compare(left=ast.Name(name),
                              ops=[ast.Is() | ast.IsNot()],
                              comparators=[ast.Name(cls)]) \
-                    if cls in _type_objects() and name in self.params:
+                    if cls in TYPE_OBJECTS and name in self.params:
                 pass
             case ast.Call(func=ast.Name('isinstance'),
                           args=[obj, ast.Name(cls)], keywords=[]) \
@@ -562,7 +511,7 @@ class Lowered(Walker[None, None]):
             case ast.Name(name) if (name in ('NULL', 'None')
                                     or name in self.params
                                     or name in self.locals
-                                    or name in _type_objects()
+                                    or name in TYPE_OBJECTS
                                     or is_exception(name)):
                 pass
             case ast.Constant(value=bool() | int()):
@@ -610,22 +559,14 @@ class Lowered(Walker[None, None]):
 
 
 class Inline(Lowered):
-    """The body of an @inline function, which partial_eval.py generates
-    into each caller: fast paths ``if <condition>: return <value>``, then
-    ``return <value>``; a value is a call (Lowered.call()) or an operand
-    (Lowered.value()).  Its signature is that of a native function: any
-    C types (c_signature()), positional parameters without
-    defaults."""
+    """The body of an @inline function: fast paths ``if <condition>:
+    return <value>``, then ``return <value>`` (a value is a call or an
+    operand); its signature: positional parameters of any C types
+    (c_signature()), no defaults."""
 
     def signature(self) -> None:
-        args = self.node.args
-        if args.vararg:
-            self.unsupported(args.vararg, f'*{args.vararg.arg}')
-        for arg in args.kwonlyargs:
-            self.unsupported(arg, f'keyword-only parameter {arg.arg!r}')
-        if args.kwarg:
-            self.unsupported(args.kwarg, f'**{args.kwarg.arg}')
-        for default in args.defaults:
+        self.positional_only()
+        for default in self.node.args.defaults:
             self.unsupported(default, f'default {_text(default)} (an '
                              '@inline function has none)')
         c_signature(self.node)      # a SpecError if not C types
@@ -671,22 +612,14 @@ def _kind(stmt: ast.stmt) -> str:
     return names.get(type(stmt), type(stmt).__name__)
 
 
-def _type_objects() -> dict[str, str]:
-    """The builtin types a spec class may describe (with a C check)."""
-    return builtin_types.TYPE_OBJECTS
-
-
 # -- the Python reference of a C function ---------------------------------------
 
 class Analysed:
     """What facts.py follows in the Python reference of a @native
-    function: control flow of the lowered subset, with every effect where
-    facts.py accounts for it; any other code is a model of the values the
-    C computes (facts.py: it has no effects), and must have none.
-
-    Effects are ``return``, ``raise``, ``assert`` and the calls of
-    primitives (runtime.py), of hand-written C functions and of spec
-    functions."""
+    function: the control flow of the lowered subset, with every effect
+    (``return``, ``raise``, ``assert``, a call of a primitive, of a C or
+    spec function) where facts.py accounts for it; the rest models
+    values and must have no effect."""
 
     def __init__(self, spec: Spec, name: str) -> None:
         self.spec = spec
@@ -777,59 +710,35 @@ class Analysed:
                 self.effect_free(stmt, _kind(stmt))
 
 
-# -- the checks ------------------------------------------------------------------
-
-_lowered_cache: weakref.WeakKeyDictionary[Spec, dict[str, list[Unsupported]]]
-_lowered_cache = weakref.WeakKeyDictionary()
-_analysed_cache: weakref.WeakKeyDictionary[Spec, dict[str, list[Unsupported]]]
-_analysed_cache = weakref.WeakKeyDictionary()
-_inline_cache: weakref.WeakKeyDictionary[Spec, dict[str, list[Unsupported]]]
-_inline_cache = weakref.WeakKeyDictionary()
-
+# -- the checks ----------------------------------------------------------------
 
 def lowered(spec: Spec, name: str) -> list[Unsupported]:
-    """What of spec function *name* (its signature and body) is outside
-    the lowered subset, in order."""
-    cache = _lowered_cache.setdefault(spec, {})
-    if name not in cache:
-        cache[name] = Lowered(spec, name).check()
-    return cache[name]
-
-
-def analysed(spec: Spec, name: str) -> list[Unsupported]:
-    """What of the Python reference of @native function *name*
-    facts.py cannot follow, in order: if anything, its facts are the
-    worst."""
-    cache = _analysed_cache.setdefault(spec, {})
-    if name not in cache:
-        cache[name] = Analysed(spec, name).check()
-    return cache[name]
-
-
-def check_lowered(spec: Spec, name: str) -> None:
-    """Raise a SpecError (NOT_LOWERED) at the first construct of spec
-    function *name* outside the lowered subset."""
-    found = lowered(spec, name)
-    if found:
-        node, what = found[0]
-        raise spec.error(node, f"{name}(): {what} is expressible, but not "
-                         "lowered to C yet", SpecErrorKind.NOT_LOWERED)
+    """What of spec function *name* (signature and body) is outside the
+    lowered subset, in order."""
+    return Lowered(spec, name).check()
 
 
 def inline(spec: Spec, name: str) -> list[Unsupported]:
-    """What of @inline function *name* (its signature and body) is outside
-    the lowered subset, in order."""
-    cache = _inline_cache.setdefault(spec, {})
-    if name not in cache:
-        cache[name] = Inline(spec, name).check()
-    return cache[name]
+    """What of @inline function *name* is outside the lowered subset."""
+    return Inline(spec, name).check()
 
 
-def check_inline(spec: Spec, name: str) -> None:
-    """Raise a SpecError (NOT_LOWERED) at the first construct of @inline
-    function *name* outside the lowered subset."""
-    found = inline(spec, name)
+def analysed(spec: Spec, name: str) -> list[Unsupported]:
+    """What of the Python reference of @native function *name* facts.py
+    cannot follow: if anything, its facts are the worst."""
+    return Analysed(spec, name).check()
+
+
+def check_lowered(spec: Spec, name: str,
+                  found: list[Unsupported] | None = None) -> None:
+    """A SpecError (NOT_LOWERED) at the first construct of spec function
+    *name* outside the lowered subset (*found*, by default lowered())."""
+    found = lowered(spec, name) if found is None else found
     if found:
         node, what = found[0]
         raise spec.error(node, f"{name}(): {what} is expressible, but not "
                          "lowered to C yet", SpecErrorKind.NOT_LOWERED)
+
+
+def check_inline(spec: Spec, name: str) -> None:
+    check_lowered(spec, name, inline(spec, name))

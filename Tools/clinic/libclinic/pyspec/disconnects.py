@@ -39,22 +39,19 @@ from __future__ import annotations
 import ast
 import builtins
 import dataclasses as dc
-import glob
 import inspect
 import os
 import re
 import sys
 import tomllib
 
-from . import frontend, specfiles
+from . import frontend, specfiles, subset
 
 
 def spec_types(srcdir):
-    """{type name: dict(cfile=..., prefixes=...)} of the builtin types
-    described by a class of the spec of a core C file (found by
-    specfiles.spec_files()): their C file, and the prefixes of the names
-    of their C API, from their type object (&PyBytes_Type: PyBytes and
-    _PyBytes, which cover PyBytesWriter_ too)."""
+    """{type name: dict(cfile=..., prefixes=...)} of the builtin types a
+    class of a core spec describes: their C file, and the prefixes of
+    their C API (&PyBytes_Type: PyBytes and _PyBytes)."""
     out = {}
     for spec_path, c_file in specfiles.core_spec_files(srcdir):
         spec = frontend.Spec.load(spec_path)
@@ -81,14 +78,12 @@ def read_baseline(srcdir, dimension):
 
 
 def _read(srcdir, rel):
-    """The text of *rel*, a path relative to *srcdir* written with '/'
-    (the paths in the disconnect lines)."""
+    """The text of *rel*, a path relative to *srcdir* with '/'."""
     with open(os.path.join(srcdir, rel), encoding='utf-8') as f:
         return f.read()
 
 
-# ---------------------------------------------------------------------------
-# C prototypes
+# -- C prototypes
 
 @dc.dataclass
 class Proto:
@@ -254,8 +249,7 @@ def parse_refcounts(srcdir):
     return out
 
 
-# ---------------------------------------------------------------------------
-# Dimension: C API
+# -- Dimension: C API
 
 def capi(srcdir):
     headers, macros = parse_headers(srcdir)
@@ -330,8 +324,7 @@ def capi(srcdir):
     return sorted(out)
 
 
-# ---------------------------------------------------------------------------
-# Signatures
+# -- Signatures
 
 UNKNOWN = object()          # a default with no Python value (NULL, ...)
 
@@ -539,8 +532,7 @@ def public_methods(tp):
                   if not name.startswith('_') and callable(value))
 
 
-# ---------------------------------------------------------------------------
-# Dimension: Doc/builtins/stdtypes.rst
+# -- Dimension: Doc/builtins/stdtypes.rst
 
 _DIRECTIVE_RE = re.compile(r'^(?P<indent> *)\.\. (?P<kind>method|classmethod|'
                            r'staticmethod|class):: (?P<sig>.*)$')
@@ -614,8 +606,7 @@ def docs(srcdir):
     return sorted(out)
 
 
-# ---------------------------------------------------------------------------
-# Dimension: Doc/c-api/typeobj.rst vs slotdefs[]
+# -- Dimension: Doc/c-api/typeobj.rst vs slotdefs[]
 
 def slots(srcdir):
     source = _read(srcdir, 'Objects/typeobject.c')
@@ -652,12 +643,10 @@ def slots(srcdir):
     return sorted(out)
 
 
-# ---------------------------------------------------------------------------
-# Dimension: docstrings written twice
+# -- Dimension: docstrings written twice
 
 def docstring_files(srcdir):
-    """The files where the docstrings of methods are written: every spec
-    with a class (found by specfiles.spec_files()), and its C file."""
+    """Every spec with a class, and its C file."""
     out = []
     for spec_path, c_file in specfiles.spec_files(srcdir):
         if not frontend.Spec.load(spec_path).classes:
@@ -704,8 +693,7 @@ def docstrings(srcdir):
                   if len(where) > 1)
 
 
-# ---------------------------------------------------------------------------
-# Dimension: typeshed (optional)
+# -- Dimension: typeshed (optional)
 
 def _typeshed_class(tree, name):
     """{method: [[Param], ...]} of class *name* of a .pyi, taking the
@@ -753,42 +741,8 @@ def typeshed(srcdir, typeshed_dir):
     return sorted(out)
 
 
-# ---------------------------------------------------------------------------
-# Dimension: the native code of the @native functions
-#
-# A @native function is implemented natively in the file its spec
-# describes (Objects/foo.c for Objects/pyspec/foo.py), and its Python
-# reference describes that code.  The checker of the file's language
-# reads the native code (NATIVE_CHECKERS, by the file's extension; the
-# C checker today).  A checker provides (see NativeChecker):
-#
-#   function(name)        the code of the function *name* of the file,
-#                         or None;
-#   calls(code)           the names of the functions *code* calls;
-#   escaping_calls(code)  those of them that may run Python code, by an
-#                         analysis of the language, a call through a slot
-#                         by the slot's name (tp_iternext);
-#   runs_no_python(name)  whether a call of *name* was audited to run no
-#                         Python code (NO_PYTHON);
-#   special_method(name)  the special method whose Python code the call
-#                         of *name* runs, if that is the only Python code
-#                         it runs (SLOT_CALLS, slotdefs[]).
-#
-# native_calls() then checks every language the same way: each escaping
-# call is accounted for by the reference (a call of the same function, a
-# calls(x, "__name__") of the special method it runs, runs_python()), or
-# calls a @native function whose reference runs no Python code, or a
-# function of the file, read in turn; a reference that cannot fail has
-# no escaping call; and each native function the reference calls is
-# called by the native code.
-#
-# A Rust checker would read Objects/foo.rs: function() finds ``fn name``
-# (a tokenizer like the cases generator's lexer), calls() lists the calls
-# by path, escaping_calls() those not audited to run no Python code (its
-# NO_PYTHON: the C API functions it binds and Rust functions that call
-# none), and special_method() maps the C API calls that run one special
-# method (PyObject_GetIter...), as for C.  Its dimension would be a ratchet
-# of its own (rust_calls, next to c_calls).
+# -- Dimension: the native code of the @native functions (README.rst,
+# "Checking a reference against its native code")
 
 # C functions that run Python code only through a special method of an
 # argument: the calls(x, "__name__") that accounts for them.  A call
@@ -799,10 +753,9 @@ SLOT_CALLS = {'PyObject_GetBuffer': '__buffer__',
               'PyObject_Length': '__len__', 'PyObject_Size': '__len__',
               'PyObject_GetIter': '__iter__', 'PyIter_Next': '__next__'}
 
-# Audited: C functions without a spec (and not in the file of the function
-# checked, which is read) that run no Python code.  Errors, memory, the
-# objects of exact builtin types; a fatal error does not return; tp_alloc
-# has no special method (Python code cannot define it).
+# Audited: C functions without a spec, outside the file checked, that run
+# no Python code (errors, memory, exact builtin types; a fatal error does
+# not return; Python code cannot define tp_alloc).
 NO_PYTHON = {
     'PyErr_Format', 'PyErr_SetString', 'PyErr_NoMemory', 'PyErr_Clear',
     'PyErr_Occurred', 'PyErr_GivenExceptionMatches', '_PyErr_Format',
@@ -821,24 +774,32 @@ NO_PYTHON = {
 
 
 class NativeChecker:
-    """Reads the native code of one file (see the comment above)."""
+    """Reads the native code of one file.  A Rust checker would read
+    Objects/foo.rs the same way, with a ratchet dimension of its own."""
 
     def __init__(self, path: str) -> None:
         self.path = path
 
     def function(self, name: str) -> object | None:
+        """The code of function *name* of the file, or None."""
         raise NotImplementedError
 
     def calls(self, code: object) -> set[str]:
+        """The names of the functions *code* calls."""
         raise NotImplementedError
 
     def escaping_calls(self, code: object) -> set[str]:
+        """Those that may run Python code (a call through a slot: the
+        slot, ``tp_iternext``)."""
         raise NotImplementedError
 
     def runs_no_python(self, name: str) -> bool:
+        """Whether a call of *name* was audited to run no Python code."""
         raise NotImplementedError
 
     def special_method(self, name: str) -> set[str]:
+        """The special methods whose Python code a call of *name* runs, if
+        that is all the Python code it runs."""
         raise NotImplementedError
 
 
@@ -960,24 +921,19 @@ class CChecker(NativeChecker):
 NATIVE_CHECKERS = {'.c': CChecker, '.h': CChecker}
 
 
-def _spec_files(srcdir):
-    for top in ('Objects', 'Python', 'Include'):
-        yield from sorted(path for path in glob.glob(os.path.join(
-            srcdir, top, '**', 'pyspec', '*.py'), recursive=True)
-            if not path.endswith('_cases.py'))
-
-
 def native_calls(srcdir, extensions):
     """The disconnects of the @native functions whose native file (the
-    file their spec describes) has one of *extensions*, by the checker of
-    NATIVE_CHECKERS for its language (see the comment above)."""
+    file their spec describes) has one of *extensions*."""
     from . import context
-    specs = [frontend.Spec.load(path) for path in _spec_files(srcdir)]
+    specs = [frontend.Spec.load(path)
+             for path, _ in specfiles.spec_files(srcdir)]
     contexts: dict[frontend.Spec, context.Context] = {}
 
-    def reference_facts(spec, name):
-        """The facts of @native function *name* of *spec*, for any
-        arguments."""
+    def reference_facts(name, spec=None):
+        """The facts of @native function *name* (of *spec*, else of the
+        spec defining it), for any arguments."""
+        if spec is None:
+            spec = next(s.resolve(name) for s in specs if s.resolve(name))[0]
         if spec not in contexts:
             contexts[spec] = context.Context(spec)
         return contexts[spec].analyzer(spec).reference_facts(name, {})
@@ -997,11 +953,11 @@ def native_calls(srcdir, extensions):
             os.path.join(srcdir, found))
         for name in spec.native_functions():
             out += _check_native(spec, name, checker, found, rel, native,
-                                 specs, reference_facts)
+                                 reference_facts)
     return sorted(out)
 
 
-def _check_native(spec, name, checker, native_file, rel, native, specs,
+def _check_native(spec, name, checker, native_file, rel, native,
                   reference_facts):
     node = spec.functions[name]
     positional, keywords = spec.c_name(name)
@@ -1038,9 +994,7 @@ def _check_native(spec, name, checker, native_file, rel, native, specs,
             if callee in native:
                 # Its facts; whether its native code agrees is its own
                 # check.
-                found = next(s.resolve(callee) for s in specs
-                             if s.resolve(callee))
-                if not reference_facts(found[0], callee).runs_python:
+                if not reference_facts(callee).runs_python:
                     continue
                 out.append(f'{where}: calls {callee}(), which may '
                            'run Python code, and its reference does '
@@ -1069,24 +1023,17 @@ def _check_native(spec, name, checker, native_file, rel, native, specs,
     # A reference that cannot fail: the native code calls nothing that
     # can (a native function whose reference cannot fail cannot).
     def may_fail(callee):
-        found = callee in native and next(
-            s.resolve(callee) for s in specs if s.resolve(callee))
-        return not found or reference_facts(found[0], callee).raises
-    returns = frontend.c_signature(node)[1] if '.' not in name \
+        return callee not in native or reference_facts(callee).raises
+    returns = subset.c_signature(node)[1] if '.' not in name \
         else 'void'
     failing = sorted(filter(may_fail, calls))
-    if (returns != 'void' and not frontend.is_struct(returns)
-            and failing and not reference_facts(spec, name).raises):
+    if (returns != 'void' and not subset.is_struct(returns)
+            and failing and not reference_facts(name, spec).raises):
         out.append(f'{where}: its reference cannot fail, but the C '
                    f'calls {", ".join(failing)}')
     return out
 
 
 def c_calls(srcdir):
-    """For each @native function implemented in C: every call in its C
-    (and in the functions of its file it calls) that may run Python code
-    is one its Python reference makes, a calls(x, "__name__") of the
-    special method it invokes, or covered by runs_python(); and it calls
-    the native functions its reference calls (the C checker,
-    native_calls())."""
+    """The disconnects of the @native functions implemented in C."""
     return native_calls(srcdir, ('.c', '.h'))

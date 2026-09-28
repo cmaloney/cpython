@@ -35,35 +35,24 @@ NULL = Null.NULL
 NOTNULL = Null.NOTNULL
 
 
-class Sentinel(str, enum.Enum):
-    """Names the partial evaluator writes into residual code."""
-
-    # ``return FALLBACK`` in a snapshot (partial_eval.py): no result, the
-    # caller restarts through the generic function.
-    FALLBACK = 'FALLBACK'
-
-
-FALLBACK = Sentinel.FALLBACK
+# ``return FALLBACK`` in a snapshot (partial_eval.py): no result, the
+# caller restarts through the generic function.
+FALLBACK = 'FALLBACK'
 
 
 @dc.dataclass(frozen=True)
 class Value:
-    """The name refers to exactly this object (cls is bytes)."""
     obj: object
 
 
 @dc.dataclass(frozen=True)
 class IterOf:
-    """The name refers to iter(source), where source (a name) is of exact
-    type tp, whose iteration runs no Python code."""
     source: str
     tp: type
 
 
 @dc.dataclass(frozen=True)
 class Other:
-    """Not NULL, of none of the exact *types*, an instance of none of the
-    *instances*."""
     types: tuple[type, ...] = ()
     instances: tuple[type, ...] = ()
 
@@ -82,12 +71,6 @@ def builtin_type(node: ast.expr) -> type | None:
         if isinstance(value, type):
             return value
     return None
-
-
-def is_type_call(node: ast.expr) -> bool:
-    """``type(x)``"""
-    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-            and node.func.id == 'type' and len(node.args) == 1)
 
 
 def exact_type(node: ast.expr, env: Env) -> type | None:
@@ -131,12 +114,10 @@ def _excluding(fact: Fact | None, **more: tuple[type, ...]) -> Other:
 
 
 def refine(test: ast.expr, env: Env) -> tuple[Env, Env]:
-    """The environments of the body and of the else clause of ``if
-    test``, which *env* does not decide: ``type(x) is K`` gives x the
-    exact type K in the body (in the else clause for ``is not``), and in
-    the other clause, x is not exactly K; after a false
-    ``isinstance(x, K)``, x is no instance of K; ``x is NULL`` and ``x
-    is K`` (x is the type K) are decided."""
+    """The environments of the body and the else clause of ``if test``
+    (which *env* does not decide): after ``type(x) is K``, x is exactly K,
+    else not; after a false ``isinstance(x, K)``, no instance of K;
+    ``x is NULL`` and ``x is K`` (a type) are decided."""
     match test:
         case ast.UnaryOp(op=ast.Not(), operand=operand):
             body, orelse = refine(operand, env)

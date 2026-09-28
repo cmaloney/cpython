@@ -1,87 +1,55 @@
-"""Partial evaluation of pyspec functions.
+"""Partial evaluation of spec functions for the facts of a call site.
 
-Given facts a call site knows -- which arguments are NULL, and optionally
-the exact type of an argument (known.py) -- fold the branches those facts
-decide and inline tail calls to other spec functions (or call a shared
-specialization, below).  After an if whose one branch exits, the facts
-of the other hold.  The result is a list of ast statements in the same
-Python subset the C emitter accepts (subset.Kind), with typed marks on
-its nodes (marks.py).  Facts about builtin types come from the spec and
-from builtin_types.py, never from the Python running Argument Clinic.
-The evaluator is created by the context of the passes (context.py),
-which keeps the shared specializations of each spec.
+Given facts about the arguments (known.py: NULL or not, an exact type, a
+value), Evaluator folds the branches they decide, inlines tail calls of
+other spec functions (or calls a shared specialization, below), and
+after an ``if`` whose one branch exits, keeps the facts of the other.
+The residual is ast in the same subset (subset.Kind), with typed marks
+(marks.py) on the nodes for facts.py and emit.py.
 
-Calls of hand-written C functions.  A @native function is
-evaluated through its Python reference, for the facts of the call
-(facts.py), and only for them: no code of a reference is ever generated.
+Calls.  A @native function is analysed through its Python reference
+(facts.py), never generated: a call whose result is NULL on every path
+is that NULL, and a ``try`` around a call that cannot raise what its
+handlers catch is its body (``iter(x)`` of a list).  An @inline body
+(``if <test>: return <value>`` paths, then ``return <value>``) is
+generated into every statement calling it (expand()): the statement with
+each value, under its test; a test the facts decide selects or drops
+its path, and what they decide of a test is dropped from it.
 
-* a call whose result is NULL on every path (``return NULL``: absent) is
-  that NULL;
-* a ``try`` around a call that cannot raise what its handlers catch is
-  its body (``iter(x)`` of a list cannot raise TypeError).
+Loops.  ``for item in it:`` over ``it = iter(x)``, for x of a known
+exact type whose iteration runs no Python code: a list or tuple is
+iterated by index without an iterator (``it = iter(x)`` is then dead),
+reading the size of a list for every item as its iterator does; the
+exact type of the items is known in the body.  Where the type of x is
+not known at ``it = iter(x)``, the rest of the block is versioned for an
+exact list and tuple when that gives an index loop (VERSIONED_ITERABLES).
 
-Calls of @inline functions.  The body of an @inline function, fast paths
-``if <test>: return <value>`` then ``return <value>`` (subset.Inline), is
-generated into every statement that calls it (expand()): the statement
-with the value of each path, under ``if <test>:``, in order.  A test the
-facts decide selects or drops its path, and what they decide of a test
-is dropped from it (only ``_PyLong_IsCompact(x)`` of ``(type(x) is int
-or type(x) is bool) and _PyLong_IsCompact(x)`` remains for an exact
-int).  The fast path of a native function is written as an @inline
-function that returns the native call last (PyNumber_AsSsize_t_fast()):
-the fast path is generated code, from one place, and the generated code
-never assumes that the native function has it.
+Arity functions.  Where the rest of a __new__ body is one of its
+NAME_nargsN() functions (emit.py), it calls it (arity_call()); where
+the __new__ calls itself for its type (``T.__new__(T, ...)``), it calls
+the arity function of the arguments not NULL, tested at run time as the
+vectorcall does (dispatch()).
 
-Loops.  ``for item in it:`` iterates an iterator ``it = iter(x)``.  When
-the exact type of x is known (from the call site, or from a
-``type(x) is K`` test) and iterating it runs no Python code
-(facts.Analyzer.iteration()):
-
-* a list or a tuple is iterated by index, without an iterator object
-  (``for item in x:``, lowered by emit.py; ``it = iter(x)`` is then
-  dead and removed), with the same semantics as its iterator: the size of
-  a list is read again for every item (except in a snapshot, below);
-* the exact type of the items, when all have the same, is known in the
-  loop body.
-
-When the exact type of x is not known where ``it = iter(x)`` is
-evaluated, the rest of the block is versioned: specialized for an exact
-list and an exact tuple when that gives an index loop, and kept generic
-for other types (VERSIONED_ITERABLES).
-
-Arity functions.  Where the rest of a __new__ body has the facts of one
-of its NAME_nargsN() functions (emit.py) and is that whole function, it
-calls the function (Evaluator.arity_call()).  Where the __new__ calls
-itself for its type (``T.__new__(T, ...)``, to construct a subclass
-instance), it calls the arity function of the arguments that are not
-NULL, tested at run time as the vectorcall does (Evaluator.dispatch()).
-
-Shared specializations.  A tail call of a spec function whose residual
-for the facts of the call has a loop is not inlined: the residual becomes
-a C function of its own (a marks.Specialization), emitted once and called
-by every call with the same facts.  A loop costs far more than a call,
-and the loop code is not duplicated.  A residual that does not iterate
-by index is not worth its own code: the call stays a call of the generic
-function, and only its facts come from the residual.
+Shared specializations.  A tail call whose residual has a loop is not
+inlined: the residual becomes a C function of its own
+(marks.Specialization) called by every call with the same facts; one
+that does not iterate by index keeps calling the generic function, with
+the facts of the residual.
 
 Snapshots.  The residual of a list loop is split in two, as the
 hand-written _PyBytes_FromSequence_lock_held() was: every statement that
-may run Python code (per facts.py) is replaced by ``return FALLBACK``,
-and the rest, which runs no Python code, is called with the list locked
-(``with critical_section(x):``; nothing without free threading):
-nothing can change the list meanwhile, so it iterates a consistent
-snapshot, borrows its items, and reads its size once.  On FALLBACK the
-call restarts through the generic, unspecialized function.  As the
-snapshot ran no Python code, the restart cannot be observed.
+may run Python code becomes ``return FALLBACK``, and the rest runs with
+the list locked (``with critical_section(x):``), so it iterates a
+consistent snapshot, borrows its items and reads its size once.  On
+FALLBACK the call restarts through the generic function; as the
+snapshot ran no Python code, that cannot be observed.
 
-Capacity.  A buffer (a C struct, see emit.py) initialized with the
-length of a sequence, ``w = init(len(x))``, has room for one unit per
-item of x: in a loop over x with a fixed number of iterations (a tuple,
-or a list in a snapshot) whose one use of w is one call of an @inline
-function writing w (its first argument), the first path of that call,
-whose test is that the buffer has room, is taken without its test
-(presize()).  The debug build checks it (see
-bytes_appender_append_unchecked()).
+Capacity.  A buffer (a C struct local) initialized with the length of a
+sequence, ``w = init(len(x))``, has room for one unit per item of x: in
+a loop over x with a fixed number of iterations (a tuple, a snapshot)
+whose one use of w is one call of an @inline function writing w, the
+first path of that call is taken without its test (presize()); the
+debug build checks it (bytes_appender_append_unchecked()).
 """
 
 from __future__ import annotations
@@ -96,19 +64,15 @@ from typing import TYPE_CHECKING, Protocol, cast
 from . import builtin_types, facts, frontend, marks, subset
 from .known import (FALLBACK, NOTNULL, NULL, SEQUENCES, Env, Fact, IterOf,
                     Other, Value, arg_fact, builtin_type, exact_type,
-                    fact_key, is_type_call, refine)
+                    fact_key, refine)
 from .marks import Specialization
 from .subset import assigned_names, loaded_names, terminates
 
 if TYPE_CHECKING:
     from .frontend import Spec
 
-__all__ = ['FALLBACK', 'NOTNULL', 'NULL', 'IterOf', 'Other', 'Value',
-           'Evaluator', 'Specializations', 'specialize']
-
 class Context(facts.Passes, Protocol):
-    """What the evaluator needs of the other passes: the context of the
-    passes (context.Context)."""
+    """What the evaluator needs of context.Context."""
 
     def specializations(self, spec: Spec | None = None) -> Specializations:
         ...
@@ -131,25 +95,17 @@ def _only_null(callee: facts.Facts | None) -> bool:
 
 
 def evaluate(expr: ast.expr, env: Env, ev: Evaluator) -> bool | None:
-    """Return True, False, or None when *expr* is not decided by *env*.
-    *ev*: the Evaluator."""
+    """The value of condition *expr* under *env*, or None."""
     match expr:
         case ast.UnaryOp(op=ast.Not(), operand=operand):
             value = evaluate(operand, env, ev)
             return None if value is None else not value
         case ast.BoolOp(op=op, values=values):
             results = [evaluate(v, env, ev) for v in values]
-            if isinstance(op, ast.And):
-                if False in results:
-                    return False
-                if all(r is True for r in results):
-                    return True
-            else:
-                if True in results:
-                    return True
-                if all(r is False for r in results):
-                    return False
-            return None
+            decisive = isinstance(op, ast.Or)   # True decides an or
+            if decisive in results:
+                return decisive
+            return None if None in results else not decisive
         case ast.Compare(left=left, ops=[ast.Is() | ast.IsNot() as op],
                          comparators=[right]):
             value = _evaluate_is(left, right, env, ev)
@@ -163,59 +119,43 @@ def evaluate(expr: ast.expr, env: Env, ev: Evaluator) -> bool | None:
                 return False
             mro = tp and klass and ev.types.mro(tp)
             return klass in mro if mro else None
-        case ast.Call(func=ast.Name('hasattr'), args=[type_call, name]) \
-                if is_type_call(type_call):
-            assert isinstance(type_call, ast.Call)
-            tp = exact_type(type_call.args[0], env)
+        case ast.Call(func=ast.Name('hasattr'), args=[
+                ast.Call(func=ast.Name('type'), args=[obj]), name]):
             attr = getattr(arg_fact(name, env), 'obj', None)
-            if tp is None or not isinstance(attr, str):
+            if not isinstance(attr, str):
                 return None
-            has: bool | None = ev.types.has(tp, attr)
-            return has
-        case ast.Name(name) if isinstance(env.get(name), Value):
-            return bool(getattr(env[name], 'obj'))
+            return ev.types.has(exact_type(obj, env), attr)
+        case ast.Name(name) if isinstance(fact := env.get(name), Value):
+            return bool(fact.obj)
     return None
 
 
 def _evaluate_is(left: ast.expr, right: ast.expr, env: Env,
                  ev: Evaluator) -> bool | None:
-    right_is_null = isinstance(right, ast.Name) and right.id == 'NULL'
-    if right_is_null and isinstance(left, ast.Name):
-        value = env.get(left.id)
-        if value == NULL:
-            return True
-        if value == NOTNULL or isinstance(value, (type, Value, IterOf,
-                                                  Other)):
-            return False
-        return None
-    if isinstance(left, ast.Name) and isinstance(env.get(left.id), Value):
-        klass = builtin_type(right)
-        if klass is None:
-            return None
-        return getattr(env[left.id], 'obj') is klass
-    if right_is_null and isinstance(left, ast.NamedExpr):
-        if isinstance(left.value, ast.Call) and _only_null(
-                ev.analyzer.call_facts(left.value, env)):
-            return True
-        return None
-    if isinstance(left, ast.Call) and is_type_call(left):
-        tp, klass = exact_type(left.args[0], env), builtin_type(right)
-        if klass is None:
-            return None
-        if tp is None:
-            other = (env.get(left.args[0].id)
-                     if isinstance(left.args[0], ast.Name) else None)
+    """``left is right``, or None when *env* does not decide it."""
+    klass = builtin_type(right)
+    match left, right:
+        case ast.Name(name), ast.Name('NULL'):
+            fact = env.get(name)
+            return None if fact is None else fact == NULL
+        case ast.Name(name), _ if isinstance(fact := env.get(name), Value):
+            return None if klass is None else fact.obj is klass
+        case ast.NamedExpr(value=ast.Call() as call), ast.Name('NULL'):
+            return True if _only_null(ev.analyzer.call_facts(call, env)) \
+                else None
+        case ast.Call(func=ast.Name('type'), args=[obj]), _ if klass:
+            tp = exact_type(obj, env)
+            if tp is not None:
+                return tp is klass
+            other = env.get(obj.id) if isinstance(obj, ast.Name) else None
             if isinstance(other, Other) and (klass in other.types
                                              or klass in other.instances):
                 return False
-            return None
-        return tp is klass
     return None
 
 
 def simplify(expr: ast.expr, env: Env, ev: Evaluator) -> bool | ast.expr:
-    """*expr* without the parts *env* decides: True, False or an ast
-    node."""
+    """*expr* without the parts *env* decides (True or False if all)."""
     value = evaluate(expr, env, ev)
     if value is not None:
         return value
@@ -239,9 +179,8 @@ def _type_test(name: str, klass: type) -> ast.expr:
 
 
 def _iter_assignment(stmt: ast.stmt) -> tuple[str, str] | None:
-    """(target, source) for ``target = iter(source)`` or for ``try:
-    target = iter(source)`` with only ``except TypeError`` handlers, else
-    None."""
+    """(target, source) of ``target = iter(source)``, possibly in a try
+    with only ``except TypeError``, or None."""
     if isinstance(stmt, ast.Try) and not stmt.finalbody and set(
             facts.caught(stmt.handlers)) == {'TypeError'} \
             and len(stmt.body) == 1:
@@ -300,9 +239,8 @@ def _with_call(stmt: ast.stmt, value: ast.expr) -> ast.stmt:
 def inline_paths(spec: Spec, name: str
                  ) -> tuple[list[tuple[ast.expr, ast.expr]], ast.expr,
                             list[str]]:
-    """([(test, value)], last value, parameters) of @inline function
-    *name* of *spec*: its fast paths ``if test: return value``, then its
-    ``return value`` (subset.Inline, which check_inline() checks)."""
+    """([(test, value)] of its fast paths, last value, parameters) of
+    @inline function *name*."""
     subset.check_inline(spec, name)
     *paths, last = spec.body(name)
     out = []
@@ -342,9 +280,9 @@ def _mark_len(node: ast.AST, env: Env) -> None:
 
 @dc.dataclass
 class _Block:
-    """The state of the evaluation of a block: its statements (the rest
-    may be rewritten), the index of the next one, the facts, the residual
-    so far, and *done* when the rest has been evaluated (versioned)."""
+    """The evaluation of a block: its statements (the rest may be
+    rewritten), the next one, the facts, the residual so far; *done*
+    when the rest was evaluated (versioned)."""
     stmts: list[ast.stmt]
     env: Env
     depth: int
@@ -361,8 +299,7 @@ class _Block:
 
 
 class Evaluator(subset.Walker[_Block, None]):
-    """Partial evaluation of the code of one spec (see the module
-    docstring); one method per kind of statement (subset.Kind)."""
+    """Partial evaluation of the code of one spec."""
 
     def __init__(self, context: Context, spec: Spec,
                  arities: Sequence[Arity] = (),
@@ -442,8 +379,7 @@ class Evaluator(subset.Walker[_Block, None]):
                      or [ast.Pass()])
         stmt.orelse = self.block(stmt.orelse, else_env, depth, inline)
         state.evaluated([stmt])
-        # After an if whose one branch exits, the facts of the other
-        # hold.
+        # After an if whose one branch exits, the other's facts hold.
         if terminates(stmt.body):
             state.env = else_env
         elif terminates(stmt.orelse):
@@ -531,11 +467,8 @@ class Evaluator(subset.Walker[_Block, None]):
 
     def c_statement(self, stmt: ast.stmt, env: Env
                     ) -> tuple[list[ast.stmt], Env]:
-        """*stmt* (see _top_call()) with the facts of its call of a
-        @native function, or its call of an @inline function
-        expanded: (statements, env).  See "Calls of hand-written C
-        functions" and "Calls of @inline functions" in the module
-        docstring."""
+        """(statements, env) of *stmt* (_top_call()): its call of a native
+        function marked with its facts, or of an @inline one expanded."""
         call = _top_call(stmt)
         if call is None:
             return [stmt], env
@@ -584,9 +517,8 @@ class Evaluator(subset.Walker[_Block, None]):
         return out
 
     def mark(self, node: ast.AST, env: Env) -> None:
-        """Mark the calls of @native functions in *node* (a
-        condition or a raise) with their facts for the emitter
-        (facts.Analyzer.mark_call())."""
+        """Mark the calls of native functions in *node* (a condition or a
+        raise) with their facts (facts.Analyzer.mark_call())."""
         for child in ast.walk(node):
             if isinstance(child, ast.Call):
                 self.analyzer.mark_call(child, env)
@@ -594,10 +526,9 @@ class Evaluator(subset.Walker[_Block, None]):
     def expand(self, stmt: ast.stmt, call: ast.Call,
                found: tuple[Spec, ast.FunctionDef],
                env: Env) -> list[ast.stmt]:
-        """*stmt*, which calls @inline function *found* (spec, def) as
-        *call*, with its body in place of the call (see "Calls of @inline
-        functions" in the module docstring).  The ``if`` of the first
-        path is marked (marks.FirstPath, see presize())."""
+        """*stmt*, which calls @inline function *found* as *call*, with
+        its body in place of the call; the ``if`` of the first path is
+        marked (marks.FirstPath, see presize())."""
         spec, node = found
         paths, last, params = inline_paths(spec, node.name)
         rename = _Rename(dict(zip(params, call.args)))
@@ -727,29 +658,24 @@ class Evaluator(subset.Walker[_Block, None]):
 
     def loop(self, stmt: ast.For, env: Env, depth: int,
              inline: bool) -> ast.For:
-        """``for item in it:``, specialized: see the module docstring.
-        The copy is marked (marks.Loop) with the exact type of the
-        iterated object (None if unknown), and whether it iterates a list
-        or tuple by index (``for item in x:``)."""
-        if (stmt.orelse or not isinstance(stmt.target, ast.Name)
-                or not isinstance(stmt.iter, ast.Name)):
-            raise ValueError(f'unsupported loop {ast.unparse(stmt)}')
-        item = stmt.target.id
+        """``for item in it:``, marked (marks.Loop) with the exact type
+        iterated and whether it iterates a list or tuple by index."""
+        # (subset.py: ``for item in it:``, no else.)
+        assert isinstance(stmt.target, ast.Name)
+        assert isinstance(stmt.iter, ast.Name)
         new = copy.copy(stmt)
         fact = env.get(stmt.iter.id)
-        iterable = None
-        sequence = False
         if isinstance(fact, IterOf):
-            iterable = fact.tp
-            if iterable in SEQUENCES:
-                new.iter = ast.Name(fact.source, ast.Load())
-                sequence = True
-        elif isinstance(fact, type) and fact in SEQUENCES:
-            iterable = fact
-            sequence = True
+            iterable: type | None = fact.tp
+        else:
+            iterable = (fact if isinstance(fact, type) and fact in SEQUENCES
+                        else None)
+        sequence = iterable in SEQUENCES
+        if sequence and isinstance(fact, IterOf):
+            new.iter = ast.Name(fact.source, ast.Load())
         item_type: Fact = self.analyzer.iteration(iterable)[1] or NOTNULL
-        new.body = self.block(stmt.body, env | {item: item_type}, depth,
-                              inline)
+        new.body = self.block(stmt.body, env | {stmt.target.id: item_type},
+                              depth, inline)
         marks.put(new, marks.Loop(iterable, sequence))
         return new
 
@@ -758,7 +684,7 @@ class Evaluator(subset.Walker[_Block, None]):
 
 class Specializations:
     """The shared specializations of one spec, made once per (callee,
-    facts), found by name; the context of the passes keeps them."""
+    facts), found by name."""
 
     def __init__(self) -> None:
         self._made: dict[Hashable, Specialization | None] = {}
@@ -865,7 +791,7 @@ def _snapshot(context: Context, spec: Spec, callee: str, name: str,
                              lineno=0)],
                  lineno=0),
         ast.If(ast.Compare(load(result), [ast.IsNot()],
-                           [load(FALLBACK.value)]),
+                           [load(FALLBACK)]),
                [ast.Return(load(result))], []),
         *[ast.Assign([store(p)], ast.Call(load('iter'), [load(source)], []),
                      lineno=0)
@@ -881,8 +807,7 @@ def _snapshot(context: Context, spec: Spec, callee: str, name: str,
 
 @dc.dataclass
 class _Path:
-    """The state of the snapshot of a path: the facts, and whether it is
-    in the loop."""
+    """The snapshot of a path: the facts, and whether it is in the loop."""
     env: Env
     in_loop: bool = False
 
@@ -919,7 +844,7 @@ class _Snapshot(subset.Walker[_Path, list[ast.stmt] | None]):
             return [stmt]
         if not path.in_loop:
             return None
-        return [ast.Return(ast.Name(FALLBACK.value, ast.Load()))]
+        return [ast.Return(ast.Name(FALLBACK, ast.Load()))]
 
     def return_(self, stmt: ast.Return,
                 path: _Path) -> list[ast.stmt] | None:
@@ -967,10 +892,9 @@ class _Snapshot(subset.Walker[_Path, list[ast.stmt] | None]):
 
 
 def presize(spec: Spec, stmts: list[ast.stmt]) -> None:
-    """Take the first path of the @inline calls that write to a buffer
-    that has room for all of them: see Capacity in the module docstring.
-    The top level of *stmts* (a function body, and the body of its try)
-    is scanned."""
+    """Take the first path of the @inline calls writing a buffer that has
+    room for all of them ("Capacity" above), in the top level of *stmts*
+    and of its try."""
     lengths = {}            # local -> the sequence it is the length of
     capacity: dict[str, str] = {}   # buffer local -> the sequence it has
     for stmt in stmts:              # room for
@@ -1032,8 +956,7 @@ def _writes(node: ast.AST, buffer: str) -> bool:
 
 def _replace(stmts: list[ast.stmt], old: ast.stmt,
              new: list[ast.stmt]) -> bool:
-    """Replace statement *old*, in *stmts* or in a block nested in them,
-    with the statements *new*; return whether it was found."""
+    """Replace statement *old*, in *stmts* or nested, with *new*."""
     for i, stmt in enumerate(stmts):
         if stmt is old:
             stmts[i:i + 1] = new
@@ -1076,16 +999,11 @@ def remove_dead_iterators(stmts: list[ast.stmt],
     return out
 
 
-def specialize(context: Context, spec: Spec, name: str, env: Env,
-               inline: bool = True,
-               arities: Sequence[Arity] = ()) -> list[ast.stmt]:
-    """Residual statements of spec function *name* of *spec* under facts
-    *env* (see context.Context.residual()).
-
-    With *inline* false, tail calls of other spec functions stay calls,
-    except where the block is versioned.  *arities*: (facts, C function,
-    arguments) of the arity functions of a __new__ (see
-    Evaluator.arity_call())."""
-    residual = Evaluator(context, spec, arities, name).block(
-        spec.body(name), env, inline=inline, top=True)
-    return remove_dead_iterators(residual)
+def residual(context: Context, spec: Spec, name: str, env: Env,
+             inline: bool = True,
+             arities: Sequence[Arity] = ()) -> list[ast.stmt]:
+    """The residual of spec function *name* under *env*.  With *inline*
+    false, tail calls of spec functions stay calls (except where the
+    block is versioned); *arities*: see Evaluator.arity_call()."""
+    return remove_dead_iterators(Evaluator(context, spec, arities, name).block(
+        spec.body(name), env, inline=inline, top=True))

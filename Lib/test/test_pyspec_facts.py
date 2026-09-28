@@ -45,7 +45,7 @@ _testinternalcapi = import_helper.import_module('_testinternalcapi')
 test_tools.skip_if_missing('clinic')
 with test_tools.imports_under_tool('clinic'):
     from libclinic.pyspec import (builtin_types, call_table, context,
-                                  frontend, partial_eval, runtime,
+                                  frontend, known, runtime, subset,
                                   specfiles)
 
 SRCDIR = test_tools.basepath
@@ -348,7 +348,7 @@ def c_shape(node):
     """The shape of the C signature of spec function *node*, as
     _testinternalcapi.pyspec_helper_shapes() writes it: "OO->n"."""
     codes = {'Py_ssize_t': 'n', 'const char *': 's', 'int': 'i'}
-    params, returns = frontend.c_signature(node)
+    params, returns = subset.c_signature(node)
     return (''.join(codes.get(c, 'O') for _, c in params) + '->'
             + codes.get(returns, 'O'))
 
@@ -406,17 +406,17 @@ class HelperTest(unittest.TestCase):
         if '.' in name:
             params = [(a.arg, 'PyObject *') for a in node.args.args]
         else:
-            params = frontend.c_signature(node)[0]
+            params = subset.c_signature(node)[0]
         null = getattr(info.cases, 'NULL', NO_NULL)
         env = {}
         for (param, ctype), arg in zip(params, args):
             if arg is null:
-                env[param] = partial_eval.NULL
+                env[param] = known.NULL
             elif ctype == 'PyObject *' and not isinstance(arg, str):
                 if type(arg) in builtin_types.TABLE:
                     env[param] = type(arg)
             else:
-                env[param] = partial_eval.Value(arg)
+                env[param] = known.Value(arg)
         return env
 
     def test_helpers(self):

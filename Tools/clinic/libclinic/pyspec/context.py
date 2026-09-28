@@ -1,21 +1,12 @@
 """The context of the passes: the state they share, in one object.
 
-Generating the C of a spec runs several passes over its bodies, which
-call each other: the partial evaluator (partial_eval.py) needs the facts
-of the calls it folds (facts.py), and the facts of a call are those of
-the residual of the callee (partial_eval.py again).  A Context is that
-wiring and the state it keeps, for one spec (and the specs it imports),
-created once and passed explicitly:
-
-* per spec: its facts.Analyzer (with the facts computed), its
-  builtin_types.TypeFacts, and its shared specializations
-  (partial_eval.Specializations);
-* the specs loaded for it: ``spec.loaded`` (frontend.Spec.load_spec()),
-  one Spec per file.
-
-Nothing is attached to a Spec, and nothing is kept between two contexts:
-emit.generate() makes one per spec it generates; a caller that only
-wants facts (disconnects.py, the tests) makes its own.
+The passes call each other: the partial evaluator needs the facts of the
+calls it folds (facts.py), and the facts of a call are those of the
+residual of the callee (partial_eval.py again).  A Context is that
+wiring, for one spec and the specs it loads (``spec.loaded``), with the
+state kept per spec: its facts.Analyzer, its builtin_types.TypeFacts
+and its shared specializations.  emit.generate() makes one per spec; a
+caller that only wants facts (disconnects.py, the tests) makes its own.
 """
 
 from __future__ import annotations
@@ -66,7 +57,6 @@ class Context:
                  inline: bool = True,
                  arities: Sequence[partial_eval.Arity] = ()
                  ) -> list[ast.stmt]:
-        """The residual statements of spec function *name* of *spec*
-        under the facts *env* (partial_eval.specialize())."""
-        return partial_eval.specialize(self, spec, name, env, inline=inline,
-                                       arities=arities)
+        """partial_eval.residual() of spec function *name* of *spec*."""
+        return partial_eval.residual(self, spec, name, env, inline=inline,
+                                     arities=arities)

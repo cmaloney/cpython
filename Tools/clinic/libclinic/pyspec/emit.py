@@ -1,60 +1,36 @@
-"""Generate C from the implemented functions of a pyspec file.
+"""Generate C from the implemented functions of a spec.
 
-Argument Clinic calls generate() after processing a C file with a spec
-and writes the result next to its other output
-(Objects/clinic/bytesobject_pyspec.c.h for Objects/bytesobject.c).
+Argument Clinic calls generate() after processing a C file with a spec;
+the result is Objects/clinic/<stem>_pyspec.c.h.  An implemented method
+becomes the NAME_impl() of its clinic function (``bytes.__new__``:
+bytes_new_impl(), plus bytes_new_nargsN() for each positional argument
+count N, the __new__ partially evaluated for exactly the class and N
+arguments, which the vectorcall clinic generates calls); a top-level
+function becomes the C function of its name, non-static when it starts
+with Py or _Py (a header declares it).  Stubs and @native functions are
+C written by hand: only called.
 
-Every implemented spec function becomes a C function:
-  * a method of a spec class implements the clinic function of that name.
-    For a method or class method (``bytes.__bytes__``) it becomes the
-    NAME_impl() that clinic's parsing code calls; the first parameter is
-    clinic's self (or class) parameter.  ``bytes.__new__`` (C basename
-    bytes_new) becomes bytes_new_impl() (Argument Clinic declares it and
-    no longer expects a hand-written body), plus bytes_new_nargsN() for
-    each positional argument count N -- the function partially evaluated
-    for exactly the class and N arguments, called by the clinic generated
-    vectorcall; bytes_new_impl() calls one where the rest of its body is
-    that function;
-  * a top-level function becomes the C function of the same name: names
-    starting with Py or _Py are defined non-static (their public or
-    internal header declares them); everything else is static.
+The passes, sharing one context.Context: the check of the lowered subset
+(subset.py), partial evaluation (partial_eval.py, which marks its
+residual, marks.py), lowering here to the form of ir.py
+(FunctionLowering), and the backend of the language (c_backend.py).
+After the functions come the call tables (call_table.py) and the shared
+specializations the code calls.
 
-Functions whose body is only a docstring and/or ``...`` (stubs,
-frontend.is_stub()) and @native functions are C written by hand:
-they are never lowered to C, only called.
+A call of a hand-written C function takes and returns the C types of its
+annotations (subset.c_signature()): a str constant is an interned str
+for an object parameter and a C string for a ``str`` one.  Its error
+check comes from its facts at the call (marks.CallCheck): none if it
+cannot raise, else ir.Convention.  A function returning a C struct
+initializes the local assigned in place, ``f(&x, args)``, returning 0 or
+-1.
 
-The passes: the body is checked against the lowered subset (subset.py),
-partially evaluated (partial_eval.py, which marks its residual code,
-marks.py), lowered here to the form of ir.py (FunctionLowering: C types,
-ownership, error checks), and written out by the backend of the language
-(c_backend.py).  Then come the tables of the caller (call_table.py: the
-type-specialized variants of NAME_nargs1() and the call table of the
-tier-2 optimizer) and the shared specializations the code calls
-(marks.Specialization, e.g. bytes_from_iterator_list()).  The passes
-share one context.Context.
-
-A call of a hand-written C function f is f(args) in C.  The C types of
-its parameters and result are its annotations (subset.c_signature()):
-a str constant is an interned str object for an object parameter and a
-C string for a ``str`` one, and a pointer of another C type is cast.
-Its error check comes from its facts for the call (facts.py, marked on
-the call by the partial evaluator, marks.CallCheck): none if it cannot
-raise; else NULL for an object (NULL and an exception set when it may
-return NULL, an absent result), -1 and an exception set for a
-Py_ssize_t, a negative value for an int (ir.Convention).  A function
-whose result is a C struct initializes the local assigned in place,
-``f(&x, args)``, which returns 0 or -1 with an exception set; that local
-is passed by address.
-
-Reference ownership: parameters are borrowed; every object local is a new
-reference, declared NULL at the top and released at every exit except
-the one returning it; it may be assigned again only where it holds no
-reference (e.g. in the other branch of an if).  A loop variable is a new
-reference, released right after its last use in the loop body; it is
-borrowed for a tuple item (the tuple keeps it alive) and in a snapshot,
-where no Python code runs (the list, locked, keeps it alive): "borrowed
-until Python code may run".  A C struct local (a buffer) is released by
-the ``finally`` clause the spec writes around its use.
+Ownership: parameters are borrowed; an object local is a new reference,
+declared NULL and released at every exit but the one returning it, and
+assigned again only where it holds none.  A loop variable is released
+right after its last use in the body; it is borrowed from a tuple, and
+in a snapshot (no Python code runs, the locked list keeps it alive).  A
+C struct local is released by the ``finally`` clause around its use.
 """
 
 from __future__ import annotations
@@ -89,10 +65,8 @@ Branch = tuple[set[str], set[str]] | None
 
 def spec_error(node: ast.AST | None, message: str,
                kind: SpecErrorKind = SpecErrorKind.LOWERING) -> SpecError:
-    """A SpecError at *node*, in the spec it was written in (app.py fills
-    in the spec of the C file): LOWERING, a use of the lowered subset
-    this emitter cannot lower; NOT_LOWERED, a construct outside the
-    lowered subset (subset.py reports those first)."""
+    """A SpecError at *node*, in the spec it was written in: LOWERING by
+    default, a use of the lowered subset this emitter cannot lower."""
     return SpecError.at(node, message, kind)
 
 
@@ -104,23 +78,18 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
         self.generator = generator
         self.spec = generator.spec
         self.analyzer = generator.context.analyzer()
-        # name -> C type; parameters are borrowed references
-        self.params = dict(params)
+        self.params = dict(params)          # name -> C type (borrowed)
         self.known_null = set(known_null)
         self.locals: dict[str, str] = {}    # name -> C type
-        # Object locals, in declaration order.
-        self.owned: list[str] = []
+        self.owned: list[str] = []      # object locals, in order
         self.live: set[str] = set()     # owned locals that may hold a value
         self.nonnull: set[str] = set()  # locals known not NULL
         self.loop_vars: list[str] = []  # owned variables of enclosing loops
         # The finally clauses around the statement lowered, innermost last.
         self.finally_blocks: list[list[ast.stmt]] = []
         self.body: list[ir.Stmt] = []
-        # (spec, last line) of the statement lowered last: see locate().
-        self.located: tuple[str, int] = ('', 0)
-        # The local whose error check follows the if chain lowered (see
-        # if_()).
-        self.checked_after: str | None = None
+        self.located: tuple[str, int] = ('', 0)     # see locate()
+        self.checked_after: str | None = None       # see if_()
 
     # -- output ------------------------------------------------------------
 
@@ -231,17 +200,14 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
                     self.declare(node.target, self.call_ctype(node.value),
                                  node)
                 elif isinstance(node, ast.For):
-                    if not isinstance(node.target, ast.Name):
-                        raise spec_error(node, 'the loop variable must be a '
-                                         'name')
                     self.declare(node.target, OBJECT, node)
 
     # -- calls -------------------------------------------------------------
 
     def c_function(self, call: ast.Call
                    ) -> tuple[str, list[str], str] | None:
-        """(C name, parameter C types, return C type) of the hand-written
-        C function *call* calls, or None."""
+        """(C name, parameter C types, return C type) of the C function
+        *call* calls, or None."""
         found = self.spec.c_function(call)
         if found is None:
             return None
@@ -253,8 +219,7 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
         return node.name, [OBJECT] * len(call.args), OBJECT
 
     def call_ctype(self, call: ast.expr) -> str:
-        if not isinstance(call, ast.Call):
-            raise spec_error(call, 'only call results can be assigned')
+        assert isinstance(call, ast.Call)       # (subset.Lowered.assign())
         function = self.c_function(call)
         if function is not None:
             return function[2]
@@ -264,12 +229,10 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
 
     def convention(self, call: ast.Call,
                    returns: str) -> ir.Convention | None:
-        """The error convention of a call of a hand-written C function
-        (see the module docstring)."""
+        """The error convention of a call of a C function."""
         check = marks.get(call, marks.CallCheck)
         if check is None:
-            # Not marked by the partial evaluator: the facts for any
-            # arguments.
+            # Not marked by the evaluator: the facts for any arguments.
             self.analyzer.mark_call(call, {})
             check = marks.get(call, marks.CallCheck)
             assert check is not None
@@ -302,10 +265,8 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
 
     def lower_call(self, call: ast.Call, target: str | None = None
                    ) -> tuple[ir.Expr, str, ir.Convention | None]:
-        """Return (expression, C type, error convention).
-
-        *target*: the local assigned, for a C function that initializes
-        it in place (then the expression is an int status)."""
+        """(expression, C type, error convention) of *call*; *target*: the
+        local assigned, for a C function initializing it in place."""
         def values() -> tuple[ir.Expr, ...]:
             return tuple(self.lower_value(a) for a in call.args)
 
@@ -441,27 +402,18 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
                 and isinstance(node.left, ast.NamedExpr)):
             named = node.left
             self.store(named.target, named.value, named)
-        for child in ast.walk(node):
-            if isinstance(child, ast.NamedExpr) and (
-                    not isinstance(node, ast.Compare)
-                    or child is not node.left):
-                raise spec_error(child,
-                                 'walrus only as the left operand of "is"')
 
     # -- statements --------------------------------------------------------
 
     def store(self, target: ast.expr, value: ast.expr, node: ast.AST,
               check: bool = True, later: Collection[str] | None = None
               ) -> tuple[str, str, ir.Convention | None]:
-        """``target = value``.  *later*: the names used after this
-        statement (see statements()), to release the loop variables used
-        last here."""
+        """``target = value``; *later*: see statements()."""
         name = ast.unparse(target)
         if name in self.live:
             raise spec_error(node, f'{name!r} is assigned again while it '
                              'holds a reference')
-        if not isinstance(value, ast.Call):
-            raise spec_error(value, 'only call results can be assigned')
+        assert isinstance(value, ast.Call)      # (subset.Lowered.assign())
         expr, ctype, convention = self.lower_call(value, target=name)
         if self.locals.get(name) != ctype:
             raise spec_error(node, f'{name!r} changes type')
@@ -483,8 +435,8 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
 
     def statements(self, stmts: list[ast.stmt],
                    later: Collection[str] = frozenset()) -> None:
-        """*later*: the names used after *stmts*.  Loop variables no
-        longer used are released before each statement, and at the end."""
+        """*later*: the names used after *stmts*; loop variables no longer
+        used are released before each statement, and at the end."""
         uses = [loaded_names([stmt]) for stmt in stmts]
         for i, stmt in enumerate(stmts):
             rest = frozenset(later).union(*uses[i + 1:])
@@ -656,31 +608,21 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
                 return ir.Eval(ir.Call('PyErr_SetString',
                                        (exc_c, ir.String(text))))
             case ast.JoinedStr(values=values):
+                # The parts subset.Lowered.message() accepts.
                 fmt, args = [], []
                 for part in values:
                     match part:
                         case ast.Constant(str() as text):
                             fmt.append(text.replace('%', '%%'))
-                        case ast.FormattedValue(
-                                value=ast.Call(
-                                    func=ast.Name('fqname'),
-                                    args=[ast.Call(func=ast.Name('type'),
-                                                   args=[obj])]),
-                                conversion=-1, format_spec=None):
+                        case ast.FormattedValue(value=ast.Call(
+                                func=ast.Name('fqname'),
+                                args=[ast.Call(args=[obj])])):
                             fmt.append('%T')
                             args.append(self.lower_value(obj))
-                        case ast.FormattedValue(
-                                value=ast.Call(
-                                    func=ast.Name('tp_name'),
-                                    args=[ast.Call(func=ast.Name('type'),
-                                                   args=[obj])]),
-                                conversion=-1, format_spec=None):
+                        case ast.FormattedValue(value=ast.Call(
+                                args=[ast.Call(args=[obj])])):  # tp_name()
                             fmt.append('%.200s')
                             args.append(ir.TypeName(self.lower_value(obj)))
-                        case _:
-                            raise spec_error(node, 'unsupported f-string part '
-                                             f'{ast.unparse(part)}',
-                                             SpecErrorKind.NOT_LOWERED)
                 return ir.Eval(ir.Call('PyErr_Format', (
                     exc_c, ir.String(''.join(fmt)), *args)))
         raise spec_error(node, 'raise needs a str or f-string message')
@@ -699,14 +641,9 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
             raise spec_error(stmt, 'try around a call that cannot fail')
         matches = []
         for handler in stmt.handlers:
-            if handler.name is not None:
-                raise spec_error(handler,
-                                 '"except E as name" is not supported')
-            assert handler.type is not None
-            types = (handler.type.elts if isinstance(handler.type, ast.Tuple)
-                     else [handler.type])
+            types = subset.handler_names(handler) or []
             tests = tuple(ir.Call('PyErr_ExceptionMatches',
-                                  (self.lower_value(t),)) for t in types)
+                                  (ir.ExceptionType(t),)) for t in types)
             matches.append(tests[0] if len(tests) == 1
                            else ir.BoolOp('or', tests))
         # In the error branch the target holds no reference; in the other,
@@ -768,12 +705,10 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
                 # its items alive: borrowed, and the size and the items
                 # are read once.
                 kind, owned = ir.Items.SNAPSHOT, False
-            elif mark.iterable is list:
+            else:
                 # What the list iterator does: the size is read again for
                 # every item, since the loop body may change the list.
                 kind = ir.Items.LIST
-            else:
-                raise spec_error(stmt, f'no index loop for {mark.iterable!r}')
         else:
             on_error = self.error_exit()
         if owned:
@@ -796,19 +731,14 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
         return None
 
     def with_(self, stmt: ast.With, later: frozenset[str]) -> None:
-        """``with critical_section(x): v = f(...)``: the critical section
-        of x (the partial evaluator writes it for snapshots).  The error
-        check comes after its end, so it is always closed."""
+        """``with critical_section(x): v = f(...)`` (of a snapshot); the
+        error check comes after its end."""
         match stmt:
             case ast.With(items=[ast.withitem(
                     context_expr=ast.Call(func=ast.Name('critical_section'),
                                           args=[obj]),
                     optional_vars=None)], body=[ast.Assign() as assign]):
                 pass
-            case ast.With(items=[ast.withitem(
-                    context_expr=ast.Call(func=ast.Name('critical_section')),
-                    optional_vars=None)]):
-                raise spec_error(stmt, 'a with body assigns one call')
             case _:
                 return self.other(stmt, later)
         lock = self.lower_value(obj)
@@ -866,25 +796,17 @@ def c_params(description: SpecFunction) -> list[tuple[str, str]]:
 
 
 class Generator:
-    """Generate the C for a spec.
-
-    c_basenames maps the implemented spec methods ("bytes.__new__") to the
-    C basename of their clinic function ("bytes_new"); conditions maps
-    those whose block is under #if to the condition (clinic's);
-    type_objects maps the clinic classes of the C file to their type
-    object ("&PyBytesIter_Type").
-    """
+    """Generate the C for a spec.  *bindings*: how its implemented
+    methods are bound to the clinic functions of the C file (C basename,
+    self type, #if condition), and the type object of each clinic class
+    ("&PyBytesIter_Type")."""
 
     def __init__(self, context: Context, bindings: PyspecBindings,
                  backend: c_backend.CBackend | None = None) -> None:
         self.context = context
         self.spec = context.spec
         self.backend = backend or c_backend.CBackend()
-        functions = bindings.functions
-        self.c_basenames = {n: b.c_basename for n, b in functions.items()}
-        self.self_ctypes = {n: b.self_ctype for n, b in functions.items()}
-        self.conditions = {n: b.condition for n, b in functions.items()
-                           if b.condition}
+        self.bindings = bindings.functions
         self.type_objects = bindings.type_objects
         # The shared specializations the generated code calls, in order.
         self.specializations: list[str] = []
@@ -897,7 +819,7 @@ class Generator:
     def describe(self, name: str) -> SpecFunction:
         if '.' in name:
             self.c_basename(name)       # used by a clinic block?
-            return self.spec.describe(name, self.self_ctypes[name])
+            return self.spec.describe(name, self.bindings[name].self_ctype)
         return self.spec.describe(name)
 
     def c_basename(self, name: str) -> str:
@@ -905,16 +827,20 @@ class Generator:
         if '.' not in name:
             return name
         try:
-            return self.c_basenames[name]
+            return self.bindings[name].c_basename
         except KeyError:
             raise spec_error(self.spec.functions[name],
                              f'{name} has a body, but no clinic block in '
                              'the C file uses it',
                              SpecErrorKind.BINDING) from None
 
+    def condition(self, name: str) -> str:
+        """The #if condition of the block of *name*, or ''."""
+        binding = self.bindings.get(name)
+        return binding.condition if binding else ''
+
     def guard(self, name: str, lines: list[str]) -> list[str]:
-        """*lines* under the condition of the block of *name*."""
-        return self.backend.guard(self.conditions.get(name, ''), lines)
+        return self.backend.guard(self.condition(name), lines)
 
     def c_name(self, name: str) -> str:
         """C name of spec function *name*: NAME_impl() for a method."""
@@ -942,10 +868,8 @@ class Generator:
         out.append('')
 
         for description in descriptions:
-            # Nothing is known about the arguments; the evaluator still
-            # specializes loops (see partial_eval.py), but keeps calls
-            # of other spec functions as calls.  Where the rest of a
-            # __new__ is an arity function, it is called.
+            # For any arguments: calls of spec functions stay calls,
+            # loops are specialized, arity functions are called.
             body = self.residual(
                 description.name, {}, inline=False,
                 arities=[(env, name, [p.name for p in given])
@@ -962,7 +886,7 @@ class Generator:
         if tables is not None:
             # The functions compiled unconditionally.
             out += tables(self, [d for d in descriptions
-                                 if d.name not in self.conditions])
+                                 if not self.condition(d.name)])
         # The specializations, which may use others.
         done = 0
         while done < len(self.specializations):
@@ -1013,7 +937,7 @@ class Generator:
                 ) -> list[tuple[Env, str, list[frontend.SpecParameter],
                                 list[frontend.SpecParameter]]]:
         """(facts, C name, given, missing parameters) of the NAME_nargsN()
-        functions of a __new__ (none for other functions)."""
+        functions of a __new__."""
         if description.new_type is None:
             return []
         cls, *params = description.parameters
@@ -1030,10 +954,9 @@ class Generator:
         return out
 
     def generate_arities(self, description: SpecFunction) -> list[str]:
-        """NAME_nargsN() for each allowed N: the __new__ spec partially
-        evaluated for exactly its class and a call with N positional
-        arguments; the rest are NULL.  Argument Clinic declares them and
-        calls them from the vectorcall with converted values."""
+        """NAME_nargsN() for each allowed N: the __new__ for exactly its
+        class and N positional arguments, the rest NULL (clinic's
+        vectorcall calls them)."""
         basename = self.c_basename(description.name)
         out = []
         for env, name, given, missing in self.arities(description):
@@ -1049,11 +972,7 @@ class Generator:
 
 def generate(spec: Spec, spec_path: str, bindings: PyspecBindings,
              tables: Tables | None = None) -> str:
-    """C for the implemented functions of *spec*, a frontend.Spec, bound
-    to the clinic functions of the C file by *bindings*; *tables*: what
-    follows the functions and their arity functions, before the shared
-    specializations they call (call_table.generate()).
-
-    *spec_path* is only named in the header comment.
-    """
+    """The C of the implemented functions of *spec*, bound to the clinic
+    functions of the C file by *bindings*; *tables*: what follows them,
+    before the shared specializations (call_table.generate())."""
     return Generator(Context(spec), bindings).generate(spec_path, tables)

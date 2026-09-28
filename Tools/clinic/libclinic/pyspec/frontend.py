@@ -1,122 +1,33 @@
 """Read a pyspec file: the Python side of Argument Clinic functions.
 
-(For contributors: Objects/pyspec/README.rst.  This docstring is about the
-implementation.)
+For Objects/foo.c the spec is Objects/pyspec/foo.py (the contributor
+guide is Objects/pyspec/README.rst).  It is read with the ast module;
+clinic never executes it.
 
-For Objects/foo.c the spec is Objects/pyspec/foo.py, ordinary Python in
-the style of a typeshed stub.  It is read with the ast module; clinic never
-executes it.
+Spec is one spec file: its top-level functions (C functions named like
+the function), its classes, and per class the methods by "T.meth".  A
+method is one of the kinds of method_kind():
 
-``class T:`` holds one method per clinic function of the clinic class
-named T.  A method is written like the clinic block it replaces:
+* CLINIC: a clinic function.  Its one-line block in the C file
+  (``bytes.split``, or ``@getter`` / ``T.attr`` for an ACCESSOR) is
+  completed from the spec by complete_block(): the clinic decorators,
+  parameter lines (converter as annotation, ``c_param='x'`` for ``name
+  as x``) and docstring (clinic_input());
+* SLOT: a dunder of slotdefs[] (slots.py), a C function with the slot's
+  typedef; its @c_name(slot="f") names it (typeobj.py);
+* PYCFUNCTION: a hand-written PyCFunction, ``@c_name(METH_O="f")``
+  (pycfunction());
+* SHARED: ``meth = module.Class.meth``, a method another spec (or class)
+  declares, possibly wrapped in ``critical_section(...)`` or
+  ``c_name(METH_NOARGS="f")(...)``.
 
-* parameters are clinic parameter lines: the converter is the annotation,
-  then the default; ``/`` and ``*`` as in clinic (and Python).  The
-  pseudo-argument ``c_param='x'`` of the converter is clinic's
-  ``name as x`` (the name of the C parameter).  The first parameter of
-  a method or a class method (``self``, ``cls``), when not annotated, is
-  clinic's implicit one;
-* ``@classmethod`` and ``@staticmethod`` as in Python (``__new__`` is
-  implicitly a class method, like in Python);
-* any other clinic decorator is written as a Python decorator of the same
-  name and arguments: ``@permit_long_summary``,
-  ``@text_signature("($self, sub[, start[, end]], /)")``,
-  ``@critical_section``, ``@vectorcall``, ...  (see "Decorators" below);
-* the return annotation, if any, is the clinic return converter;
-* the docstring is the text help() shows after the signature: the summary,
-  then the parameter section clinic renders ("  name" and the parameter
-  docstring indented by 4), then the rest of the docstring;
-* there are no clones, as Python has none: two methods with the same
-  signature (``find`` and ``count``) are two full ``def`` statements, and
-  clinic generates for the second what it generates for a clone;
-* a body of ``...`` (or only a docstring) means the C impl is
-  hand-written.  A real body implements the function (emit.py), if it
-  and the signature are in the lowered subset (subset.py; describe()
-  checks it first); with ``@native`` the C impl is hand-written
-  and the body, any Python, is its Python reference, never compiled.
-
-Any signature clinic can state is a spec signature, and any Python is a
-spec body: only the lowered subset is generated as C.
-
-Each spec method has a one-line block in the .c file, above its impl:
-the function line only (``bytes.split``).  complete_block() turns the
-spec method into the rest of the block (clinic_input()), and clinic
-writes the impl head into the block's output, as usual.  A missing
-block is an error.  An accessor, ``@getter def attr(self)`` or
-``@setter def attr(self, value: object)``, is a clinic function too; its
-block names it with the same decorator (``@getter`` / ``T.attr``).
-Clinic then binds the functions with a body to their clinic function
-(DSLParser.bind_spec(), PyspecBindings).
-
-The C basename of a spec method is clinic's default (``T`` for
-``T.__new__``, ``T___init__`` for ``T.__init__``, ``T_meth`` otherwise);
-``@c_name("x")`` gives another, as ``as x`` does in a block.
-
-Top-level functions are C functions named like the function.  A real
-body is generated.  ``@native`` marks a function implemented natively
-(in C, written by hand) whose body is its Python reference, never
-compiled, not even in part; its annotations are the C types of its
-parameters and result, the interface generated code calls it through
-(see c_signature()).  ``@inline`` marks a function whose body is
-generated into each of its callers (partial_eval.py), never a C function
-of its own: the fast path of a native function is one (see
-is_inline()).  A body of ``...`` (or only a docstring) is a hand-written
-C function about which nothing is known.  A spec imports the functions of other specs by name,
-by the path of the spec from the source root: ``from
-Objects.pyspec.abstract import PyNumber_AsSsize_t``, ``from
-Python.pyspec.errors import PyErr_BadInternalCall``
+A body of ``...`` (or only a docstring) is C about which nothing is
+known (is_stub()); ``@native``: C written by hand, the body is its
+Python reference (is_native()); ``@inline``: generated into each caller
+(is_inline()); any other body is implemented (implemented()): lowered to
+C if it is in the lowered subset (subset.py; describe() checks it
+first).  A spec imports other specs by their path from the source root
 (specfiles.import_root()).
-
-Decorators
-----------
-Any clinic decorator may be written on a spec method as a Python
-decorator with the same name and arguments (string or integer constants),
-which runtime.py defines as an identity decorator: it only chooses how
-clinic renders C, and clinic validates it as in a .c file.
-(``@classmethod`` and ``@staticmethod`` are Python's own.)
-
-C names: @c_name
-----------------
-``@c_name("x")`` names the C function of a method: it is clinic's
-``meth as x``.  It is not passed to clinic as a decorator.  The keyword
-form names the C function *and* the C interface it has, for methods that
-are not clinic functions (see "Methods that are not clinic functions"):
-``@c_name(sq_item="bytes_item")`` (a slot) or
-``@c_name(METH_NOARGS="bytes_getnewargs")`` (a PyCFunction).
-
-Methods that are not clinic functions (method_kind())
-------------------------------------------------------
-* A slot: a dunder of ``slotdefs[]`` (slots.py) other than ``__new__``
-  and ``__init__``, a C function with the slot's typedef, with a body of
-  ``...`` or, with ``@native``, a Python reference.  Its parameters
-  are those of the slot wrapper, unannotated; it has no docstring.  Its C
-  function is ``<class>_<slot without its prefix>`` unless @c_name says
-  otherwise; a dunder that several slots can implement names them
-  (``@c_name(mp_length="f", sq_length="f")``) unless another dunder of
-  the class selected a slot it shares; a class declares every dunder of
-  the slots it fills (typeobj.py).
-* A hand-written PyCFunction: ``@c_name(METH_NOARGS="f")``,
-  ``METH_O``, ``METH_VARARGS`` or ``METH_FASTCALL`` (pycfunction()):
-  parameters unannotated, ``(self, /)``, ``(self, arg, /)`` or ``(self,
-  /, *args)``, with ``**kwargs`` for METH_KEYWORDS; @classmethod,
-  @staticmethod and @coexist add METH_CLASS, METH_STATIC and
-  METH_COEXIST; its docstring as is, after the signature of
-  @text_signature if any.  A slot may also have such an entry in the
-  method table (``@c_name(mp_subscript="f", METH_O="f")`` and
-  ``@coexist``).
-* Shared: ``meth = module.Class.meth``, a method another spec declares
-  (``from Objects.stringlib.pyspec import transmogrify``), or ``Class.meth`` of
-  another class of this spec.  If the C file has a clinic block for it
-  (``bytearray.strip``), it is a clinic function of this class with the
-  parameters, docstring and decorators of that method; else its entry in
-  the method table is the other's.  It may be decorated by calls:
-  ``critical_section(...)`` (the clinic decorator; for an entry, clinic
-  generates ``<class>_<meth>()`` calling the other's C function in a
-  critical section on self) and ``c_name(METH_NOARGS="f")(...)`` (the
-  entry calls f, a PyCFunction, with the other's docstring).
-
-For the classes of the spec of a C file, clinic generates the method and
-slot tables their PyTypeObject (written in C) names (typeobj.py).
 """
 
 
@@ -137,37 +48,21 @@ from libclinic.errors import SpecError, SpecErrorKind
 from . import builtin_types, marks, slots, specfiles, subset
 
 
-# Annotations of the parameters of implemented spec functions, and the C
-# type they stand for (the lowered subset, subset.py).  For methods, the
-# annotations are clinic converters; Argument Clinic checks that they
-# agree.
-SPEC_CTYPES = subset.LOWERED_CTYPES
-
-# The C types of the annotations of a @native or @inline function (see
-# subset.c_signature()).
-C_CTYPES = subset.C_CTYPES
-c_signature = subset.c_signature
-is_struct = subset.is_struct
-
 TYPE_CTYPE = 'PyTypeObject *'
 
 # Builtin types a spec class may describe, and their C type objects.
 TYPE_OBJECTS = builtin_types.TYPE_OBJECTS
 
-# Clinic decorators that are also Python's: they set the kind of the
-# method.  Any other decorator is a clinic-only one (see "Decorators"),
-# except the spec's own: @c_name, @native and @inline.
+# Clinic decorators that are also Python's; the spec's own.  Any other
+# decorator is a clinic one.
 METHOD_DECORATORS = ('classmethod', 'staticmethod')
 SPEC_DECORATORS = ('c_name', 'native', 'inline')
 
-# The clinic decorators that make a def an accessor: in the C file, its
-# one-line block names the accessor with the same decorator.
+# The clinic decorators of an accessor, repeated by its block in C.
 ACCESSOR_DECORATORS = ('getter', 'setter')
 
-# The C calling conventions of a hand-written PyCFunction entry
-# (``@c_name(METH_O="f")``), with the Python parameters after self each
-# takes: none, one positional-only, or ``*args`` (and ``**kwargs``, which
-# adds METH_KEYWORDS).
+# The calling conventions of a hand-written PyCFunction, and the
+# parameters each takes (``**kwargs`` adds METH_KEYWORDS).
 PYCFUNCTION_FLAGS = {
     'METH_NOARGS': '(self, /)',
     'METH_O': '(self, arg, /)',
@@ -175,8 +70,7 @@ PYCFUNCTION_FLAGS = {
     'METH_FASTCALL': '(self, /, *args[, **kwargs])',
 }
 
-# Kinds of the methods of a spec class (see "Methods that are not clinic
-# functions").
+# The kinds of the methods of a spec class (method_kind()).
 CLINIC, SLOT, PYCFUNCTION, SHARED, ACCESSOR = (
     'clinic', 'slot', 'pycfunction', 'shared', 'accessor')
 
@@ -197,7 +91,6 @@ class SpecFunction:
     # "PyBytes_FromObject", or "bytes.__new__" for a method.
     name: str
     path: str
-    lineno: int
     parameters: list[SpecParameter]
     # For a __new__: the Python name of its class.
     new_type: str | None = None
@@ -208,10 +101,7 @@ class PyCFunctionEntry:
     """A hand-written PyCFunction of a method table
     (``@c_name(METH_O="f")``)."""
     c_function: str
-    # METH_NOARGS, METH_O, METH_VARARGS or METH_FASTCALL.
-    convention: str
-    # The flags of its PyMethodDef: "METH_VARARGS | METH_KEYWORDS".
-    flags: str
+    flags: str      # of its PyMethodDef: "METH_VARARGS | METH_KEYWORDS"
 
 
 @dc.dataclass
@@ -228,25 +118,26 @@ class SpecBinding:
 @dc.dataclass
 class PyspecBindings:
     """What clinic learns from the C file for the C it generates from the
-    spec (emit.py, typeobj.py): the bindings of the implemented spec
-    methods ("bytes.__new__"), and the type object of each clinic class
-    ("bytes": "&PyBytes_Type")."""
+    spec: the bindings of the implemented methods ("bytes.__new__"), and
+    the type object of each clinic class ("bytes": "&PyBytes_Type")."""
     functions: dict[str, SpecBinding] = dc.field(default_factory=dict)
     type_objects: dict[str, str] = dc.field(default_factory=dict)
 
 
-def spec_path(filename: str) -> str:
-    """Path of the spec file for the C file *filename*."""
+def _beside(filename: str, directory: str, suffix: str) -> str:
     dirname, basename = os.path.split(filename)
     stem = os.path.splitext(basename)[0]
-    return os.path.join(dirname, 'pyspec', stem + '.py')
+    return os.path.join(dirname, directory, stem + suffix)
+
+
+def spec_path(filename: str) -> str:
+    """Path of the spec file for the C file *filename*."""
+    return _beside(filename, 'pyspec', '.py')
 
 
 def output_path(filename: str) -> str:
     """Path of the C generated from the spec of the C file *filename*."""
-    dirname, basename = os.path.split(filename)
-    stem = os.path.splitext(basename)[0]
-    return os.path.join(dirname, 'clinic', stem + '_pyspec.c.h')
+    return _beside(filename, 'clinic', '_pyspec.c.h')
 
 
 def docstring_of(body: list[ast.stmt]) -> str | None:
@@ -270,11 +161,8 @@ def without_docstring(node: ast.FunctionDef) -> list[ast.stmt]:
 
 
 def is_stub(node: ast.FunctionDef) -> bool:
-    """True if the body is only a docstring and/or ``...``.
-
-    A stub is a function implemented in C by hand about which nothing is
-    known: it is never lowered to C, and a call of it may do anything.
-    """
+    """True if the body is only a docstring and/or ``...``: C about which
+    nothing is known (a call of it may do anything)."""
     body = without_docstring(node)
     return not body or (len(body) == 1 and isinstance(body[0], ast.Expr)
                         and isinstance(body[0].value, ast.Constant)
@@ -298,8 +186,7 @@ def decorator_name(decorator: ast.expr) -> str | None:
 
 
 def accessor_kind(node: ast.FunctionDef) -> str:
-    """'getter' or 'setter' for an accessor (``@getter``, ``@setter``),
-    else ''."""
+    """'getter' or 'setter' for an accessor, else ''."""
     for decorator in node.decorator_list:
         name = decorator_name(decorator)
         if name in ACCESSOR_DECORATORS:
@@ -307,32 +194,25 @@ def accessor_kind(node: ast.FunctionDef) -> str:
     return ''
 
 
+def has_decorator(node: ast.FunctionDef, name: str) -> bool:
+    return any(decorator_name(d) == name for d in node.decorator_list)
+
+
 def is_native(node: ast.FunctionDef) -> bool:
-    """True for ``@native``: a function implemented natively (C written
-    by hand) whose body is its Python reference: it describes the native
-    code (facts, the difftest) and is never compiled."""
-    return any(decorator_name(d) == 'native'
-               for d in node.decorator_list)
+    """``@native``: C written by hand; the body is its Python reference,
+    never compiled."""
+    return has_decorator(node, 'native')
 
 
 def is_inline(node: ast.FunctionDef) -> bool:
-    """True for ``@inline``: a top-level function whose body is generated
-    into each caller by the partial evaluator, and is never a C function
-    of its own.  Its annotations are C types, as for @native; its body is
-    fast paths, ``if <test>: return <value>``, then ``return <value>``
-    (subset.Inline).  A fast path of a native function f is written as
-    one, ``return f(...)`` last, and spec bodies call it instead of f:
-    the fast path is then generated code, and f's reference only
-    describes f."""
-    return any(decorator_name(d) == 'inline'
-               for d in node.decorator_list)
+    """``@inline``: the body is generated into each caller
+    (partial_eval.py), never a C function of its own."""
+    return has_decorator(node, 'inline')
 
 
 @dc.dataclass
 class Shared:
-    """``meth = module.Class.meth`` in a spec class (``Class.meth`` for a
-    class of the same spec), possibly decorated by calls:
-    ``critical_section(...)``, ``c_name(METH_NOARGS="f")(...)``."""
+    """``meth = [decorator(...)(]module.Class.meth[)]`` in a class."""
     module: str | None
     cls: str
     meth: str
@@ -342,9 +222,8 @@ class Shared:
 
 @functools.cache
 def spec_classes() -> dict[type, Spec]:
-    """{builtin type: Spec} of the complete classes (see
-    builtin_types.TypeFacts.spec_class()) of the specs of the tree
-    (specfiles.spec_files())."""
+    """{builtin type: Spec} of the classes of the tree that declare the
+    slots of their type (builtin_types.TypeFacts)."""
     out = {}
     for path, _ in specfiles.spec_files():
         spec = Spec.load(path)
@@ -356,8 +235,7 @@ def spec_classes() -> dict[type, Spec]:
     return out
 
 
-# The decorators a shared method may have (see "Methods that are not
-# clinic functions").
+# The decorators a shared method may have.
 SHARED_DECORATORS = ('critical_section', 'c_name')
 
 
@@ -376,9 +254,8 @@ class Spec:
         self.accessors: dict[str, dict[str, ast.FunctionDef]] = {}
         # Specs imported with ``from pkg import module``: name -> path.
         self.imports: dict[str, str] = {}
-        # The specs loaded for this one or for a spec it imports, by
-        # absolute path, one Spec per file: shared by all of them
-        # (load_spec()).
+        # One Spec per file (absolute path), shared with the specs it
+        # imports (load_spec()).
         self.loaded: dict[str, Spec] = {} if loaded is None else loaded
         # Functions imported with ``from pkg.module import f``: name ->
         # path of the spec.
@@ -440,10 +317,8 @@ class Spec:
 
     def _add_accessor(self, name: str, kind: str,
                       node: ast.FunctionDef) -> None:
-        """``@getter def attr(self)`` / ``@setter def attr(self, value)``
-        in a class: the accessors of attribute *name* ("T.attr"), each a
-        clinic function whose one-line block in the C file starts with
-        the same decorator."""
+        """``@getter def attr(self)`` or ``@setter def attr(self,
+        value)``: an accessor of "T.attr" (*kind*: getter or setter)."""
         self._check_def(name, node)
         if sum(decorator_name(d) in ACCESSOR_DECORATORS
                for d in node.decorator_list) > 1:
@@ -460,13 +335,10 @@ class Spec:
         accessors[kind] = node
 
     def _add_import(self, node: ast.ImportFrom) -> None:
-        """``from Objects.stringlib.pyspec import transmogrify``: the spec
-        Objects/stringlib/pyspec/transmogrify.py; ``from
-        Objects.pyspec.abstract import PyNumber_AsSsize_t``: that function
-        of the spec Objects/pyspec/abstract.py.  A spec is imported by its
-        path from the source root (specfiles.import_root()).  Imports of
-        the standard library are for the Python references of @native
-        functions."""
+        """``from Objects.stringlib.pyspec import transmogrify`` (a spec)
+        or ``from Objects.pyspec.abstract import PyNumber_AsSsize_t`` (a
+        function of a spec), by the path from the source root.  Imports
+        of the standard library are for Python references."""
         if node.module is None or node.module.startswith('libclinic') \
                 or node.module in sys.stdlib_module_names:
             return
@@ -475,28 +347,25 @@ class Spec:
         for alias in node.names:
             name = alias.asname or alias.name
             path = os.path.join(root, *parts, alias.name + '.py')
+            module = os.path.join(root, *parts) + '.py'
             if os.path.exists(path):
                 self.imports[name] = path
-                continue
-            path = os.path.join(root, *parts) + '.py'
-            if os.path.exists(path):
-                self.imported_functions[name] = path
-                continue
-            path = os.path.join(root, *parts, alias.name + '.py')
-            raise self.error(node, f"imported spec {path} not found: a "
-                             "spec imports another by its path from the "
-                             "source root ('from Objects.pyspec.abstract "
-                             "import PyObject_LengthHint_fast', 'from "
-                             "Objects.stringlib.pyspec import "
-                             "transmogrify')")
+            elif os.path.exists(module):
+                self.imported_functions[name] = module
+            else:
+                raise self.error(node, f"imported spec {path} not found: a "
+                                 "spec imports another by its path from the "
+                                 "source root ('from Objects.pyspec."
+                                 "abstract import PyObject_LengthHint_fast',"
+                                 " 'from Objects.stringlib.pyspec import "
+                                 "transmogrify')")
 
     def imported(self, module: str) -> Spec:
         """The spec imported as *module*."""
         return self.load_spec(self.imports[module])
 
     def load_spec(self, path: str) -> Spec:
-        """The spec at *path*, imported by this one (or by a spec it
-        imports): read once."""
+        """The spec at *path*, read once for this spec and its imports."""
         path = os.path.abspath(path)
         if path not in self.loaded:
             spec = Spec.load(path, self.loaded)
@@ -504,8 +373,7 @@ class Spec:
         return self.loaded[path]
 
     def resolve(self, name: str) -> tuple[Spec, ast.FunctionDef] | None:
-        """(the spec defining it, its def) of the function *name* of this
-        spec or imported by it, or None."""
+        """(spec, def) of function *name* of this spec or imported."""
         if name in self.functions:
             return self, self.functions[name]
         path = self.imported_functions.get(name)
@@ -515,10 +383,8 @@ class Spec:
 
     def _called(self, call: ast.Call
                 ) -> tuple[Spec, ast.FunctionDef] | None:
-        """(spec, def) of the function *call* calls by name, of this spec
-        or imported.  A call copied from another spec (the body of an
-        @inline function, see partial_eval.py) names the spec it was
-        written in (marks.Scope)."""
+        """(spec, def) of the function *call* calls by name; a call copied
+        from another spec (an @inline body) resolves there (marks.Scope)."""
         func = call.func
         if not isinstance(func, ast.Name):
             return None
@@ -527,8 +393,7 @@ class Spec:
 
     def c_function(self, call: ast.Call
                    ) -> tuple[Spec, ast.FunctionDef] | None:
-        """(spec, def) of the hand-written C function *call* calls (by
-        name): @native or a stub, of this spec or imported."""
+        """(spec, def) of the C function (@native or ...) *call* calls."""
         found = self._called(call)
         if (found is None or is_inline(found[1])
                 or found[0].implemented(ast.unparse(call.func))):
@@ -537,8 +402,7 @@ class Spec:
 
     def inline_function(self, call: ast.Call
                         ) -> tuple[Spec, ast.FunctionDef] | None:
-        """(spec, def) of the @inline function *call* calls (by name), of
-        this spec or imported."""
+        """(spec, def) of the @inline function *call* calls."""
         found = self._called(call)
         if found is None or not is_inline(found[1]):
             return None
@@ -602,8 +466,7 @@ class Spec:
     def _add_shared(self, cls_name: str, stmt: ast.stmt, name: str,
                     module: str | None, cls: str, meth: str,
                     decorators: list[ast.expr]) -> None:
-        """``name = module.cls.meth``: a method declared in another spec
-        (or another class of this one)."""
+        """``name = module.cls.meth``."""
         where = f'{module}.{cls}' if module else cls
         if module is not None and module not in self.imports:
             raise self.error(stmt, f"{module} is not a spec imported with "
@@ -625,17 +488,14 @@ class Spec:
         self.shared[f'{cls_name}.{name}'] = Shared(module, cls, meth,
                                                    stmt.lineno, decorators)
 
-    def shared_source(self, name: str) -> tuple[Spec, str]:
-        """(spec, "Class.meth") declaring shared method *name*."""
-        shared = self.shared[name]
+    def declaration(self, name: str) -> tuple[Spec, str]:
+        """(spec, "Class.meth") of the def declaring method *name* (for a
+        shared method, the method it shares)."""
+        shared = self.shared.get(name)
+        if shared is None:
+            return self, name
         other = self.imported(shared.module) if shared.module else self
         return other, f'{shared.cls}.{shared.meth}'
-
-    def declaration(self, name: str) -> tuple[Spec, str]:
-        """(spec, "Class.meth") of the def declaring method *name*."""
-        if name in self.shared:
-            return self.shared_source(name)
-        return self, name
 
     def shared_decorators(self, name: str) -> list[tuple[str, int]]:
         """The clinic decorator lines of shared method *name*, with their
@@ -644,18 +504,12 @@ class Spec:
                 for d in self.shared[name].decorators
                 if decorator_name(d) not in SPEC_DECORATORS]
 
-    def is_locked(self, name: str) -> bool:
-        """Whether shared method *name* is ``critical_section(...)``."""
-        return any(decorator_name(d) == 'critical_section'
-                   for d in self.shared[name].decorators)
-
     # -- implemented functions ---------------------------------------------
 
     def implemented(self, name: str) -> bool:
-        """Whether spec function *name* has a body lowered to a C function
-        of its own: a top-level function or a clinic method with a body
-        other than ``...``, neither @native nor @inline.  (Slots and
-        hand-written PyCFunctions are C: typeobj.py rejects a body.)"""
+        """Whether spec function *name* has a body generated as a C
+        function of its own: a top-level function or a clinic method,
+        not a stub, @native or @inline."""
         node = self.functions.get(name)
         if (node is None or is_stub(node) or is_native(node)
                 or is_inline(node)):
@@ -674,11 +528,8 @@ class Spec:
         return [a.arg for a in args.posonlyargs + args.args]
 
     def call_target(self, func: ast.expr) -> str | None:
-        """The implemented spec function called as *func*, if any.
-
-        ``f(...)`` calls top-level f; ``T.m(...)`` calls method m of the
-        spec class T.
-        """
+        """The implemented spec function called as *func* (``f(...)``,
+        ``T.m(...)``), if any."""
         match func:
             case ast.Name(name):
                 pass
@@ -694,13 +545,10 @@ class Spec:
 
     def describe(self, name: str,
                  self_ctype: str = 'PyObject *') -> SpecFunction:
-        """The C signature of implemented spec function *name*: a
-        top-level function, a __new__ (its class is a PyTypeObject *), or
-        another method, whose self (or class) parameter has C type
-        *self_ctype* (clinic's, see SpecBinding).
-
-        First, the signature and the body must be in the lowered subset
-        (subset.py): else a SpecError (NOT_LOWERED) says what is not."""
+        """The C signature of implemented spec function *name*, whose self
+        (or class) parameter has C type *self_ctype* (a __new__'s is a
+        type).  A SpecError (NOT_LOWERED) first if *name* is not in the
+        lowered subset."""
         subset.check_lowered(self, name)
         node = self.functions[name]
         args = node.args
@@ -717,20 +565,19 @@ class Spec:
                 continue
             match arg.annotation:
                 case ast.Name(conv) | ast.Call(func=ast.Name(conv)):
-                    ctype = SPEC_CTYPES[conv]
+                    ctype = subset.LOWERED_CTYPES[conv]
                 case _:
                     raise AssertionError('checked by subset.py')
             parameters.append(SpecParameter(arg.arg, ctype,
                                             i >= first_optional))
-        return SpecFunction(name, self.filename, node.lineno, parameters,
+        return SpecFunction(name, self.filename, parameters,
                             new_type)
 
     # -- kinds of methods and C names --------------------------------------
 
     def c_name(self, name: str) -> tuple[str | None, dict[str, str]]:
-        """The arguments of @c_name of method *name*: (positional C name
-        or None, {slot or METH_ flag: C name}).  For a shared method, the
-        @c_name of this spec (``c_name(...)(module.Class.meth)``)."""
+        """(C name or None, {slot or METH_ flag: C name}) of the @c_name of
+        method *name* (of a shared method: ``c_name(...)(X.meth)``)."""
         if name in self.shared:
             decorators = self.shared[name].decorators
         elif name in self.functions:
@@ -762,10 +609,8 @@ class Spec:
 
     def pycfunction(self, name: str) -> PyCFunctionEntry | None:
         """The hand-written PyCFunction entry of method *name*
-        (``@c_name(METH_O="f")``), or None.  The parameters of the def
-        after self give its calling convention; @classmethod,
-        @staticmethod and @coexist add METH_CLASS, METH_STATIC and
-        METH_COEXIST."""
+        (``@c_name(METH_O="f")``), or None; its parameters must be those
+        of the calling convention."""
         _, keywords = self.c_name(name)
         given = [(k, v) for k, v in keywords.items()
                  if k in PYCFUNCTION_FLAGS]
@@ -782,36 +627,28 @@ class Spec:
         positional = args.posonlyargs + args.args
         if not static:
             positional = positional[1:]
-        match convention:
-            case 'METH_NOARGS':
-                ok = not positional
-            case 'METH_O':
-                ok = len(positional) == 1
-            case _:
-                ok = not positional and args.vararg is not None
-        if (not ok or args.kwonlyargs or args.defaults
-                or (args.kwarg and convention in ('METH_NOARGS', 'METH_O'))
-                or (args.vararg and convention in ('METH_NOARGS', 'METH_O'))
-                or args.args):
+        if convention in ('METH_NOARGS', 'METH_O'):
+            ok = (len(positional) == (convention == 'METH_O')
+                  and not (args.vararg or args.kwarg))
+        else:
+            ok = not positional and args.vararg is not None
+        if not ok or args.kwonlyargs or args.defaults or args.args:
             wanted = PYCFUNCTION_FLAGS[convention]
             if static:
                 wanted = wanted.replace('self, ', '').replace('self', '')
             raise self.error(node, f"{name}: a {convention} function takes "
                              f"{wanted}")
         flags = [convention]
-        if args.kwarg:
-            flags.append('METH_KEYWORDS')
-        if 'classmethod' in decorators:
-            flags.append('METH_CLASS')
-        if static:
-            flags.append('METH_STATIC')
-        if 'coexist' in decorators:
-            flags.append('METH_COEXIST')
-        return PyCFunctionEntry(c_function, convention, ' | '.join(flags))
+        for flag, on in (('METH_KEYWORDS', args.kwarg is not None),
+                         ('METH_CLASS', 'classmethod' in decorators),
+                         ('METH_STATIC', static),
+                         ('METH_COEXIST', 'coexist' in decorators)):
+            if on:
+                flags.append(flag)
+        return PyCFunctionEntry(c_function, ' | '.join(flags))
 
     def method_kind(self, name: str) -> str:
-        """CLINIC, SLOT, PYCFUNCTION, SHARED or ACCESSOR (see "Methods
-        that are not clinic functions")."""
+        """CLINIC, SLOT, PYCFUNCTION, SHARED or ACCESSOR."""
         if name in self.shared:
             return SHARED
         if name in self.accessors:
@@ -829,9 +666,8 @@ class Spec:
         return CLINIC
 
     def entries(self, cls_name: str) -> list[str]:
-        """Names of all the methods and shared methods of class
-        *cls_name*, in order (not its accessors: their table, tp_getset,
-        is written in C)."""
+        """The methods and shared methods of class *cls_name*, in order
+        (not its accessors: tp_getset is written in C)."""
         names = []
         for stmt in self.classes[cls_name].body:
             match stmt:
@@ -842,17 +678,14 @@ class Spec:
         return names
 
     def declares_slots(self, cls_name: str) -> bool:
-        """True if class *cls_name* declares a slot (a dunder of
-        slotdefs[]).  Such a class describes its whole type: Argument
-        Clinic generates its method and slot tables, and test_clinic
-        compares all its slots with the type.  A class without slots
-        declares methods only; their table stays in C."""
+        """Whether class *cls_name* declares a slot: then it describes its
+        whole type (clinic generates its method and slot tables); else it
+        declares methods only, and their table stays in C."""
         return any(self.method_kind(f'{cls_name}.{meth}') == SLOT
                    for meth in self.entries(cls_name))
 
     def docstring(self, name: str) -> str | None:
-        """The docstring of method *name* as __doc__ shows it (the
-        indentation of the source removed), or None."""
+        """The docstring of method *name* as __doc__ shows it, or None."""
         node = self.functions[name]
         doc = docstring_of(node.body)
         if doc is None:
@@ -875,13 +708,9 @@ class Spec:
     def clinic_input(self, name: str, accessor: str = ''
                      ) -> tuple[list[tuple[str, int]], str,
                                 list[tuple[str, int]]]:
-        """Clinic DSL for spec method *name*, or for its *accessor*
-        ('getter' or 'setter', which the block in the C file names).
-
-        Return (decorator lines, text to append to the function line,
-        the lines after the function line); each line comes with the line
-        of the spec it is taken from, where clinic reports its errors.
-        """
+        """(decorator lines, text to append to the function line, the
+        lines after it) of spec method *name* (or of its *accessor*), each
+        line with its line in the spec, where clinic reports errors."""
         node = (self.accessors[name][accessor] if accessor
                 else self.functions[name])
         decorators, kind = self._decorators(node, skip=accessor)
@@ -928,9 +757,8 @@ class Spec:
 
     def _decorators(self, node: ast.FunctionDef, skip: str = ''
                     ) -> tuple[list[tuple[str, int]], str]:
-        """Clinic decorator lines of *node*, in order, with their line in
-        the spec, and the kind of *node*.  *skip*: a decorator written
-        in the block of the C file (@getter, @setter)."""
+        """The clinic decorator lines of *node* with their line in the
+        spec, and its kind; *skip*: a decorator the C file writes."""
         kind = 'method'
         decorators = []
         for decorator in node.decorator_list:
@@ -1053,10 +881,8 @@ class Spec:
     def _split_docstring(self, node: ast.FunctionDef, lines: list[str],
                          names: list[str]
                          ) -> tuple[list[str], dict[str, list[str]]]:
-        """Separate the parameter section clinic renders after the summary.
-
-        Return the clinic docstring and the parameter docstrings.
-        """
+        """(clinic docstring, parameter docstrings): the parameter
+        section clinic renders after the summary, taken out."""
         param_docs: dict[str, list[str]] = {}
         if len(lines) < 3 or lines[1]:
             return lines, param_docs
@@ -1140,17 +966,12 @@ def _binding_error(message: str) -> SpecError:
 def complete_block(spec: Spec, function_line: str, head: list[str],
                    cls_name: str | None, directives: Collection[str]
                    ) -> SpecBlock | None:
-    """The rest of a one-line block from the spec method it names, if it
-    names a method of a class of the spec: the lines replacing
-    *function_line* (the clinic decorators of the method, the function
-    line, and the parameters and docstring).  None for a function of a
-    class the spec does not declare.
-
-    *head* holds the lines of the block before the function line;
-    *cls_name* is the clinic class of the function; *directives* are the
-    clinic directives and decorators (DSLParser.directives).  The
-    checksum of the block is still computed on the input in the C file.
-    """
+    """The rest of a one-line block from the spec method it names: the
+    lines replacing *function_line* (decorators, function line,
+    parameters and docstring), or None for a class the spec does not
+    declare.  *head*: the lines of the block before the function line;
+    *directives*: those of clinic (DSLParser.directives).  The checksum
+    of the block is still that of the input in the C file."""
     names = function_line.partition('->')[0].partition(' as ')[0].strip()
     meth = names.rpartition('.')[2]
     if cls_name is None or cls_name not in spec.classes:
@@ -1222,15 +1043,10 @@ def complete_block(spec: Spec, function_line: str, head: list[str],
         left, arrow, right = function_line.partition('->')
         function_line = (f'{left.rstrip()} as {c_name}'
                          + (f' {arrow}{right}' if arrow else ''))
-    if accessor:
-        node = spec.accessors[name][accessor]
-        location = (spec.filename, node.lineno)
-    elif name in spec.shared:
-        node = decl_spec.functions[decl_name]
-        location = (spec.filename, spec.shared[name].lineno)
-    else:
-        node = spec.functions[name]
-        location = (spec.filename, node.lineno)
+    node = (spec.accessors[name][accessor] if accessor
+            else decl_spec.functions[decl_name])
+    location = (spec.filename, spec.shared[name].lineno
+                if name in spec.shared else node.lineno)
     indent = function_line[:len(function_line) - len(function_line.lstrip())]
     return SpecBlock(
         name, [*spec_decorators,

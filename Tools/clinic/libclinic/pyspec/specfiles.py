@@ -1,18 +1,10 @@
 """The spec files of the source tree, found by one glob.
 
-A spec is ``<dir>/pyspec/<stem>.py``; it describes the C file
-``<dir>/<stem>.c`` (or the header ``<dir>/<stem>.h``), and its test data
-is ``<dir>/pyspec/<stem>_cases.py`` (see Objects/pyspec/README.rst).
-Everything that iterates over "the specs" uses spec_files(): Argument
-Clinic (the call-table registry, call_table.py), the disconnect ratchet
-(disconnects.py), test_clinic and test_pyspec_facts.  Adding a spec file
-adds it everywhere; no list names it.
-
-A spec of a core C file (``Objects/*.c``, ``Python/*.c``: linked into
-libpython) may give its classes call tables, which the interpreter finds
-in the registry of Include/internal/pycore_pyspec.h (call_table.py).  A
-spec of an extension module (``Modules/``) cannot: its data is not in
-libpython.
+A spec ``<dir>/pyspec/<stem>.py`` describes ``<dir>/<stem>.c`` (or
+``.h``); its test data is ``<dir>/pyspec/<stem>_cases.py``.  Everything
+that iterates over "the specs" uses spec_files(), so adding a spec file
+adds it everywhere.  Only a spec of a core C file (``Objects/*.c``,
+``Python/*.c``, in libpython) may give call tables (call_table.py).
 """
 
 from __future__ import annotations
@@ -24,8 +16,7 @@ import types
 
 # The top-level directories holding pyspec/ directories.
 TOPS = ('Objects', 'Python', 'Include', 'Modules')
-# The directories of the C files linked into libpython whose specs may
-# give call tables.
+# The directories of the core C files (linked into libpython).
 CORE_DIRS = ('Objects', 'Python')
 CASES_SUFFIX = '_cases.py'
 
@@ -50,12 +41,9 @@ def c_file_of(spec_path: str) -> str | None:
 
 
 def import_root(spec_path: str) -> str:
-    """The directory the imports of spec *spec_path* are relative to: a
-    spec imports another by its path from the source root, the parent of
-    the nearest Objects/, Python/, Include/ or Modules/ directory above
-    it (``from Objects.pyspec.abstract import PyObject_LengthHint_fast``,
-    ``from Objects.stringlib.pyspec import transmogrify``).  A spec
-    outside such a tree (a test's) imports relative to the directory of
+    """The source root the imports of spec *spec_path* are relative to:
+    the parent of the nearest Objects/, Python/, Include/ or Modules/
+    above it; for a spec outside such a tree (a test's), the directory of
     its C file."""
     path = os.path.abspath(spec_path)
     directory = os.path.dirname(path)
@@ -111,10 +99,9 @@ _CASES: dict[str, types.ModuleType] = {}
 
 
 def load_cases(spec_path: str) -> types.ModuleType | None:
-    """The module <stem>_cases.py next to the spec *spec_path*, or None.
-    Each is loaded once per process: the tests keep using the same
-    classes and functions (the JIT keeps a little memory per function it
-    compiles, which a fresh module per -R run would report)."""
+    """The module <stem>_cases.py next to the spec *spec_path*, or None,
+    loaded once per process (the JIT keeps a little memory per function
+    it compiles, which a fresh module per -R run would report)."""
     path = cases_path(spec_path)
     if path in _CASES:
         return _CASES[path]

@@ -1,28 +1,18 @@
-"""The builtin types the pyspec tools know, in one table.
+"""The builtin types the pyspec tools know, in one audited table.
 
-A row describes a builtin type implemented in C without a spec: its C
-type object and checks, its base, its immortal constants, how to get its
-size, and the special methods it defines itself, in C.  It is written
-out, not read from the builtins of the Python running Argument Clinic
-(PYTHON_FOR_REGEN may be older than the Python being built: before 3.12
-no type has __buffer__); test_clinic checks it against the Python being
-built.
+A row describes a builtin type implemented in C: its type object and
+checks, base, immortal constants, how to read its size, and the special
+methods it defines in C, each an audited fact: it runs no Python code,
+and its value is the exact type of its result (for ``__iter__``, of the
+items), or None when not known.  A method that may run Python code
+(forwarding to another object) is not listed, or listed as PYTHON.  The
+table is written out, not read from the Python running clinic (which may
+be older); test_clinic checks it against the Python being built.
 
-The special methods are audited facts about C code that has no spec:
-each one listed runs no Python code.  Its value is the exact type of its
-result, or None when not known.  For ``__iter__`` it is the exact type
-of every item: iter(x) and iterating it run no Python code (``object``:
-items of any type).  A type whose special method may run Python code
-(it forwards to another object, like mappingproxy's __len__, reversed's
-__length_hint__ or PickleBuffer's __buffer__) is not in the table, or
-lists the method as PYTHON: nothing is claimed about it.
-
-A spec class that declares the slots of its type (bytes, in any spec of
-the tree) describes the type itself; TypeFacts reads it instead of the
-table.  The row of such a type lists only what no spec gives: its C
-names, constants, and the audited facts of the special methods its spec
-writes in C without a Python reference (``...``); test_clinic checks
-that a row repeats nothing a spec derives.
+A spec class that declares the slots of its type describes the type
+itself: TypeFacts reads it instead, and its row lists only what the spec
+does not give (C names, constants, the facts of methods written as
+``...``); test_clinic checks that a row repeats nothing a spec derives.
 """
 
 from __future__ import annotations
@@ -58,8 +48,7 @@ class Row:
         self.slots = slots or {}
         self.constants = constants or {}    # value -> Py_CONSTANT_* name
         self.size = size                    # 'PyList_GET_SIZE': len()
-        # Tried as the exact type of the argument of a one-argument call
-        # (the per-type entries of the tier-2 call table, call_table.py).
+        # Tried as the exact type of the argument of the call table.
         self.candidate = candidate
 
 
@@ -77,9 +66,8 @@ def _row(name: str, base: type = object,
 
 
 TABLE: dict[type, Row] = {
-    # The candidates first, in the order of the call table.
-    # bytes and bytearray have a spec (Objects/pyspec/): only the special
-    # methods it writes as ... are listed.
+    # The candidates first, in the order of the call table.  bytes and
+    # bytearray have a spec: only the special methods it writes as ....
     bytes: _row('bytes', candidate=True,
                 constants={b'': 'Py_CONSTANT_EMPTY_BYTES'},
                 slots={'__iter__': int}),
@@ -126,8 +114,7 @@ SPECIALS = ('__buffer__', '__bytes__', '__index__', '__iter__', '__len__',
 
 CANDIDATES = [tp for tp, row in TABLE.items() if row.candidate]
 
-# By name: the C checks of the types, (check, exact check); the type
-# objects of those a spec class may describe (with a check).
+# By name: (check, exact check); the type objects of the checked types.
 CHECKS = {tp.__name__: (row.check, row.check_exact)
           for tp, row in TABLE.items()}
 TYPE_OBJECTS = {tp.__name__: row.type_object for tp, row in TABLE.items()
@@ -174,27 +161,22 @@ class Facts(Protocol):
 
 
 class TypeFacts:
-    """What the tools know about builtin types: from the spec for its
-    complete classes (of this spec, else of another spec of the tree),
-    else from TABLE; nothing about other types.  Never from the Python
-    running Argument Clinic."""
+    """What the tools know about builtin types: from the spec class that
+    declares the slots of the type (of this spec, else of the tree), else
+    from TABLE; nothing about other types."""
 
     def __init__(self, spec: Spec, classes: Mapping[type, Spec],
                  derive: Callable[[Any, str, type], Facts | None]) -> None:
-        """*spec*: the spec whose classes are this spec's; *classes*:
-        {builtin type: spec} of the complete classes of the specs of the
-        tree (frontend.spec_classes()); *derive(spec, name, tp)*: the
-        facts of special method *name* ("T.meth" of *spec*) for self of
-        exact type tp, from its body or Python reference, or None for a
-        method written in C only (facts.Analyzer.method_facts(), which
-        the context of the passes, context.py, gives)."""
+        """*classes*: {builtin type: spec} of the complete classes of the
+        tree (frontend.spec_classes()); *derive(spec, "T.meth", tp)*: the
+        facts of a special method for self of exact type tp, or None for
+        a method written in C only (facts.Analyzer.method_facts())."""
         self.spec = spec
         self.classes = classes
         self.derive = derive
 
     def class_spec(self, tp: type) -> Spec | None:
-        """The spec with the complete class of builtin tp: this spec, or
-        another spec of the tree; None when there is none."""
+        """The spec whose class describes builtin tp, or None."""
         if getattr(builtins, tp.__name__, None) is not tp:
             return None
         if (tp.__name__ in self.spec.classes
@@ -203,18 +185,15 @@ class TypeFacts:
         return self.classes.get(tp)
 
     def spec_class(self, tp: type) -> ast.ClassDef | None:
-        """The complete spec class of builtin tp, or None.  A class that
-        declares a slot (a dunder of slotdefs[]) declares them all:
-        test_clinic checks it against the slot wrappers of the type."""
+        """The spec class that describes builtin tp, or None."""
         spec = self.class_spec(tp)
         return None if spec is None else spec.classes[tp.__name__]
 
     def derived(self, spec: Spec, tp: type, name: str) -> SlotValue:
-        """The TABLE value of special method *name* of builtin tp, whose
-        complete class is in *spec*, another spec: derived from its body
-        or Python reference; for a method written in C only (a stub, and
-        __iter__, whose value is the type of the items), the audited value
-        of the row of tp, else PYTHON."""
+        """The TABLE value of special method *name* of tp, whose class is
+        in *spec*, another spec: from its body or reference; for one
+        written in C only (and __iter__, whose value is the type of the
+        items), the value of the row of tp, else PYTHON."""
         other, full = spec.declaration(f'{tp.__name__}.{name}')
         found = None if name == '__iter__' else self.derive(other, full, tp)
         if found is not None:
@@ -225,7 +204,10 @@ class TypeFacts:
         return PYTHON
 
     def mro(self, tp: type | None) -> list[type] | None:
-        """The MRO of tp, or None when tp is not known."""
+        """The MRO of tp, or None when tp is not known (or None: then it
+        may have any special method)."""
+        if tp is None:
+            return None
         out = []
         while tp is not None:
             if self.spec_class(tp) is not None:
@@ -264,11 +246,10 @@ class TypeFacts:
         return None if owner is None else owner is not False
 
     def special(self, tp: type | None, name: str) -> Special | None:
-        """The special method *name* of exact type tp: (the spec function
-        that implements it, None) for a class of this spec, (None, its
-        TABLE value) for a class of another spec (derived()) or a table
-        type, (None, False) when tp does not have it, and None when not
-        known."""
+        """The special method *name* of exact type tp: (the spec function,
+        None) for a class of this spec, (None, its TABLE value) for
+        another class (derived()), (None, False) when tp does not have
+        it, None when not known."""
         owner = self.owner(tp, name)
         if owner is None:
             return None

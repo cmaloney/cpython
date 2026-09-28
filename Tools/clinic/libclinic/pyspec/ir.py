@@ -1,15 +1,12 @@
 """The lowered form: a function as emit.py lowers it, for a backend.
 
-emit.py lowers the residual code of a spec function (partial_eval.py)
-to this form, which has made every decision that does not depend on the
-language written: the C types of the locals, which references are owned
-and where each is released (Release), the error check of every call
-(Failed, with its Convention), and how a loop iterates (ForIndex,
-ForIter).  A backend writes it out as the text of one language:
-c_backend.py writes C.  Calls name functions and macros of the C API,
-which any language calls through its C interface; the operations a
-backend writes its own way (type checks, reference counting, loops,
-critical sections, the fallback of a snapshot) are nodes of their own.
+It has made every decision that does not depend on the language: the C
+types of the locals, which references are owned and where each is
+released (Release), the error check of every call (Failed), how a loop
+iterates (ForIndex, ForIter).  A backend writes it out (c_backend.py:
+C).  Calls name functions of the C API, which any language calls; what
+a backend writes its own way (type checks, reference counts, loops,
+critical sections) are nodes of their own.
 """
 
 from __future__ import annotations
