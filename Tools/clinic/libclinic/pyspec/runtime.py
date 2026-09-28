@@ -1,36 +1,19 @@
-"""Names a pyspec file may use, with their meaning as Python.
+"""The names a spec imports, with their meaning as Python.
 
-A pyspec file is ordinary Python: it imports these names with
-``from libclinic.pyspec.runtime import ...``.  Running it (see load())
-gives the reference behavior; Argument Clinic reads the same file with the
-ast module (frontend.py), derives facts from it (call_table.py) and lowers
-it to C (emit.py).  Besides the functions of the specs themselves, a spec
-uses:
+A spec imports them with ``from libclinic.pyspec.runtime import ...``;
+load() runs a spec as Python (the reference behaviour, for the tests),
+while clinic reads the same file with the ast module.  They are:
 
 * builtins with a fixed C meaning: ``NULL``, ``isinstance`` (the real
   type), ``iter`` (PyObject_GetIter()), ``tp_name`` and ``fqname`` (type
-  names in error messages).  Clinic gives ``isinstance`` and ``iter`` their
-  C meaning by name, so a spec that calls them without importing them
-  from here would run the builtins as Python: load() refuses it
-  (SHADOWED_BUILTINS);
-* the Argument Clinic decorators, and ``@c_name`` (frontend.py,
-  typeobj.py): identity decorators for Python;
-* ``@inline``: a function generated into each caller (a fast path);
-* ``@native`` and a few primitives that say what plain Python
-  cannot, placed where the effect happens, so that the control flow
-  around them gives their conditions (see Objects/pyspec/README.rst):
-
-  exact(T, value)       value is a new object of exactly type T
-  unknown(value)        value is a new object of a type not known exactly
-  calls(x, "__name__")  here the C invokes the special method of type(x):
-                        Python code runs only if that method is Python code
-  runs_python()         here the C may run any Python code
-  NULL                  returned: absent (not an error)
-
-  exact() and unknown() may fail (MemoryError); calls() and runs_python()
-  may raise anything.  When the spec runs as Python they only return
-  their value (exact() checks its type): the code around them models what
-  the C computes.
+  names in messages).  Clinic gives isinstance and iter their C meaning
+  by name, so a spec must import them (SHADOWED_BUILTINS);
+* the clinic decorators and ``@c_name``, ``@native``, ``@inline``:
+  identity decorators for Python;
+* the primitives of a Python reference, where the effect happens:
+  ``exact(T, value)``, ``unknown(value)``, ``calls(x, "__name__")``,
+  ``runs_python()`` (Objects/pyspec/README.rst, "Native functions").
+  As Python they only return their value (exact() checks its type).
 """
 
 import ast
@@ -100,17 +83,13 @@ def c_name(*args: str, **kwargs: str) -> Callable[[_F], _F]:
 
 
 def native(func: _F) -> _F:
-    """The function of the same name is implemented natively (in C, by
-    hand) and is the authority; the body is its Python reference: run
-    when the spec runs as Python, and read for the facts of its calls.
-    It describes the native code and is never compiled, not even in
-    part."""
+    """Implemented natively; the body is its Python reference, run as
+    Python and read for facts, never compiled."""
     return func
 
 
 def inline(func: _F) -> _F:
-    """The body is generated into each caller (a fast path of a native
-    function, say), never as a C function of its own."""
+    """The body is generated into each caller."""
     return func
 
 
@@ -154,12 +133,9 @@ class _Iterator:
 
 
 def iter(obj: Any) -> _Iterator:
-    """PyObject_GetIter().
-
-    ``for item in it:`` over its result is lowered to PyIter_Next() calls:
-    tp_iternext only.  A Python for loop would call ``it.__iter__()``
-    first, which C does not do; the wrapper makes the spec, run as
-    Python, do the same as C."""
+    """PyObject_GetIter().  ``for item in it:`` over the result is
+    PyIter_Next() calls in C; a Python for loop would first call
+    ``it.__iter__()``, which the wrapper makes a no-op, as in C."""
     return _Iterator(builtins.iter(obj))
 
 

@@ -105,10 +105,7 @@ class PyCFunctionEntry:
     """A hand-written PyCFunction of a method table
     (``@c_name(METH_O="f")``)."""
     c_function: str
-    # METH_NOARGS, METH_O, METH_VARARGS or METH_FASTCALL.
-    convention: str
-    # The flags of its PyMethodDef: "METH_VARARGS | METH_KEYWORDS".
-    flags: str
+    flags: str      # of its PyMethodDef: "METH_VARARGS | METH_KEYWORDS"
 
 
 @dc.dataclass
@@ -331,10 +328,8 @@ class Spec:
 
     def _add_accessor(self, name: str, kind: str,
                       node: ast.FunctionDef) -> None:
-        """``@getter def attr(self)`` / ``@setter def attr(self, value)``
-        in a class: the accessors of attribute *name* ("T.attr"), each a
-        clinic function whose one-line block in the C file starts with
-        the same decorator."""
+        """``@getter def attr(self)`` or ``@setter def attr(self,
+        value)``: an accessor of "T.attr" (*kind*: getter or setter)."""
         self._check_def(name, node)
         if sum(decorator_name(d) in ACCESSOR_DECORATORS
                for d in node.decorator_list) > 1:
@@ -351,13 +346,10 @@ class Spec:
         accessors[kind] = node
 
     def _add_import(self, node: ast.ImportFrom) -> None:
-        """``from Objects.stringlib.pyspec import transmogrify``: the spec
-        Objects/stringlib/pyspec/transmogrify.py; ``from
-        Objects.pyspec.abstract import PyNumber_AsSsize_t``: that function
-        of the spec Objects/pyspec/abstract.py.  A spec is imported by its
-        path from the source root (specfiles.import_root()).  Imports of
-        the standard library are for the Python references of @native
-        functions."""
+        """``from Objects.stringlib.pyspec import transmogrify`` (a spec)
+        or ``from Objects.pyspec.abstract import PyNumber_AsSsize_t`` (a
+        function of a spec), by the path from the source root.  Imports
+        of the standard library are for Python references."""
         if node.module is None or node.module.startswith('libclinic') \
                 or node.module in sys.stdlib_module_names:
             return
@@ -366,28 +358,25 @@ class Spec:
         for alias in node.names:
             name = alias.asname or alias.name
             path = os.path.join(root, *parts, alias.name + '.py')
+            module = os.path.join(root, *parts) + '.py'
             if os.path.exists(path):
                 self.imports[name] = path
-                continue
-            path = os.path.join(root, *parts) + '.py'
-            if os.path.exists(path):
-                self.imported_functions[name] = path
-                continue
-            path = os.path.join(root, *parts, alias.name + '.py')
-            raise self.error(node, f"imported spec {path} not found: a "
-                             "spec imports another by its path from the "
-                             "source root ('from Objects.pyspec.abstract "
-                             "import PyObject_LengthHint_fast', 'from "
-                             "Objects.stringlib.pyspec import "
-                             "transmogrify')")
+            elif os.path.exists(module):
+                self.imported_functions[name] = module
+            else:
+                raise self.error(node, f"imported spec {path} not found: a "
+                                 "spec imports another by its path from the "
+                                 "source root ('from Objects.pyspec."
+                                 "abstract import PyObject_LengthHint_fast',"
+                                 " 'from Objects.stringlib.pyspec import "
+                                 "transmogrify')")
 
     def imported(self, module: str) -> Spec:
         """The spec imported as *module*."""
         return self.load_spec(self.imports[module])
 
     def load_spec(self, path: str) -> Spec:
-        """The spec at *path*, imported by this one (or by a spec it
-        imports): read once."""
+        """The spec at *path*, read once for this spec and its imports."""
         path = os.path.abspath(path)
         if path not in self.loaded:
             spec = Spec.load(path, self.loaded)
@@ -395,8 +384,7 @@ class Spec:
         return self.loaded[path]
 
     def resolve(self, name: str) -> tuple[Spec, ast.FunctionDef] | None:
-        """(the spec defining it, its def) of the function *name* of this
-        spec or imported by it, or None."""
+        """(spec, def) of function *name* of this spec or imported."""
         if name in self.functions:
             return self, self.functions[name]
         path = self.imported_functions.get(name)
@@ -406,10 +394,8 @@ class Spec:
 
     def _called(self, call: ast.Call
                 ) -> tuple[Spec, ast.FunctionDef] | None:
-        """(spec, def) of the function *call* calls by name, of this spec
-        or imported.  A call copied from another spec (the body of an
-        @inline function, see partial_eval.py) names the spec it was
-        written in (marks.Scope)."""
+        """(spec, def) of the function *call* calls by name; a call copied
+        from another spec (an @inline body) resolves there (marks.Scope)."""
         func = call.func
         if not isinstance(func, ast.Name):
             return None
@@ -690,7 +676,7 @@ class Spec:
             flags.append('METH_STATIC')
         if 'coexist' in decorators:
             flags.append('METH_COEXIST')
-        return PyCFunctionEntry(c_function, convention, ' | '.join(flags))
+        return PyCFunctionEntry(c_function, ' | '.join(flags))
 
     def method_kind(self, name: str) -> str:
         """CLINIC, SLOT, PYCFUNCTION, SHARED or ACCESSOR (see "Methods
