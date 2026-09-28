@@ -318,18 +318,31 @@ add_op(JitOptContext *ctx, _PyUOpInstruction *this_instr,
 
 #define JUMP_TO_LABEL(label) goto label;
 
-#ifdef Py_DEBUG
-/* Debug builds check at run time the facts the optimizer uses about the
- * result res of a call (an exact type or an immortal constant): emit the
- * call (unless its handler already emitted a replacement), then an
- * _ASSERT_RESULT_* uop.  above is the number of stack items above res. */
+/* The optimizer loop copies this_instr to the output only when its handler
+ * emitted nothing (out_start is where the handler's output starts).  A
+ * handler that keeps the instruction and emits uops after it calls this
+ * first, so that the instruction is kept, before them. */
 static void
-assert_result_facts(JitOptContext *ctx, _PyUOpInstruction *this_instr,
-                    _PyUOpInstruction *out_start, JitOptRef res, int above)
+keep_this_instr(JitOptContext *ctx, _PyUOpInstruction *this_instr,
+                _PyUOpInstruction *out_start)
 {
     if (ctx->out_buffer.next == out_start) {
         *(ctx->out_buffer.next++) = *this_instr;
     }
+}
+
+#ifdef Py_DEBUG
+/* Debug builds check at run time the facts the optimizer uses about the
+ * result res of a call (an exact type or an immortal constant), with an
+ * _ASSERT_RESULT_* uop after the call.  The call is the uops the handler
+ * emitted in place of this_instr or, when it emitted none, this_instr
+ * itself (keep_this_instr()).  above is the number of stack items above
+ * res.  Without room for the check in the output buffer, none is emitted. */
+static void
+assert_result_facts(JitOptContext *ctx, _PyUOpInstruction *this_instr,
+                    _PyUOpInstruction *out_start, JitOptRef res, int above)
+{
+    keep_this_instr(ctx, this_instr, out_start);
     if (ctx->out_buffer.end - ctx->out_buffer.next < 2) {
         return;
     }
@@ -351,20 +364,33 @@ assert_result_facts(JitOptContext *ctx, _PyUOpInstruction *this_instr,
 /* The result of a uop that does what slot slot_id (_PySpec_SLOT()) of an
  * exact tp does (a copy of its C), with an argument of exact type arg_type
  * (NULL for none): the facts the spec derives for the slot
- * (_PySpec_FindSlot()), not a copy of them.  A byte is also a small int:
- * compact, which the uop's code, not the spec, gives. */
+ * (_PySpec_FindSlot()), not a copy of them.  Only "not NULL" when the spec
+ * derives none.  What the uop's own code gives on top (e.g. "a byte is a
+ * small int") is for its handler to add. */
 static JitOptRef
 spec_slot_result(JitOptContext *ctx, PyTypeObject *tp, uint16_t slot_id,
-                 PyTypeObject *arg_type, bool byte)
+                 PyTypeObject *arg_type)
 {
     const _PySpecCall *spec = _PySpec_FindSlot(tp, slot_id, arg_type);
     if (spec == NULL || spec->result_type == NULL) {
         return sym_new_not_null(ctx);
     }
-    if (byte && spec->result_type == &PyLong_Type) {
-        return sym_new_compact_int(ctx);
-    }
     return sym_new_type(ctx, spec->result_type);
+}
+
+/* The facts of pyspec call table entry call (pycore_pyspec.h, NULL for
+ * none) about its result: a constant, else an exact type, else only "not
+ * NULL". */
+static JitOptRef
+spec_call_result(JitOptContext *ctx, const _PySpecCall *call)
+{
+    if (call != NULL && call->result_const >= 0) {
+        return sym_new_const(ctx, Py_GetConstantBorrowed(call->result_const));
+    }
+    if (call != NULL && call->result_type != NULL) {
+        return sym_new_type(ctx, call->result_type);
+    }
+    return sym_new_not_null(ctx);
 }
 
 static int
@@ -501,6 +527,96 @@ optimize_pop_top(JitOptContext *ctx, _PyUOpInstruction *this_instr, JitOptRef va
     else {
         ADD_OP(_POP_TOP, 0, 0);
     }
+}
+
+/* Calls of a class with a pyspec call table (pycore_pyspec.h), for
+ * _CALL_BUILTIN_CLASS: the class is known, self_or_null is NULL. */
+
+/* The call table entry for calling tp with nargs positional arguments args
+ * (NULL if none).  When the type of the argument is unknown, speculate on
+ * the type recorded while tracing (_RECORD_ARG0_TYPE) if it has an entry of
+ * its own with an exact result type: emit a _GUARD_TYPE for it (the
+ * argument is TOS) and use that entry. */
+static const _PySpecCall *
+find_spec_class_call(JitOptContext *ctx, _PyUOpInstruction *this_instr,
+                     PyTypeObject *tp, JitOptRef *args, int nargs)
+{
+    PyTypeObject *arg_type = NULL;
+    if (nargs == 1) {
+        arg_type = sym_get_type(args[0]);
+        if (arg_type == NULL) {
+            PyTypeObject *probable = sym_get_probable_type(args[0]);
+            const _PySpecCall *typed = NULL;
+            if (probable != NULL) {
+                typed = _PySpec_FindCall(tp, 1, probable);
+            }
+            if (typed != NULL && typed->arg_type == probable &&
+                typed->result_type != NULL)
+            {
+                ADD_OP(_GUARD_TYPE, 0, (uintptr_t)probable);
+                sym_set_type(args[0], probable);
+                arg_type = probable;
+            }
+        }
+    }
+    return _PySpec_FindCall(tp, nargs, arg_type);
+}
+
+/* tp() always returns the constant of call, without side effects: replace
+ * the call by the constant.  Pops the class and the NULL, pushes the
+ * constant and a NULL (the stack _CALL_BUILTIN_CLASS leaves); returns the
+ * constant, the new callable. */
+static JitOptRef
+fold_spec_class_call(JitOptContext *ctx, _PyUOpInstruction *this_instr,
+                     JitOptRef callable, JitOptRef self_or_null,
+                     const _PySpecCall *call)
+{
+    PyObject *value = Py_GetConstantBorrowed(call->result_const);
+    assert(_Py_IsImmortal(value));
+    optimize_pop_top(ctx, this_instr, self_or_null);
+    optimize_pop_top(ctx, this_instr, callable);
+    ADD_OP(_LOAD_CONST_INLINE_BORROW, 0, (uintptr_t)value);
+    ADD_OP(_PUSH_NULL, 0, 0);
+    return PyJitRef_Borrow(sym_new_const(ctx, value));
+}
+
+/* tp(arg) returns arg itself (bytes(b) for an exact bytes b), tp is
+ * immortal: no call.  Swap arg into the callable slot, made a strong
+ * reference if it is borrowed, and the class into the argument slot: the
+ * caller updates the two slots.  Returns the new callable. */
+static JitOptRef
+alias_spec_class_call(JitOptContext *ctx, _PyUOpInstruction *this_instr,
+                      JitOptRef arg)
+{
+    if (PyJitRef_IsBorrowed(arg)) {
+        ADD_OP(_MAKE_HEAP_SAFE, 0, 0);
+    }
+    ADD_OP(_SWAP, 3, 0);
+    return PyJitRef_StripReferenceInfo(arg);
+}
+
+/* Replace the call of callable_o with nargs arguments by a direct call of
+ * the C function of call.  Returns the result, the new callable, with the
+ * facts of call. */
+static JitOptRef
+direct_spec_class_call(JitOptContext *ctx, _PyUOpInstruction *this_instr,
+                       PyObject *callable_o, const _PySpecCall *call,
+                       int nargs)
+{
+    if (nargs == 0) {
+        ADD_OP(_CALL_BUILTIN_CLASS_0_INLINE, nargs, (uintptr_t)call->func.f0);
+    }
+    else if ((call->flags & _PySpec_MAY_RUN_PYTHON) == 0 &&
+             _Py_IsImmortal(callable_o))
+    {
+        /* Runs no Python code (checked in debug builds). */
+        ADD_OP(_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON, nargs,
+               (uintptr_t)call->func.f1);
+    }
+    else {
+        ADD_OP(_CALL_BUILTIN_CLASS_1_INLINE, nargs, (uintptr_t)call->func.f1);
+    }
+    return spec_call_result(ctx, call);
 }
 
 /* Look up name via super (normal case from supercheck where
@@ -690,9 +806,7 @@ optimize_uops(
                 Py_UNREACHABLE();
         }
         // If no ADD_OP was called during this iteration, copy the original instruction
-        if (ctx->out_buffer.next == out_ptr) {
-            *(ctx->out_buffer.next++) = *this_instr;
-        }
+        keep_this_instr(ctx, this_instr, out_ptr);
         assert(ctx->frame != NULL);
         DUMP_UOPS(ctx, "out", out_ptr, stack_pointer);
         if (!CURRENT_FRAME_IS_INIT_SHIM() && !ctx->done) {

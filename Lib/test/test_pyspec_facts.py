@@ -528,9 +528,12 @@ class DebugAssertionTest(unittest.TestCase):
         ''')
         if support.Py_DEBUG:
             rc, out, err = script_helper.assert_python_failure('-c', code)
-            self.assertIn(b'Fatal Python error: _PySpec_CheckPythonAllowed: '
-                          b'python (<string>:3) runs inside a call that the '
-                          b'pyspec facts say runs no Python code', err)
+            # The error names the function that ran.
+            self.assertIn(b'Fatal Python error: _PySpec_CheckPythonAllowed',
+                          err)
+            self.assertRegex(err, rb'python \(<string>:\d+\) runs inside a '
+                                  rb'call that the pyspec facts say runs no '
+                                  rb'Python code')
         else:
             rc, out, err = script_helper.assert_python_ok('-c', code)
             self.assertEqual(out.strip(), b'x')
@@ -701,17 +704,16 @@ class SlotFactsTest(unittest.TestCase):
                 self.assertIn(f'_PySpec_SLOT({member})', text[start:end])
 
     def test_uops_do_not_escape(self):
-        # A uop without HAS_ESCAPES_FLAG runs no Python code: the slot it
-        # copies must not either (test_table_is_derived).
-        path = os.path.join(SRCDIR, 'Include', 'internal',
-                            'pycore_uop_metadata.h')
-        with open(path, encoding='utf-8') as f:
-            text = f.read()
+        # A uop that does not escape (no HAS_ESCAPES_FLAG, as the cases
+        # generator analyses Python/bytecodes.c) runs no Python code: the
+        # slot it copies must not either (test_table_is_derived).
+        with test_tools.imports_under_tool('cases_generator'):
+            import analyzer
+        analysis = analyzer.analyze_files(
+            [os.path.join(SRCDIR, 'Python', 'bytecodes.c')])
         for uop, _, _ in slot_uses():
             with self.subTest(uop=uop):
-                line = next(line for line in text.splitlines()
-                            if line.strip().startswith(f'[{uop}] = '))
-                self.assertNotIn('HAS_ESCAPES_FLAG', line)
+                self.assertFalse(analysis.uops[uop].properties.escapes)
 
     def test_uops_agree(self):
         # The specialized code gives what the slot gives, with the facts.

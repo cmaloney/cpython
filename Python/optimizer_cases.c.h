@@ -1432,7 +1432,8 @@
             bytes_st = stack_pointer[-2];
             res = spec_slot_result(ctx, &PyBytes_Type,
                                _PySpec_SLOT(as_mapping.mp_subscript),
-                               &PyLong_Type, true);
+                               &PyLong_Type);
+            sym_set_compact_int(res);
             b = bytes_st;
             s = sub_st;
             ASSERT_RESULT_FACTS(res, 2);
@@ -3877,8 +3878,8 @@
         case _ITER_NEXT_BYTES: {
             JitOptRef next;
             next = spec_slot_result(ctx, &PyBytesIter_Type,
-                                _PySpec_SLOT(ht_type.tp_iternext), NULL,
-                                true);
+                                _PySpec_SLOT(ht_type.tp_iternext), NULL);
+            sym_set_compact_int(next);
             ASSERT_RESULT_FACTS(next, 0);
             CHECK_STACK_BOUNDS(1);
             stack_pointer[0] = next;
@@ -4567,75 +4568,31 @@
             if (callable_o != NULL && PyType_Check(callable_o) &&
                 sym_is_null(self_or_null) && oparg <= 1)
             {
-                PyTypeObject *tp = (PyTypeObject *)callable_o;
-                PyTypeObject *arg_type = NULL;
-                if (oparg == 1) {
-                    arg_type = sym_get_type(args[0]);
-                    if (arg_type == NULL) {
-                        PyTypeObject *probable = sym_get_probable_type(args[0]);
-                        const _PySpecCall *typed = NULL;
-                        if (probable != NULL) {
-                            typed = _PySpec_FindCall(tp, 1, probable);
-                        }
-                        if (typed != NULL && typed->arg_type == probable &&
-                            typed->result_type != NULL)
-                        {
-                            ADD_OP(_GUARD_TYPE, 0, (uintptr_t)probable);
-                            sym_set_type(args[0], probable);
-                            arg_type = probable;
-                        }
-                    }
-                }
-                call = _PySpec_FindCall(tp, oparg, arg_type);
+                call = find_spec_class_call(ctx, this_instr,
+                                        (PyTypeObject *)callable_o,
+                                        args, oparg);
             }
-            if (call != NULL && call->result_const >= 0 && oparg == 0) {
-                PyObject *value = Py_GetConstantBorrowed(call->result_const);
-                assert(_Py_IsImmortal(value));
-                optimize_pop_top(ctx, this_instr, self_or_null);
-                optimize_pop_top(ctx, this_instr, callable);
-                ADD_OP(_LOAD_CONST_INLINE_BORROW, 0, (uintptr_t)value);
-                ADD_OP(_PUSH_NULL, 0, 0);
-                callable = PyJitRef_Borrow(sym_new_const(ctx, value));
+            if (call == NULL) {
+                callable = sym_new_not_null(ctx);
             }
-            else if (call != NULL && oparg == 1 && call->result_alias == 0 &&
+            else if (call->result_const >= 0 && oparg == 0) {
+                callable = fold_spec_class_call(ctx, this_instr, callable,
+                    self_or_null, call);
+            }
+            else if (oparg == 1 && call->result_alias == 0 &&
                  (call->arg_type == NULL ||
                   sym_matches_type(args[0], call->arg_type)) &&
                  _Py_IsImmortal(callable_o))
             {
                 JitOptRef arg = args[0];
-                if (PyJitRef_IsBorrowed(arg)) {
-                    ADD_OP(_MAKE_HEAP_SAFE, 0, 0);
-                }
-                ADD_OP(_SWAP, 3, 0);
                 args[0] = PyJitRef_Borrow(callable);
-                callable = PyJitRef_StripReferenceInfo(arg);
+                callable = alias_spec_class_call(ctx, this_instr, arg);
                 ASSERT_RESULT_FACTS(callable, 2);
             }
-            else if (call != NULL) {
-                if (oparg == 0) {
-                    ADD_OP(_CALL_BUILTIN_CLASS_0_INLINE, oparg, (uintptr_t)call->func.f0);
-                }
-                else if ((call->flags & _PySpec_MAY_RUN_PYTHON) == 0 &&
-                     _Py_IsImmortal(callable_o))
-                {
-                    ADD_OP(_CALL_BUILTIN_CLASS_1_INLINE_NO_PYTHON, oparg, (uintptr_t)call->func.f1);
-                }
-                else {
-                    ADD_OP(_CALL_BUILTIN_CLASS_1_INLINE, oparg, (uintptr_t)call->func.f1);
-                }
-                if (call->result_const >= 0) {
-                    callable = sym_new_const(ctx, Py_GetConstantBorrowed(call->result_const));
-                }
-                else if (call->result_type != NULL) {
-                    callable = sym_new_type(ctx, call->result_type);
-                }
-                else {
-                    callable = sym_new_not_null(ctx);
-                }
-                ASSERT_RESULT_FACTS(callable, oparg + 1);
-            }
             else {
-                callable = sym_new_not_null(ctx);
+                callable = direct_spec_class_call(ctx, this_instr, callable_o,
+                    call, oparg);
+                ASSERT_RESULT_FACTS(callable, oparg + 1);
             }
             stack_pointer[-2 - oparg] = callable;
             break;
@@ -5111,10 +5068,11 @@
             self_or_null = stack_pointer[-1 - oparg];
             callable = stack_pointer[-2 - oparg];
             PyObject *callable_o = sym_get_const(ctx, callable);
+            PyMethodDescrObject *method = NULL;
             const _PySpecCall *spec = NULL;
             if (callable_o && Py_IS_TYPE(callable_o, &PyMethodDescr_Type)
                 && sym_is_not_null(self_or_null)) {
-                PyMethodDescrObject *method = (PyMethodDescrObject *)callable_o;
+                method = (PyMethodDescrObject *)callable_o;
                 spec = _PySpec_FindMethod(method->d_common.d_type,
                                       method->d_method->ml_meth, NULL, 1,
                                       sym_get_type(self_or_null));
@@ -5136,21 +5094,11 @@
                 ASSERT_RESULT_FACTS(res, 2);
             }
             else {
-                if (callable_o && Py_IS_TYPE(callable_o, &PyMethodDescr_Type)
-                    && sym_is_not_null(self_or_null)) {
-                    PyMethodDescrObject *method = (PyMethodDescrObject *)callable_o;
+                if (method != NULL) {
                     PyCFunction cfunc = method->d_method->ml_meth;
                     ADD_OP(_CALL_METHOD_DESCRIPTOR_NOARGS_INLINE, oparg + 1, (uintptr_t)cfunc);
                 }
-                if (spec != NULL && spec->result_const >= 0) {
-                    res = sym_new_const(ctx, Py_GetConstantBorrowed(spec->result_const));
-                }
-                else if (spec != NULL && spec->result_type != NULL) {
-                    res = sym_new_type(ctx, spec->result_type);
-                }
-                else {
-                    res = sym_new_not_null(ctx);
-                }
+                res = spec_call_result(ctx, spec);
                 ASSERT_RESULT_FACTS(res, 2);
                 c = callable;
                 if (sym_is_not_null(self_or_null)) {

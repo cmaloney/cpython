@@ -1,5 +1,5 @@
-# Known disconnects: C API: headers, C definitions, Doc/c-api, refcounts.dat,
-# stable_abi.toml, threadsafety.dat and Objects/pyspec/capi/.
+# Known disconnects: C API of each spec'd type: headers, C definitions,
+# Doc/c-api, refcounts.dat, stable_abi.toml and threadsafety.dat.
 # Checked by Lib/test/test_pyspec_catalog.py: this list may only shrink.
 # Fixed one?  Delete its line.  Keep the lines sorted.
 PyBytesWriter_Create: documented but has no entry in Doc/data/threadsafety.dat
