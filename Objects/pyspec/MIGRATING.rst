@@ -27,12 +27,13 @@ Tools/clinic changes with a conversion, and don't reorder methods in the
 PR that moves them.
 
 =====  =================================  ==============================
-Level  What moves                         Parity check
+Level  What moves                         Parity check (and the review)
 =====  =================================  ==============================
 1      signatures and docstrings          ``Objects/clinic/foo.c.h``
                                           byte-identical
-2      method and slot tables, tp_doc     ``pyspec_parity.py`` (below)
-3      function internals (spec bodies)   difftest, ``HelperTest``,
+2      method and slot tables, tp_doc     parity record unchanged
+3      function internals (spec bodies)   parity record unchanged,
+                                          difftest, ``HelperTest``,
                                           ``c_calls``, section 3 below
 4      facts used by the specializer      ``test_opt``,
        or the JIT                         ``test_pyspec_facts`` (debug)
@@ -42,60 +43,165 @@ Level  What moves                         Parity check
 
 Before every PR: regenerate with ``./python Tools/clinic/clinic.py
 Objects/foo.c`` (not ``--make`` from a checkout that contains other
-worktrees), rebuild, and run::
+worktrees), rebuild, and paste the output of the review (below) into
+the PR description.
 
-    ./python -m test test_clinic test_pyspec_facts test_pyspec_catalog
+Validating a change: the review
+'''''''''''''''''''''''''''''''
 
-``PyspecFilesTest`` of ``test_clinic`` checks that the generated files
-are up to date, runs the spec as Python against the interpreter on the
-``CASES`` of ``foo_cases.py``, checks each class against ``TYPES``, and
-checks that each type has exactly the slot wrappers its class declares.
-When it says "the spec and the interpreter differ", rebuild first.
+One command answers the reviewer's questions, on a build of the change
+(a debug build: it also asserts the facts)::
+
+    ./python Tools/clinic/pyspec_review.py
+
+It takes about 20 seconds, needs no other build, and prints a summary
+ready to paste; the exit status is 0 when every answer is fine.  For
+example (``bytes`` and ``bytearray`` against main)::
+
+    pyspec review of 1a2b3c4d5e6 against main (merge base ee1bbf037ff), python 3.16 free-threaded=False debug=True pointer=64 platform=linux
+
+    - Behaviour: same as Tools/clinic/pyspec-baseline/parity.txt for bytearray, bytearray_iterator, bytes, bytes_iterator, mmap (87,737 lines in 251 sections)
+      - Tools/clinic/pyspec-baseline/parity.txt: unchanged since the base for this configuration
+      - on purpose: bytes /^C tp_vectorcall$/: bytes() is called through the vectorcall the spec generates
+      - (`python Tools/clinic/pyspec_parity.py check`)
+    - Generated code: up to date (clinic --dry-run on 10 C files of specs)
+      - Objects/clinic/bytearrayobject_pyspec.c.h: new (384 lines, generated from Objects/pyspec/bytearrayobject.py)
+      - Objects/clinic/bytesobject.c.h: +94/-9 lines, in bytes_new_impl, bytes_new, bytes_new_helper, bytes_new_nargs0, bytes_new_nargs1, bytes_new_nargs2, ... (8 names)
+        - on purpose (bytes_new_impl, bytes_new, bytes_new_helper, ... (8 names)): bytes.__new__ has a spec body: clinic generates its vectorcall and per-arity entries around the parser
+      - Objects/clinic/bytesobject_pyspec.c.h: new (1049 lines, generated from Objects/pyspec/bytesobject.py)
+      - every other clinic output: identical to the base
+    - Specs vs interpreter: passed, 491 tests (`python -m test test_clinic`: ...)
+    - Facts: passed, 19 tests; debug build: facts also asserted at run time (`python -m test test_pyspec_facts`: ...)
+    - Ratchet: passed, 12 tests (skipped=1); c_calls 0, capi 20, docs 0, docstrings 2, slots 3 (`python -m test test_pyspec_catalog`: ...)
+      - ratchet baseline: unchanged since the base
+
+    Result: OK
+
+The questions, and the command that answers each on its own:
+
+1. *Did any observable behaviour of the spec'd types change?*
+   ``./python Tools/clinic/pyspec_parity.py check`` (also run by
+   ``test_tools.test_pyspec_parity``): the types against the committed
+   record, ``Tools/clinic/pyspec-baseline/parity.txt``.  A section that
+   differs is named with the spec line and the clinic block it comes
+   from.  The review also says which sections of the record the change
+   touched: a migration touches none.
+2. *Is the generated code up to date, and which generated files differ
+   from main, where and why?*  ``./python Tools/clinic/clinic.py
+   --dry-run Objects/foo.c`` says ``would update ...`` when not; the
+   review lists every clinic output that differs from the merge base,
+   with the C functions whose part changed, and the reason from the
+   ``PARITY`` of the type (``NOT EXPLAINED`` otherwise).
+3. *Are the facts sound?*  ``./python -m test test_pyspec_facts`` on a
+   debug build, where every fact is also asserted when the optimized
+   code runs; ``test_clinic`` (``PyspecFilesTest``) runs the spec as
+   Python against the interpreter.
+4. *Is the ratchet ok?*  ``./python -m test -v test_pyspec_catalog``;
+   the review shows the counts and how the baseline files changed since
+   the base (only deletions are fine).
+
+``--baseline ../build-main/python`` adds a line-by-line comparison with
+a build of the merge base (same configuration) and says whether each
+``known`` difference still occurs; ``--base REF`` names the branch the
+change goes into (default: ``main``, ``upstream/main`` or
+``origin/main``); ``--no-tests`` skips the test modules.
 
 Checking parity with the interpreter before the migration
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 
 ``Tools/clinic/pyspec_parity.py`` records everything observable about a
-type and compares it with a build of the tree before the migration.  It
-records:
+type, in sections (the type, its help, its C layout, each attribute,
+each protocol):
 
 - the Python surface: ``vars()`` in order, docstrings, text signatures
   and ``help()``;
 - the C layout: which slots are set, and whether each is inherited,
   generic or shared; every ``PyMethodDef``'s flags and doc; the members
   and getsets;
-- a few thousand probed calls per type (about 2,700 for ``bytes``):
-  each method at each arity,
-  with keywords and with a pool of argument values, one parameter at a
-  time.  It keeps the exact result, or the exception type and message,
-  and any warnings;
+- probed calls (about 34,000 lines for ``bytes``): each method at each
+  arity, with keywords (keyword-only ones with every pool value), and
+  with a pool of argument values for one parameter at a time and for
+  each pair of parameters (``encoding`` with ``errors``), on an instance
+  and, as fully, on an instance of a subclass.  It keeps the exact
+  result, or the exception type and message, any warnings, and what the
+  call did to its receiver (the new repr of a mutable one; what an
+  iterator yields next, e.g. after ``__setstate__``);
 - operators, subscripts, conversions, iteration, hashing, pickling and
-  copying of sample instances.
+  copying of sample instances; ``T[int]``; data descriptors on
+  instances, on the type and on other objects.
 
-Keep a build of the tree before the migration (``../build-main``), then
-after rebuilding::
+*The record.*  ``Tools/clinic/pyspec-baseline/parity.txt`` holds, per
+build configuration, one line per section: its number of lines and a
+digest (500 lines, 18 KB, for the five spec'd types, instead of 9 MB of
+captured text; a capture takes about 4 seconds).  A change that keeps
+behaviour leaves it unchanged, so a reviewer needs no build of main:
+the test suite checks the record, and the PR's diff shows it untouched.
+The blocks recorded so far were captured on main (Linux, 64-bit, GIL,
+debug and release: a debug build rejects unknown error handlers where a
+release build does not, so each configuration has its own block); a
+configuration with no block skips the check.  To see *which* lines of
+a section differ, compare with a build of the base::
 
-    ./python Tools/clinic/pyspec_parity.py compare ../build-main/python
+    ./python Tools/clinic/pyspec_parity.py compare ../build-main/python [bytes]
 
-With no type names it checks every type in the ``TYPES`` of a
-``_cases.py``, so add the migrated class there first.  It prints a
-unified diff of what changed, and ``no difference`` otherwise.  If the
-old build is gone, capture on it before migrating and check later::
+It prints each differing line before and after, grouped by section,
+with the spec line and clinic block responsible (``--all`` for every
+line)::
+
+    bytes .decode: 1 of 700 lines differ  [Objects/pyspec/bytesobject.py:144, Objects/bytesobject.c:2343]
+        call b'a b'.decode('utf-8', 'ascii')
+            before: !LookupError: unknown error handler name 'ascii'
+            after:  str 'a b'
+
+If the old build is gone, capture on it first and check later::
 
     ../build-main/python Tools/clinic/pyspec_parity.py capture list -o list.parity
     ./python Tools/clinic/pyspec_parity.py check list.parity
 
-The same check runs in the test suite when ``PYSPEC_PARITY_BASELINE``
-names the old python::
+The same comparison runs in the test suite when
+``PYSPEC_PARITY_BASELINE`` names the old python::
 
     PYSPEC_PARITY_BASELINE=../build-main/python ./python -m test test_tools.test_pyspec_parity
 
-Both builds must be the same Python version and configuration (debug,
-free-threaded).  A difference the migration makes on purpose goes into
-``KNOWN_DIFFERENCES`` of the tool, with the reason; so far that is only
-``bytes``'s vectorcall.  A type the tool cannot construct needs sample
-instances in its ``SAMPLES``.  This checks that nothing changed; the
-type's own tests (``test_bytes``, ...) still check that it is right.
+*Migrating the next type* (``list``): record it first, on the tree
+before the migration (ideally in a small PR of its own, so that main's
+CI checks the record against main):
+
+1. add the class to ``TYPES`` in ``Objects/pyspec/listobject_cases.py``
+   and, if needed, its ``PARITY`` (below);
+2. ``./python Tools/clinic/pyspec_parity.py check --update`` on a build
+   of that tree (once per configuration you can build);
+3. migrate; ``check`` must say ``same as ...``, and the PR must not
+   touch the record.
+
+A change of behaviour on purpose is either a ``known`` entry of the
+type's ``PARITY`` (left out of the record, listed by the review with its
+reason) or a ``check --update`` with the reason in the PR.  An unrelated
+change on main can change a section too (a docstring inherited from
+``object`` in ``help()``, the message of another type's error):
+re-record with ``check --update`` and say so.
+
+*What is specific to a type* lives with its data, in the ``PARITY`` of
+its ``_cases.py``, keyed by the class names of ``TYPES`` (see
+``Objects/pyspec/bytesobject_cases.py``)::
+
+    PARITY = {
+        'bytes': {
+            'samples': {"b'a b'": lambda: b'a b'},       # instances to probe
+            'pool': {"'strict'": lambda: 'strict'},      # more argument values
+            'known': {r'^C tp_vectorcall$': 'why'},      # keys of capture lines
+            'generated': {r'^bytes_(new|vectorcall)': 'why'},  # C names
+        },
+    }
+
+A type with no samples is probed on the pool values of exactly its
+type, or on ``T()``; an iterator, or a type ``T()`` cannot make, needs
+samples.  Both sides of a comparison must be the same Python version
+and configuration (debug, free-threaded, pointer size, platform).  Pairs
+of parameters are probed on the first sample only, with values from the
+pool: a behaviour that only a value outside the pool shows is not
+covered.  This checks that nothing changed; the type's own tests
+(``test_bytes``, ...) still check that it is right.
 
 Level 1: signatures and docstrings
 ''''''''''''''''''''''''''''''''''
@@ -147,17 +253,9 @@ The ``PyTypeObject`` itself is not generated.
 *Gives:* adding a method or slot is one ``def`` plus its C; nothing to
 add to a table by hand.
 
-*Parity:* the same attributes, docstrings and signatures before and
-after, dumped with the interpreter built from each commit::
-
-    ./python -c "
-    import sys; T = eval(sys.argv[1])
-    print(T.__name__, T.__flags__, T.__basicsize__, T.__itemsize__, repr(T.__doc__))
-    for k, v in T.__dict__.items():
-        print(k, type(v).__name__, repr(getattr(v, '__doc__', None)),
-              getattr(v, '__text_signature__', None))" bytes > after.txt
-
-``diff before.txt after.txt`` must be empty; ``nm -S
+*Parity:* the parity record unchanged (``pyspec_parity.py check``,
+"Validating a change" above): the same attributes, docstrings,
+signatures, slots, method table entries and behaviour; ``nm -S
 Objects/foo.o`` lists the same table symbols.
 
 *Size:* bytes: about 100 lines of tables and ``PyDoc_STRVAR`` (both
@@ -165,7 +263,8 @@ types) become about 45 lines of dunders and a class docstring.
 
 Checklist:
 
-- [ ] type dump identical, for every type of the file (iterators too);
+- [ ] parity record unchanged, for every type of the file (iterators
+  too, each in ``TYPES``);
 - [ ] ``test_clinic`` (slot wrappers vs dunders) passes;
 - [ ] no ``@getter``/``@setter`` in the class (not supported yet: keep
   ``tp_getset`` in C).
