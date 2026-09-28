@@ -123,7 +123,9 @@ slot tables their PyTypeObject (written in C) names (typeobj.py).
 from __future__ import annotations
 
 import ast
+import builtins
 import dataclasses as dc
+import functools
 import os
 import shlex
 import sys
@@ -132,7 +134,7 @@ from collections.abc import Collection
 
 from libclinic.errors import PYSPEC_README as README
 from libclinic.errors import SpecError, SpecErrorKind
-from . import builtin_types, slots, specfiles, subset
+from . import builtin_types, marks, slots, specfiles, subset
 
 
 # Annotations of the parameters of implemented spec functions, and the C
@@ -141,17 +143,16 @@ from . import builtin_types, slots, specfiles, subset
 # agree.
 SPEC_CTYPES = subset.LOWERED_CTYPES
 
-# The C types of the annotations of a @native function: these, and
-# a string, which is the C type itself ('PyTypeObject *').
-C_CTYPES = SPEC_CTYPES | {'Py_ssize_t': 'Py_ssize_t', 'int': 'int',
-                          'None': 'void'}
+# The C types of the annotations of a @native or @inline function (see
+# subset.c_signature()).
+C_CTYPES = subset.C_CTYPES
+c_signature = subset.c_signature
+is_struct = subset.is_struct
 
 TYPE_CTYPE = 'PyTypeObject *'
 
 # Builtin types a spec class may describe, and their C type objects.
-TYPE_OBJECTS = {tp.__name__: row.type_object
-                for tp, row in builtin_types.TABLE.items()
-                if row.check is not None}
+TYPE_OBJECTS = builtin_types.TYPE_OBJECTS
 
 # Clinic decorators that are also Python's: they set the kind of the
 # method.  Any other decorator is a clinic-only one (see "Decorators"),
@@ -327,38 +328,6 @@ def is_inline(node: ast.FunctionDef) -> bool:
                for d in node.decorator_list)
 
 
-def is_struct(ctype: str) -> bool:
-    """Whether C type *ctype* (of c_signature()) is a C struct: neither a
-    pointer nor a scalar."""
-    return '*' not in ctype and ctype not in C_CTYPES.values() \
-        and ctype.split()[-1] not in ('char', 'short', 'int', 'long')
-
-
-def c_signature(node: ast.FunctionDef) -> tuple[list[tuple[str, str]], str]:
-    """([(parameter, C type)], C return type) of a @native or
-    @inline function: an annotation of C_CTYPES or a string (the C type); no
-    return annotation is ``PyObject *``.  A return type that is neither
-    a scalar nor a pointer is a C struct that the function initializes in
-    place (see emit.py)."""
-    def ctype(annotation: ast.expr | None, default: str | None) -> str:
-        match annotation:
-            case None if default is not None:
-                return default
-            case ast.Constant(str() as text):
-                return text
-            case ast.Name(name) if name in C_CTYPES:
-                return C_CTYPES[name]
-            case ast.Constant(None):
-                return 'void'
-        raise SpecError(f"{node.name}(): the annotations of a "
-                        f"@native or @inline function are C types: "
-                        f"{sorted(C_CTYPES)} or a string",
-                        lineno=getattr(annotation, 'lineno', node.lineno))
-    args = node.args.posonlyargs + node.args.args
-    return ([(a.arg, ctype(a.annotation, None)) for a in args],
-            ctype(node.returns, 'PyObject *'))
-
-
 @dc.dataclass
 class Shared:
     """``meth = module.Class.meth`` in a spec class (``Class.meth`` for a
@@ -370,13 +339,31 @@ class Shared:
     lineno: int
     decorators: list[ast.expr] = dc.field(default_factory=list)
 
+
+@functools.cache
+def spec_classes() -> dict[type, Spec]:
+    """{builtin type: Spec} of the complete classes (see
+    builtin_types.TypeFacts.spec_class()) of the specs of the tree
+    (specfiles.spec_files())."""
+    out = {}
+    for path, _ in specfiles.spec_files():
+        spec = Spec.load(path)
+        assert spec is not None
+        for name in spec.classes:
+            tp = getattr(builtins, name, None)
+            if isinstance(tp, type) and spec.declares_slots(name):
+                out[tp] = spec
+    return out
+
+
 # The decorators a shared method may have (see "Methods that are not
 # clinic functions").
 SHARED_DECORATORS = ('critical_section', 'c_name')
 
 
 class Spec:
-    def __init__(self, source: str, filename: str = '<spec>') -> None:
+    def __init__(self, source: str, filename: str = '<spec>',
+                 loaded: dict[str, Spec] | None = None) -> None:
         self.filename = filename
         self.source = source
         self.module = ast.parse(source, filename)
@@ -389,7 +376,10 @@ class Spec:
         self.accessors: dict[str, dict[str, ast.FunctionDef]] = {}
         # Specs imported with ``from pkg import module``: name -> path.
         self.imports: dict[str, str] = {}
-        self._specs: dict[str, Spec] = {}     # load_spec()
+        # The specs loaded for this one or for a spec it imports, by
+        # absolute path, one Spec per file: shared by all of them
+        # (load_spec()).
+        self.loaded: dict[str, Spec] = {} if loaded is None else loaded
         # Functions imported with ``from pkg.module import f``: name ->
         # path of the spec.
         self.imported_functions: dict[str, str] = {}
@@ -409,6 +399,7 @@ class Spec:
                                      "Objects.stringlib.pyspec import "
                                      "transmogrify' (its path from the "
                                      "source root)")
+        self.loaded.setdefault(os.path.abspath(filename), self)
 
     def error(self, node: ast.AST | None, message: str,
               kind: SpecErrorKind = SpecErrorKind.INVALID) -> SpecError:
@@ -507,13 +498,10 @@ class Spec:
         """The spec at *path*, imported by this one (or by a spec it
         imports): read once."""
         path = os.path.abspath(path)
-        if path == os.path.abspath(self.filename):
-            return self
-        if path not in self._specs:
-            spec = Spec.load(path)
+        if path not in self.loaded:
+            spec = Spec.load(path, self.loaded)
             assert spec is not None
-            self._specs[path] = spec
-        return self._specs[path]
+        return self.loaded[path]
 
     def resolve(self, name: str) -> tuple[Spec, ast.FunctionDef] | None:
         """(the spec defining it, its def) of the function *name* of this
@@ -530,12 +518,12 @@ class Spec:
         """(spec, def) of the function *call* calls by name, of this spec
         or imported.  A call copied from another spec (the body of an
         @inline function, see partial_eval.py) names the spec it was
-        written in (``pyspec_scope``)."""
+        written in (marks.Scope)."""
         func = call.func
         if not isinstance(func, ast.Name):
             return None
-        return self.load_spec(getattr(call, 'pyspec_scope',
-                                      self.filename)).resolve(func.id)
+        return self.load_spec(marks.scope(call)
+                              or self.filename).resolve(func.id)
 
     def c_function(self, call: ast.Call
                    ) -> tuple[Spec, ast.FunctionDef] | None:
@@ -557,13 +545,15 @@ class Spec:
         return found
 
     @classmethod
-    def load(cls, path: str) -> Spec | None:
+    def load(cls, path: str,
+             loaded: dict[str, Spec] | None = None) -> Spec | None:
+        """The spec at *path*, or None; *loaded*: see __init__()."""
         try:
             with open(path, encoding='utf-8') as f:
                 source = f.read()
         except FileNotFoundError:
             return None
-        return cls(source, path)
+        return cls(source, path, loaded)
 
     def _add_class(self, node: ast.ClassDef) -> None:
         """Only these statements may be in a spec class: a docstring,

@@ -42,9 +42,11 @@ with test_tools.imports_under_tool('clinic'):
     from libclinic.pyspec import runtime as pyspec_runtime
     from libclinic.pyspec import (builtin_types as pyspec_builtin_types,
                                   call_table as pyspec_call_table,
+                                  context as pyspec_context,
                                   facts as pyspec_facts,
                                   frontend as pyspec_frontend,
-                                  partial_eval as pyspec_partial_eval,
+                                  known as pyspec_known,
+                                  marks as pyspec_marks,
                                   slots as pyspec_slots,
                                   specfiles as pyspec_specfiles,
                                   subset as pyspec_subset)
@@ -5675,10 +5677,87 @@ class PyspecTest(PyspecTestBase):
         self.generate(spec, self.BLOCK)
         with open(self.output_path, encoding='utf-8') as f:
             output = f.read()
+        # Each group of lines of the spec is named before its C.
         self.assertIn("\nPyObject *\nPyFoo_Get(PyObject *x)\n{\n"
+                      "    /* pyspec/foo.py:8 */\n"
                       "    return Py_NewRef(x);\n}\n", output)
         self.assertNotIn("PyFoo_Stub", output)
         self.assertNotIn("PyFoo_Documented", output)
+
+    def test_call_with_defaults(self):
+        # A spec function called with fewer arguments than parameters:
+        # the others are their defaults (NULL); the __new__ calling itself
+        # for its class calls the arity function of the arguments given,
+        # as the vectorcall would.
+        spec = """
+            class bytes:
+                def __new__(cls, a: object, b: str = NULL, /):
+                    if cls is not bytes:
+                        value = bytes.__new__(bytes, a)
+                        return bytes_subtype_new(cls, value)
+                    return a
+
+            def PyFoo_New(x: object):
+                return bytes.__new__(bytes, x)
+
+            @native
+            def bytes_subtype_new(type: 'PyTypeObject *', tmp: object):
+                return unknown(tmp)
+        """
+        self.generate(spec, self.BLOCK)
+        with open(self.output_path, encoding='utf-8') as f:
+            output = f.read()
+        self.assertIn("    if (cls != &PyBytes_Type) {\n"
+                      "        if (a != NULL) {\n"
+                      "            value = foo_new_nargs1(a);\n", output)
+        # (One error check after the calls.)
+        self.assertIn("        else {\n"
+                      "            value = foo_new_impl(&PyBytes_Type, a, "
+                      "NULL);\n"
+                      "        }\n"
+                      "        if (value == NULL) {\n", output)
+        self.assertIn("    return foo_new_impl(&PyBytes_Type, x, NULL);\n",
+                      output)
+        exc = self.expect_located_failure(
+            spec.replace("bytes.__new__(bytes, x)",
+                         "bytes.__new__(bytes, x, NULL, NULL)"),
+            self.BLOCK, "bytes.__new__() takes 2 to 3 arguments, not 4", 10)
+        self.assertEqual(exc.kind, SpecErrorKind.INVALID)
+
+    def test_except_tuple(self):
+        # except (E1, E2): a handler for either, dropped when the call
+        # raises neither.
+        spec = dedent(self.SPEC) + dedent("""
+            def PyFoo_Iter(x: object):
+                try:
+                    it = iter(x)
+                except (TypeError, ValueError):
+                    return x
+                return it
+
+            def PyFoo_Copy(x: object):
+                try:
+                    y = foo_copy(x)
+                except (TypeError, ValueError):
+                    return x
+                return y
+
+            @native
+            def foo_copy(x: object):
+                return exact(bytes, bytes(x))
+        """)
+        self.generate(spec, self.BLOCK)
+        with open(self.output_path, encoding='utf-8') as f:
+            output = f.read()
+        self.assertIn("    it = PyObject_GetIter(x);\n"
+                      "    if (it == NULL) {\n"
+                      "        if (PyErr_ExceptionMatches(PyExc_TypeError) || "
+                      "PyErr_ExceptionMatches(PyExc_ValueError)) {\n"
+                      "            PyErr_Clear();\n", output)
+        # foo_copy() raises only MemoryError: no handler can run.
+        copy = output[output.index("PyFoo_Copy(PyObject *x)"):]
+        self.assertIn("y = foo_copy(x);\n    if (y == NULL) {", copy)
+        self.assertNotIn("PyErr_ExceptionMatches", copy)
 
     def test_method_and_class_method(self):
         # A method or class method with a body: clinic's parsing code
@@ -5733,8 +5812,22 @@ class PyspecTest(PyspecTestBase):
             output = f.read()
         self.assertIn("static PyObject *\n"
                       "bytes___bytes___impl(PyBytesObject *self)\n{\n"
+                      "    /* pyspec/foo.py:5 */\n"
                       "    if (PyBytes_CheckExact(self)) {\n"
                       "        return Py_NewRef(self);\n"
+                      "    }\n", output)
+        # The block says where the impl is generated.
+        self.assertIn("    return return_value;\n}\n\n"
+                      "/* bytes_fromhex_impl() is generated from "
+                      "pyspec/foo.py:10,\n   in clinic/foo_pyspec.c.h. */\n"
+                      "/*[clinic end generated code:", generated)
+        # A local known not NULL is released with Py_DECREF, after the
+        # result is computed.
+        self.assertIn("    if (cls != &PyBytes_Type) {\n"
+                      "        PyObject *_return_value = "
+                      "PyObject_CallOneArg((PyObject *)cls, result);\n"
+                      "        Py_DECREF(result);\n"
+                      "        return _return_value;\n"
                       "    }\n", output)
         self.assertIn("static PyObject *\n"
                       "bytes_fromhex_impl(PyTypeObject *cls, "
@@ -5777,6 +5870,7 @@ class PyspecTest(PyspecTestBase):
                       "static PyObject *\n"
                       "bytes_meth_impl(PyBytesObject *self, PyObject *a)\n"
                       "{\n"
+                      "    /* pyspec/foo.py:5 */\n"
                       "    return Py_NewRef(a);\n"
                       "}\n"
                       "#endif /* defined(CONDITION) */\n", output)
@@ -7370,16 +7464,16 @@ class PyspecFactsTest(TestCase):
 
     @staticmethod
     def env(cases, env):
-        """The facts of partial_eval for the markers of a FACTS env."""
-        pe = pyspec_partial_eval
+        """The facts (known.py) for the markers of a FACTS env."""
+        known = pyspec_known
         out = {}
         for name, value in env.items():
             if value is getattr(cases, 'NULL', None):
-                out[name] = pe.NULL
+                out[name] = known.NULL
             elif value is getattr(cases, 'ANY', None):
-                out[name] = pe.NOTNULL
+                out[name] = known.NOTNULL
             elif isinstance(value, tuple) and value[:1] == ('is',):
-                out[name] = pe.Value(value[1])
+                out[name] = known.Value(value[1])
             else:
                 out[name] = value
         return out
@@ -7402,8 +7496,9 @@ class PyspecFactsTest(TestCase):
             loop, = [node for stmt in body for node in ast.walk(stmt)
                      if isinstance(node, ast.For)]
             sequence, iterable = expected['loop']
-            self.assertIs(loop.pyspec_sequence, sequence)
-            self.assertIs(loop.pyspec_iterable, iterable)
+            mark = pyspec_marks.get(loop, pyspec_marks.Loop)
+            self.assertIs(mark.by_index, sequence)
+            self.assertIs(mark.iterable, iterable)
             where = [loop]
         calls = {ast.unparse(node.func) for stmt in where
                  for node in ast.walk(stmt) if isinstance(node, ast.Call)}
@@ -7413,14 +7508,14 @@ class PyspecFactsTest(TestCase):
             self.assertNotIn(name, calls)
 
     def check_fact(self, spec, cases, fact):
-        pe = pyspec_partial_eval
-        analyzer = pyspec_facts.analyzer(spec)
+        context = pyspec_context.Context(spec)
+        analyzer = context.analyzer()
         env = self.env(cases, fact['env'])
         residual = None
         if 'expr' in fact:
             effects = pyspec_facts.Facts()
             call = ast.parse(fact['expr'], mode='eval').body
-            result_type = analyzer.call(call, env, effects)
+            result_type = analyzer.call(call, pyspec_facts.Flow(env, effects))
             found = types.SimpleNamespace(
                 result_type=result_type, runs_python=effects.runs_python)
         elif fact.get('reference'):
@@ -7432,7 +7527,8 @@ class PyspecFactsTest(TestCase):
             if 'arities' in fact:
                 options['arities'] = [(self.env(cases, e), name, given)
                                       for e, name, given in fact['arities']]
-            residual = pe.specialize(spec, fact['function'], env, **options)
+            residual = context.residual(spec, fact['function'], env,
+                                        **options)
             found = None
             if 'args' in fact:
                 found = analyzer.facts(residual, env, fact['args'])
@@ -7450,11 +7546,11 @@ class PyspecFactsTest(TestCase):
             self.assertEqual(ast.unparse(residual[-1]), fact['last'])
         self.check_code(code, fact)
         if 'called' in fact:
-            special = pe.specialization_of(spec, residual[-1].value,
-                                           facts=True)
+            special = pyspec_marks.get(residual[-1].value,
+                                       pyspec_marks.Specialized).special
             self.check_body(special.body, fact['called'])
         for name, expected in fact.get('specializations', {}).items():
-            special = pe.specialization(spec, name)
+            special = context.specializations()[name]
             if 'params' in expected:
                 self.assertEqual(special.params, expected['params'])
             if 'lock' in expected:
@@ -7516,7 +7612,7 @@ class PyspecFactsTest(TestCase):
         bt = pyspec_builtin_types
         for spec_path, _ in spec_files():
             spec = pyspec_frontend.Spec.load(spec_path)
-            facts = bt.TypeFacts(spec)
+            facts = pyspec_context.Context(spec).types()
             tps = [*bt.TABLE]
             tps += [tp for name in spec.classes
                     if (tp := getattr(builtins, name, None)) is not None
@@ -7538,7 +7634,7 @@ class PyspecFactsTest(TestCase):
         # The row of a type with a spec class repeats nothing the spec
         # derives: it lists only the special methods the spec writes as
         # ... (C only).
-        for tp, spec in bt.spec_classes().items():
+        for tp, spec in pyspec_frontend.spec_classes().items():
             row = bt.TABLE.get(tp)
             for name in (row.slots if row else ()):
                 with self.subTest(tp=tp, name=name):
@@ -7596,7 +7692,7 @@ class PyspecFactsTest(TestCase):
             def g(x: object):
                 ...
         """))
-        facts = pyspec_facts.analyzer(spec).function_facts('f')
+        facts = pyspec_context.Context(spec).analyzer().function_facts('f')
         self.assertTrue(facts.runs_python)
         self.assertIn(pyspec_facts.ANY, facts.raises)
         self.assertIsNone(facts.result_type)
@@ -7883,10 +7979,10 @@ class PyspecLanguageTest(PyspecTestBase):
          "    raise TypeError('x') from None",
          "raise statement \"raise TypeError('x') from None\"", 2),
         ("def __new__(cls, a: object, /):\n    try:\n        b = iter(a)\n"
-         "    except (TypeError, ValueError):\n        return a\n"
+         "    except (TypeError, len):\n        return a\n"
          "    return b",
-         "except clause (TypeError, ValueError) (lowered: except E, E a "
-         "builtin exception)", 4),
+         "except clause (TypeError, len) (lowered: except E, except (E1, "
+         "E2), builtin exceptions)", 4),
         ("def __new__(cls, a: object, /):\n    return",
          "return of nothing", 2),
         ("def __new__(cls, a: object, /):\n    a += 1\n    return a",
@@ -7982,7 +8078,7 @@ class PyspecLanguageTest(PyspecTestBase):
                     pass
                 return x
         """))
-        analyzer = pyspec_facts.analyzer(spec)
+        analyzer = pyspec_context.Context(spec).analyzer()
         # A loop without effects is a model of the value.
         model = analyzer.reference_facts('model', {})
         self.assertEqual((model.result_type, model.runs_python,

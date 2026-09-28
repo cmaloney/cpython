@@ -66,6 +66,13 @@ def import_root(spec_path: str) -> str:
     return os.path.dirname(os.path.dirname(path))
 
 
+def display_path(spec_path: str) -> str:
+    """*spec_path* from the source root (import_root()), with slashes:
+    ``Objects/pyspec/bytesobject.py``."""
+    return os.path.relpath(spec_path, import_root(spec_path)).replace(
+        os.sep, '/')
+
+
 def spec_files(root: str | None = None) -> list[tuple[str, str | None]]:
     """(spec path, the C file it describes or None) of every spec file
     under *root* (the source tree by default), sorted."""

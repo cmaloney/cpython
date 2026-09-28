@@ -3,16 +3,16 @@
 For a clinic __new__ implemented by a spec (``def __new__(cls, ...)`` in
 ``class bytes:``, the clinic function bytes.__new__, C basename
 bytes_new), emit.py generates NAME_nargsN(): the spec partially evaluated
-for exactly that type and N positional arguments.  emit.py then calls
-generate() here, which adds to the same generated file (Argument Clinic
-writes it; there is no separate command):
+for exactly that type and N positional arguments.  generate() here adds
+to the same generated file, after them (emit.generate() calls it back;
+Argument Clinic writes the file; there is no separate command):
 
 * NAME_nargs1_T(): NAME_nargs1 partially evaluated for an argument of
   exact type T, for the candidates of builtin_types.py.  A variant is kept
   only when its residual code is much smaller than the generic one
   (KEEP_RATIO); variants with identical code share one C function, and a
   variant that would only call a shared specialization
-  (partial_eval.Specialization, e.g. bytes_from_iterator_list()) is that
+  (marks.Specialization, e.g. bytes_from_iterator_list()) is that
   function.
 
 * ``const _PySpecCallTable _PySpec_<class>_calls`` for each class of
@@ -65,34 +65,41 @@ from the syntax of all those specs (table_classes()): a new spec'd class
 is picked up without editing C.
 """
 
+from __future__ import annotations
+
 import ast
 import os
+from collections.abc import Sequence
 
-from . import builtin_types, emit, facts, frontend, partial_eval, slots
-from . import specfiles
-from .partial_eval import NOTNULL, Value
+from libclinic.errors import SpecError, SpecErrorKind
+from . import builtin_types, emit, frontend, marks, slots, specfiles
+from .facts import Facts
+from .frontend import Spec, SpecFunction, SpecParameter
+from .known import NOTNULL, Env, Value
+
+# An entry of a call table: (arity, argument type, C function, facts,
+# constant result).
+Entry = tuple[int, type | None, str, Facts, str | None]
 
 # Keep a type-specialized variant when its residual has at most this
 # fraction of the AST nodes of the generic residual.
 KEEP_RATIO = 0.5
 
 
-def node_count(stmts):
+def node_count(stmts: list[ast.stmt]) -> int:
     return sum(1 for stmt in stmts for _ in ast.walk(stmt))
 
 
-def residual_key(stmts):
+def residual_key(stmts: list[ast.stmt]) -> str:
     """Residuals with equal keys lower to the same C: the AST, and the
-    marks of the partial evaluator that the emitter reads (e.g. whether a
-    loop iterates a list or a tuple by index)."""
-    marks = [(type(node).__name__, name, repr(value))
-             for stmt in stmts for node in ast.walk(stmt)
-             for name, value in vars(node).items()
-             if name.startswith('pyspec_')]
-    return ast.dump(ast.Module(stmts, [])) + repr(marks)
+    marks of the partial evaluator (e.g. whether a loop iterates a list
+    or a tuple by index)."""
+    found = [(type(node).__name__, marks.of(node))
+             for stmt in stmts for node in ast.walk(stmt) if marks.of(node)]
+    return ast.dump(ast.Module(stmts, [])) + repr(found)
 
 
-def _const_name(residual):
+def _const_name(residual: list[ast.stmt]) -> str | None:
     """Py_CONSTANT_* name if the residual is just ``return <constant>``."""
     match residual:
         case [ast.Return(value=ast.Constant() as value)]:
@@ -100,7 +107,7 @@ def _const_name(residual):
     return None
 
 
-def _flags(facts):
+def _flags(facts: Facts) -> str:
     flags = []
     if facts.runs_python:
         flags.append('_PySpec_MAY_RUN_PYTHON')
@@ -109,7 +116,8 @@ def _flags(facts):
     return ' | '.join(flags) or '0'
 
 
-def _describe(facts, const, arg_names=()):
+def _describe(facts: Facts, const: str | None,
+              arg_names: Sequence[str] = ()) -> str:
     parts = []
     if const is not None:
         parts.append(f'always {const}, no side effects')
@@ -130,11 +138,13 @@ def _describe(facts, const, arg_names=()):
     return '; '.join(parts)
 
 
-def _type_object(tp):
+def _type_object(tp: type | None) -> str:
     return builtin_types.TABLE[tp].type_object if tp is not None else 'NULL'
 
 
-def _entry(comment, nargs, facts, const, arg_type, func, arg_names=()):
+def _entry(comment: str, nargs: int, facts: Facts, const: str | None,
+           arg_type: type | None, func: tuple[str, str] | None,
+           arg_names: Sequence[str] = ()) -> list[str]:
     """The lines of a _PySpecCall; *func* is (union member, C name), or
     None for none."""
     result_type = _type_object(facts.result_type)
@@ -153,7 +163,7 @@ def _entry(comment, nargs, facts, const, arg_type, func, arg_names=()):
     ]
 
 
-def table_classes(spec):
+def table_classes(spec: Spec) -> list[str]:
     """The classes of *spec* that get a call table, in the order of the
     spec: those with a __new__ or a method implemented by the spec, or a
     slot with a Python reference (a @native dunder).
@@ -175,38 +185,39 @@ def table_classes(spec):
     return out
 
 
-def table_name(cls_name):
+def table_name(cls_name: str) -> str:
     """The C name of the call table of spec class *cls_name*."""
     return f'_PySpec_{cls_name}_calls'
 
 
-def generate(generator, descriptions):
+def generate(generator: emit.Generator,
+             descriptions: list[SpecFunction]) -> list[str]:
     """C lines: the type-specialized variants and the call table of each
     class of table_classes(), from *descriptions* (frontend.SpecFunction:
     the implemented functions compiled unconditionally).
 
     *generator* is the emit.Generator of the spec."""
     out = []
-    by_class = {}           # class name -> [__new__ description, methods]
+    news: dict[str, SpecFunction] = {}      # class name -> __new__
+    methods: dict[str, list[SpecFunction]] = {}
     for description in descriptions:
         cls_name, _, meth = description.name.rpartition('.')
         if not cls_name:
             continue
-        entry = by_class.setdefault(cls_name, [None, []])
         if meth == '__new__':
-            entry[0] = description
+            news[cls_name] = description
         else:
-            entry[1].append(description)
+            methods.setdefault(cls_name, []).append(description)
     for cls_name in table_classes(generator.spec):
         type_object = _class_type_object(generator, cls_name)
-        new, methods = by_class.get(cls_name, (None, []))
+        new = news.get(cls_name)
         calls = method_table = None
         if new is not None:
             lines, calls = generate_calls(generator, new)
             out += lines
-        if methods:
+        if methods.get(cls_name):
             lines, method_table = generate_methods(generator, cls_name,
-                                                   methods)
+                                                   methods[cls_name])
             out += lines
         lines, slot_table = generate_slots(generator, cls_name, type_object)
         out += lines
@@ -227,7 +238,7 @@ def generate(generator, descriptions):
     return out
 
 
-def _class_type_object(generator, cls_name):
+def _class_type_object(generator: emit.Generator, cls_name: str) -> str:
     """The C type object of spec class *cls_name*: a builtin type's, or
     the one its clinic class declaration in the C file names."""
     tp = builtin_types.by_name(cls_name)
@@ -236,42 +247,42 @@ def _class_type_object(generator, cls_name):
     type_object = generator.type_objects.get(cls_name)
     if type_object is None:
         spec = generator.spec
-        raise emit.SpecError(spec.classes[cls_name],
-                             f'class {cls_name} has a call table: declare '
-                             f'it in the C file (class {cls_name} "T *" '
-                             '"&T_Type")')
+        raise spec.error(spec.classes[cls_name],
+                         f'class {cls_name} has a call table: declare it in '
+                         f'the C file (class {cls_name} "T *" "&T_Type")',
+                         SpecErrorKind.BINDING)
     return type_object
 
 
-def generate_calls(generator, description):
+def generate_calls(generator: emit.Generator,
+                   description: SpecFunction) -> tuple[list[str], str]:
     """The variants and the calls array of a clinic __new__."""
-    spec = generator.spec
-    analyzer = facts.analyzer(spec)
+    analyzer = generator.context.analyzer()
     params = description.parameters[1:]
     # The spec function ("bytes.__new__") and the C basename of its
     # clinic function ("bytes_new").
     name = description.name
     basename = generator.c_basename(name)
     out = []
-    entries = []            # (nargs, arg type name, function, facts, const)
+    entries: list[Entry] = []
     for env, _, given, missing in generator.arities(description):
         nargs = len(given)
         if any(p.ctype != emit.OBJECT for p in given):
             continue
         arg_names = [p.name for p in given]
-        generic = partial_eval.specialize(spec, name, env)
+        generic = generator.residual(name, env)
         generic_size = node_count(generic)
         if nargs == 1:
-            functions = {}      # ast dump of the residual -> C name
+            functions: dict[str, str] = {}  # residual_key() -> C name
             for tp in builtin_types.CANDIDATES:
                 typed_env = env | {given[0].name: tp}
-                residual = partial_eval.specialize(spec, name, typed_env)
+                residual = generator.residual(name, typed_env)
                 if node_count(residual) > KEEP_RATIO * generic_size:
                     continue
                 key = residual_key(residual)
                 found = analyzer.facts(residual, typed_env, arg_names)
                 const = _const_name(residual)
-                special = _just_calls(spec, residual, given)
+                special = _just_calls(residual, given)
                 if special is not None:
                     # The variant would only call it.
                     generator.use(special.name)
@@ -306,7 +317,9 @@ def generate_calls(generator, description):
     return out, table
 
 
-def generate_methods(generator, type_name, descriptions):
+def generate_methods(generator: emit.Generator, type_name: str,
+                     descriptions: list[SpecFunction]
+                     ) -> tuple[list[str], str]:
     """The facts of the methods and class methods of a type implemented by
     the spec: per method, a generic entry, and an entry per exact type of
     the first argument whose facts differ from it (for a class method,
@@ -317,11 +330,12 @@ def generate_methods(generator, type_name, descriptions):
     is the type itself).  Only calls with all parameters, all objects, are
     described."""
     spec = generator.spec
-    analyzer = facts.analyzer(spec)
+    analyzer = generator.context.analyzer()
     # The type as the partial evaluator knows it; None for a class that
     # is not a builtin type (only its generic entries are derived).
     type_value = builtin_types.by_name(type_name)
-    entries = []
+    entries: list[tuple[str, int, type | None, Facts, list[str], str,
+                        str]] = []
     for description in descriptions:
         name = description.name
         node = spec.functions[name]
@@ -332,7 +346,7 @@ def generate_methods(generator, type_name, descriptions):
         first, *params = description.parameters
         if any(p.optional or p.ctype != emit.OBJECT for p in params):
             continue
-        env = {p.name: NOTNULL for p in params}
+        env: Env = {p.name: NOTNULL for p in params}
         env[first.name] = NOTNULL
         if 'classmethod' in decorators:
             # The generic entry holds for any class (a subclass shares
@@ -346,7 +360,7 @@ def generate_methods(generator, type_name, descriptions):
         else:
             typed_base = env
             args = [first, *params]
-            candidates = [type_value]
+            candidates = [type_value] if type_value else []
             on = ''
         if type_value is None:
             candidates = []
@@ -354,11 +368,11 @@ def generate_methods(generator, type_name, descriptions):
             continue
         arg_names = [a.name for a in args]
         meth = f'(PyCFunction){generator.c_basename(name)}'
-        generic = partial_eval.specialize(spec, name, env)
+        generic = generator.residual(name, env)
         generic_facts = analyzer.facts(generic, env, arg_names)
         for tp in candidates:
             typed_env = typed_base | {args[0].name: tp}
-            residual = partial_eval.specialize(spec, name, typed_env)
+            residual = generator.residual(name, typed_env)
             found = analyzer.facts(residual, typed_env, arg_names)
             if found.key() != generic_facts.key():
                 entries.append((name, len(args), tp, found, arg_names, meth,
@@ -383,7 +397,7 @@ def generate_methods(generator, type_name, descriptions):
     return out, table
 
 
-def slot_member(spec, cls_name, dunder):
+def slot_member(spec: Spec, cls_name: str, dunder: str) -> str:
     """The C slot that keys the facts of special method *dunder* of spec
     class *cls_name*, as a member of PyHeapTypeObject
     (``as_mapping.mp_subscript``, ``ht_type.tp_iternext``): the first slot
@@ -396,31 +410,32 @@ def slot_member(spec, cls_name, dunder):
     raise ValueError(f'{cls_name}.{dunder} fills no slot')
 
 
-def generate_slots(generator, cls_name, type_object):
+def generate_slots(generator: emit.Generator, cls_name: str,
+                   type_object: str) -> tuple[list[str], str]:
     """(C lines, array name) of the facts of the slots of class
     *cls_name* (whose type object is *type_object*) that have a Python
     reference, for self of exactly the class; ([], '') when there are
     none."""
     spec = generator.spec
-    analyzer = facts.analyzer(spec)
+    analyzer = generator.context.analyzer()
     tp = builtin_types.by_name(cls_name)
-    entries = []
+    entries: list[tuple[str, list[str], type | None, Facts]] = []
     for name in spec.native_functions():
         owner, _, dunder = name.rpartition('.')
         if owner != cls_name or not slots.is_slot(dunder):
             continue
         arg_names = spec.params(name)
-        env = {arg_names[0]: tp or NOTNULL}
+        env: Env = {arg_names[0]: tp or NOTNULL}
         env |= {p: NOTNULL for p in arg_names[1:]}
         generic = analyzer.reference_facts(name, env)
         if len(arg_names) > 1:
-            for arg_type in builtin_types.CANDIDATES:
+            for candidate in builtin_types.CANDIDATES:
                 found = analyzer.reference_facts(
-                    name, env | {arg_names[1]: arg_type})
+                    name, env | {arg_names[1]: candidate})
                 # (An argument type that always raises is left to the
                 # generic entry: nothing uses that.)
                 if found.key() != generic.key() and not found.always_raises:
-                    entries.append((dunder, arg_names, arg_type, found))
+                    entries.append((dunder, arg_names, candidate, found))
         entries.append((dunder, arg_names, None, generic))
     if not entries:
         return [], ''
@@ -451,20 +466,23 @@ def generate_slots(generator, cls_name, type_object):
     return out, table
 
 
-def _just_calls(spec, residual, given):
+def _just_calls(residual: list[ast.stmt], given: list[SpecParameter]
+                ) -> marks.Specialization | None:
     """The Specialization a residual only calls with the given arguments
     (the same C signature), or None."""
     match residual:
         case [ast.Return(value=ast.Call(args=args) as call)]:
-            special = partial_eval.specialization_of(spec, call)
-            if special is not None and [ast.unparse(a) for a in args] == [
+            mark = marks.get(call, marks.Specialized)
+            if mark and mark.called and [ast.unparse(a) for a in args] == [
                     p.name for p in given]:
-                return special
+                return mark.special
     return None
 
 
-def _variant(generator, description, c_name, residual, given, missing, tp,
-             facts, const):
+def _variant(generator: emit.Generator, description: SpecFunction,
+             c_name: str, residual: list[ast.stmt],
+             given: list[SpecParameter], missing: list[SpecParameter],
+             tp: type, facts: Facts, const: str | None) -> list[str]:
     described = _describe(facts, const, [p.name for p in given])
     return generator.commented_function(
         f'{generator.c_basename(description.name)}() for exactly '
@@ -481,24 +499,25 @@ REGISTRY_START = '/*[pyspec registry start]*/'
 REGISTRY_END = '/*[pyspec registry end]*/'
 
 
-def registry(root):
+def registry(root: str) -> list[tuple[str, str]]:
     """(table name, spec path relative to *root*) of the call table of
     every class of table_classes() of the specs of the core C files."""
     out = []
     for spec_path, _ in specfiles.core_spec_files(root):
-        spec = frontend.Spec.load(spec_path)
+        spec = Spec.load(spec_path)
+        assert spec is not None
         rel = os.path.relpath(spec_path, root).replace(os.sep, '/')
         out += [(table_name(cls_name), rel)
                 for cls_name in table_classes(spec)]
     names = [name for name, _ in out]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
-        raise frontend.SpecError(f"two spec classes have the call table "
+        raise SpecError(f"two spec classes have the call table "
                                  f"{', '.join(duplicates)}: rename one")
     return out
 
 
-def registry_text(entries):
+def registry_text(entries: list[tuple[str, str]]) -> str:
     """The generated part of the registry header, between the markers."""
     lines = [
         '/* Generated by Argument Clinic (Tools/clinic/libclinic/pyspec/'
@@ -520,7 +539,7 @@ def registry_text(entries):
     return '\n'.join(lines) + '\n'
 
 
-def registry_outputs(filename):
+def registry_outputs(filename: str) -> list[tuple[str, str]]:
     """[(path, text)] of the registry header rewritten for the specs of
     the tree of *filename*, a C file being processed by Argument Clinic:
     [] unless it is a core C file (specfiles.is_core()) of a tree with the

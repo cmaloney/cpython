@@ -1808,7 +1808,10 @@ bytes_buffer_getbuffer(PyObject *op, Py_buffer *view, int flags)
 /*[clinic input]
 bytes.__bytes__
 [clinic start generated code]*/
-/*[clinic end generated code: output=da39a3ee5e6b4b0d input=54e1d9883c2b4b67]*/
+
+/* bytes___bytes___impl() is generated from Objects/pyspec/bytesobject.py:121,
+   in clinic/bytesobject_pyspec.c.h. */
+/*[clinic end generated code: output=5e049083e1e10e9f input=54e1d9883c2b4b67]*/
 
 #define LEFTSTRIP 0
 #define RIGHTSTRIP 1
@@ -2369,7 +2372,10 @@ bytes_splitlines_impl(PyBytesObject *self, int keepends)
 /*[clinic input]
 bytes.fromhex
 [clinic start generated code]*/
-/*[clinic end generated code: output=da39a3ee5e6b4b0d input=c08418a83b24de18]*/
+
+/* bytes_fromhex_impl() is generated from Objects/pyspec/bytesobject.py:210,
+   in clinic/bytesobject_pyspec.c.h. */
+/*[clinic end generated code: output=a5e769b8f9ce16b5 input=c08418a83b24de18]*/
 
 
 PyObject*
@@ -2521,7 +2527,10 @@ bytes_subtype_new(PyTypeObject *, PyObject *);
 /*[clinic input]
 bytes.__new__
 [clinic start generated code]*/
-/*[clinic end generated code: output=da39a3ee5e6b4b0d input=b39ff265a4f043e1]*/
+
+/* bytes_new_impl() is generated from Objects/pyspec/bytesobject.py:66,
+   in clinic/bytesobject_pyspec.c.h. */
+/*[clinic end generated code: output=1d0ce45bf66c2fee input=b39ff265a4f043e1]*/
 static Py_ssize_t _PyBytesWriter_ResizeToAllocated(PyBytesWriter *writer);
 static void* _PyBytesWriter_ResizeAndUpdatePointer(PyBytesWriter *writer,
                                                    Py_ssize_t size,

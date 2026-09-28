@@ -343,7 +343,7 @@ impl_definition block
         stem = os.path.splitext(basename)[0]
         spec_name = f"{os.path.basename(dirname)}/pyspec/{stem}.py"
         # Only a file whose spec has bodies or types needs these.
-        from libclinic.pyspec import emit, typeobj
+        from libclinic.pyspec import call_table, emit, typeobj
         parts = []
         if spec.implemented_functions():
             self.pyspec_bindings.type_objects = {
@@ -351,7 +351,8 @@ impl_definition block
                 for path, cls in self._clinic_classes(self, '')}
             try:
                 parts.append(emit.generate(spec, spec_name,
-                                           self.pyspec_bindings))
+                                           self.pyspec_bindings,
+                                           call_table.generate))
             except SpecError as exc:
                 # An error in the spec itself, unless it names another.
                 if exc.filename is None:

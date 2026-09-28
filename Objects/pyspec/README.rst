@@ -241,7 +241,8 @@ Statements                ``if``/``else``; ``x = call(...)``;
                           setting the exception), ``raise E("...")``,
                           ``raise E(f"...{fqname(type(x))}...")`` (also
                           ``tp_name``); ``try: x = call(...)`` ``except
-                          E:`` ... ``else:`` ...; ``try:`` ...
+                          E:`` (or ``except (E1, E2):``) ... ``else:``
+                          ...; ``try:`` ...
                           ``finally:`` <calls of C functions>; ``for
                           item in it:`` (no ``else``); ``pass``
 Conditions                ``x is [not] NULL``, ``(v := call(...)) is
@@ -278,18 +279,62 @@ about which nothing is known.
 Extending the lowered subset
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Adding a construct is a local change:
+Adding a construct is a local change, in
+``Tools/clinic/libclinic/pyspec/``:
 
 1. accept it in ``subset.py``, in the method of ``Lowered`` for its kind
-   of node (``signature()``, ``statement()``, ``condition()``,
-   ``value()``, ``call()``; ``Analysed`` for references);
-2. lower it in ``emit.py`` (and evaluate it in ``partial_eval.py`` if
-   the facts of a call site decide it);
-3. give its effects in ``facts.py`` if it has any (anything it does not
+   of node (``signature()``, a statement method, ``condition()``,
+   ``value()``, ``call()``; ``Analysed`` for references).  The kinds of
+   statements are ``subset.Kind``; every pass over statements is a
+   ``subset.Walker``, with a method per kind.  A new kind of statement
+   is a new ``Kind`` (and its default method in ``Walker``) and a method
+   in each walker: ``facts.Analyzer``,
+   ``partial_eval.Evaluator`` and ``emit.FunctionLowering`` (a kind
+   without a method goes to ``other()``: the worst facts, and an error
+   in the emitter);
+2. give its effects in ``facts.py`` if it has any (anything it does not
    know is the worst case);
-4. add its row to the table above, and a test to ``PyspecLanguageTest``
+3. evaluate it in ``partial_eval.py`` if the facts of a call site decide
+   it; what the evaluator decides for the emitter is a typed mark on the
+   node (``marks.py``);
+4. lower it in ``emit.py`` to the nodes of ``ir.py``; an operation that
+   each language writes its own way is a new node, written by
+   ``c_backend.py``;
+5. add its row to the table above, and a test to ``PyspecLanguageTest``
    of ``Lib/test/test_clinic.py`` (its message moves from the
    "not lowered" cases to a generated-C case).
+
+The generated C and other languages
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The C of a spec body is made in passes that share one
+``context.Context``: the body is checked (``subset.py``), partially
+evaluated for the facts of each entry (``partial_eval.py``, with the
+facts of ``facts.py``), lowered (``emit.py``) to a small typed form
+(``ir.py``), and written out by ``c_backend.CBackend``.  The lowered
+form has made every decision that does not depend on the language: the
+C types of the locals, which references are owned and where each is
+released (``Release``, NULL or not), the error check of each call
+(``Failed`` and its ``Convention``), how a loop iterates (``ForIndex``
+over a tuple, a list, or a list in its critical section; ``ForIter``).
+Calls name functions of the C API.
+
+Each group of lines of the spec is named in the C before its code,
+``/* Objects/pyspec/bytesobject.py:90 */``, and the clinic block of a
+spec method says where its impl is generated.
+
+A backend for another language (Rust, say) would implement the methods
+of ``CBackend`` for it: ``function()`` (an ``extern "C"`` function with
+the C signature of the entry, which clinic's C parsing code calls),
+``prototype()``, ``comment()``, ``guard()`` (``#if``), the statements
+and expressions of ``ir.py`` -- in particular those the C API has only
+as macros or inline functions: ``TypeCheck`` (``PyBytes_CheckExact()``),
+``HasSlot``, ``NewRef``/``Release`` (reference counts), the loops of
+``ForIndex`` (``PyTuple_GET_ITEM()``, ``_PyList_ITEMS()``), ``Locked``
+(the critical section), ``TypeName`` -- and write to its own output
+file.  The partial evaluation, the facts, the lowering and the call
+tables of the tier-2 optimizer (C data of the interpreter, from
+``call_table.py``) stay as they are.
 
 Conditional compilation
 -----------------------

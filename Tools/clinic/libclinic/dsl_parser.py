@@ -2,6 +2,7 @@ from __future__ import annotations
 import ast
 import enum
 import inspect
+import os
 import pprint
 import re
 import shlex
@@ -11,7 +12,7 @@ from types import FunctionType
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import libclinic
-from libclinic.pyspec import frontend
+from libclinic.pyspec import frontend, specfiles
 from libclinic import (
     ClinicError, VersionTuple,
     fail, warn, unspecified, unknown, NULL)
@@ -1798,6 +1799,12 @@ class DSLParser:
                 raise error(f"parameter {sp.name!r} is {sp.ctype!r}, its "
                             f"converter gives {p.converter.type!r}")
         func.pyspec = func.c_basename
+        output = os.path.relpath(frontend.output_path(self.clinic.filename),
+                                 os.path.dirname(self.clinic.filename))
+        func.pyspec_origin = (
+            f"/* {func.c_basename}_impl() is generated from "
+            f"{specfiles.display_path(description.path)}:{description.lineno},"
+            f"\n   in {output.replace(os.sep, '/')}. */")
         self.clinic.pyspec_bindings.functions[description.name] = (
             frontend.SpecBinding(func.c_basename, self_ctype,
                                  func.condition or ''))

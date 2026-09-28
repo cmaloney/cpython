@@ -9,15 +9,20 @@ For Objects/foo.c, Objects/pyspec/foo.py is its spec:
                 primitives exact(), unknown(), calls(), runs_python();
                 load() runs a spec as Python (for tests)
   subset        the lowered subset: what of a spec is generated as C and
-                analysed for facts, checked before partial evaluation
+                analysed for facts, checked before partial evaluation;
+                the kinds of its statements, and the walker over them
   builtin_types the one table of builtin types without a spec (C type
                 objects, checks, constants, audited special methods)
+  known, marks  what the passes know about names, and the typed marks
+                the partial evaluator puts on the nodes of its result
   facts         derives the facts of statements and of the calls of
                 native functions from their Python references (which
                 are never compiled)
   partial_eval  folds a spec function for facts known at a call site,
                 and generates @inline functions into their callers
-  emit          generates C from the implemented spec functions
+  context       the state the passes share, one object per spec
+  emit          lowers the implemented spec functions to the form of
+                ir, which c_backend writes as C
   call_table    adds the call table of each class for the tier-2
                 optimizer to that C, and writes the registry of all of
                 them (Include/internal/pycore_pyspec.h)

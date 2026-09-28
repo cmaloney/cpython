@@ -971,8 +971,17 @@ def native_calls(srcdir, extensions):
     """The disconnects of the @native functions whose native file (the
     file their spec describes) has one of *extensions*, by the checker of
     NATIVE_CHECKERS for its language (see the comment above)."""
-    from . import facts
+    from . import context
     specs = [frontend.Spec.load(path) for path in _spec_files(srcdir)]
+    contexts: dict[frontend.Spec, context.Context] = {}
+
+    def reference_facts(spec, name):
+        """The facts of @native function *name* of *spec*, for any
+        arguments."""
+        if spec not in contexts:
+            contexts[spec] = context.Context(spec)
+        return contexts[spec].analyzer(spec).reference_facts(name, {})
+
     native = {name for spec in specs for name in spec.native_functions()}
     out = []
     for spec in specs:
@@ -988,12 +997,12 @@ def native_calls(srcdir, extensions):
             os.path.join(srcdir, found))
         for name in spec.native_functions():
             out += _check_native(spec, name, checker, found, rel, native,
-                                 specs, facts)
+                                 specs, reference_facts)
     return sorted(out)
 
 
 def _check_native(spec, name, checker, native_file, rel, native, specs,
-                  facts):
+                  reference_facts):
     node = spec.functions[name]
     positional, keywords = spec.c_name(name)
     c_name = positional or next(iter(keywords.values()), name)
@@ -1031,8 +1040,7 @@ def _check_native(spec, name, checker, native_file, rel, native, specs,
                 # check.
                 found = next(s.resolve(callee) for s in specs
                              if s.resolve(callee))
-                if not facts.analyzer(found[0]).reference_facts(
-                        callee, {}).runs_python:
+                if not reference_facts(found[0], callee).runs_python:
                     continue
                 out.append(f'{where}: calls {callee}(), which may '
                            'run Python code, and its reference does '
@@ -1063,14 +1071,12 @@ def _check_native(spec, name, checker, native_file, rel, native, specs,
     def may_fail(callee):
         found = callee in native and next(
             s.resolve(callee) for s in specs if s.resolve(callee))
-        return not found or facts.analyzer(found[0]).reference_facts(
-            callee, {}).raises
+        return not found or reference_facts(found[0], callee).raises
     returns = frontend.c_signature(node)[1] if '.' not in name \
         else 'void'
     failing = sorted(filter(may_fail, calls))
     if (returns != 'void' and not frontend.is_struct(returns)
-            and failing and not facts.analyzer(spec).reference_facts(
-                name, {}).raises):
+            and failing and not reference_facts(spec, name).raises):
         out.append(f'{where}: its reference cannot fail, but the C '
                    f'calls {", ".join(failing)}')
     return out

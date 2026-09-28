@@ -44,7 +44,7 @@ from test.support import import_helper, script_helper
 _testinternalcapi = import_helper.import_module('_testinternalcapi')
 test_tools.skip_if_missing('clinic')
 with test_tools.imports_under_tool('clinic'):
-    from libclinic.pyspec import (builtin_types, call_table, facts,
+    from libclinic.pyspec import (builtin_types, call_table, context,
                                   frontend, partial_eval, runtime,
                                   specfiles)
 
@@ -66,7 +66,7 @@ class SpecInfo:
 
     @functools.cached_property
     def analyzer(self):
-        return facts.analyzer(self.spec)
+        return context.Context(self.spec).analyzer()
 
     @functools.cached_property
     def references(self):
