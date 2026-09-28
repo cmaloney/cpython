@@ -1,52 +1,53 @@
 # pyspec experiment: saved state
 
 Branch `exp/ac_python_overloads_v0` (local only, never pushed); merge base with main
-`ee1bbf037ff`.  This directory records where the experiment stands so work can resume
-without the original sessions.  It is experiment bookkeeping, not part of any upstream
-change: drop it before proposing anything.
+`ee1bbf037ff`.  State as of phase 4 (merged at `63ce50f2c9b`, plus workstreams S and F).
+This directory records where the experiment stands so work can resume without the
+original sessions.  It is experiment bookkeeping, not part of any upstream change: drop
+it before proposing anything.
+
+**Start here:** `drafts/CONCEPT.md` (the concept end to end, with numbers and their
+sources), `drafts/PR_SERIES.md` (the upstream plan), `Objects/pyspec/README.rst` (the
+reference), `Objects/pyspec/MIGRATING.rst` (the procedure and validation).
 
 ## What the branch does
-`bytes` is described by Python-syntax specs that Argument Clinic reads:
+Types are described by Python-syntax specs that Argument Clinic reads
+(`<dir>/pyspec/<stem>.py` for `<dir>/<stem>.c` or `.h`, found by one glob in
+`Tools/clinic/libclinic/pyspec/specfiles.py`):
 
-- `Objects/pyspec/bytesobject.py`: `class bytes` / `class bytes_iterator` (method
-  signatures, docstrings, slot stubs), spec bodies (`__new__`, `__bytes__`,
-  `fromhex`, `PyBytes_FromObject`, `bytes_from_iterator`), and `@c_implemented`
-  helpers (hand-written C; the body is the Python reference, facts derived from it).
+- `Objects/pyspec/bytesobject.py`: `class bytes` / `class bytes_iterator` (signatures,
+  docstrings, clinic decorators, slots as dunders), spec bodies (`__new__`, `__bytes__`,
+  `fromhex`, `PyBytes_FromObject`, `bytes_from_iterator`), `@native` functions (C written
+  by hand; the body is the Python reference, never compiled, read for facts) and an
+  `@inline` fast path (generated into callers).
 - `Objects/pyspec/{abstract,typeobject,unicodeobject}.py`, `Python/pyspec/errors.py`,
-  `Include/cpython/pyspec/longintrepr.py`: helpers of other C files, imported by name.
-- `Objects/pyspec/bytearrayobject.py`: `class bytearray` / its iterator; shares methods
-  with bytes (`strip = critical_section(bytesobject.bytes.strip)`).
-- `Objects/stringlib/pyspec/{transmogrify,ctype}.py`: methods shared by bytes and bytearray.
-- The `PyTypeObject` structs stay hand-written in C (user decision); clinic generates
-  only `<prefix>_doc`, `<prefix>_methods[]` and the `as_number/sequence/mapping/buffer`
-  sub-tables, which the structs (after the generated include) name as on main.
-- `Objects/pyspec/bytesobject_cases.py`: difftest data (spec run as Python vs the
-  interpreter).
-- Facts come from bodies plus four primitives (`exact(T, v)`, `unknown(v)`,
-  `calls(x, "__slot__")`, `runs_python()`); `...` means worst case; one audited table
-  of builtin types: `Tools/clinic/libclinic/pyspec/builtin_types.py`.
-- `Objects/pyspec/README.rst`: the contributor guide ("to do X, edit Y"), incl.
-  "Conditional compilation"; `Objects/pyspec/MIGRATING.rst`: the migration guide (five
-  levels, checklists, the "does a spec body help or just rewrite?" procedure with a
-  worked example); `Tools/clinic/pyspec_bench.py`: the instruction-count helper it uses.
-- `Modules/pyspec/mmapmodule.py`: a methods-only spec with `#if`-guarded methods (the
-  conditional-compilation sample; `mmapmodule.c.h` byte-identical to main).
-- A spec class generates method/slot tables only if it declares a slot
-  (`Spec.declares_slots()`); a methods-only class keeps its C method table.
-- Clinic generates `Objects/clinic/bytesobject.c.h` (byte-identical to main outside
-  `bytes.__new__`) and `Objects/clinic/bytesobject_pyspec.c.h` (spec bodies, per-arity
-  and per-type entries, the tier-2 call table, the method and slot tables);
-  `bytearrayobject.c.h` and `transmogrify.h.h` are byte-identical to main.
-- The tier-2 optimizer uses derived facts (alias, constant, no-Python, exact type);
-  debug builds assert them at run time.
-- `Lib/test/test_pyspec_catalog.py`: a disconnect ratchet over C API files, docs
-  signatures, typeobj.rst, duplicated docstrings, the C of `@c_implemented` helpers
-  (`c_calls`: every call that may run Python is accounted for in the reference, using
-  the cases generator's lexer) and (optionally) typeshed; baselines in
-  `Tools/clinic/pyspec-baseline/*.txt` may only shrink.
-- `Lib/test/test_pyspec_facts.py`: every call-table entry and every callable helper
-  called directly against the interpreter / its reference, with fact checks and a
-  "no Python" tripwire.
+  `Include/cpython/pyspec/longintrepr.py`: native functions of other files, imported by
+  their path from the source root (`from Objects.pyspec.abstract import ...`), with
+  `@inline` fast paths (`PyNumber_AsSsize_t_fast`, `PyObject_LengthHint_fast`).
+- `Objects/pyspec/bytearrayobject.py` (levels 1, 2, 5; shares methods with bytes and the
+  stringlib specs `Objects/stringlib/pyspec/{transmogrify,ctype}.py`);
+  `Modules/pyspec/mmapmodule.py` (methods only, `#if`-guarded methods).
+- Each spec has `<stem>_cases.py`: `TYPES`, `CASES` (difftest), `HELPERS` (native
+  functions called directly), `FACTS`, `SLOT_USES`, `PARITY` (per-type parity data).
+  Adding a type is adding data; no interpreter C, test class or tool code names a type.
+- The spec language accepts any Python; `subset.py` is the one place that says what is
+  **lowered** (generated as C) and what is **analysed** for facts; everything else is
+  reported as "expressible, but not lowered to C yet" where lowering is asked for.
+- Lowering: `subset` check → `partial_eval` (facts of each entry, typed marks in
+  `marks.py`, one `context.Context`) → `emit` to the typed form of `ir.py` →
+  `c_backend.CBackend`.  Generated C names its spec lines.
+- `PyTypeObject`s stay in C; clinic generates `<prefix>_doc`, `<prefix>_methods[]` and the
+  `tp_as_*` sub-tables into `Objects/clinic/<stem>_pyspec.c.h`, plus the spec bodies, the
+  tier-2 call tables and one registry of every spec'd class
+  (`Include/internal/pycore_pyspec.h`: `_PySpec_FindCall`, `_PySpec_FindMethod`,
+  `_PySpec_FindSlot`).  The optimizer uses the facts in `_CALL_BUILTIN_CLASS`,
+  `_CALL_METHOD_DESCRIPTOR_NOARGS` and the `BINARY_OP_SUBSCR_BYTES_INT` / `FOR_ITER_BYTES`
+  uops; debug builds assert them (`_ASSERT_RESULT_*`, no-Python tripwire).
+- Validation: `Tools/clinic/pyspec_review.py` (one summary), `pyspec_parity.py` and the
+  committed record `Tools/clinic/pyspec-baseline/parity.txt` (GIL release, GIL debug,
+  FT debug blocks), `test_pyspec_facts`, `test_pyspec_catalog` (ratchet: capi, docs,
+  slots, docstrings, typeshed, `c_calls` via `NATIVE_CHECKERS` / `CChecker`),
+  `Tools/clinic/pyspec_bench.py` (instruction counts).
 
 ## Workstreams and where their results are
 | WS | Topic | State | Report |
@@ -71,13 +72,23 @@ change: drop it before proposing anything.
 | A | `bytes(list)` regression, F1/F2/F4, code size | merged | `reports/phase1_A.md` |
 | Audit | comments and docstrings match the code | merged | `reports/comment_audit.md` |
 | P1+P2 | helpers by name, facts derived from bodies, F3, one types table, C-side check | merged | `reports/phase2_P1P2.md` |
-| 3b | bytearray from a spec; PyTypeObject back in C (`@static_type`/`@final` removed) | merged | `reports/phase3b_bytearray.md` |
+| 3b | bytearray from a spec; PyTypeObject back in C | merged | `reports/phase3b_bytearray.md` |
 | Cond | `#if` handled as plain clinic; mmap sample | merged | `reports/phase3_conditionals.md` |
 | Guide | MIGRATING.rst + pyspec_bench.py; removeprefix worked example: keep in C | merged | `reports/phase3_migration_guide.md` |
 | 3a | bytes slot facts; `BINARY_OP_SUBSCR_BYTES_INT`, `FOR_ITER_BYTES` | merged | `reports/phase3a_slot_specializations.md` |
+| **Phase 4** | general mechanisms, bytes as data (brief: `PHASE4.md`) | | |
+| 4-D | parity record, `pyspec_review.py`, per-type `PARITY` data | merged `f4b03fd9f9f` | commit messages |
+| 4-B1 | spec language front end: full signatures, any body, one lowered subset, one `SpecError` | merged `adf1bf6a04d` | commit messages |
+| 4-A | one registry of spec'd classes, data-driven tests, generic `_testinternalcapi` | merged `a2aff724d86` | commit messages |
+| 4-E | optimizer helpers, brittle tests, FT parity block, magic number, upstream split | merged `bb32433383b` | `reports/phase4_E.md` |
+| 4-C | `@c_implemented` → `@native` (never compiled), `@inline` fast paths, pluggable native checkers | merged `c7242273486` | commit messages |
+| 4-P | PGO+LTO cost of `@inline`; `Sub(n)` below main | merged `2545b5e477c` | `reports/phase4_P.md` |
+| 4-B2 | typed marks, one context, IR + C backend, spec-line traceability, `except (A, B)`, `__new__` by arity | merged `63ce50f2c9b` | commit messages |
+| 4-S | simplify `Tools/clinic/libclinic/pyspec/` (code only) | in progress (parallel to F) | (its report) |
+| 4-F | presentation: CONCEPT, PR series, README/MIGRATING consolidated, this file | done on its worktree branch | `drafts/CONCEPT.md`, `drafts/PR_SERIES.md` |
 
-`DESIGN.md` is the shared brief every agent read (goals, decisions, resource rules);
-`PROPOSALS.md` holds P1/P2.
+`DESIGN.md` is the shared brief of the early workstreams (goals, resource rules);
+`PHASE4.md` the phase 4 brief; `PROPOSALS.md` holds P1/P2 (implemented).
 
 ## User decisions in force
 - The branch must be a win across the board vs main (no micro regressions).
@@ -89,81 +100,97 @@ change: drop it before proposing anything.
 - Free-threaded `bytes(list)` keeps main's atomic snapshot for all-int lists (F1).
 - P1 + P2 approved and implemented (see PROPOSALS.md, `reports/phase2_P1P2.md`).
 - Integration is measured as a ratchet that may only go down.
+- **General mechanisms with per-type data**: nothing in the interpreter, the tests or the
+  tool is keyed on a type name; a type is a spec, a `_cases.py` and table rows.
+- **Spec language: expressible vs lowered.**  A spec may say anything in Python; one
+  explicit boundary (`subset.py`) says what is generated and analysed; the rest is
+  worst case and reported as "expressible, not lowered yet".
+- **`@native` / `@inline`**: a native function's reference is never compiled, not even
+  in part; a fast path generated code takes is an `@inline` function next to it, never an
+  `if` in the reference that the C does not have.
+- **PGO+LTO arbitrates micro costs** (with an A/A pair and a fixed `PYTHONHASHSEED`);
+  **must-inline markers only as a rare exception** (none needed so far: `reports/phase4_P.md`).
 - Heavy commands run memory-capped (`systemd-run --user --scope -p MemoryMax=...`),
   serially, `make -j8` (an OOM once took down the desktop).
 
-## Performance vs main (PGO+LTO release JIT, instructions / cycles per iteration)
-Every `bytes()` call shape is below main, JIT on and off (full table:
-`reports/phase1_A.md`).  Examples, main -> branch: `bytes(list256)` 6849/1227 ->
-5124/872; `bytes(list16)` 1329/250 -> 798/157; `bytes(b16)` 923/187 -> 218/43;
-`bytes(range256)` 25572/5149 -> 15412/3000; `Sub(b16)` 1332/269 -> 1058/201.
-3a: `b16[i]` 141 -> 44 net instructions, `for c in b16` 93 -> 59 per item; pyflate
--3.1% instructions, -1.2..-2.2% cycles (perf stat), ~-0.4% wall clock (pyperformance,
-inside A/A noise).  Other methods, `==`, hash and startup are neutral; pyperformance shows no bytes-attributable
-change (bytes calls are <1% of every benchmark).  bytes code is +1.3 KB vs main.
-P2 changed no shape for the worse (non-PGO instruction counts); `bytes(16)` now uses
-the no-Python call (442 -> 433 instructions).
+## Performance vs main
+PGO+LTO release JIT, clang 21, `PYTHONHASHSEED=1`, instructions / cycles per iteration,
+main → branch at `edd5f1f6cfd` (`reports/phase4_P.md`): `bytes(16)` 911/171 → 447/98;
+`bytes(iter(l16))` 3191/660 → 2349/486; `bytes(range(256))` 25573 → 16710; `Sub(16)`
+1318/262 → 1278/251; `Sub(b16)` 1316 → 1044; `Sub(l16)` 1745 → 1732 (thinnest margin,
+−0.1 to −1.1 % across seeds); `b16[i]` 304 → 206; `for c in b16` 1652 → 1110; the other
+29 `bytes()` shapes −25 to −76 % (JIT off −11 to −59 %).  A/A ±9 instructions, ±3 %
+cycles.  `@inline` test cost +6..+11 instructions where it fails (within noise).
+End to end: pyflate −3.1 % instructions, −1.2..−2.2 % cycles (perf stat), ~−0.4 % wall
+clock inside pyperformance noise; no bytes-attributable pyperformance change elsewhere;
+startup neutral.  bytes machine code +1.3 KB vs main (measured in phase 1).
+**Not re-measured under PGO+LTO:** B2's generated-code changes (`73525613207`,
+`ec33bf398b0`: subclass `__new__` calls the arity entry, fewer error checks).
 
-## Test status (commit 300ec600747)
-Debug JIT build `../build-exp` (srcdir: this checkout): test_clinic, test_bytes,
-test_mmap, test_inspect, test_iter, test_pydoc, test_descr, test_pickle, test_buffer,
-test_int, test_opcache, test_generated_cases, test_pyspec_catalog, test_pyspec_facts,
-test_tools.test_pyspec_bench pass, and test_dis alone; test_capi alone passes.  Running
-test_opt or test_dis after other modules in one invocation fails a few specialization
-tests (e.g. `test_dis.test_show_jit` sees `LOAD_GLOBAL` not `LOAD_GLOBAL_BUILTIN`); main
-fails the same tests in the same combinations (upstream order dependency, worth an
-issue).  `PYTHON_JIT=0 -R 3:3` on test_clinic, test_bytes, test_opcache and the pyspec
-suites passes; JIT-on `-R 3:3` on test_pyspec_facts reports decaying counts (JIT
-warm-up, see open items).  No expected failures.  Clinic on the seven spec-backed files
-and `make regen-cases` leave the tree clean.  Parity with main: `bytearrayobject.c.h`,
-`transmogrify.h.h`, `mmapmodule.c.h` identical; `bytesobject.c.h` differs only in the
-`bytes.__new__` section; bytes/bytearray type dumps identical except
-`bytes.tp_vectorcall`.  Ratchet: docstrings 2, capi 20, docs 0, slots 3, c_calls 0.
+## Test status (`63ce50f2c9b`, workstream F)
+Debug JIT build `../build-exp` (srcdir: the main checkout at `63ce50f2c9b`):
+- `test_clinic test_pyspec_facts test_pyspec_catalog test_tools.test_pyspec_parity
+  test_tools.test_pyspec_bench`: 564 tests, pass.
+- The PHASE4 list plus `test_capi.test_opt`: 1,457 tests; passed on the 4th run; the
+  first three runs of the same command failed
+  `test_opt.test_binary_op_subscr_constant_frozendict_known_hash` ("unexpectedly None")
+  only after the other modules (it passes alone, and with any subset tried).  Probably a
+  hash-seed / order dependency; not investigated (open item 7).
+- `Tools/clinic/pyspec_review.py --baseline ../build-str1-dbg/python`: Result OK; no
+  difference in 87,737 lines; c_calls 0, capi 20, docs 0, docstrings 2, slots 3.
+- `PYSPEC_PARITY_BASELINE=../build-str1-dbg/python -m test test_tools.test_pyspec_parity`:
+  pass.  Clinic `--dry-run` on the ten spec'd C files: up to date.
+- Free-threaded debug (`reports/phase4_E.md`, at `bb32433383b`): test_bytes,
+  test_pyspec_facts, test_clinic, test_capi.test_opt, test_opcache, test_mmap,
+  test_pyspec_catalog, test_generated_cases pass; the FT parity block matches main FT;
+  F1 holds.
+- Earlier: `PYTHON_JIT=0 -R 3:3` on the pyspec suites passes; JIT-on `-R 3:3` on
+  test_pyspec_facts reports decaying counts (JIT warm-up).  `test_dis`/`test_opt` after
+  other modules fail a few specialization tests on main too (upstream order dependency).
 
 ## Open items
-1. Tool code is flat after P2 (5710 -> 5691 lines; the C-side check costs ~200).
-   P2 deleted `Objects/pyspec/capi/bytesobject.py` (hand-written runs-Python name sets
-   nothing consumed); the user approved the deletion.  The C-side check is per function,
-   not per path, and treats refcount releases as running no Python (audited
-   assumption).  A JIT refleak in HelperTest with fresh functions per `-R` repetition
-   was worked around, not investigated (maybe the same class as item 2's).  String
-   C-type annotations trigger ruff F722.  bytes `__iter__`/`__len__` are `...` (the old
-   ITERATION fact had no consumer).  Two PGO builds of one commit differ by +-1-3%.
-2. `_CALL_STR_1` upstream: the user files the issue (text in `drafts/`), replaces
-   `gh-NNNNNN` in the commit and NEWS name.  `str(int)` keeps the exact-str claim; the
-   companion fix makes it always true: local branch `fix-pylong-str-exact` (c490a0e38f2,
-   based on main, merged here) requires `_pylong.int_to_decimal_string()` to return an
-   exact str (`PyUnicode_CheckExact` in `Objects/longobject.c`, test in test_int, NEWS
-   with a `gh-NNNNNN` placeholder); file it as its own small issue/PR.  A constant
-   +1 refcount on the subclass remains in `repro_type_refleak.py` under the JIT
-   (was +12007), not investigated.
-2b. From 3b: `threadsafety.dat` levels for three bytearray entries are the agent's
-   judgement (review before upstream); ctype docstrings now compiled per type (+1.4 KB);
-   `pycore_bytes_methods.h` declares nine never-defined docstrings (pre-existing); the
-   spec's type-level slot C names are not compared with the C struct (only existence);
-   `bytes.lstrip` docstring has a double space (fixing it lets bytearray share it).
-2c. From 3a: no magic-number bump for the two new opcodes; the free-threaded build
-   was not re-tested after 3a; "a byte is a small int" is a uop claim (no value
-   ranges in the facts); `_PySpec_FindSlot` looks at bytes' table only (one line per
-   new spec file); `==` specialization skipped (below noise).
-3. Next (queued, needs the user's go-ahead): generated constructor vectorcall for every
-   spec'd type, replacing hand-written `*_vectorcall`; then types in order tuple,
-   int, list, str.  Done in phase 3: bytearray, bytes slot specializations.
-   Previously listed phase 3: `b[i]` and `FOR_ITER` over bytes specializations from slot facts (the only
-   measurable end-to-end lever, ~1.5-2% pyflate), then bytearray (shares the stringlib
-   specs, removes duplicated docstrings), then tuple, int, list, str.
-4. Upstreamable pieces (see `reports/review_int.md` section 5): doc/docstring/typeshed
-   fixes from WS9, typeobj.rst missing rows, refcounts.dat gaps, `PickleBuffer` over a
-   Python `__buffer__` (F7), the devguide section (`drafts/devguide_draft.rst`).
+1. **Upstream filings** (the user files them): `_CALL_STR_1` (issue text in
+   `drafts/call-str-1-UPSTREAM.md`, replace `gh-NNNNNN`), `_pylong` exact str
+   (`fix-pylong-str-exact`), then `drafts/PR_SERIES.md` Part A.  Magic number: bump in the
+   upstream specialization PR, not here (`reports/phase4_E.md` section 5).
+2. **Tool size**: `Tools/clinic/libclinic/pyspec/` 8,628 lines at `63ce50f2c9b`
+   (+ `pyspec_parity.py` 1,459, `pyspec_review.py` 390); workstream S simplifies it.
+3. **Parity record churn**: unrelated upstream changes can alter a section (inherited
+   docstrings, other types' messages) and need a re-record; only Linux 64-bit blocks.
+4. **Not lowered yet**: keyword-only parameters, non-`NULL` defaults, converters other
+   than `object`/`str`, `while`, `__init__`, `@critical_section` on generated methods.
+   Not expressible: optional groups, deprecation markers, module-level functions.
+5. **Rust**: design only (`CBackend` interface, `NativeChecker`), no Rust code.
+6. Optional from 4-P: prune `@inline` paths by call-site hints (saves 7 instructions per
+   iterator call of `bytes_from_iterator`); `PyObject_LengthHint` of a list iterator costs
+   362 instructions (main too).  Fix `PYTHONHASHSEED` in all future micro tables.
+7. Flaky `test_opt.test_binary_op_subscr_constant_frozendict_known_hash` in a combined
+   run (above).  `../build-ft` is broken (`pybuilddir.txt` missing; `make` there fixes it).
+8. Carried over: the C-side check is per function, not per path, and treats refcount
+   releases as running no Python (so does the tripwire); a JIT refleak in HelperTest with
+   fresh functions per `-R` repetition was worked around; a constant +1 refcount on the
+   subclass in `repro_type_refleak.py` under the JIT; `threadsafety.dat` levels for three
+   bytearray entries are the agent's judgement; ctype docstrings compiled per type
+   (+1.4 KB); `pycore_bytes_methods.h` declares nine never-defined docstrings
+   (pre-existing); the spec's type-level slot C names are only checked for existence;
+   `bytes.lstrip` docstring has a double space; "a byte is a small int" is a uop claim
+   (no value ranges in the facts); `==` specialization skipped (below noise); string
+   C-type annotations trigger ruff F722.
+9. **Next types** (need the user's go-ahead): generated constructor vectorcall for every
+   spec'd type; then tuple, int, list, str.
 
 ## Resuming
 - Worktrees of finished agents are removed; their branches remain as
   `worktree-agent-*`.
-- Build dirs (outside the repo): `build-exp` (debug JIT, srcdir this checkout: use
-  it), `build_perf_base_jit` (main, PGO+LTO JIT), `build-str1-dbg` (main, debug tier-2
-  interpreter).  Stale build dirs of finished agents were deleted.
-- Regenerate with `Tools/clinic/clinic.py Objects/bytesobject.c
-  Objects/stringlib/transmogrify.h Objects/bytearrayobject.c Modules/mmapmodule.c
-  Objects/abstract.c
-  Objects/typeobject.c Objects/unicodeobject.c` (not `--make` from a checkout containing
-  `.claude/worktrees/`, which it would also scan).
+- Build dirs (outside the repo): `build-exp` (debug JIT, srcdir the main checkout: use
+  it), `build-str1-dbg` (main at the merge base, debug tier-2; the parity baseline),
+  `build_perf_base_jit` (main, PGO+LTO JIT, clang 22: do not compare with clang-21
+  builds), `build-p4-*` (phase 4 agents' debug builds; `build-p4-e-ft` branch FT debug,
+  `build-p4-e-ft-main` main FT debug; their source worktrees were removed, so they run
+  but cannot be rebuilt).
+- Regenerate with `./python Tools/clinic/clinic.py Objects/bytesobject.c
+  Objects/stringlib/transmogrify.h Objects/stringlib/ctype.h Objects/bytearrayobject.c
+  Modules/mmapmodule.c Objects/abstract.c Objects/typeobject.c Objects/unicodeobject.c
+  Python/errors.c Include/cpython/longintrepr.h` (not `--make` from a checkout containing
+  `.claude/worktrees/`, which it would also scan); `--dry-run` checks.
+- Validate: `./python Tools/clinic/pyspec_review.py --baseline ../build-str1-dbg/python`.
