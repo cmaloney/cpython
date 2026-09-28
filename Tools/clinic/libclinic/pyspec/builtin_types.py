@@ -48,8 +48,7 @@ class Row:
         self.slots = slots or {}
         self.constants = constants or {}    # value -> Py_CONSTANT_* name
         self.size = size                    # 'PyList_GET_SIZE': len()
-        # Tried as the exact type of the argument of a one-argument call
-        # (the per-type entries of the tier-2 call table, call_table.py).
+        # Tried as the exact type of the argument of the call table.
         self.candidate = candidate
 
 
@@ -67,9 +66,8 @@ def _row(name: str, base: type = object,
 
 
 TABLE: dict[type, Row] = {
-    # The candidates first, in the order of the call table.
-    # bytes and bytearray have a spec (Objects/pyspec/): only the special
-    # methods it writes as ... are listed.
+    # The candidates first, in the order of the call table.  bytes and
+    # bytearray have a spec: only the special methods it writes as ....
     bytes: _row('bytes', candidate=True,
                 constants={b'': 'Py_CONSTANT_EMPTY_BYTES'},
                 slots={'__iter__': int}),
@@ -116,8 +114,7 @@ SPECIALS = ('__buffer__', '__bytes__', '__index__', '__iter__', '__len__',
 
 CANDIDATES = [tp for tp, row in TABLE.items() if row.candidate]
 
-# By name: the C checks of the types, (check, exact check); the type
-# objects of those a spec class may describe (with a check).
+# By name: (check, exact check); the type objects of the checked types.
 CHECKS = {tp.__name__: (row.check, row.check_exact)
           for tp, row in TABLE.items()}
 TYPE_OBJECTS = {tp.__name__: row.type_object for tp, row in TABLE.items()
@@ -164,10 +161,9 @@ class Facts(Protocol):
 
 
 class TypeFacts:
-    """What the tools know about builtin types: from the spec for its
-    complete classes (of this spec, else of another spec of the tree),
-    else from TABLE; nothing about other types.  Never from the Python
-    running Argument Clinic."""
+    """What the tools know about builtin types: from the spec class that
+    declares the slots of the type (of this spec, else of the tree), else
+    from TABLE; nothing about other types."""
 
     def __init__(self, spec: Spec, classes: Mapping[type, Spec],
                  derive: Callable[[Any, str, type], Facts | None]) -> None:
@@ -180,8 +176,7 @@ class TypeFacts:
         self.derive = derive
 
     def class_spec(self, tp: type) -> Spec | None:
-        """The spec with the complete class of builtin tp: this spec, or
-        another spec of the tree; None when there is none."""
+        """The spec whose class describes builtin tp, or None."""
         if getattr(builtins, tp.__name__, None) is not tp:
             return None
         if (tp.__name__ in self.spec.classes
@@ -190,9 +185,7 @@ class TypeFacts:
         return self.classes.get(tp)
 
     def spec_class(self, tp: type) -> ast.ClassDef | None:
-        """The complete spec class of builtin tp, or None.  A class that
-        declares a slot (a dunder of slotdefs[]) declares them all:
-        test_clinic checks it against the slot wrappers of the type."""
+        """The spec class that describes builtin tp, or None."""
         spec = self.class_spec(tp)
         return None if spec is None else spec.classes[tp.__name__]
 
@@ -211,8 +204,8 @@ class TypeFacts:
         return PYTHON
 
     def mro(self, tp: type | None) -> list[type] | None:
-        """The MRO of tp, or None when tp is not known (None: a type not
-        known exactly, which may have any special method)."""
+        """The MRO of tp, or None when tp is not known (or None: then it
+        may have any special method)."""
         if tp is None:
             return None
         out = []

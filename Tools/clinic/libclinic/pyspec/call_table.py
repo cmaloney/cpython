@@ -50,9 +50,7 @@ def node_count(stmts: list[ast.stmt]) -> int:
 
 
 def residual_key(stmts: list[ast.stmt]) -> str:
-    """Residuals with equal keys lower to the same C: the AST, and the
-    marks of the partial evaluator (e.g. whether a loop iterates a list
-    or a tuple by index)."""
+    """Residuals with equal keys lower to the same C: the AST and marks."""
     found = [(type(node).__name__, marks.of(node))
              for stmt in stmts for node in ast.walk(stmt) if marks.of(node)]
     return ast.dump(ast.Module(stmts, [])) + repr(found)
@@ -123,12 +121,9 @@ def _entry(comment: str, nargs: int, facts: Facts, const: str | None,
 
 
 def table_classes(spec: Spec) -> list[str]:
-    """The classes of *spec* that get a call table, in the order of the
-    spec: those with a __new__ or a method implemented by the spec, or a
-    slot with a Python reference (a @native dunder).
-
-    Only the syntax of the spec decides, so that the registry lists
-    exactly the tables generate() defines without generating them."""
+    """The classes of *spec* that get a call table: with an implemented
+    method or a @native slot.  Only the syntax decides, so that the
+    registry lists the tables without generating them."""
     if not spec.implemented_functions():
         return []           # Argument Clinic generates no call table
     out = []
@@ -192,8 +187,7 @@ def _array(out: list[str], ctype: str, name: str, comment: list[str],
 
 
 def _class_type_object(generator: emit.Generator, cls_name: str) -> str:
-    """The C type object of spec class *cls_name*: a builtin type's, or
-    the one its clinic class declaration in the C file names."""
+    """The type object of a builtin type, or of the clinic class."""
     tp = builtin_types.by_name(cls_name)
     if tp is not None:
         return _type_object(tp)
@@ -324,11 +318,9 @@ def generate_methods(generator: emit.Generator, type_name: str,
 
 
 def slot_member(spec: Spec, cls_name: str, dunder: str) -> str:
-    """The C slot that keys the facts of special method *dunder* of spec
-    class *cls_name*, as a member of PyHeapTypeObject
-    (``as_mapping.mp_subscript``, ``ht_type.tp_iternext``): the first slot
-    of the dunder in slotdefs[] that the class fills (all of them unless
-    its @c_name names some), which is the one its wrapper calls."""
+    """The slot keying the facts of *dunder* of class *cls_name*, as a
+    member of PyHeapTypeObject (``as_mapping.mp_subscript``): the first
+    one in slotdefs[] the class fills, which its wrapper calls."""
     _, named = spec.c_name(f'{cls_name}.{dunder}')
     for slotdef in slots.candidates(dunder):
         if not named or slotdef.slot in named:
@@ -390,8 +382,7 @@ def generate_slots(generator: emit.Generator, cls_name: str,
 
 def _just_calls(residual: list[ast.stmt], given: list[SpecParameter]
                 ) -> marks.Specialization | None:
-    """The Specialization a residual only calls with the given arguments
-    (the same C signature), or None."""
+    """The Specialization *residual* only calls with *given*, or None."""
     match residual:
         case [ast.Return(value=ast.Call(args=args) as call)]:
             mark = marks.get(call, marks.Specialized)
@@ -422,8 +413,8 @@ REGISTRY_END = '/*[pyspec registry end]*/'
 
 
 def registry(root: str) -> list[tuple[str, str]]:
-    """(table name, spec path relative to *root*) of the call table of
-    every class of table_classes() of the specs of the core C files."""
+    """(table name, spec path relative to *root*) of every call table of
+    the core specs."""
     out = []
     for spec_path, _ in specfiles.core_spec_files(root):
         spec = Spec.load(spec_path)
@@ -462,10 +453,8 @@ def registry_text(entries: list[tuple[str, str]]) -> str:
 
 
 def registry_outputs(filename: str) -> list[tuple[str, str]]:
-    """[(path, text)] of the registry header rewritten for the specs of
-    the tree of *filename*, a C file being processed by Argument Clinic:
-    [] unless it is a core C file (specfiles.is_core()) of a tree with the
-    header."""
+    """[(path, text)] of the registry header rewritten, when clinic
+    processes *filename*, a core C file of a tree with the header."""
     filename = os.path.abspath(filename)
     root = os.path.dirname(os.path.dirname(filename))
     header = os.path.join(root, REGISTRY_HEADER)

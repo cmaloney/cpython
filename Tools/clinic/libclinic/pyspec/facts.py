@@ -94,9 +94,8 @@ class Facts:
 
 
 def caught(handlers: list[ast.ExceptHandler]) -> list[str]:
-    """The names of the exceptions *handlers* catch (``except E:`` and
-    ``except (E1, E2):``, subset.handler_names()); anything else is kept
-    as its text, which Facts.raises_any() takes as any exception."""
+    """The exceptions *handlers* catch (another form is kept as its text:
+    any exception for Facts.raises_any())."""
     out = []
     for handler in handlers:
         names = subset.handler_names(handler)
@@ -118,8 +117,7 @@ def _exception_name(node: ast.expr | None, env: Env) -> str:
 
 
 class Passes(Protocol):
-    """What the analysis needs of the other passes: the context of the
-    passes (context.Context)."""
+    """What the analysis needs of context.Context."""
 
     def analyzer(self, spec: Spec | None = None) -> Analyzer: ...
 
@@ -144,8 +142,7 @@ class Flow:
 
 
 class Analyzer(subset.Walker[Flow, None]):
-    """The facts of the code of one spec; made by the context of the
-    passes, which keeps one per spec."""
+    """The facts of the code of one spec (one per spec, in the context)."""
 
     def __init__(self, context: Passes, spec: Spec) -> None:
         self.context = context
@@ -180,9 +177,8 @@ class Analyzer(subset.Walker[Flow, None]):
                             lambda: self.facts(special.body, special.env))
 
     def reference_facts(self, name: str, env: Env) -> Facts:
-        """Facts of @native function *name* of this spec, called
-        with the facts *env* about its parameters: of its Python
-        reference, partially evaluated for them."""
+        """Facts of a call of @native function *name* with the facts *env*:
+        of its Python reference, partially evaluated for them."""
         if subset.analysed(self.spec, name):
             # Code facts.py cannot follow: the worst facts.
             return Facts(worst=True)
@@ -191,9 +187,8 @@ class Analyzer(subset.Walker[Flow, None]):
             self.spec.params(name), reference=True))
 
     def inline_facts(self, name: str, env: Env) -> Facts:
-        """Facts of @inline function *name* of this spec, called with the
-        facts *env* about its parameters: of its body, partially
-        evaluated for them, as generated into the caller."""
+        """Facts of a call of @inline function *name* with the facts *env*:
+        of its body, partially evaluated for them."""
         if subset.inline(self.spec, name):
             return Facts(worst=True)
         return self._cached(self._key('inline', name=name, env=env),
@@ -202,9 +197,8 @@ class Analyzer(subset.Walker[Flow, None]):
             self.spec.params(name)))
 
     def method_facts(self, name: str, tp: type) -> Facts | None:
-        """Facts of method *name* ("T.meth") of this spec for self of
-        exact type tp, from its body or its Python reference; None for a
-        method written in C only (builtin_types.TypeFacts.derived())."""
+        """Facts of method *name* ("T.meth") for self of exact type tp; None
+        for a method written in C only."""
         node = self.spec.functions[name]
         if frontend.is_stub(node):
             return None
@@ -216,9 +210,8 @@ class Analyzer(subset.Walker[Flow, None]):
                           params)
 
     def call_facts(self, call: ast.Call, env: Env) -> Facts | None:
-        """Facts of the call of a hand-written C function (@native,
-        or a stub: worst) or of an @inline function, with the facts *env*
-        of the caller; None when *call* is neither."""
+        """Facts of *call* of a C function (@native, or ``...``: the worst)
+        or of an @inline function; None when it is neither."""
         inline = self.spec.inline_function(call)
         found = inline or self.spec.c_function(call)
         if found is None:
@@ -237,8 +230,7 @@ class Analyzer(subset.Walker[Flow, None]):
         return analyzer.reference_facts(node.name, callee_env)
 
     def mark_call(self, call: ast.Call, env: Env) -> Facts | None:
-        """call_facts(), and the mark of *call* with its error check
-        (marks.CallCheck), which emit.py reads."""
+        """call_facts(), and *call* marked with them (marks.CallCheck)."""
         callee = self.call_facts(call, env)
         if callee is not None:
             marks.put(call, marks.CallCheck(bool(callee.raises),
@@ -321,8 +313,6 @@ class Analyzer(subset.Walker[Flow, None]):
     def for_(self, stmt: ast.For, flow: Flow) -> None:
         if not isinstance(stmt.target, ast.Name):
             return self.other(stmt, flow)
-        # The partial evaluator marks the exact type of the iterated
-        # object when it knows it (see partial_eval.py).
         loop = marks.get(stmt, marks.Loop)
         is_known, item_type = self.iteration(loop.iterable if loop else None)
         if not is_known:
