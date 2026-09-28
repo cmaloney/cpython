@@ -29,7 +29,9 @@ optimizer reads (Include/internal/pycore_pyspec.h).  Last come the
 shared specializations the code calls (partial_eval.Specialization),
 e.g. bytes_from_iterator_list().
 
-The accepted Python subset is small on purpose; anything else is an error.
+The lowered subset is small on purpose; subset.py checks it before
+partial evaluation, and anything else is reported there as expressible,
+but not lowered yet.  It is:
 
 Statements:
   if/else, return, raise E("...") / raise E(f"..."), raise f() (f a C

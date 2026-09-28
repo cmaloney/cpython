@@ -167,8 +167,8 @@ Checklist:
 
 - [ ] type dump identical, for every type of the file (iterators too);
 - [ ] ``test_clinic`` (slot wrappers vs dunders) passes;
-- [ ] no ``@getter``/``@setter`` in the class (not supported yet: keep
-  ``tp_getset`` in C).
+- [ ] accessors (``@getter``/``@setter`` in the class) keep their
+  ``tp_getset`` table in C.
 
 Level 3: spec bodies
 ''''''''''''''''''''
@@ -280,7 +280,8 @@ Custom converters
 Optional groups
     Not supported (41 functions).  Keep the class in plain clinic.
 Getters and setters
-    Not supported yet; the ``tp_getset`` table stays hand-written.
+    Declared in the spec (``@getter``, ``@setter``), their blocks keep
+    the decorator; the ``tp_getset`` table stays hand-written.
 Shared stringlib code
     Declare the method once in ``Objects/stringlib/pyspec/`` and share
     it (``center = transmogrify.B.center``).  Convert both users (bytes
@@ -518,21 +519,25 @@ line.  The common ones:
     Move the decorator or the ``as`` name from the C block to the spec.
 ``unknown clinic decorator @x``
     A typo, or a decorator clinic does not have.
-``parameter 'x' needs an annotation from ['object', 'str']``
-    A spec body takes only those.  Keep the function in C, or take
-    ``object`` and convert in a ``@c_implemented`` helper (see the
-    worked example: that changes the generated parser).
-``parameter 'x' may only default to NULL`` / ``a spec needs positional parameters only``
-    Same: the body subset; keep it in C.
-``unsupported ...; see Objects/pyspec/README.rst``
-    A statement or expression outside the body subset.  Assign a call to
-    a local before comparing it.
+``f(): ... is expressible, but not lowered to C yet; see "The lowered subset" ...``
+    The signature or the body of a function clinic would generate is
+    outside the lowered subset of README.rst: a converter other than
+    ``object`` and ``str`` (take ``object`` and convert in a
+    ``@c_implemented`` helper, see the worked example: that changes the
+    generated parser), a default other than ``NULL``, a keyword-only
+    parameter, a statement or expression the table does not list
+    (assign a call to a local before comparing it).  Or keep the C:
+    ``...``, or ``@c_implemented`` with the body as its reference.
+``unsupported ...`` (the same hint)
+    A use the partial evaluation produced that the emitter cannot lower
+    yet, e.g. a fast path of a reference in another spec (reported
+    there).
 ``m: use ... as the body of a function implemented in C, not pass``
     Write ``...``.
 ``the body of a @c_implemented function is its Python reference``
     Give the reference a body, or drop ``@c_implemented``.
-``X is defined twice (accessors are not supported yet)``
-    ``@getter``/``@setter``: keep them in C.
+``'T.x' is an accessor in ...: its block starts with @getter or @setter``
+    Write ``@getter`` (or ``@setter``) above ``T.x`` in the block.
 ``conflicting types for 'x_impl'`` (C compiler)
     Rerun clinic; it rewrites the impl head.
 ``the spec and the interpreter differ`` (``test_clinic``)

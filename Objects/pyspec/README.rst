@@ -6,7 +6,8 @@ written as ordinary Python, in the style of a typeshed stub.  Argument
 Clinic reads it when it processes ``foo.c``.  A method of ``class bytes``
 is the clinic function ``bytes.meth``.  A body of ``...`` means the C impl
 is written by hand, as with plain Argument Clinic; a real body is
-generated as C.  ``Objects/stringlib/pyspec/`` holds the specs of the
+generated as C (if it is in the lowered subset, below).
+``Objects/stringlib/pyspec/`` holds the specs of the
 templates that bytes and bytearray share.  A spec body calls C functions
 by name; each one it calls is declared in the spec of its own file
 (``Objects/pyspec/abstract.py`` for ``Objects/abstract.c``,
@@ -49,9 +50,17 @@ Add a C method              A ``def`` with body ``...`` in the spec, at its
                             ``/*[clinic input]`` ``bytes.meth``
                             ``[clinic start generated code]*/`` above the
                             impl.  Clinic writes the head and the table.
-Add a spec-body method      The same ``def`` with a body in the subset
-                            below, the same one-line block (no C body);
-                            add cases to ``foo_cases.py``.
+Add a spec-body method      The same ``def`` with a body in the lowered
+                            subset (below), the same one-line block (no C
+                            body); add cases to ``foo_cases.py``.
+Keep a method's C, with     ``@c_implemented`` on the ``def``: any
+its Python reference        signature, any Python body; clinic output is
+                            that of ``...``.
+Add an accessor             ``@getter def attr(self) -> conv:`` (its
+                            docstring) and ``@setter def attr(self,
+                            value: object):``; in ``foo.c`` the blocks
+                            ``@getter`` ``T.attr`` and ``@setter``
+                            ``T.attr``.  ``tp_getset`` stays in C.
 Call a C function from a    Call it by name.  Declare it, if no spec does
 spec body                   yet, in the spec of its C file, with
                             ``@c_implemented`` and its Python reference
@@ -71,9 +80,20 @@ facts of a slot             reference (``bytes.__getitem__``); add it to
                             ``_PySpec_FindSlot()`` (see
                             ``_BINARY_OP_SUBSCR_BYTES_INT``) and is listed
                             in ``SlotFactsTest.USES``.
-Add a hand-written          ``@c_name(METH_O="f")`` (or ``METH_NOARGS``,
-PyCFunction                 plus ``@classmethod`` for ``METH_CLASS``);
-                            the docstring is ``__doc__`` as is.
+Add a hand-written          ``@c_name(METH_O="f")``, or ``METH_NOARGS``,
+PyCFunction                 ``METH_VARARGS``, ``METH_FASTCALL``: the
+                            parameters say which (``(self, /)``,
+                            ``(self, arg, /)``, ``(self, /, *args)``;
+                            ``**kwargs`` adds ``METH_KEYWORDS``);
+                            ``@classmethod``, ``@staticmethod``,
+                            ``@coexist`` add ``METH_CLASS``,
+                            ``METH_STATIC``, ``METH_COEXIST``.  The
+                            docstring is ``__doc__`` as is, after the
+                            signature of ``@text_signature``.  A slot
+                            with a method entry too (list's
+                            ``__getitem__``): its slots and
+                            ``METH_O="f"`` in ``@c_name``, and
+                            ``@coexist``.
 Share a stringlib method    ``from stringlib.pyspec import transmogrify``,
                             then ``center = transmogrify.B.center`` in the
                             class; the method is declared once, in
@@ -126,32 +146,118 @@ Decorators
   clinic's: ``T_meth``, ``T`` for ``T.__new__``, ``T___init__``.
 * ``@c_name(slot="f", ...)``: the slots of a dunder that several slots can
   implement (``@c_name(mp_length="f", sq_length="f")``).
-* ``@c_name(METH_NOARGS="f")``, ``@c_name(METH_O="f")``: a hand-written
-  PyCFunction entry.
+* ``@c_name(METH_NOARGS="f")``, ``@c_name(METH_O="f")``,
+  ``METH_VARARGS``, ``METH_FASTCALL``: a hand-written PyCFunction entry
+  (``Spec.pycfunction()`` in ``frontend.py``).
+* ``@c_implemented``: the C is written by hand and the body is its Python
+  reference (below); on a clinic method, clinic generates what it does
+  for ``...``.
+* ``@getter``, ``@setter`` (and ``@deleter`` after ``@setter``): an
+  accessor; its block in the C file starts with the same decorator.
 * ``@c_name("prefix")`` on a class: the prefix of its generated tables
   (``striter_methods``); the default is the class name.
 
 In a converter, ``c_param='x'`` names the C parameter (clinic's
 ``name as x``).
 
-What a spec may contain
------------------------
+The spec language
+-----------------
+
+A spec is Python, and may say anything a type needs.  Clinic reads it
+with the ``ast`` module; the tests run it.
 
 * A class body holds a docstring, ``def``\ s, shared methods
   (``x = module.Class.x``, or ``Class.x`` of the same spec, possibly
   wrapped in ``critical_section(...)`` or ``c_name(...)(...)``) and
-  ``pass``.  Two methods with the same
-  signature are two full ``def``\ s: Python has no clones.
-  ``@getter``/``@setter`` are not supported in a class of a C file yet.
-* A C implementation is a body of ``...``, or only a docstring (not
-  ``pass``): nothing is known about it, and a call of it may do anything.
-* A spec body may use: ``if``/``else``, ``return``, ``raise E("...")``,
-  ``x = call(...)``, ``try``/``except E``/``else``, ``try``/``finally``,
-  ``for item in it``; conditions ``x is [not] NULL``, ``type(x) is K``,
-  ``isinstance(x, K)``, ``hasattr(type(x), "__dunder__")``, integer
-  comparisons, ``and``/``or``/``not``; calls of C functions, other spec
-  functions and ``T.meth(...)``.  See
-  ``Tools/clinic/libclinic/pyspec/emit.py``.
+  ``pass``.  Two methods with the same signature are two full ``def``\ s:
+  Python has no clones.
+* A signature is any signature clinic can state: positional-only,
+  positional-or-keyword and keyword-only parameters, ``*args``,
+  ``**kwargs``, any converter (the annotation, with its options:
+  ``object(c_default="NULL")``, ``str(accept={str, NoneType})``,
+  ``c_param='x'`` for clinic's ``name as x``), any default (``()``,
+  ``10``, ``None``, ``NULL``), ``self: self(type="...")``, ``cls:
+  defining_class``, a return converter (``-> Py_ssize_t``),
+  ``@classmethod``, ``@staticmethod``, ``__new__``, ``__init__``,
+  accessors (``@getter``, ``@setter``) and every clinic decorator.
+  Clinic's output for it is plain clinic's, byte for byte.  Not
+  expressible yet: optional groups (``[ ]``), the ``[from X.Y]``
+  deprecation markers, and module-level clinic functions: keep those in
+  plain clinic.
+* A body is any Python.  ``...`` (or only a docstring, not ``pass``) is
+  a C implementation about which nothing is known: a call of it may do
+  anything.  With ``@c_implemented`` the body is the Python reference of
+  C written by hand (below).  Any other body is generated as C, and must
+  be in the lowered subset.
+
+The lowered subset
+------------------
+
+What clinic generates as C, and what the facts follow, is one explicit
+part of the language, checked by ``Tools/clinic/libclinic/pyspec/subset.py``
+before anything else.  Outside it, clinic says where and what:
+``foo.py:12: error: bytes.__new__(): while loop '...' is expressible, but
+not lowered to C yet``.  Keep the C by hand then: ``...``, or
+``@c_implemented`` with the body as its Python reference.
+
+========================  ================================================
+Signature                 a top-level function, ``__new__`` (of a type
+                          with a row in ``builtin_types.py``), a method
+                          or a ``@classmethod``; positional parameters
+                          with converter ``object`` or ``str``, default
+                          ``NULL``; no ``@critical_section``
+Statements                ``if``/``else``; ``x = call(...)``;
+                          ``f(...)`` for a C function ``f``; ``return
+                          x``, ``return call(...)``, ``return
+                          <constant>``; ``raise f(...)`` (a C function
+                          setting the exception), ``raise E("...")``,
+                          ``raise E(f"...{fqname(type(x))}...")`` (also
+                          ``tp_name``); ``try: x = call(...)`` ``except
+                          E:`` ... ``else:`` ...; ``try:`` ...
+                          ``finally:`` <calls of C functions>; ``for
+                          item in it:`` (no ``else``); ``pass``
+Conditions                ``x is [not] NULL``, ``(v := call(...)) is
+                          [not] NULL``, ``type(x) is [not] K``, ``cls
+                          is [not] K``, ``isinstance(x, K)``,
+                          ``hasattr(type(x), "__index__")`` (or
+                          ``"__buffer__"``), a call of a C function
+                          that cannot fail, integer comparisons,
+                          ``and``/``or``/``not``; ``K`` a type of
+                          ``builtin_types.py``
+Values                    names, ``NULL``, types, exception classes,
+                          ``bool`` and ``int`` constants; a ``str``
+                          constant as the argument of a C function
+Calls                     C functions by name (``@c_implemented``, or
+                          ``...``), other spec functions (``f(...)``,
+                          ``T.meth(...)``), ``iter(x)``, ``len(x)`` of
+                          an exact list or tuple, a local object or
+                          type with at most one argument (``f()``,
+                          ``cls(x)``)
+========================  ================================================
+
+In a Python reference (``@c_implemented``), the facts follow the same
+control flow; any other code is the model of a value and must have no
+effect (no primitive, no call of a C or spec function, no ``return`` or
+``raise``) where they cannot see it, e.g. in a ``while`` loop or in the
+argument of a call.  A reference that does has the worst facts: any
+result, may raise anything, may run Python code.  So does a function
+about which nothing is known.
+
+Extending the lowered subset
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Adding a construct is a local change:
+
+1. accept it in ``subset.py``, in the method of ``Lowered`` for its kind
+   of node (``signature()``, ``statement()``, ``condition()``,
+   ``value()``, ``call()``; ``Analysed`` for references);
+2. lower it in ``emit.py`` (and evaluate it in ``partial_eval.py`` if
+   the facts of a call site decide it);
+3. give its effects in ``facts.py`` if it has any (anything it does not
+   know is the worst case);
+4. add its row to the table above, and a test to ``PyspecLanguageTest``
+   of ``Lib/test/test_clinic.py`` (its message moves from the
+   "not lowered" cases to a generated-C case).
 
 Conditional compilation
 -----------------------
@@ -233,8 +339,13 @@ with the reference, and checks the derived facts, with debug builds
 aborting when Python code runs where the facts say none does.
 
 Clinic reports every error as ``path:line: error: message``, at the line
-of the spec when the error is in the spec.  The implementation is in
-``Tools/clinic/libclinic/pyspec/``.
+of the spec when the error is in the spec (in the spec it was written
+in, for code copied from another).  A spec error has a kind
+(``SpecErrorKind`` in ``Tools/clinic/libclinic/errors.py``): not valid
+in the spec language; expressible, but not lowered yet; in the lowered
+subset, but a use the emitter cannot lower (a local that changes type);
+or a disagreement between the spec and the blocks of the C file.  The
+implementation is in ``Tools/clinic/libclinic/pyspec/``.
 
 To migrate a C file to a spec, and to decide whether a function is
 worth a spec body, see `MIGRATING.rst <MIGRATING.rst>`_.

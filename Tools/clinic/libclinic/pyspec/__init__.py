@@ -8,6 +8,8 @@ For Objects/foo.c, Objects/pyspec/foo.py is its spec:
                 builtins with a C meaning, @c_implemented and the
                 primitives exact(), unknown(), calls(), runs_python();
                 load() runs a spec as Python (for tests)
+  subset        the lowered subset: what of a spec is generated as C and
+                analysed for facts, checked before partial evaluation
   builtin_types the one table of builtin types without a spec (C type
                 objects, checks, constants, audited special methods)
   facts         derives the facts of statements and of the calls of C

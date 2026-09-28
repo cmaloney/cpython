@@ -30,12 +30,23 @@ named T.  A method is written like the clinic block it replaces:
   signature (``find`` and ``count``) are two full ``def`` statements, and
   clinic generates for the second what it generates for a clone;
 * a body of ``...`` (or only a docstring) means the C impl is
-  hand-written.  A real body implements the function: see emit.py.
+  hand-written.  A real body implements the function (emit.py), if it
+  and the signature are in the lowered subset (subset.py; describe()
+  checks it first); with ``@c_implemented`` the C impl is hand-written
+  and the body, any Python, is its Python reference.
+
+Any signature clinic can state is a spec signature, and any Python is a
+spec body: only the lowered subset is generated as C.
 
 Each spec method has a one-line block in the .c file, above its impl:
-the function line only (``bytes.split``).  clinic_input() turns the spec
-method into the rest of the block, and clinic writes the impl head into
-the block's output, as usual.  A missing block is an error.
+the function line only (``bytes.split``).  complete_block() turns the
+spec method into the rest of the block (clinic_input()), and clinic
+writes the impl head into the block's output, as usual.  A missing
+block is an error.  An accessor, ``@getter def attr(self)`` or
+``@setter def attr(self, value: object)``, is a clinic function too; its
+block names it with the same decorator (``@getter`` / ``T.attr``).
+Clinic then binds the functions with a body to their clinic function
+(DSLParser.bind_spec(), PyspecBindings).
 
 The C basename of a spec method is clinic's default (``T`` for
 ``T.__new__``, ``T___init__`` for ``T.__init__``, ``T_meth`` otherwise);
@@ -79,9 +90,15 @@ Methods that are not clinic functions (method_kind())
   (``@c_name(mp_length="f", sq_length="f")``) unless another dunder of
   the class selected a slot it shares; a class declares every dunder of
   the slots it fills (typeobj.py).
-* A hand-written PyCFunction: ``@c_name(METH_NOARGS="f")`` or
-  ``@c_name(METH_O="f")``, parameters ``(self, /)`` or ``(self, arg, /)``
-  unannotated, its docstring as is.
+* A hand-written PyCFunction: ``@c_name(METH_NOARGS="f")``,
+  ``METH_O``, ``METH_VARARGS`` or ``METH_FASTCALL`` (pycfunction()):
+  parameters unannotated, ``(self, /)``, ``(self, arg, /)`` or ``(self,
+  /, *args)``, with ``**kwargs`` for METH_KEYWORDS; @classmethod,
+  @staticmethod and @coexist add METH_CLASS, METH_STATIC and
+  METH_COEXIST; its docstring as is, after the signature of
+  @text_signature if any.  A slot may also have such an entry in the
+  method table (``@c_name(mp_subscript="f", METH_O="f")`` and
+  ``@coexist``).
 * Shared: ``meth = module.Class.meth``, a method another spec declares
   (``from stringlib.pyspec import transmogrify``), or ``Class.meth`` of
   another class of this spec.  If the C file has a clinic block for it

@@ -28,6 +28,13 @@ these is the model of the values the C computes: it has no effects (the
 effects of the C are the ones stated).  The c_calls dimension of
 disconnects.py checks them against the C: every call in the C function
 that may run Python code must be accounted for by one of them.
+
+Anything outside the subset this analysis follows (subset.py: a body
+outside the lowered subset, a reference with an effect where it is not
+followed, such as a primitive in a while loop or in the argument of a
+call) has the worst facts: any result, NULL or not, may raise anything,
+may run Python code.  Nothing here fails on a construct it does not
+know.
 """
 
 from __future__ import annotations
