@@ -7330,7 +7330,7 @@ class PyspecFilesTest(TestCase):
                 continue
             methods.append(meth)
             if kind == pyspec_frontend.SHARED:
-                other, other_name = spec.shared_source(name)
+                other, other_name = spec.declaration(name)
                 if other.method_kind(other_name) == pyspec_frontend.PYCFUNCTION:
                     docs[meth] = other.docstring(other_name)
             elif kind == pyspec_frontend.PYCFUNCTION:

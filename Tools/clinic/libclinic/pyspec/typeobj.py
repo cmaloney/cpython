@@ -208,7 +208,7 @@ class TypeGenerator:
             c_basename, _ = self.functions[name]
             return [], f'    {c_basename.upper()}_METHODDEF'
         shared = spec.shared[name]
-        other, other_name = spec.shared_source(name)
+        other, other_name = spec.declaration(name)
 
         def error(message: str) -> SpecError:
             return SpecError(message, filename=spec.filename,
@@ -216,7 +216,8 @@ class TypeGenerator:
 
         kind = other.method_kind(other_name)
         _, keywords = spec.c_name(name)
-        locked = spec.is_locked(name)
+        locked = any(frontend.decorator_name(d) == 'critical_section'
+                     for d in shared.decorators)
         flag: str | None
         if kind == PYCFUNCTION:
             docs, c_func, flag, doc_name = self._pycfunction(

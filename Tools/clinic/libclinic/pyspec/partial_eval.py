@@ -1,87 +1,55 @@
-"""Partial evaluation of pyspec functions.
+"""Partial evaluation of spec functions for the facts of a call site.
 
-Given facts a call site knows -- which arguments are NULL, and optionally
-the exact type of an argument (known.py) -- fold the branches those facts
-decide and inline tail calls to other spec functions (or call a shared
-specialization, below).  After an if whose one branch exits, the facts
-of the other hold.  The result is a list of ast statements in the same
-Python subset the C emitter accepts (subset.Kind), with typed marks on
-its nodes (marks.py).  Facts about builtin types come from the spec and
-from builtin_types.py, never from the Python running Argument Clinic.
-The evaluator is created by the context of the passes (context.py),
-which keeps the shared specializations of each spec.
+Given facts about the arguments (known.py: NULL or not, an exact type, a
+value), Evaluator folds the branches they decide, inlines tail calls of
+other spec functions (or calls a shared specialization, below), and
+after an ``if`` whose one branch exits, keeps the facts of the other.
+The residual is ast in the same subset (subset.Kind), with typed marks
+(marks.py) on the nodes for facts.py and emit.py.
 
-Calls of hand-written C functions.  A @native function is
-evaluated through its Python reference, for the facts of the call
-(facts.py), and only for them: no code of a reference is ever generated.
+Calls.  A @native function is analysed through its Python reference
+(facts.py), never generated: a call whose result is NULL on every path
+is that NULL, and a ``try`` around a call that cannot raise what its
+handlers catch is its body (``iter(x)`` of a list).  An @inline body
+(``if <test>: return <value>`` paths, then ``return <value>``) is
+generated into every statement calling it (expand()): the statement with
+each value, under its test; a test the facts decide selects or drops
+its path, and what they decide of a test is dropped from it.
 
-* a call whose result is NULL on every path (``return NULL``: absent) is
-  that NULL;
-* a ``try`` around a call that cannot raise what its handlers catch is
-  its body (``iter(x)`` of a list cannot raise TypeError).
+Loops.  ``for item in it:`` over ``it = iter(x)``, for x of a known
+exact type whose iteration runs no Python code: a list or tuple is
+iterated by index without an iterator (``it = iter(x)`` is then dead),
+reading the size of a list for every item as its iterator does; the
+exact type of the items is known in the body.  Where the type of x is
+not known at ``it = iter(x)``, the rest of the block is versioned for an
+exact list and tuple when that gives an index loop (VERSIONED_ITERABLES).
 
-Calls of @inline functions.  The body of an @inline function, fast paths
-``if <test>: return <value>`` then ``return <value>`` (subset.Inline), is
-generated into every statement that calls it (expand()): the statement
-with the value of each path, under ``if <test>:``, in order.  A test the
-facts decide selects or drops its path, and what they decide of a test
-is dropped from it (only ``_PyLong_IsCompact(x)`` of ``(type(x) is int
-or type(x) is bool) and _PyLong_IsCompact(x)`` remains for an exact
-int).  The fast path of a native function is written as an @inline
-function that returns the native call last (PyNumber_AsSsize_t_fast()):
-the fast path is generated code, from one place, and the generated code
-never assumes that the native function has it.
+Arity functions.  Where the rest of a __new__ body is one of its
+NAME_nargsN() functions (emit.py), it calls it (arity_call()); where
+the __new__ calls itself for its type (``T.__new__(T, ...)``), it calls
+the arity function of the arguments not NULL, tested at run time as the
+vectorcall does (dispatch()).
 
-Loops.  ``for item in it:`` iterates an iterator ``it = iter(x)``.  When
-the exact type of x is known (from the call site, or from a
-``type(x) is K`` test) and iterating it runs no Python code
-(facts.Analyzer.iteration()):
-
-* a list or a tuple is iterated by index, without an iterator object
-  (``for item in x:``, lowered by emit.py; ``it = iter(x)`` is then
-  dead and removed), with the same semantics as its iterator: the size of
-  a list is read again for every item (except in a snapshot, below);
-* the exact type of the items, when all have the same, is known in the
-  loop body.
-
-When the exact type of x is not known where ``it = iter(x)`` is
-evaluated, the rest of the block is versioned: specialized for an exact
-list and an exact tuple when that gives an index loop, and kept generic
-for other types (VERSIONED_ITERABLES).
-
-Arity functions.  Where the rest of a __new__ body has the facts of one
-of its NAME_nargsN() functions (emit.py) and is that whole function, it
-calls the function (Evaluator.arity_call()).  Where the __new__ calls
-itself for its type (``T.__new__(T, ...)``, to construct a subclass
-instance), it calls the arity function of the arguments that are not
-NULL, tested at run time as the vectorcall does (Evaluator.dispatch()).
-
-Shared specializations.  A tail call of a spec function whose residual
-for the facts of the call has a loop is not inlined: the residual becomes
-a C function of its own (a marks.Specialization), emitted once and called
-by every call with the same facts.  A loop costs far more than a call,
-and the loop code is not duplicated.  A residual that does not iterate
-by index is not worth its own code: the call stays a call of the generic
-function, and only its facts come from the residual.
+Shared specializations.  A tail call whose residual has a loop is not
+inlined: the residual becomes a C function of its own
+(marks.Specialization) called by every call with the same facts; one
+that does not iterate by index keeps calling the generic function, with
+the facts of the residual.
 
 Snapshots.  The residual of a list loop is split in two, as the
 hand-written _PyBytes_FromSequence_lock_held() was: every statement that
-may run Python code (per facts.py) is replaced by ``return FALLBACK``,
-and the rest, which runs no Python code, is called with the list locked
-(``with critical_section(x):``; nothing without free threading):
-nothing can change the list meanwhile, so it iterates a consistent
-snapshot, borrows its items, and reads its size once.  On FALLBACK the
-call restarts through the generic, unspecialized function.  As the
-snapshot ran no Python code, the restart cannot be observed.
+may run Python code becomes ``return FALLBACK``, and the rest runs with
+the list locked (``with critical_section(x):``), so it iterates a
+consistent snapshot, borrows its items and reads its size once.  On
+FALLBACK the call restarts through the generic function; as the
+snapshot ran no Python code, that cannot be observed.
 
-Capacity.  A buffer (a C struct, see emit.py) initialized with the
-length of a sequence, ``w = init(len(x))``, has room for one unit per
-item of x: in a loop over x with a fixed number of iterations (a tuple,
-or a list in a snapshot) whose one use of w is one call of an @inline
-function writing w (its first argument), the first path of that call,
-whose test is that the buffer has room, is taken without its test
-(presize()).  The debug build checks it (see
-bytes_appender_append_unchecked()).
+Capacity.  A buffer (a C struct local) initialized with the length of a
+sequence, ``w = init(len(x))``, has room for one unit per item of x: in
+a loop over x with a fixed number of iterations (a tuple, a snapshot)
+whose one use of w is one call of an @inline function writing w, the
+first path of that call is taken without its test (presize()); the
+debug build checks it (bytes_appender_append_unchecked()).
 """
 
 from __future__ import annotations
@@ -102,9 +70,6 @@ from .subset import assigned_names, loaded_names, terminates
 
 if TYPE_CHECKING:
     from .frontend import Spec
-
-__all__ = ['FALLBACK', 'NOTNULL', 'NULL', 'IterOf', 'Other', 'Value',
-           'Evaluator', 'Specializations', 'specialize']
 
 class Context(facts.Passes, Protocol):
     """What the evaluator needs of the other passes: the context of the
@@ -139,17 +104,10 @@ def evaluate(expr: ast.expr, env: Env, ev: Evaluator) -> bool | None:
             return None if value is None else not value
         case ast.BoolOp(op=op, values=values):
             results = [evaluate(v, env, ev) for v in values]
-            if isinstance(op, ast.And):
-                if False in results:
-                    return False
-                if all(r is True for r in results):
-                    return True
-            else:
-                if True in results:
-                    return True
-                if all(r is False for r in results):
-                    return False
-            return None
+            decisive = isinstance(op, ast.Or)   # True decides an or
+            if decisive in results:
+                return decisive
+            return None if None in results else not decisive
         case ast.Compare(left=left, ops=[ast.Is() | ast.IsNot() as op],
                          comparators=[right]):
             value = _evaluate_is(left, right, env, ev)
@@ -166,12 +124,10 @@ def evaluate(expr: ast.expr, env: Env, ev: Evaluator) -> bool | None:
         case ast.Call(func=ast.Name('hasattr'), args=[type_call, name]) \
                 if is_type_call(type_call):
             assert isinstance(type_call, ast.Call)
-            tp = exact_type(type_call.args[0], env)
             attr = getattr(arg_fact(name, env), 'obj', None)
-            if tp is None or not isinstance(attr, str):
+            if not isinstance(attr, str):
                 return None
-            has: bool | None = ev.types.has(tp, attr)
-            return has
+            return ev.types.has(exact_type(type_call.args[0], env), attr)
         case ast.Name(name) if isinstance(env.get(name), Value):
             return bool(getattr(env[name], 'obj'))
     return None

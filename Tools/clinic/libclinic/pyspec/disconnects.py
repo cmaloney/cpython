@@ -46,7 +46,7 @@ import re
 import sys
 import tomllib
 
-from . import frontend, specfiles
+from . import frontend, specfiles, subset
 
 
 def spec_types(srcdir):
@@ -1072,10 +1072,10 @@ def _check_native(spec, name, checker, native_file, rel, native, specs,
         found = callee in native and next(
             s.resolve(callee) for s in specs if s.resolve(callee))
         return not found or reference_facts(found[0], callee).raises
-    returns = frontend.c_signature(node)[1] if '.' not in name \
+    returns = subset.c_signature(node)[1] if '.' not in name \
         else 'void'
     failing = sorted(filter(may_fail, calls))
-    if (returns != 'void' and not frontend.is_struct(returns)
+    if (returns != 'void' and not subset.is_struct(returns)
             and failing and not reference_facts(spec, name).raises):
         out.append(f'{where}: its reference cannot fail, but the C '
                    f'calls {", ".join(failing)}')
