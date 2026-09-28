@@ -12,7 +12,7 @@ from libclinic.block_parser import Block, BlockParser
 from libclinic.codegen import BlockPrinter, Destination, CodeGen
 from libclinic.parser import Parser, PythonParser
 from libclinic.dsl_parser import DSLParser
-from libclinic.pyspec import emit, frontend, typeobj
+from libclinic.pyspec import call_table, emit, frontend, typeobj
 if TYPE_CHECKING:
     from libclinic.clanguage import CLanguage
     from libclinic.function import (
@@ -264,6 +264,9 @@ impl_definition block
                     continue
 
         outputs += self.pyspec_outputs()
+        if self.pyspec is not None:
+            # The registry of the call tables of all specs (call_table.py).
+            outputs += call_table.registry_outputs(self.filename)
         # Nothing is written unless every output could be generated (the
         # caller writes the C file itself last).
         for filename, text in outputs:

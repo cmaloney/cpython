@@ -348,16 +348,16 @@ assert_result_facts(JitOptContext *ctx, _PyUOpInstruction *this_instr,
 #  define ASSERT_RESULT_FACTS(RES, ABOVE) ((void)0)
 #endif
 
-/* The result of a uop that does what special method name of an exact tp
- * does (a copy of its slot's C), with an argument of exact type arg_type
+/* The result of a uop that does what slot slot_id (_PySpec_SLOT()) of an
+ * exact tp does (a copy of its C), with an argument of exact type arg_type
  * (NULL for none): the facts the spec derives for the slot
  * (_PySpec_FindSlot()), not a copy of them.  A byte is also a small int:
  * compact, which the uop's code, not the spec, gives. */
 static JitOptRef
-spec_slot_result(JitOptContext *ctx, PyTypeObject *tp, const char *name,
+spec_slot_result(JitOptContext *ctx, PyTypeObject *tp, uint16_t slot_id,
                  PyTypeObject *arg_type, bool byte)
 {
-    const _PySpecCall *spec = _PySpec_FindSlot(tp, name, arg_type);
+    const _PySpecCall *spec = _PySpec_FindSlot(tp, slot_id, arg_type);
     if (spec == NULL || spec->result_type == NULL) {
         return sym_new_not_null(ctx);
     }

@@ -611,7 +611,8 @@ dummy_func(void) {
 
     op(_BINARY_OP_SUBSCR_BYTES_INT, (bytes_st, sub_st -- res, b, s)) {
         /* The facts of bytes.__getitem__(int), from the spec. */
-        res = spec_slot_result(ctx, &PyBytes_Type, "__getitem__",
+        res = spec_slot_result(ctx, &PyBytes_Type,
+                               _PySpec_SLOT(as_mapping.mp_subscript),
                                &PyLong_Type, true);
         b = bytes_st;
         s = sub_st;
@@ -631,7 +632,8 @@ dummy_func(void) {
         /* The items of an exact bytes are those of its iterator: the
          * facts of bytes_iterator.__next__, from the spec
          * (bytes_iteritem() is its index form). */
-        next = spec_slot_result(ctx, &PyBytesIter_Type, "__next__", NULL,
+        next = spec_slot_result(ctx, &PyBytesIter_Type,
+                                _PySpec_SLOT(ht_type.tp_iternext), NULL,
                                 true);
         ASSERT_RESULT_FACTS(next, 0);
     }

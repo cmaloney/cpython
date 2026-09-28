@@ -3311,9 +3311,11 @@ static PyTypeObject SelfInterruptingContextManager_Type = {
 };
 
 
-/* Direct calls of pyspec call-table entries (Include/internal/pycore_pyspec.h),
- * for the difftest of every entry (Lib/test/test_pyspec_facts.py): the
- * JIT-only typed variants can be called without the JIT. */
+/* The pyspec call tables (Include/internal/pycore_pyspec.h), for
+ * Lib/test/test_pyspec_facts.py, which does the rest in Python: the
+ * registry and its entries as data, the lookups the optimizer makes, a
+ * direct call of a call entry (the JIT-only typed variants can be called
+ * without the JIT), and the "no Python" tripwire around any call. */
 
 static const _PySpecCallTable *
 pyspec_get_table(PyObject *tp)
@@ -3341,33 +3343,16 @@ pyspec_method_def(PyTypeObject *tp, PyCFunction meth)
     return NULL;
 }
 
+/* An entry as a dict. */
 static PyObject *
-pyspec_entry_dict(PyTypeObject *tp, const _PySpecCall *call, int is_method)
+pyspec_entry_dict(const _PySpecCall *call)
 {
     PyObject *result_const = Py_None;
     if (call->result_const >= 0) {
         result_const = Py_GetConstantBorrowed(call->result_const);
     }
-    PyObject *method = Py_None;
-    int method_flags = 0;
-    if (is_method) {
-        PyMethodDef *def = pyspec_method_def(tp, call->func.meth);
-        if (def == NULL) {
-            PyErr_SetString(PyExc_SystemError,
-                            "method entry not in tp_methods");
-            return NULL;
-        }
-        method = PyUnicode_FromString(def->ml_name);
-        if (method == NULL) {
-            return NULL;
-        }
-        method_flags = def->ml_flags;
-    }
-    else {
-        Py_INCREF(method);
-    }
     return Py_BuildValue(
-        "{s:i, s:O, s:O, s:O, s:O, s:i, s:O, s:O, s:N, s:i}",
+        "{s:i, s:O, s:O, s:O, s:O, s:i, s:O, s:O}",
         "nargs", (int)call->nargs,
         "may_run_python",
         (call->flags & _PySpec_MAY_RUN_PYTHON) ? Py_True : Py_False,
@@ -3378,13 +3363,53 @@ pyspec_entry_dict(PyTypeObject *tp, const _PySpecCall *call, int is_method)
         "result_alias", (int)call->result_alias,
         "arg_type", call->arg_type ? (PyObject *)call->arg_type : Py_None,
         "result_type",
-        call->result_type ? (PyObject *)call->result_type : Py_None,
-        "method", method,
-        "method_flags", method_flags);
+        call->result_type ? (PyObject *)call->result_type : Py_None);
 }
 
-/* pyspec_table(tp) -> (calls, methods): the entries of tp's call table, as
- * dicts, in table order (an entry's index is its position in the list). */
+/* Append entry *call* of the table of tp to list, with what identifies
+ * it: for a method (is_method), its name and whether it is a class
+ * method; for a slot (slot is not NULL), the slot and its dunder. */
+static int
+pyspec_append_entry(PyObject *list, PyTypeObject *tp, int is_method,
+                    const _PySpecCall *call, const _PySpecSlot *slot)
+{
+    PyObject *d = pyspec_entry_dict(call);
+    if (d == NULL) {
+        return -1;
+    }
+    PyObject *extra = NULL;
+    if (slot != NULL) {
+        extra = Py_BuildValue("{s:i, s:s}", "slot", (int)slot->slot,
+                              "name", slot->name);
+    }
+    else if (is_method) {
+        PyMethodDef *def = pyspec_method_def(tp, call->func.meth);
+        if (def == NULL) {
+            PyErr_SetString(PyExc_SystemError,
+                            "method entry not in tp_methods");
+        }
+        else {
+            extra = Py_BuildValue("{s:s, s:O}", "name", def->ml_name,
+                                  "classmethod",
+                                  (def->ml_flags & METH_CLASS) ? Py_True
+                                                               : Py_False);
+        }
+    }
+    else {
+        extra = PyDict_New();
+    }
+    int rc = -1;
+    if (extra != NULL && PyDict_Update(d, extra) == 0) {
+        rc = PyList_Append(list, d);
+    }
+    Py_XDECREF(extra);
+    Py_DECREF(d);
+    return rc;
+}
+
+/* pyspec_table(tp) -> {"calls": [...], "methods": [...], "slots": [...]}:
+ * the entries of tp's call table as dicts, in table order (an entry's
+ * index is its position in its list). */
 static PyObject *
 pyspec_table(PyObject *self, PyObject *tp)
 {
@@ -3394,37 +3419,52 @@ pyspec_table(PyObject *self, PyObject *tp)
     }
     PyObject *calls = PyList_New(0);
     PyObject *methods = PyList_New(0);
-    if (calls == NULL || methods == NULL) {
+    PyObject *slots = PyList_New(0);
+    if (calls == NULL || methods == NULL || slots == NULL) {
         goto error;
     }
-    for (Py_ssize_t i = 0; i < table->ncalls + table->nmethods; i++) {
-        int is_method = i >= table->ncalls;
-        const _PySpecCall *call = (is_method ? &table->methods[i - table->ncalls]
-                                             : &table->calls[i]);
-        PyObject *d = pyspec_entry_dict((PyTypeObject *)tp, call, is_method);
-        if (d == NULL) {
-            goto error;
-        }
-        int rc = PyList_Append(is_method ? methods : calls, d);
-        Py_DECREF(d);
-        if (rc < 0) {
+    PyTypeObject *type = (PyTypeObject *)tp;
+    for (Py_ssize_t i = 0; i < table->ncalls; i++) {
+        if (pyspec_append_entry(calls, type, 0, &table->calls[i],
+                                NULL) < 0) {
             goto error;
         }
     }
-    return Py_BuildValue("NN", calls, methods);
+    for (Py_ssize_t i = 0; i < table->nmethods; i++) {
+        if (pyspec_append_entry(methods, type, 1, &table->methods[i],
+                                NULL) < 0) {
+            goto error;
+        }
+    }
+    for (Py_ssize_t i = 0; i < table->nslots; i++) {
+        if (pyspec_append_entry(slots, type, 0, &table->slots[i].facts,
+                                &table->slots[i]) < 0) {
+            goto error;
+        }
+    }
+    return Py_BuildValue("{s:N, s:N, s:N}", "calls", calls,
+                         "methods", methods, "slots", slots);
 error:
     Py_XDECREF(calls);
     Py_XDECREF(methods);
+    Py_XDECREF(slots);
     return NULL;
 }
 
+/* pyspec_classes() -> the types of the registry, in its order. */
 static PyObject *
-pyspec_index(const _PySpecCall *found, const _PySpecCall *entries)
+pyspec_classes(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
-    if (found == NULL) {
-        Py_RETURN_NONE;
+    PyObject *list = PyList_New(0);
+#define APPEND(TABLE) \
+    if (list != NULL && \
+        PyList_Append(list, (PyObject *)(TABLE).type) < 0) \
+    { \
+        Py_CLEAR(list); \
     }
-    return PyLong_FromSsize_t(found - entries);
+    _PySpec_REGISTRY(APPEND)
+#undef APPEND
+    return list;
 }
 
 /* arg_type (a type, or None for unknown) -> *result; -1 on error. */
@@ -3441,6 +3481,15 @@ pyspec_arg_type(PyObject *arg_type, PyTypeObject **result)
     }
     *result = (PyTypeObject *)arg_type;
     return 0;
+}
+
+static PyObject *
+pyspec_index(const _PySpecCall *found, const _PySpecCall *entries)
+{
+    if (found == NULL) {
+        Py_RETURN_NONE;
+    }
+    return PyLong_FromSsize_t(found - entries);
 }
 
 /* pyspec_find_call(tp, nargs, arg_type) -> the index of the entry that
@@ -3461,29 +3510,6 @@ pyspec_find_call(PyObject *self, PyObject *args)
     }
     return pyspec_index(_PySpec_FindCall((PyTypeObject *)tp, nargs, at),
                         table->calls);
-}
-
-/* pyspec_find_slot(tp, name, arg_type) -> the facts _PySpec_FindSlot() gives
- * the optimizer for special method *name* of an exact tp, with an argument
- * of exact type arg_type (None: unknown or none), as a dict, or None. */
-static PyObject *
-pyspec_find_slot(PyObject *self, PyObject *args)
-{
-    PyObject *tp, *arg_type;
-    const char *name;
-    PyTypeObject *at;
-    if (!PyArg_ParseTuple(args, "O!sO", &PyType_Type, &tp, &name,
-                          &arg_type)) {
-        return NULL;
-    }
-    if (pyspec_arg_type(arg_type, &at) < 0) {
-        return NULL;
-    }
-    const _PySpecCall *facts = _PySpec_FindSlot((PyTypeObject *)tp, name, at);
-    if (facts == NULL) {
-        Py_RETURN_NONE;
-    }
-    return pyspec_entry_dict((PyTypeObject *)tp, facts, 0);
 }
 
 /* pyspec_find_method(tp, name, self_or_cls, nargs, arg_type) -> the index of
@@ -3521,255 +3547,231 @@ pyspec_find_method(PyObject *self, PyObject *args)
         table->methods);
 }
 
-static const _PySpecCall *
-pyspec_entry(PyObject *tp, int is_method, Py_ssize_t index)
+/* pyspec_find_slot(tp, slot, arg_type) -> the index of the slot entry that
+ * _PySpec_FindSlot() gives the optimizer for slot *slot* (its
+ * _PySpec_SLOT() value) of an exact tp, with an argument of exact type
+ * arg_type (None: unknown or none), or None. */
+static PyObject *
+pyspec_find_slot(PyObject *self, PyObject *args)
 {
+    PyObject *tp, *arg_type;
+    int slot_id;
+    PyTypeObject *at;
+    if (!PyArg_ParseTuple(args, "OiO", &tp, &slot_id, &arg_type)) {
+        return NULL;
+    }
     const _PySpecCallTable *table = pyspec_get_table(tp);
-    if (table == NULL) {
+    if (table == NULL || pyspec_arg_type(arg_type, &at) < 0) {
         return NULL;
     }
-    Py_ssize_t n = is_method ? table->nmethods : table->ncalls;
-    if (index < 0 || index >= n) {
-        PyErr_SetString(PyExc_IndexError, "no such pyspec call-table entry");
+    if (slot_id < 0 || slot_id > UINT16_MAX) {
+        PyErr_SetString(PyExc_ValueError, "bad slot");
         return NULL;
     }
-    return is_method ? &table->methods[index] : &table->calls[index];
-}
-
-/* The entry's guard: the exact type of the first argument.  The typed C
- * variants rely on it. */
-static int
-pyspec_check_guard(const _PySpecCall *call, PyObject *first)
-{
-    if (call->arg_type != NULL && !Py_IS_TYPE(first, call->arg_type)) {
-        PyErr_Format(PyExc_TypeError,
-                     "the entry needs an argument of exact type %s, not %T",
-                     call->arg_type->tp_name, first);
-        return -1;
+    const _PySpecCall *found =
+        _PySpec_FindSlot((PyTypeObject *)tp, (uint16_t)slot_id, at);
+    for (Py_ssize_t i = 0; found != NULL && i < table->nslots; i++) {
+        if (found == &table->slots[i].facts) {
+            return PyLong_FromSsize_t(i);
+        }
     }
-    return 0;
+    Py_RETURN_NONE;
 }
 
-/* pyspec_call(tp, index, args, no_python=False): call entry *index* of the
- * calls of tp (tp(*args), positional arguments) directly, and return its
- * result.  With no_python, make the call as the no-Python uop does
- * (_PySpec_CallNoPython1()): in debug builds, running Python code is then a
- * fatal error. */
+/* pyspec_call(tp, index, args): call entry *index* of the calls of tp
+ * (tp(*args), positional arguments) directly, and return its result. */
 static PyObject *
 pyspec_call(PyObject *self, PyObject *args)
 {
     PyObject *tp, *callargs;
     Py_ssize_t index;
-    int no_python = 0;
-    if (!PyArg_ParseTuple(args, "OnO!|p", &tp, &index, &PyTuple_Type,
-                          &callargs, &no_python))
+    if (!PyArg_ParseTuple(args, "OnO!", &tp, &index, &PyTuple_Type,
+                          &callargs))
     {
         return NULL;
     }
-    const _PySpecCall *call = pyspec_entry(tp, 0, index);
-    if (call == NULL) {
+    const _PySpecCallTable *table = pyspec_get_table(tp);
+    if (table == NULL) {
         return NULL;
     }
+    if (index < 0 || index >= table->ncalls) {
+        PyErr_SetString(PyExc_IndexError, "no such pyspec call-table entry");
+        return NULL;
+    }
+    const _PySpecCall *call = &table->calls[index];
     if (PyTuple_GET_SIZE(callargs) != call->nargs) {
         PyErr_Format(PyExc_TypeError, "the entry takes %d arguments",
                      (int)call->nargs);
         return NULL;
     }
-    PyThreadState *tstate = PyThreadState_Get();
     if (call->nargs == 0) {
-        int saved = no_python ? _PySpec_EnterNoPython(tstate) : 0;
-        PyObject *res = call->func.f0();
-        if (no_python) {
-            _PySpec_LeaveNoPython(tstate, saved);
-        }
-        return res;
+        return call->func.f0();
     }
     assert(call->nargs == 1);
     PyObject *arg = PyTuple_GET_ITEM(callargs, 0);
-    if (pyspec_check_guard(call, arg) < 0) {
+    /* The entry's guard, which the typed C variants rely on. */
+    if (call->arg_type != NULL && !Py_IS_TYPE(arg, call->arg_type)) {
+        PyErr_Format(PyExc_TypeError,
+                     "the entry needs an argument of exact type %s, not %T",
+                     call->arg_type->tp_name, arg);
         return NULL;
-    }
-    if (no_python) {
-        return _PySpec_CallNoPython1(tstate, call->func.f1, arg);
     }
     return call->func.f1(arg);
 }
 
-/* pyspec_call_method(tp, index, self_or_cls, args, no_python=False): call
- * the ml_meth of method entry *index* of tp directly, bound to self_or_cls
- * (the class, for a class method), with positional args. */
+/* pyspec_no_python(func, args): func(*args) made as the uops that the
+ * facts say run no Python code make their call (_PySpec_CallNoPython1()):
+ * in debug builds, running Python code is a fatal error. */
 static PyObject *
-pyspec_call_method(PyObject *self, PyObject *args)
+pyspec_no_python(PyObject *self, PyObject *args)
 {
-    PyObject *tp, *self_or_cls, *callargs;
-    Py_ssize_t index;
-    int no_python = 0;
-    if (!PyArg_ParseTuple(args, "OnOO!|p", &tp, &index, &self_or_cls,
-                          &PyTuple_Type, &callargs, &no_python))
-    {
+    PyObject *func, *callargs;
+    if (!PyArg_ParseTuple(args, "OO!", &func, &PyTuple_Type, &callargs)) {
         return NULL;
     }
-    const _PySpecCall *call = pyspec_entry(tp, 1, index);
-    if (call == NULL) {
-        return NULL;
-    }
-    PyMethodDef *def = pyspec_method_def((PyTypeObject *)tp, call->func.meth);
-    if (def == NULL) {
-        PyErr_SetString(PyExc_SystemError, "method entry not in tp_methods");
-        return NULL;
-    }
-    int is_class = (def->ml_flags & METH_CLASS) != 0;
-    int ok = (is_class
-              ? (PyType_Check(self_or_cls) &&
-                 PyType_IsSubtype((PyTypeObject *)self_or_cls,
-                                  (PyTypeObject *)tp))
-              : PyObject_TypeCheck(self_or_cls, (PyTypeObject *)tp));
-    if (!ok) {
-        PyErr_Format(PyExc_TypeError, "bad self or cls %R for %s",
-                     self_or_cls, def->ml_name);
-        return NULL;
-    }
-    Py_ssize_t nargs = PyTuple_GET_SIZE(callargs);
-    /* The entry's nargs counts self for a method, not cls. */
-    if (nargs + (is_class ? 0 : 1) != call->nargs) {
-        PyErr_Format(PyExc_TypeError, "the entry takes %d arguments",
-                     (int)call->nargs);
-        return NULL;
-    }
-    PyObject *first = is_class ? PyTuple_GET_ITEM(callargs, 0) : self_or_cls;
-    if (pyspec_check_guard(call, first) < 0) {
-        return NULL;
-    }
-    int kind = def->ml_flags & (METH_VARARGS | METH_FASTCALL | METH_NOARGS |
-                                METH_O | METH_KEYWORDS);
-    PyObject *const *items = &PyTuple_GET_ITEM(callargs, 0);
     PyThreadState *tstate = PyThreadState_Get();
-    int saved = no_python ? _PySpec_EnterNoPython(tstate) : 0;
-    PyObject *res = NULL;
-    switch (kind) {
-        case METH_NOARGS:
-            if (nargs == 0) {
-                res = def->ml_meth(self_or_cls, NULL);
-            }
-            break;
-        case METH_O:
-            if (nargs == 1) {
-                res = def->ml_meth(self_or_cls, items[0]);
-            }
-            break;
-        case METH_FASTCALL:
-            res = _PyCFunctionFast_CAST(def->ml_meth)(self_or_cls, items,
-                                                      nargs);
-            break;
-        case METH_VARARGS:
-            res = def->ml_meth(self_or_cls, callargs);
-            break;
-        default:
-            break;
-    }
-    if (no_python) {
-        _PySpec_LeaveNoPython(tstate, saved);
-    }
-    if (res == NULL && !PyErr_Occurred()) {
-        PyErr_Format(PyExc_TypeError, "cannot call %s this way",
-                     def->ml_name);
-    }
+    int saved = _PySpec_EnterNoPython(tstate);
+    PyObject *res = PyObject_Call(func, callargs, NULL);
+    _PySpec_LeaveNoPython(tstate, saved);
     return res;
 }
 
+/* The C functions of the specs (@c_implemented) that test_pyspec_facts
+ * calls directly (HelperTest), a row each: the function and the shape of
+ * its C signature, "parameters->result" with O for PyObject * (or another
+ * object pointer), n for Py_ssize_t, s for const char * and i for int.
+ * The test checks each shape against the C signature in the spec. */
+typedef void (*pyspec_func)(void);
 
-/* The hand-written C functions of the specs (@c_implemented, see
- * Objects/pyspec/README.rst) that are not static: called directly, with
- * the arguments of args (None for NULL), for the difftest of their Python
- * references (Lib/test/test_pyspec_facts.py, HelperTest).  A result that
- * is NULL without an exception is None. */
+static const struct {
+    const char *name;
+    const char *shape;
+    pyspec_func func;
+} pyspec_helpers[] = {
+    {"_PyNumber_Index", "O->O", (pyspec_func)_PyNumber_Index},
+    {"PyNumber_AsSsize_t", "OO->n", (pyspec_func)PyNumber_AsSsize_t},
+    {"PyObject_LengthHint", "On->n", (pyspec_func)PyObject_LengthHint},
+    {"_PyObject_LookupSpecial", "OO->O",
+     (pyspec_func)_PyObject_LookupSpecial},
+    {"PyUnicode_AsEncodedString", "Oss->O",
+     (pyspec_func)PyUnicode_AsEncodedString},
+    {"_PyLong_IsCompact", "O->i", (pyspec_func)_PyLong_IsCompact},
+    {"_PyLong_CompactValue", "O->n", (pyspec_func)_PyLong_CompactValue},
+};
+
+/* pyspec_helper_shapes() -> {name: shape} of those. */
 static PyObject *
-pyspec_helper_call(const char *name, PyObject *args)
+pyspec_helper_shapes(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
-    Py_ssize_t n = PyTuple_GET_SIZE(args);
-    PyObject *a[2] = {NULL, NULL};
-    for (Py_ssize_t i = 0; i < n && i < 2; i++) {
-        a[i] = PyTuple_GET_ITEM(args, i);
-        a[i] = a[i] == Py_None ? NULL : a[i];
-    }
-#define ARGS(N) if (n != (N)) { goto bad; }
-    if (strcmp(name, "PyNumber_AsSsize_t") == 0) {
-        ARGS(2);
-        Py_ssize_t v = PyNumber_AsSsize_t(a[0], a[1]);
-        if (v == -1 && PyErr_Occurred()) {
-            return NULL;
+    PyObject *result = PyDict_New();
+    for (size_t i = 0; i < Py_ARRAY_LENGTH(pyspec_helpers); i++) {
+        PyObject *shape = PyUnicode_FromString(pyspec_helpers[i].shape);
+        if (result == NULL || shape == NULL ||
+            PyDict_SetItemString(result, pyspec_helpers[i].name, shape) < 0)
+        {
+            Py_CLEAR(result);
         }
-        return PyLong_FromSsize_t(v);
+        Py_XDECREF(shape);
     }
-    if (strcmp(name, "_PyNumber_Index") == 0) {
-        ARGS(1);
-        return _PyNumber_Index(a[0]);
-    }
-    if (strcmp(name, "PyObject_LengthHint") == 0) {
-        ARGS(2);
-        Py_ssize_t v = PyObject_LengthHint(a[0], PyLong_AsSsize_t(a[1]));
-        if (v == -1 && PyErr_Occurred()) {
-            return NULL;
-        }
-        return PyLong_FromSsize_t(v);
-    }
-    if (strcmp(name, "_PyObject_LookupSpecial") == 0) {
-        ARGS(2);
-        PyObject *res = _PyObject_LookupSpecial(a[0], a[1]);
-        if (res == NULL && !PyErr_Occurred()) {
-            Py_RETURN_NONE;
-        }
-        return res;
-    }
-    if (strcmp(name, "PyUnicode_AsEncodedString") == 0) {
-        if (n != 3) {
-            goto bad;
-        }
-        PyObject *enc = PyTuple_GET_ITEM(args, 1);
-        PyObject *err = PyTuple_GET_ITEM(args, 2);
-        return PyUnicode_AsEncodedString(
-            PyTuple_GET_ITEM(args, 0),
-            enc == Py_None ? NULL : PyUnicode_AsUTF8(enc),
-            err == Py_None ? NULL : PyUnicode_AsUTF8(err));
-    }
-    if (strcmp(name, "_PyLong_IsCompact") == 0) {
-        ARGS(1);
-        return PyBool_FromLong(_PyLong_IsCompact((PyLongObject *)a[0]));
-    }
-    if (strcmp(name, "_PyLong_CompactValue") == 0) {
-        ARGS(1);
-        return PyLong_FromSsize_t(
-            _PyLong_CompactValue((PyLongObject *)a[0]));
-    }
-#undef ARGS
-bad:
-    PyErr_Format(PyExc_ValueError, "no such helper call: %s/%zd", name, n);
-    return NULL;
+    return result;
 }
 
-/* pyspec_helper(name, args, no_python=False): see pyspec_helper_call().
- * name may also be a C callable (a method descriptor, a slot wrapper):
- * called with args.  With no_python, the call is in the "no Python"
- * tripwire. */
+typedef union {
+    PyObject *o;
+    Py_ssize_t n;
+    const char *s;
+    int i;
+} pyspec_arg;
+
+/* pyspec_helper(name, args, null): call the helper *name* of
+ * pyspec_helpers with args; an argument that is null is passed as NULL.
+ * A result that is NULL without an exception is None. */
 static PyObject *
 pyspec_helper(PyObject *self, PyObject *args)
 {
-    PyObject *name, *callargs;
-    int no_python = 0;
-    if (!PyArg_ParseTuple(args, "OO!|p", &name, &PyTuple_Type, &callargs,
-                          &no_python)) {
+    const char *name;
+    PyObject *callargs, *null;
+    if (!PyArg_ParseTuple(args, "sO!O", &name, &PyTuple_Type, &callargs,
+                          &null)) {
         return NULL;
     }
-    const char *cname = NULL;
-    if (PyUnicode_Check(name) && (cname = PyUnicode_AsUTF8(name)) == NULL) {
+    size_t row = 0;
+    while (row < Py_ARRAY_LENGTH(pyspec_helpers) &&
+           strcmp(pyspec_helpers[row].name, name) != 0) {
+        row++;
+    }
+    if (row == Py_ARRAY_LENGTH(pyspec_helpers)) {
+        PyErr_Format(PyExc_ValueError, "no such helper: %s", name);
         return NULL;
     }
-    PyThreadState *tstate = PyThreadState_Get();
-    int saved = no_python ? _PySpec_EnterNoPython(tstate) : 0;
-    PyObject *res = cname ? pyspec_helper_call(cname, callargs)
-                          : PyObject_Call(name, callargs, NULL);
-    if (no_python) {
-        _PySpec_LeaveNoPython(tstate, saved);
+    const char *shape = pyspec_helpers[row].shape;
+    pyspec_func f = pyspec_helpers[row].func;
+    const char *params_end = strchr(shape, '-');
+    Py_ssize_t nargs = params_end - shape;
+    pyspec_arg a[3];
+    if (nargs > 3 || PyTuple_GET_SIZE(callargs) != nargs) {
+        PyErr_Format(PyExc_TypeError, "%s takes %zd arguments", name, nargs);
+        return NULL;
+    }
+    for (Py_ssize_t k = 0; k < nargs; k++) {
+        PyObject *arg = PyTuple_GET_ITEM(callargs, k);
+        int is_null = arg == null;
+        switch (shape[k]) {
+            case 'O':
+                a[k].o = is_null ? NULL : arg;
+                break;
+            case 'n':
+                a[k].n = PyLong_AsSsize_t(arg);
+                if (a[k].n == -1 && PyErr_Occurred()) {
+                    return NULL;
+                }
+                break;
+            case 's':
+                a[k].s = is_null ? NULL : PyUnicode_AsUTF8(arg);
+                if (!is_null && a[k].s == NULL) {
+                    return NULL;
+                }
+                break;
+            default:
+                Py_UNREACHABLE();
+        }
+    }
+    PyObject *res = NULL;
+    Py_ssize_t n = -1;
+    if (strcmp(shape, "O->O") == 0) {
+        res = ((PyObject *(*)(PyObject *))f)(a[0].o);
+    }
+    else if (strcmp(shape, "OO->O") == 0) {
+        res = ((PyObject *(*)(PyObject *, PyObject *))f)(a[0].o, a[1].o);
+    }
+    else if (strcmp(shape, "Oss->O") == 0) {
+        res = ((PyObject *(*)(PyObject *, const char *, const char *))f)(
+            a[0].o, a[1].s, a[2].s);
+    }
+    else if (strcmp(shape, "OO->n") == 0) {
+        n = ((Py_ssize_t (*)(PyObject *, PyObject *))f)(a[0].o, a[1].o);
+    }
+    else if (strcmp(shape, "On->n") == 0) {
+        n = ((Py_ssize_t (*)(PyObject *, Py_ssize_t))f)(a[0].o, a[1].n);
+    }
+    else if (strcmp(shape, "O->n") == 0) {
+        n = ((Py_ssize_t (*)(PyObject *))f)(a[0].o);
+    }
+    else if (strcmp(shape, "O->i") == 0) {
+        n = ((int (*)(PyObject *))f)(a[0].o);
+    }
+    else {
+        PyErr_Format(PyExc_SystemError, "no caller for the shape %s", shape);
+        return NULL;
+    }
+    if (shape[nargs + 2] != 'O') {
+        if (n == -1 && PyErr_Occurred()) {
+            return NULL;
+        }
+        return PyLong_FromSsize_t(n);
+    }
+    if (res == NULL && !PyErr_Occurred()) {
+        Py_RETURN_NONE;
     }
     return res;
 }
@@ -3885,12 +3887,14 @@ static PyMethodDef module_functions[] = {
 #endif
     GH_119213_GETARGS_METHODDEF
     {"get_static_builtin_types", get_static_builtin_types, METH_NOARGS},
+    {"pyspec_classes", pyspec_classes, METH_NOARGS},
     {"pyspec_table", pyspec_table, METH_O},
     {"pyspec_find_call", pyspec_find_call, METH_VARARGS},
     {"pyspec_find_method", pyspec_find_method, METH_VARARGS},
     {"pyspec_find_slot", pyspec_find_slot, METH_VARARGS},
     {"pyspec_call", pyspec_call, METH_VARARGS},
-    {"pyspec_call_method", pyspec_call_method, METH_VARARGS},
+    {"pyspec_no_python", pyspec_no_python, METH_VARARGS},
+    {"pyspec_helper_shapes", pyspec_helper_shapes, METH_NOARGS},
     {"pyspec_helper", pyspec_helper, METH_VARARGS},
     {"identify_type_slot_wrappers", identify_type_slot_wrappers, METH_NOARGS},
     {"has_deferred_refcount", has_deferred_refcount, METH_O},
