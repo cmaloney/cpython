@@ -68,7 +68,7 @@ typedef struct {
 #define _PySpec_SLOT(MEMBER) ((uint16_t)offsetof(PyHeapTypeObject, MEMBER))
 
 /* The facts of a slot of a spec'd class that has a Python reference (a
- * @c_implemented dunder), for self of exactly that class: the facts of
+ * @native dunder), for self of exactly that class: the facts of
  * calling the special method, e.g. b[i] for bytes.__getitem__.  In
  * facts, nargs counts self, arg_type is the exact type of the argument
  * after self (NULL: any), and func is not used. */

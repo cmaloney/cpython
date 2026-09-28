@@ -560,7 +560,7 @@ FACTS = [
 # -- the hand-written C functions ------------------------------------------
 #
 # HELPERS (test_pyspec_facts HelperTest): the inputs of each C function of
-# the spec with a Python reference (@c_implemented) that can be called
+# the spec with a Python reference (@native) that can be called
 # from Python, as its reference takes them (a function making them when
 # they must be fresh); NULL is C NULL.  An exported function is called
 # through ctypes; a dunder through the slot wrapper of TYPES;

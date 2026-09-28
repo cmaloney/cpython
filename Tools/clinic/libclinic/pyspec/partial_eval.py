@@ -9,7 +9,7 @@ Python subset the C emitter accepts.  Facts about builtin types come
 from the spec and from builtin_types.py, never from the Python running
 Argument Clinic.
 
-Calls of hand-written C functions.  A @c_implemented function is
+Calls of hand-written C functions.  A @native function is
 evaluated through its Python reference, for the facts of the call
 (facts.py):
 
@@ -376,7 +376,7 @@ def _with_call(stmt, value):
 
 
 def fast_paths(spec, name):
-    """(test, value, parameters) of the fast paths of @c_implemented
+    """(test, value, parameters) of the fast paths of @native
     function *name* of *spec*: its leading ``if test: return value``.
     A reference facts.py cannot follow has none (subset.analysed())."""
     out = []
@@ -480,7 +480,7 @@ class Evaluator:
 
     def c_statement(self, stmt, env):
         """*stmt* (see _top_call()) with the facts of its call of a
-        @c_implemented function: (statements, env).  See "Calls of
+        @native function: (statements, env).  See "Calls of
         hand-written C functions" in the module docstring."""
         call = _top_call(stmt)
         found = call and self.spec.c_function(call)
@@ -627,7 +627,7 @@ class Evaluator:
         return out
 
     def mark(self, node, env):
-        """Mark the calls of @c_implemented functions in *node* (a
+        """Mark the calls of @native functions in *node* (a
         condition or a raise) with their facts for the emitter
         (pyspec_raises, pyspec_null)."""
         for child in ast.walk(node):
@@ -968,7 +968,7 @@ def presize(spec, stmts):
                     lengths[target] = arg
                     continue
                 if (arg in lengths and found
-                        and frontend.is_c_implemented(found[1])
+                        and frontend.is_native(found[1])
                         and frontend.is_struct(
                             frontend.c_signature(found[1])[1])):
                     capacity[target] = lengths[arg]     # init(len(seq))

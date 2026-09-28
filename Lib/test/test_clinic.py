@@ -5711,11 +5711,11 @@ class PyspecTest(PyspecTestBase):
                         return cls(result)
                     return result
 
-            @c_implemented
+            @native
             def bytes_copy(b: object):
                 return exact(bytes, bytes(b))
 
-            @c_implemented
+            @native
             def _PyBytes_FromHex(string: object, use_bytearray: int):
                 calls(string, "__buffer__")
                 return exact(bytes, bytes.fromhex(string))
@@ -5781,8 +5781,8 @@ class PyspecTest(PyspecTestBase):
                       "}\n"
                       "#endif /* defined(CONDITION) */\n", output)
 
-    def test_c_implemented(self):
-        # A @c_implemented function: C by hand, never generated.  Its
+    def test_native(self):
+        # A @native function: C by hand, never generated.  Its
         # annotations are C types; the error check of a call comes from
         # what its Python reference can do.
         spec = dedent("""
@@ -5795,20 +5795,20 @@ class PyspecTest(PyspecTestBase):
                         return pair(a, "__name__")
                     return a
 
-            @c_implemented
+            @native
             def PyErr_BadInternalCall() -> None:
                 raise SystemError("bad argument")
 
-            @c_implemented
+            @native
             def size_of(x: object) -> Py_ssize_t:
                 calls(x, "__len__")
                 return len(x)
 
-            @c_implemented
+            @native
             def at_most(n: Py_ssize_t, m: 'long') -> int:
                 return n <= m
 
-            @c_implemented
+            @native
             def pair(x: object, name: object):
                 if x is NULL:
                     return NULL
@@ -5829,16 +5829,16 @@ class PyspecTest(PyspecTestBase):
         # The facts of the call table come from the references too.
         self.assertIn("/* bytes(x): result type not known exactly; may run "
                       "Python code */", output)
-        self.check_error_c_implemented()
+        self.check_error_native()
 
-    def check_error_c_implemented(self):
+    def check_error_native(self):
         spec = dedent(self.SPEC) + dedent("""
-            @c_implemented
+            @native
             def f(x: object):
                 ...
         """)
         self.expect_failure(spec, self.BLOCK, "f: the body of a "
-                            "@c_implemented function is its Python "
+                            "@native function is its Python "
                             "reference")
 
     def test_missing_block(self):
@@ -6523,7 +6523,7 @@ class PyspecStubTest(PyspecTestBase):
             "@critical_section is expressible, but not lowered to C yet; "
             'see "The lowered subset" in Objects/pyspec/README.rst; a '
             "hand-written C function keeps this as its Python reference "
-            "with @c_implemented", 3)
+            "with @native", 3)
         self.assertEqual(exc.kind, SpecErrorKind.NOT_LOWERED)
         # So is a syntax error.
         self.expect_located_failure("class bytes:\n  def f(self):\n"
@@ -6792,8 +6792,8 @@ class PyspecTypeTest(PyspecTestBase):
             class bytes:
                 @cname("bytes_r")
                 def __repr__(self, /): ...
-        """, "bytes.__repr__: a slot takes only @c_implemented and "
-             "@c_name and @coexist and @text_signature, not "
+        """, "bytes.__repr__: a slot takes only @c_name and "
+             "@coexist and @native and @text_signature, not "
              "@cname('bytes_r')")
         self.check_error("""
             class bytes:
@@ -6801,8 +6801,8 @@ class PyspecTypeTest(PyspecTestBase):
                 @permit_long_summary
                 @c_name(METH_NOARGS="f")
                 def meth(self, /): ...
-        """, "bytes.meth: a PyCFunction takes only @c_implemented and "
-             "@c_name and @classmethod and @coexist and @staticmethod and "
+        """, "bytes.meth: a PyCFunction takes only @c_name and "
+             "@classmethod and @coexist and @native and @staticmethod and "
              "@text_signature, not @permit_long_summary")
         # @classmethod is METH_CLASS.
         header = self.types_header("""
@@ -7756,12 +7756,12 @@ class PyspecLanguageTest(PyspecTestBase):
         """, self.blocks(stubs[0]), "bytes.nbytes(): an accessor with a "
                                     "body is expressible, but not lowered")
 
-    def test_c_implemented_method(self):
+    def test_native_method(self):
         # A clinic method whose C is written by hand, with a Python
         # reference in any Python and any signature: plain clinic output.
         self.check("""
             class bytes:
-                @c_implemented
+                @native
                 def meth(self, *args: tuple, sep: object = None):
                     '''Summary.'''
                     out = []
@@ -7887,7 +7887,7 @@ class PyspecLanguageTest(PyspecTestBase):
          "value 'x' (lowered: names, NULL, types, exceptions, bool and int "
          "constants)", 2),
         ("def __new__(cls, a: object, /):\n    return exact(bytes, a)",
-         "exact() outside the Python reference of a @c_implemented "
+         "exact() outside the Python reference of a @native "
          "function", 2),
         ("@staticmethod\ndef meth(a: object, /):\n    return a",
          "@staticmethod", 1),
@@ -7913,7 +7913,7 @@ class PyspecLanguageTest(PyspecTestBase):
                     'lowered to C yet; see "The lowered subset" in '
                     "Objects/pyspec/README.rst; a hand-written C function "
                     "keeps this as its Python reference with "
-                    "@c_implemented", line + 1)
+                    "@native", line + 1)
                 self.assertEqual(exc.kind, SpecErrorKind.NOT_LOWERED)
 
     def test_all_not_lowered(self):
@@ -7938,7 +7938,7 @@ class PyspecLanguageTest(PyspecTestBase):
             spec = pyspec_frontend.Spec.load(path)
             for name, node in spec.functions.items():
                 with self.subTest(spec=path, function=name):
-                    if pyspec_frontend.is_c_implemented(node):
+                    if pyspec_frontend.is_native(node):
                         self.assertEqual(
                             pyspec_subset.analysed(spec, name), [])
                     elif spec.implemented(name):
@@ -7948,20 +7948,20 @@ class PyspecLanguageTest(PyspecTestBase):
     # -- facts: the worst case outside the subset -------------------------------
 
     REFERENCES = """
-        @c_implemented
+        @native
         def model(x: object):
             n = 0
             while n < 3:
                 n += 1
             return exact(bytes, bytes(n))
 
-        @c_implemented
+        @native
         def effect_in_loop(x: object):
             while x:
                 calls(x, "__len__")
             return exact(bytes, x)
 
-        @c_implemented
+        @native
         def nested_effect(x: object):
             return exact(bytes, unknown(x))
     """
@@ -8018,7 +8018,7 @@ class PyspecLanguageTest(PyspecTestBase):
         other = os.path.join(self.tmp_dir, 'pyspec', 'other.py')
         with open(other, 'w', encoding='utf-8') as f:
             f.write(dedent("""\
-                @c_implemented
+                @native
                 def helper(x: object):
                     if type(x) is bytes:
                         return x.upper()

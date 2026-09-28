@@ -40,7 +40,7 @@ writes it; there is no separate command):
     - _PySpec_MAY_RUN_PYTHON: some call on a path may run Python code.
 
 * ``const _PySpecSlot <class>_spec_slots[]``: the facts of the slots of
-  the class that have a Python reference (``@c_implemented`` dunders:
+  the class that have a Python reference (``@native`` dunders:
   bytes.__getitem__, bytes_iterator.__next__), for self of exactly the
   class: per slot, a generic entry, and an entry per exact type of the
   argument after self whose facts differ from it (unless it always
@@ -156,7 +156,7 @@ def _entry(comment, nargs, facts, const, arg_type, func, arg_names=()):
 def table_classes(spec):
     """The classes of *spec* that get a call table, in the order of the
     spec: those with a __new__ or a method implemented by the spec, or a
-    slot with a Python reference (a @c_implemented dunder).
+    slot with a Python reference (a @native dunder).
 
     Only the syntax of the spec decides, so that the registry lists
     exactly the tables generate() defines without generating them."""
@@ -169,7 +169,7 @@ def table_classes(spec):
             node = spec.functions.get(name)
             if spec.implemented(name) or (
                     node is not None and slots.is_slot(meth)
-                    and frontend.is_c_implemented(node)):
+                    and frontend.is_native(node)):
                 out.append(cls_name)
                 break
     return out
@@ -405,7 +405,7 @@ def generate_slots(generator, cls_name, type_object):
     analyzer = facts.analyzer(spec)
     tp = builtin_types.by_name(cls_name)
     entries = []
-    for name in spec.c_implemented_functions():
+    for name in spec.native_functions():
         owner, _, dunder = name.rpartition('.')
         if owner != cls_name or not slots.is_slot(dunder):
             continue

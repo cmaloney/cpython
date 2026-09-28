@@ -5,7 +5,7 @@ For Objects/foo.c, Objects/pyspec/foo.py is its spec:
   frontend      reads the spec; turns a spec method into the clinic input
                 of the one-line clinic block naming it in the C file
   runtime       names a spec imports, with their meaning as Python: the
-                builtins with a C meaning, @c_implemented and the
+                builtins with a C meaning, @native and the
                 primitives exact(), unknown(), calls(), runs_python();
                 load() runs a spec as Python (for tests)
   subset        the lowered subset: what of a spec is generated as C and

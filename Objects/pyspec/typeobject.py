@@ -1,15 +1,15 @@
 """Spec of Objects/typeobject.c: the functions other specs call.
 
-Each is @c_implemented: the C is the authority; the body is its Python
+Each is @native: the C is the authority; the body is its Python
 reference (see Objects/pyspec/README.rst).
 """
 
 import inspect
 
-from libclinic.pyspec.runtime import NULL, c_implemented, calls, unknown
+from libclinic.pyspec.runtime import NULL, native, calls, unknown
 
 
-@c_implemented
+@native
 def _PyObject_LookupSpecial(obj: object, name: object):
     """The attribute name of type(obj), bound to obj by its __get__ (if
     it has one); NULL, not an error, when type(obj) has none."""

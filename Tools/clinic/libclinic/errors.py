@@ -49,7 +49,7 @@ class SpecErrorKind(enum.Enum):
 SPEC_ERROR_HINTS = {
     SpecErrorKind.NOT_LOWERED: (
         f'see "The lowered subset" in {PYSPEC_README}; a hand-written C '
-        'function keeps this as its Python reference with @c_implemented'),
+        'function keeps this as its Python reference with @native'),
 }
 
 

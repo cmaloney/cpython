@@ -1,6 +1,6 @@
 """Spec of Objects/abstract.c: the functions other specs call.
 
-Each is @c_implemented: the C is the authority; the body is its Python
+Each is @native: the C is the authority; the body is its Python
 reference, run when a spec runs as Python and read for the facts of its
 calls (see Objects/pyspec/README.rst).  A leading ``if <test>: return
 <value>`` is a fast path: where a call knows the test holds, Argument
@@ -10,7 +10,7 @@ Clinic writes the value instead of the call.
 import operator
 
 from libclinic.pyspec.runtime import (
-    NULL, PY_SSIZE_T_MAX, c_implemented, calls, isinstance, runs_python,
+    NULL, PY_SSIZE_T_MAX, native, calls, isinstance, runs_python,
     tp_name)
 
 from Include.cpython.pyspec.longintrepr import (
@@ -18,7 +18,7 @@ from Include.cpython.pyspec.longintrepr import (
 from pyspec.typeobject import _PyObject_LookupSpecial
 
 
-@c_implemented
+@native
 def _PyNumber_Index(o: object):
     """o itself if it is an int, else o.__index__(), which must return an
     int."""
@@ -36,7 +36,7 @@ def _PyNumber_Index(o: object):
     return operator.index(o)
 
 
-@c_implemented
+@native
 def PyNumber_AsSsize_t(o: object, exc: object) -> Py_ssize_t:
     """o (with its __index__) as a Py_ssize_t: exc is raised when it does
     not fit, or, when exc is NULL, the nearest bound is returned."""
@@ -51,7 +51,7 @@ def PyNumber_AsSsize_t(o: object, exc: object) -> Py_ssize_t:
               "integer")
 
 
-@c_implemented
+@native
 def PyObject_LengthHint(o: object, defaultvalue: Py_ssize_t) -> Py_ssize_t:
     """len(o), else o.__length_hint__(), else defaultvalue: a TypeError
     from either means it has none."""

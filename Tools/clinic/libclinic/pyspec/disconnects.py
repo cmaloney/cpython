@@ -19,7 +19,7 @@ slots       The slot tables of Doc/c-api/typeobj.rst vs slotdefs[] in
 docstrings  The same docstring written by hand in two places.
 typeshed    Optional: typeshed's stdlib/builtins.pyi vs the signatures of
             the spec (the runtime's for methods without a spec).
-c_calls     The C of each @c_implemented function vs its Python reference:
+c_calls     The C of each @native function vs its Python reference:
             every call that may run Python code (by the token-level escape
             analysis of Tools/cases_generator/analyzer.py) is accounted for
             by the reference: a call of the same function, a calls() of
@@ -752,7 +752,7 @@ def typeshed(srcdir, typeshed_dir):
 
 
 # ---------------------------------------------------------------------------
-# Dimension: the C of the @c_implemented functions
+# Dimension: the C of the @native functions
 
 # C functions that run Python code only through a special method of an
 # argument: the calls(x, "__name__") that accounts for them.  A call
@@ -868,7 +868,7 @@ def _spec_files(srcdir):
 
 
 def c_calls(srcdir):
-    """For each @c_implemented function: every call in its C (and in the
+    """For each @native function: every call in its C (and in the
     functions of its file it calls) that may run Python code is one its
     Python reference makes, a calls(x, "__name__") of the special method
     it invokes, or covered by runs_python()."""
@@ -884,7 +884,7 @@ def c_calls(srcdir):
     dunders['tp_descr_get'] = {'__get__'}
     specs = [frontend.Spec.load(path) for path in _spec_files(srcdir)]
     implemented = {name for spec in specs
-                   for name in spec.c_implemented_functions()}
+                   for name in spec.native_functions()}
     out = []
     for spec in specs:
         rel = os.path.relpath(spec.filename, srcdir).replace(os.sep, '/')
@@ -896,7 +896,7 @@ def c_calls(srcdir):
         if cfile is None:
             continue
         text = _LITERALS.sub(_blank, _read(srcdir, cfile))
-        for name in spec.c_implemented_functions():
+        for name in spec.native_functions():
             node = spec.functions[name]
             positional, keywords = spec.c_name(name)
             c_name = positional or next(iter(keywords.values()), name)

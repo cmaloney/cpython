@@ -3636,7 +3636,7 @@ pyspec_no_python(PyObject *self, PyObject *args)
     return res;
 }
 
-/* The C functions of the specs (@c_implemented) that test_pyspec_facts
+/* The C functions of the specs (@native) that test_pyspec_facts
  * calls directly (HelperTest), a row each: the function and the shape of
  * its C signature, "parameters->result" with O for PyObject * (or another
  * object pointer), n for Py_ssize_t, s for const char * and i for int.

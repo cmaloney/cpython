@@ -20,7 +20,7 @@ Every implemented spec function becomes a C function:
     internal header declares them); everything else is static.
 
 Functions whose body is only a docstring and/or ``...`` (stubs,
-frontend.is_stub()) and @c_implemented functions are C written by hand:
+frontend.is_stub()) and @native functions are C written by hand:
 they are never lowered to C, only called.
 
 For a __new__ implemented by the spec, call_table.py then adds
@@ -48,7 +48,7 @@ Conditions:
   f(...) (a C function that cannot fail), integer comparisons,
   and/or/not
 Calls (result is a new reference, or the C type of a C function):
-  f(...) for a hand-written C function f (@c_implemented, or ``...``),
+  f(...) for a hand-written C function f (@native, or ``...``),
   iter(x), len(x) of an exact list or tuple, f() for an object
   variable f, f(x) for an object or type variable f (e.g. cls(result)),
   <spec function>(...), T.<spec method>(...)
@@ -275,7 +275,7 @@ class FunctionEmitter:
         if found is None:
             return None
         spec, node = found
-        if frontend.is_c_implemented(node):
+        if frontend.is_native(node):
             params, returns = frontend.c_signature(node)
             return node.name, [ctype for _, ctype in params], returns
         # A stub: objects in, an object out.

@@ -273,7 +273,7 @@ Level 3: spec bodies
 ''''''''''''''''''''
 
 *Needs:* a body in the subset of `README.rst <README.rst>`__ instead of
-``...``; every C function the body calls declared ``@c_implemented``,
+``...``; every C function the body calls declared ``@native``,
 with its Python reference, in the spec of its own C file; cases in
 ``foo_cases.py``; each new helper in ``HelperTest`` of
 ``test_pyspec_facts``.  Only ``object`` and ``str`` parameters (and
@@ -335,7 +335,7 @@ iterate over.  In ``foo_cases.py``:
   (``class T "..." "&T_Type"``);
 - [ ] ``CASES["T.__new__"]`` and ``CASES["T.meth"]`` have inputs for every
   call-table entry (``DirectCallTest`` fails on an entry none reaches);
-- [ ] ``HELPERS`` has inputs for every ``@c_implemented`` function, or it
+- [ ] ``HELPERS`` has inputs for every ``@native`` function, or it
   is in ``NOT_CALLABLE`` (static) or ``HELPER_CALLERS`` (hidden: its C
   entry point); an exported or header one also needs its row in
   ``pyspec_helpers`` of ``Modules/_testinternalcapi.c`` (its signature
@@ -415,7 +415,7 @@ When not to migrate a function's internals (level 3): when nothing in
 section 3 comes out positive.  In practice: a method whose call
 overhead is a small part of its cost (most ``bytes`` methods: 0 to 8 %,
 WS6); logic that needs ``Py_buffer``, a struct, pointer arithmetic or a
-loop over raw memory (it ends up in ``@c_implemented`` helpers, so the
+loop over raw memory (it ends up in ``@native`` helpers, so the
 C just moves); anything whose fact has no consumer.  Levels 1 and 2
 cost no speed and apply to any class without the features above; level
 3 only where it pays.
@@ -571,7 +571,7 @@ The candidate: two methods whose C is a type-dispatch shell around a
             return self
         return bytes_copy(self)
 
-with three ``@c_implemented`` helpers in C (``bytes_prefix_len``,
+with three ``@native`` helpers in C (``bytes_prefix_len``,
 ``bytes_suffix_len``, ``bytes_trim``).  The first attempt kept the
 parameter ``prefix: Py_buffer`` and clinic refused it (``parameter
 'prefix' needs an annotation from ['object', 'str']``), so the buffer
@@ -644,19 +644,19 @@ line.  The common ones:
     The signature or the body of a function clinic would generate is
     outside the lowered subset of README.rst: a converter other than
     ``object`` and ``str`` (take ``object`` and convert in a
-    ``@c_implemented`` helper, see the worked example: that changes the
+    ``@native`` helper, see the worked example: that changes the
     generated parser), a default other than ``NULL``, a keyword-only
     parameter, a statement or expression the table does not list
     (assign a call to a local before comparing it).  Or keep the C:
-    ``...``, or ``@c_implemented`` with the body as its reference.
+    ``...``, or ``@native`` with the body as its reference.
 ``unsupported ...`` (the same hint)
     A use the partial evaluation produced that the emitter cannot lower
     yet, e.g. a fast path of a reference in another spec (reported
     there).
 ``m: use ... as the body of a function implemented in C, not pass``
     Write ``...``.
-``the body of a @c_implemented function is its Python reference``
-    Give the reference a body, or drop ``@c_implemented``.
+``the body of a @native function is its Python reference``
+    Give the reference a body, or drop ``@native``.
 ``'T.x' is an accessor in ...: its block starts with @getter or @setter``
     Write ``@getter`` (or ``@setter``) above ``T.x`` in the block.
 ``conflicting types for 'x_impl'`` (C compiler)
@@ -667,7 +667,7 @@ A difftest failure on an exception message
     The reference does not model the C's error: raise the same
     exception and message in the reference.
 ``calls f(), which may run Python code: account for it with runs_python()`` (``test_pyspec_catalog``)
-    The C of a ``@c_implemented`` helper calls ``f``.  If ``f`` can run
+    The C of a ``@native`` helper calls ``f``.  If ``f`` can run
     Python code, add ``calls(x, "__slot__")`` or ``runs_python()`` to
     the reference.  If it cannot (``memcmp``), add it to the audited
     ``NO_PYTHON`` set of ``disconnects.py``.

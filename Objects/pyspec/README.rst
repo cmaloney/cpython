@@ -55,7 +55,7 @@ Add a C method              A ``def`` with body ``...`` in the spec, at its
 Add a spec-body method      The same ``def`` with a body in the lowered
                             subset (below), the same one-line block (no C
                             body); add cases to ``foo_cases.py``.
-Keep a method's C, with     ``@c_implemented`` on the ``def``: any
+Keep a method's C, with     ``@native`` on the ``def``: any
 its Python reference        signature, any Python body; clinic output is
                             that of ``...``.
 Add an accessor             ``@getter def attr(self) -> conv:`` (its
@@ -65,7 +65,7 @@ Add an accessor             ``@getter def attr(self) -> conv:`` (its
                             ``T.attr``.  ``tp_getset`` stays in C.
 Call a C function from a    Call it by name.  Declare it, if no spec does
 spec body                   yet, in the spec of its C file, with
-                            ``@c_implemented`` and its Python reference
+                            ``@native`` and its Python reference
                             (below), and import it (``from pyspec.abstract
                             import PyObject_LengthHint``); add its inputs
                             to ``HELPERS`` of the ``_cases.py`` of its
@@ -75,7 +75,7 @@ Add or rename a slot        ``def __len__(self, /): ...`` in the class,
                             function is not ``<class>_<slot>`` without the
                             slot's prefix (``bytes_repr``); write the C
                             function with the slot's typedef.
-Give the optimizer the      ``@c_implemented`` on the slot, with its Python
+Give the optimizer the      ``@native`` on the slot, with its Python
 facts of a slot             reference (``bytes.__getitem__``); add inputs
                             to ``HELPERS`` in ``foo_cases.py``.  Clinic
                             puts its facts in the call table of the class;
@@ -153,7 +153,7 @@ Decorators
 * ``@c_name(METH_NOARGS="f")``, ``@c_name(METH_O="f")``,
   ``METH_VARARGS``, ``METH_FASTCALL``: a hand-written PyCFunction entry
   (``Spec.pycfunction()`` in ``frontend.py``).
-* ``@c_implemented``: the C is written by hand and the body is its Python
+* ``@native``: the C is written by hand and the body is its Python
   reference (below); on a clinic method, clinic generates what it does
   for ``...``.
 * ``@getter``, ``@setter`` (and ``@deleter`` after ``@setter``): an
@@ -190,7 +190,7 @@ with the ``ast`` module; the tests run it.
   plain clinic.
 * A body is any Python.  ``...`` (or only a docstring, not ``pass``) is
   a C implementation about which nothing is known: a call of it may do
-  anything.  With ``@c_implemented`` the body is the Python reference of
+  anything.  With ``@native`` the body is the Python reference of
   C written by hand (below).  Any other body is generated as C, and must
   be in the lowered subset.
 
@@ -202,7 +202,7 @@ part of the language, checked by ``Tools/clinic/libclinic/pyspec/subset.py``
 before anything else.  Outside it, clinic says where and what:
 ``foo.py:12: error: bytes.__new__(): while loop '...' is expressible, but
 not lowered to C yet``.  Keep the C by hand then: ``...``, or
-``@c_implemented`` with the body as its Python reference.
+``@native`` with the body as its Python reference.
 
 ========================  ================================================
 Signature                 a top-level function, ``__new__`` (of a type
@@ -231,7 +231,7 @@ Conditions                ``x is [not] NULL``, ``(v := call(...)) is
 Values                    names, ``NULL``, types, exception classes,
                           ``bool`` and ``int`` constants; a ``str``
                           constant as the argument of a C function
-Calls                     C functions by name (``@c_implemented``, or
+Calls                     C functions by name (``@native``, or
                           ``...``), other spec functions (``f(...)``,
                           ``T.meth(...)``), ``iter(x)``, ``len(x)`` of
                           an exact list or tuple, a local object or
@@ -239,7 +239,7 @@ Calls                     C functions by name (``@c_implemented``, or
                           ``cls(x)``)
 ========================  ================================================
 
-In a Python reference (``@c_implemented``), the facts follow the same
+In a Python reference (``@native``), the facts follow the same
 control flow; any other code is the model of a value and must have no
 effect (no primitive, no call of a C or spec function, no ``return`` or
 ``raise``) where they cannot see it, e.g. in a ``while`` loop or in the
@@ -283,11 +283,11 @@ method is where its block is in the C file.
 * The tests skip a method whose block is under an ``#if`` false in this
   build.
 
-C functions: ``@c_implemented``
--------------------------------
+C functions: ``@native``
+------------------------
 
 A C function written by hand that spec bodies call is a function of the
-spec of its file, decorated ``@c_implemented``: the C is the authority, and
+spec of its file, decorated ``@native``: the C is the authority, and
 the body is its *Python reference*.  The reference runs when a spec runs
 as Python (the difftest), and Argument Clinic reads it for the facts of
 each call: the exact type of the result, whether it can raise, and whether
@@ -296,7 +296,7 @@ never compiled.  Its annotations are its C types (``object``, ``str``,
 ``int``, ``Py_ssize_t``, ``None``, or the C type as a string,
 ``'PyTypeObject *'``)::
 
-    @c_implemented
+    @native
     def _PyBytes_FromBuffer(x: object):
         """A copy of the buffer of x (in C order)."""
         calls(x, "__buffer__")

@@ -12,7 +12,7 @@ uses:
   names in error messages);
 * the Argument Clinic decorators, and ``@c_name`` (frontend.py,
   typeobj.py): identity decorators for Python;
-* ``@c_implemented`` and a few primitives that say what plain Python
+* ``@native`` and a few primitives that say what plain Python
   cannot, placed where the effect happens, so that the control flow
   around them gives their conditions (see Objects/pyspec/README.rst):
 
@@ -41,7 +41,7 @@ _F = TypeVar('_F', bound=Callable[..., Any])
 
 __all__ = [
     'NULL', 'PY_SSIZE_T_MAX', 'isinstance', 'iter', 'tp_name', 'fqname',
-    'c_implemented', 'exact', 'unknown', 'calls', 'runs_python',
+    'native', 'exact', 'unknown', 'calls', 'runs_python',
 ]
 
 
@@ -91,7 +91,7 @@ def c_name(*args: str, **kwargs: str) -> Callable[[_F], _F]:
     return lambda func: func
 
 
-def c_implemented(func: _F) -> _F:
+def native(func: _F) -> _F:
     """The C function of the same name is written by hand and is the
     authority; the body is its Python reference: run when the spec runs
     as Python, and read for the facts of its calls.  It is never lowered
@@ -172,7 +172,7 @@ def load(path: str) -> dict[str, Callable[..., Any]]:
     the spec has run, the global T is the builtin again: bodies compare
     with the real type.  Calls ``T.m(...)`` of spec methods call the spec
     method, as in the generated C (except in the Python reference of a
-    @c_implemented function, which uses the builtin).  The specs it
+    @native function, which uses the builtin).  The specs it
     imports (``from pyspec.abstract import PyNumber_AsSsize_t``) are found
     relative to the directory of the C file, or to the source root
     (frontend.py).
@@ -198,7 +198,7 @@ def load(path: str) -> dict[str, Callable[..., Any]]:
             # The Python reference of a C function models it with the
             # builtins.
             if any(builtins.isinstance(d, ast.Name)
-                   and d.id == 'c_implemented'
+                   and d.id == 'native'
                    for d in node.decorator_list):
                 return node
             return self.generic_visit(node)

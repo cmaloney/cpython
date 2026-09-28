@@ -10,7 +10,7 @@ A spec may contain any Python.  Only part of it is *wired up*:
   Its signature and its statements must be in the lowered subset;
   lowered() lists what is not, and check_lowered() reports the first as
   "expressible, but not lowered to C yet", before any partial evaluation;
-* the Python reference of a hand-written C function (``@c_implemented``)
+* the Python reference of a hand-written C function (``@native``)
   is never lowered, but read for facts (facts.py): its control flow is
   followed, and every effect (a call of a primitive or of a C function,
   ``return``, ``raise``) must be where facts.py and partial_eval.py
@@ -374,7 +374,7 @@ class Lowered:
             self.arguments(call, strings=False)
         elif (isinstance(func, ast.Name) and func.id in PRIMITIVES):
             self.unsupported(call, f'{func.id}() outside the Python '
-                             'reference of a @c_implemented function')
+                             'reference of a @native function')
         else:
             self.unsupported(call, f'call {_text(call)} (lowered: of C '
                              'functions, spec functions, iter(), len(), '
@@ -408,7 +408,7 @@ def _type_objects() -> dict[str, str]:
 # -- the Python reference of a C function ---------------------------------------
 
 class Analysed:
-    """What facts.py follows in the Python reference of a @c_implemented
+    """What facts.py follows in the Python reference of a @native
     function: control flow of the lowered subset, with every effect where
     facts.py accounts for it; any other code is a model of the values the
     C computes (facts.py: it has no effects), and must have none.
@@ -523,7 +523,7 @@ def lowered(spec: Spec, name: str) -> list[Unsupported]:
 
 
 def analysed(spec: Spec, name: str) -> list[Unsupported]:
-    """What of the Python reference of @c_implemented function *name*
+    """What of the Python reference of @native function *name*
     facts.py cannot follow, in order: if anything, its facts are the
     worst."""
     cache = _analysed_cache.setdefault(spec, {})
