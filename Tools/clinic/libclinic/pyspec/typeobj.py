@@ -338,22 +338,18 @@ class TypeGenerator:
             kind = spec.method_kind(name)
             if kind == SLOT:
                 dunders.append(meth)
-                if spec.pycfunction(name) is not None:
-                    # Also in the method table (METH_COEXIST).
-                    doc, c_func, flag, doc_name = self._pycfunction(
-                        spec, name, meth, 'slot')
-                    docs += doc
-                    table.append(_method_def(meth, c_func, flag, doc_name))
-            elif kind == PYCFUNCTION:
-                doc, c_func, flag, doc_name = self._pycfunction(spec, name,
-                                                                meth)
+            if kind == PYCFUNCTION or (kind == SLOT
+                                       and spec.pycfunction(name)):
+                # (A slot with an entry: METH_COEXIST.)
+                doc, c_func, flag, doc_name = self._pycfunction(
+                    spec, name, meth, 'slot' if kind == SLOT else 'PyCFunction')
                 docs += doc
                 table.append(_method_def(meth, c_func, flag, doc_name))
             elif kind == SHARED:
                 doc, entry = self._shared_entry(name, meth)
                 docs += doc
                 table.append(entry)
-            elif meth not in ('__new__', '__init__'):
+            elif kind != SLOT and meth not in ('__new__', '__init__'):
                 # (tp_new and tp_init: the C of the type names them.)
                 table.append(self._clinic_entry(name))
 
@@ -369,21 +365,18 @@ class TypeGenerator:
             out += [f'static PyMethodDef {self.prefix}_methods[] = {{',
                     *table, '    {NULL, NULL}  /* sentinel */', '};', '']
 
-        # The slots of the sub-tables; those of the type itself (subtable
-        # None) are named by its C.
+        # The slots of the sub-tables, in the order of slotdefs[]; those of
+        # the type itself are named by its C.
         slot_funcs = self.resolve_slots(dunders)
-        by_subtable: dict[str | None, dict[str, str]] = {}
-        slotdefs = {s.slot: s for s in slots.slotdefs()}
-        for slot, c_name in slot_funcs.items():
-            by_subtable.setdefault(slotdefs[slot].subtable, {})[slot] = c_name
         for subtable in SUBTABLE_ORDER:
-            if subtable not in by_subtable:
-                continue
-            ctype = slots.SUBTABLES[subtable]
-            out.append(f'static {ctype} {self.prefix}_{subtable} = {{')
-            for slot in _in_struct_order(by_subtable[subtable]):
-                out.append(f'    .{slot} = {by_subtable[subtable][slot]},')
-            out += ['};', '']
+            filled = dict.fromkeys(s.slot for s in slots.slotdefs()
+                                   if s.subtable == subtable
+                                   and s.slot in slot_funcs)
+            if filled:
+                out += [f'static {slots.SUBTABLES[subtable]} '
+                        f'{self.prefix}_{subtable} = {{',
+                        *[f'    .{slot} = {slot_funcs[slot]},'
+                          for slot in filled], '};', '']
         return out if len(out) > 2 else []
 
 
@@ -392,11 +385,6 @@ def _method_def(meth: str, c_func: str, flags: str, doc_name: str) -> str:
     if flags.split(' | ')[0] not in ('METH_NOARGS', 'METH_O'):
         c_func = f'_PyCFunction_CAST({c_func})'
     return f'    {{"{meth}", {c_func}, {flags}, {doc_name}}},'
-
-
-def _in_struct_order(slot_funcs: dict[str, str]) -> list[str]:
-    order = [s.slot for s in slots.slotdefs()]
-    return sorted(slot_funcs, key=order.index)
 
 
 def header(spec_path: str) -> str:
