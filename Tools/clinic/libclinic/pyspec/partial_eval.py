@@ -72,8 +72,7 @@ if TYPE_CHECKING:
     from .frontend import Spec
 
 class Context(facts.Passes, Protocol):
-    """What the evaluator needs of the other passes: the context of the
-    passes (context.Context)."""
+    """What the evaluator needs of context.Context."""
 
     def specializations(self, spec: Spec | None = None) -> Specializations:
         ...
@@ -96,8 +95,7 @@ def _only_null(callee: facts.Facts | None) -> bool:
 
 
 def evaluate(expr: ast.expr, env: Env, ev: Evaluator) -> bool | None:
-    """Return True, False, or None when *expr* is not decided by *env*.
-    *ev*: the Evaluator."""
+    """The value of condition *expr* under *env*, or None."""
     match expr:
         case ast.UnaryOp(op=ast.Not(), operand=operand):
             value = evaluate(operand, env, ev)
@@ -157,8 +155,7 @@ def _evaluate_is(left: ast.expr, right: ast.expr, env: Env,
 
 
 def simplify(expr: ast.expr, env: Env, ev: Evaluator) -> bool | ast.expr:
-    """*expr* without the parts *env* decides: True, False or an ast
-    node."""
+    """*expr* without the parts *env* decides (True or False if all)."""
     value = evaluate(expr, env, ev)
     if value is not None:
         return value
@@ -182,9 +179,8 @@ def _type_test(name: str, klass: type) -> ast.expr:
 
 
 def _iter_assignment(stmt: ast.stmt) -> tuple[str, str] | None:
-    """(target, source) for ``target = iter(source)`` or for ``try:
-    target = iter(source)`` with only ``except TypeError`` handlers, else
-    None."""
+    """(target, source) of ``target = iter(source)``, possibly in a try
+    with only ``except TypeError``, or None."""
     if isinstance(stmt, ast.Try) and not stmt.finalbody and set(
             facts.caught(stmt.handlers)) == {'TypeError'} \
             and len(stmt.body) == 1:
@@ -243,9 +239,8 @@ def _with_call(stmt: ast.stmt, value: ast.expr) -> ast.stmt:
 def inline_paths(spec: Spec, name: str
                  ) -> tuple[list[tuple[ast.expr, ast.expr]], ast.expr,
                             list[str]]:
-    """([(test, value)], last value, parameters) of @inline function
-    *name* of *spec*: its fast paths ``if test: return value``, then its
-    ``return value`` (subset.Inline, which check_inline() checks)."""
+    """([(test, value)] of its fast paths, last value, parameters) of
+    @inline function *name*."""
     subset.check_inline(spec, name)
     *paths, last = spec.body(name)
     out = []
@@ -285,9 +280,9 @@ def _mark_len(node: ast.AST, env: Env) -> None:
 
 @dc.dataclass
 class _Block:
-    """The state of the evaluation of a block: its statements (the rest
-    may be rewritten), the index of the next one, the facts, the residual
-    so far, and *done* when the rest has been evaluated (versioned)."""
+    """The evaluation of a block: its statements (the rest may be
+    rewritten), the next one, the facts, the residual so far; *done*
+    when the rest was evaluated (versioned)."""
     stmts: list[ast.stmt]
     env: Env
     depth: int
@@ -304,8 +299,7 @@ class _Block:
 
 
 class Evaluator(subset.Walker[_Block, None]):
-    """Partial evaluation of the code of one spec (see the module
-    docstring); one method per kind of statement (subset.Kind)."""
+    """Partial evaluation of the code of one spec."""
 
     def __init__(self, context: Context, spec: Spec,
                  arities: Sequence[Arity] = (),
@@ -385,8 +379,7 @@ class Evaluator(subset.Walker[_Block, None]):
                      or [ast.Pass()])
         stmt.orelse = self.block(stmt.orelse, else_env, depth, inline)
         state.evaluated([stmt])
-        # After an if whose one branch exits, the facts of the other
-        # hold.
+        # After an if whose one branch exits, the other's facts hold.
         if terminates(stmt.body):
             state.env = else_env
         elif terminates(stmt.orelse):
@@ -474,11 +467,8 @@ class Evaluator(subset.Walker[_Block, None]):
 
     def c_statement(self, stmt: ast.stmt, env: Env
                     ) -> tuple[list[ast.stmt], Env]:
-        """*stmt* (see _top_call()) with the facts of its call of a
-        @native function, or its call of an @inline function
-        expanded: (statements, env).  See "Calls of hand-written C
-        functions" and "Calls of @inline functions" in the module
-        docstring."""
+        """(statements, env) of *stmt* (_top_call()): its call of a native
+        function marked with its facts, or of an @inline one expanded."""
         call = _top_call(stmt)
         if call is None:
             return [stmt], env
@@ -527,9 +517,8 @@ class Evaluator(subset.Walker[_Block, None]):
         return out
 
     def mark(self, node: ast.AST, env: Env) -> None:
-        """Mark the calls of @native functions in *node* (a
-        condition or a raise) with their facts for the emitter
-        (facts.Analyzer.mark_call())."""
+        """Mark the calls of native functions in *node* (a condition or a
+        raise) with their facts (facts.Analyzer.mark_call())."""
         for child in ast.walk(node):
             if isinstance(child, ast.Call):
                 self.analyzer.mark_call(child, env)
@@ -537,10 +526,9 @@ class Evaluator(subset.Walker[_Block, None]):
     def expand(self, stmt: ast.stmt, call: ast.Call,
                found: tuple[Spec, ast.FunctionDef],
                env: Env) -> list[ast.stmt]:
-        """*stmt*, which calls @inline function *found* (spec, def) as
-        *call*, with its body in place of the call (see "Calls of @inline
-        functions" in the module docstring).  The ``if`` of the first
-        path is marked (marks.FirstPath, see presize())."""
+        """*stmt*, which calls @inline function *found* as *call*, with
+        its body in place of the call; the ``if`` of the first path is
+        marked (marks.FirstPath, see presize())."""
         spec, node = found
         paths, last, params = inline_paths(spec, node.name)
         rename = _Rename(dict(zip(params, call.args)))
@@ -670,10 +658,8 @@ class Evaluator(subset.Walker[_Block, None]):
 
     def loop(self, stmt: ast.For, env: Env, depth: int,
              inline: bool) -> ast.For:
-        """``for item in it:``, specialized: see the module docstring.
-        The copy is marked (marks.Loop) with the exact type of the
-        iterated object (None if unknown), and whether it iterates a list
-        or tuple by index (``for item in x:``)."""
+        """``for item in it:``, marked (marks.Loop) with the exact type
+        iterated and whether it iterates a list or tuple by index."""
         if (stmt.orelse or not isinstance(stmt.target, ast.Name)
                 or not isinstance(stmt.iter, ast.Name)):
             raise ValueError(f'unsupported loop {ast.unparse(stmt)}')
@@ -701,7 +687,7 @@ class Evaluator(subset.Walker[_Block, None]):
 
 class Specializations:
     """The shared specializations of one spec, made once per (callee,
-    facts), found by name; the context of the passes keeps them."""
+    facts), found by name."""
 
     def __init__(self) -> None:
         self._made: dict[Hashable, Specialization | None] = {}
@@ -824,8 +810,7 @@ def _snapshot(context: Context, spec: Spec, callee: str, name: str,
 
 @dc.dataclass
 class _Path:
-    """The state of the snapshot of a path: the facts, and whether it is
-    in the loop."""
+    """The snapshot of a path: the facts, and whether it is in the loop."""
     env: Env
     in_loop: bool = False
 
@@ -910,10 +895,9 @@ class _Snapshot(subset.Walker[_Path, list[ast.stmt] | None]):
 
 
 def presize(spec: Spec, stmts: list[ast.stmt]) -> None:
-    """Take the first path of the @inline calls that write to a buffer
-    that has room for all of them: see Capacity in the module docstring.
-    The top level of *stmts* (a function body, and the body of its try)
-    is scanned."""
+    """Take the first path of the @inline calls writing a buffer that has
+    room for all of them ("Capacity" above), in the top level of *stmts*
+    and of its try."""
     lengths = {}            # local -> the sequence it is the length of
     capacity: dict[str, str] = {}   # buffer local -> the sequence it has
     for stmt in stmts:              # room for
@@ -975,8 +959,7 @@ def _writes(node: ast.AST, buffer: str) -> bool:
 
 def _replace(stmts: list[ast.stmt], old: ast.stmt,
              new: list[ast.stmt]) -> bool:
-    """Replace statement *old*, in *stmts* or in a block nested in them,
-    with the statements *new*; return whether it was found."""
+    """Replace statement *old*, in *stmts* or nested, with *new*."""
     for i, stmt in enumerate(stmts):
         if stmt is old:
             stmts[i:i + 1] = new
@@ -1022,13 +1005,9 @@ def remove_dead_iterators(stmts: list[ast.stmt],
 def specialize(context: Context, spec: Spec, name: str, env: Env,
                inline: bool = True,
                arities: Sequence[Arity] = ()) -> list[ast.stmt]:
-    """Residual statements of spec function *name* of *spec* under facts
-    *env* (see context.Context.residual()).
-
-    With *inline* false, tail calls of other spec functions stay calls,
-    except where the block is versioned.  *arities*: (facts, C function,
-    arguments) of the arity functions of a __new__ (see
-    Evaluator.arity_call())."""
+    """The residual of spec function *name* under *env*.  With *inline*
+    false, tail calls of spec functions stay calls (except where the
+    block is versioned); *arities*: see Evaluator.arity_call()."""
     residual = Evaluator(context, spec, arities, name).block(
         spec.body(name), env, inline=inline, top=True)
     return remove_dead_iterators(residual)

@@ -36,8 +36,7 @@ from . import builtin_types
 # One construct outside a subset: (node, what it is, for messages).
 Unsupported = tuple[ast.AST, str]
 
-# Converters (annotations) of the parameters of a lowered function, and
-# the C type of the argument.
+# The converters of the parameters of a lowered function: their C type.
 LOWERED_CTYPES = {
     'object': 'PyObject *',
     'str': 'const char *',
@@ -73,18 +72,15 @@ COMPARE_OPS = {ast.Lt: '<', ast.LtE: '<=', ast.Gt: '>', ast.GtE: '>=',
 
 
 def is_struct(ctype: str) -> bool:
-    """Whether C type *ctype* (of c_signature()) is a C struct: neither a
-    pointer nor a scalar."""
+    """Whether *ctype* is a C struct: neither a pointer nor a scalar."""
     return '*' not in ctype and ctype not in C_CTYPES.values() \
         and ctype.split()[-1] not in ('char', 'short', 'int', 'long')
 
 
 def c_signature(node: ast.FunctionDef) -> tuple[list[tuple[str, str]], str]:
-    """([(parameter, C type)], C return type) of a @native or
-    @inline function: an annotation of C_CTYPES or a string (the C type); no
-    return annotation is ``PyObject *``.  A return type that is neither
-    a scalar nor a pointer is a C struct that the function initializes in
-    place (see emit.py)."""
+    """([(parameter, C type)], C return type) of a @native or @inline
+    function: annotations of C_CTYPES or strings; no return annotation is
+    ``PyObject *``; a struct result is initialized in place (emit.py)."""
     def ctype(annotation: ast.expr | None, default: str | None) -> str:
         match annotation:
             case None if default is not None:
@@ -123,9 +119,8 @@ class Spec(Protocol):
 # -- the statements ----------------------------------------------------------
 
 class Kind(enum.Enum):
-    """The kinds of statements of the lowered subset, and of the residual
-    code of the partial evaluator; the value is the name of the method of
-    a Walker for the kind."""
+    """The kinds of statements of the lowered subset and of residual code;
+    the value names the method of a Walker for the kind."""
     PASS = 'pass_'          # pass, a docstring
     IF = 'if_'
     ASSIGN = 'assign'       # x = <call>
@@ -169,10 +164,9 @@ R = TypeVar('R')
 
 
 class Walker(Generic[A, R]):
-    """A pass over statements: statement() calls the method named by the
-    Kind of the statement (``if_``, ``assign``...) with *arg*, the state
-    of the walk; other() is for a statement of no kind, and for a kind
-    the walker has no method for."""
+    """A pass over statements: statement() calls the method of the Kind
+    of the statement with *arg*, the state of the walk, or other() for a
+    statement of no kind or a kind the walker has no method for."""
 
     def statement(self, stmt: ast.stmt, arg: A) -> R:
         found = kind(stmt)
@@ -217,9 +211,8 @@ def assigned_names(stmts: list[ast.stmt]) -> set[str]:
 
 
 def call_arguments(spec: Spec, name: str, call: ast.Call) -> list[ast.expr]:
-    """The arguments of *call*, a call of spec function *name*, one per
-    parameter: an omitted one is its default, NULL (the only default of
-    the lowered subset).  A SpecError for too few or too many."""
+    """The arguments of *call* of spec function *name*, one per parameter
+    (NULL for an omitted one: the only default of the lowered subset)."""
     args = spec.functions[name].args
     params = len(args.posonlyargs + args.args)
     if not params - len(args.defaults) <= len(call.args) <= params:
@@ -566,12 +559,10 @@ class Lowered(Walker[None, None]):
 
 
 class Inline(Lowered):
-    """The body of an @inline function, which partial_eval.py generates
-    into each caller: fast paths ``if <condition>: return <value>``, then
-    ``return <value>``; a value is a call (Lowered.call()) or an operand
-    (Lowered.value()).  Its signature is that of a native function: any
-    C types (c_signature()), positional parameters without
-    defaults."""
+    """The body of an @inline function: fast paths ``if <condition>:
+    return <value>``, then ``return <value>`` (a value is a call or an
+    operand); its signature: positional parameters of any C types
+    (c_signature()), no defaults."""
 
     def signature(self) -> None:
         self.positional_only()
@@ -625,13 +616,10 @@ def _kind(stmt: ast.stmt) -> str:
 
 class Analysed:
     """What facts.py follows in the Python reference of a @native
-    function: control flow of the lowered subset, with every effect where
-    facts.py accounts for it; any other code is a model of the values the
-    C computes (facts.py: it has no effects), and must have none.
-
-    Effects are ``return``, ``raise``, ``assert`` and the calls of
-    primitives (runtime.py), of hand-written C functions and of spec
-    functions."""
+    function: the control flow of the lowered subset, with every effect
+    (``return``, ``raise``, ``assert``, a call of a primitive, of a C or
+    spec function) where facts.py accounts for it; the rest models
+    values and must have no effect."""
 
     def __init__(self, spec: Spec, name: str) -> None:
         self.spec = spec
