@@ -106,3 +106,72 @@
   - `Sub(16)` is −3.5 to −6.4 %.
 - **Not a win across the board:** `bytearray(b16)` needs a fix first. The `fromhex` +0.4 %
   should be checked with a second PGO build.
+
+## Follow-up: root causes and fix (fix = `737069ca773`)
+Builds: `tip2` is a second PGO+LTO build of the tip source (A/A across builds), and `fix` is
+`737069ca773`. Both use the same flags, and both are kept in `../p4f-perf/`. Data:
+`../p4f-perf/data/fix_seed{1,0,7}.txt` (full list at seed 1; `fix_close.txt` at seeds 0 and 7).
+Callgrind: seed 0, JIT off, 2000 iterations minus 0, one run at a time under an 8G cap.
+
+### `bytearray(b16)` +24: PGO profile noise in unchanged code, not branch code
+- **Callgrind (main / tip / tip2):** 1241 / 1265 / 1237 per iteration.
+  - The only difference: `_PyBytes_FromSize` is 0 / 40 / 0 instructions of self cost, and
+    `_PyBytes_ResizeKeepOnError` is 57 / 41 / 57.
+  - In tip, the `oldsize == 0` call is out of line. In main and tip2 it is inlined.
+  - `bytearray___init__`, the buffer calls, `type_call` and `bytearray_new` are identical.
+    `Objects/clinic/bytearrayobject.c.h` is byte-identical to main.
+- **Inline remarks** (`-Rpass-missed=inline` with each build's `code.profclangd`): main
+  inlines at `cost=185, threshold=250`. Tip gives the site the cold threshold, 45.
+- **Cause: clang front-end branch weights.** `_PyBytes_ResizeKeepOnError` is the same source
+  on both branches (`if (!PyBytes_Check(v) || newsize < 0)`).
+  - In tip's profile, the entry count is 171127 but the `newsize < 0` operand ran 171124
+    times. So 3 increments were lost: the profile counters are not atomic, and training runs
+    threads.
+  - Clang derives the count of `newsize < 0` being true as 0 − 3, which underflows to the
+    weight `UINT32_MAX : 1`. The rest of the function is then cold, so `_PyBytes_FromSize`
+    is not inlined.
+  - main (171011/171012) and tip2 (171093/171093) happened not to underflow.
+  - It is random per training run, so it can equally hit main.
+- **No change was made:** the code is main's, unchanged. The tip2 and fix builds both inline
+  the call. A robust fix would be upstream (two separate `if`s, or
+  `-fprofile-update=atomic` for PGO), not branch code.
+
+### `fromhex` +5: real, fixed in the spec
+- `bytes_fromhex` is 15 / 20 / 20 instructions of self cost (main / tip / tip2).
+- The spec body `result = _PyBytes_FromHex(...); if cls is not bytes: return cls(result);
+  return result` lowered to a NULL check on the hot path plus a merged return. Main tests the
+  type first and checks NULL only on the subclass path.
+- Fix `737069ca773`: the spec tests `cls is bytes` first and returns `_PyBytes_FromHex(...)`,
+  which is a tail call.
+  - `bytes_fromhex` is now 15. The callgrind total is 1471.8 vs main's 1471.7.
+  - Parity, facts and the review are unchanged. Only `bytesobject_pyspec.c.h` changes.
+
+### `b16 == b16c` +2: build layout
+- The +2 is all in `_TAIL_CALL_COMPARE_OP` (74 / 76 / 74 / 76 for main / tip / tip2 / fix).
+- The generic `COMPARE_OP` source is the same as main's, and tip2 equals main.
+
+### Results (instructions, JIT on / off; main → tip → tip2 → fix)
+| shape | seed 1 | seed 0 | seed 7 |
+|---|---|---|---|
+| `bytearray(b16)` | 1251/1249 → 1275/1273 → 1249/1244 → **1248/1249** | 1251/1249 → 1275/1273 → 1249/1244 → **1248/1249** | 1262/1249 → 1275/1273 → 1249/1244 → **1248/1249** |
+| `bytes.fromhex(h16)` | 1602/1532 → 1609/1539 → 1603/1530 → **1604/1534** | 1563/1493 → 1569/1499 → 1564/1491 → **1564/1494** | 1572/1502 → 1579/1509 → 1573/1500 → **1574/1504** |
+| `fromhex(h16)` | 1051/975 → 1056/980 → 1055/976 → **1051/975** | same | 1050/975 → … → **1051/975** |
+| `b16.fromhex(h16)` | 1502/1412 → 1508/1418 → 1504/1411 → **1503/1413** | 1463/1373 → … → **1463/1373** | 1472/1382 → … → **1473/1383** |
+| `b16 == b16c` | 348/339 → 350/341 → 349/337 → 350/341 | same | same |
+
+- **Everything else in the seed-1 list:** fix is within ±9 of tip, the cross-build A/A range
+  (tip vs tip2 differ by up to 9 on unchanged code, e.g. `hash(b16)` off 504 vs 494).
+  - It stays below main by the same margins as before: `bytes(hb)` −26 %/−18 %,
+    `Sub(l16)` −1.1 to −1.9 %, `Sub(16)` −3.8 to −7.3 %.
+  - `b16s.split()` off (1844) is its known second mode.
+- **Cycles:** flat or lower. `bytearray(b16)` is 242–245 vs main's 241–247.
+
+### Verdict
+- **Real regressions:** none left. `bytearray(b16)` is at or below main at seeds 0, 1 and 7
+  (the tip build's +24 was profile noise), and fromhex's real +5 is fixed.
+- **Remaining +1 to +2** (`bytes.fromhex`, `==`, `b16.__bytes__()` off): all in code that is
+  unchanged from main or equal to main under callgrind. They fall within the cross-build A/A
+  range, and tip2 shows the same shapes at or below main.
+- **Tests:** debug JIT `../build-p4-fix`. `pyspec_review.py --baseline ../build-str1-dbg/python`
+  gives Result OK (87,737 lines, no difference). The 8 test files pass, and clinic on the
+  spec-backed files leaves the tree clean.
