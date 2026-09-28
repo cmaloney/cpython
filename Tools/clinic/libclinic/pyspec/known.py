@@ -35,35 +35,24 @@ NULL = Null.NULL
 NOTNULL = Null.NOTNULL
 
 
-class Sentinel(str, enum.Enum):
-    """Names the partial evaluator writes into residual code."""
-
-    # ``return FALLBACK`` in a snapshot (partial_eval.py): no result, the
-    # caller restarts through the generic function.
-    FALLBACK = 'FALLBACK'
-
-
-FALLBACK = Sentinel.FALLBACK
+# ``return FALLBACK`` in a snapshot (partial_eval.py): no result, the
+# caller restarts through the generic function.
+FALLBACK = 'FALLBACK'
 
 
 @dc.dataclass(frozen=True)
 class Value:
-    """The name refers to exactly this object (cls is bytes)."""
     obj: object
 
 
 @dc.dataclass(frozen=True)
 class IterOf:
-    """The name refers to iter(source), where source (a name) is of exact
-    type tp, whose iteration runs no Python code."""
     source: str
     tp: type
 
 
 @dc.dataclass(frozen=True)
 class Other:
-    """Not NULL, of none of the exact *types*, an instance of none of the
-    *instances*."""
     types: tuple[type, ...] = ()
     instances: tuple[type, ...] = ()
 

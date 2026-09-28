@@ -821,7 +821,7 @@ def _snapshot(context: Context, spec: Spec, callee: str, name: str,
                              lineno=0)],
                  lineno=0),
         ast.If(ast.Compare(load(result), [ast.IsNot()],
-                           [load(FALLBACK.value)]),
+                           [load(FALLBACK)]),
                [ast.Return(load(result))], []),
         *[ast.Assign([store(p)], ast.Call(load('iter'), [load(source)], []),
                      lineno=0)
@@ -875,7 +875,7 @@ class _Snapshot(subset.Walker[_Path, list[ast.stmt] | None]):
             return [stmt]
         if not path.in_loop:
             return None
-        return [ast.Return(ast.Name(FALLBACK.value, ast.Load()))]
+        return [ast.Return(ast.Name(FALLBACK, ast.Load()))]
 
     def return_(self, stmt: ast.Return,
                 path: _Path) -> list[ast.stmt] | None:
