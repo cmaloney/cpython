@@ -38,14 +38,14 @@ from libclinic.pyspec.runtime import permit_long_summary, text_signature
 from libclinic.pyspec.runtime import c_name
 
 # The C functions of other files the bodies call.
-from pyspec.abstract import (
+from Objects.pyspec.abstract import (
     PyNumber_AsSsize_t, PyNumber_AsSsize_t_fast, PyObject_LengthHint_fast)
-from pyspec.typeobject import _PyObject_LookupSpecial
-from pyspec.unicodeobject import PyUnicode_AsEncodedString
+from Objects.pyspec.typeobject import _PyObject_LookupSpecial
+from Objects.pyspec.unicodeobject import PyUnicode_AsEncodedString
 from Python.pyspec.errors import PyErr_BadInternalCall
 
 # Methods shared with bytearray (Objects/stringlib/pyspec/).
-from stringlib.pyspec import ctype, transmogrify
+from Objects.stringlib.pyspec import ctype, transmogrify
 
 
 class bytes:

@@ -61,10 +61,11 @@ parameters and result, the interface generated code calls it through
 generated into each of its callers (partial_eval.py), never a C function
 of its own: the fast path of a native function is one (see
 is_inline()).  A body of ``...`` (or only a docstring) is a hand-written
-C function about which nothing is known.  A spec imports the functions of other specs by name:
-``from pyspec.abstract import PyNumber_AsSsize_t``, a path relative to
-the directory of the C file, or to the source root (``from
-Python.pyspec.errors import PyErr_BadInternalCall``).
+C function about which nothing is known.  A spec imports the functions of other specs by name,
+by the path of the spec from the source root: ``from
+Objects.pyspec.abstract import PyNumber_AsSsize_t``, ``from
+Python.pyspec.errors import PyErr_BadInternalCall``
+(specfiles.import_root()).
 
 Decorators
 ----------
@@ -104,7 +105,7 @@ Methods that are not clinic functions (method_kind())
   method table (``@c_name(mp_subscript="f", METH_O="f")`` and
   ``@coexist``).
 * Shared: ``meth = module.Class.meth``, a method another spec declares
-  (``from stringlib.pyspec import transmogrify``), or ``Class.meth`` of
+  (``from Objects.stringlib.pyspec import transmogrify``), or ``Class.meth`` of
   another class of this spec.  If the C file has a clinic block for it
   (``bytearray.strip``), it is a clinic function of this class with the
   parameters, docstring and decorators of that method; else its entry in
@@ -131,7 +132,7 @@ from collections.abc import Collection
 
 from libclinic.errors import PYSPEC_README as README
 from libclinic.errors import SpecError, SpecErrorKind
-from . import builtin_types, slots, subset
+from . import builtin_types, slots, specfiles, subset
 
 
 # Annotations of the parameters of implemented spec functions, and the C
@@ -405,9 +406,9 @@ class Spec:
                     pass    # for the Python reference of a function
                 case ast.Import():
                     raise self.error(node, "import a spec as 'from "
-                                     "stringlib.pyspec import transmogrify' "
-                                     "(a path relative to the directory of "
-                                     "the C file)")
+                                     "Objects.stringlib.pyspec import "
+                                     "transmogrify' (its path from the "
+                                     "source root)")
 
     def error(self, node: ast.AST | None, message: str,
               kind: SpecErrorKind = SpecErrorKind.INVALID) -> SpecError:
@@ -468,33 +469,35 @@ class Spec:
         accessors[kind] = node
 
     def _add_import(self, node: ast.ImportFrom) -> None:
-        """``from stringlib.pyspec import transmogrify``: the spec
-        Objects/stringlib/pyspec/transmogrify.py; ``from pyspec.abstract
-        import PyNumber_AsSsize_t``: that function of the spec
-        Objects/pyspec/abstract.py.  Paths are relative to the directory
-        of the C file of this spec, else to the source root (its
-        parent).  Imports of the standard library are for the Python
-        references of @native functions."""
+        """``from Objects.stringlib.pyspec import transmogrify``: the spec
+        Objects/stringlib/pyspec/transmogrify.py; ``from
+        Objects.pyspec.abstract import PyNumber_AsSsize_t``: that function
+        of the spec Objects/pyspec/abstract.py.  A spec is imported by its
+        path from the source root (specfiles.import_root()).  Imports of
+        the standard library are for the Python references of @native
+        functions."""
         if node.module is None or node.module.startswith('libclinic') \
                 or node.module in sys.stdlib_module_names:
             return
-        base = os.path.dirname(os.path.dirname(os.path.abspath(
-            self.filename)))
+        root = specfiles.import_root(self.filename)
         parts = node.module.split('.')
         for alias in node.names:
             name = alias.asname or alias.name
-            for root in (base, os.path.dirname(base)):
-                path = os.path.join(root, *parts, alias.name + '.py')
-                if os.path.exists(path):
-                    self.imports[name] = path
-                    break
-                path = os.path.join(root, *parts) + '.py'
-                if os.path.exists(path):
-                    self.imported_functions[name] = path
-                    break
-            else:
-                path = os.path.join(base, *parts, alias.name + '.py')
-                raise self.error(node, f"imported spec {path} not found")
+            path = os.path.join(root, *parts, alias.name + '.py')
+            if os.path.exists(path):
+                self.imports[name] = path
+                continue
+            path = os.path.join(root, *parts) + '.py'
+            if os.path.exists(path):
+                self.imported_functions[name] = path
+                continue
+            path = os.path.join(root, *parts, alias.name + '.py')
+            raise self.error(node, f"imported spec {path} not found: a "
+                             "spec imports another by its path from the "
+                             "source root ('from Objects.pyspec.abstract "
+                             "import PyObject_LengthHint_fast', 'from "
+                             "Objects.stringlib.pyspec import "
+                             "transmogrify')")
 
     def imported(self, module: str) -> Spec:
         """The spec imported as *module*."""

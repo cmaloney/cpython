@@ -49,6 +49,23 @@ def c_file_of(spec_path: str) -> str | None:
     return None
 
 
+def import_root(spec_path: str) -> str:
+    """The directory the imports of spec *spec_path* are relative to: a
+    spec imports another by its path from the source root, the parent of
+    the nearest Objects/, Python/, Include/ or Modules/ directory above
+    it (``from Objects.pyspec.abstract import PyObject_LengthHint_fast``,
+    ``from Objects.stringlib.pyspec import transmogrify``).  A spec
+    outside such a tree (a test's) imports relative to the directory of
+    its C file."""
+    path = os.path.abspath(spec_path)
+    directory = os.path.dirname(path)
+    while os.path.dirname(directory) != directory:
+        if os.path.basename(directory) in TOPS:
+            return os.path.dirname(directory)
+        directory = os.path.dirname(directory)
+    return os.path.dirname(os.path.dirname(path))
+
+
 def spec_files(root: str | None = None) -> list[tuple[str, str | None]]:
     """(spec path, the C file it describes or None) of every spec file
     under *root* (the source tree by default), sorted."""

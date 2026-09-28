@@ -15,7 +15,7 @@ from libclinic.pyspec.runtime import (
 
 from Include.cpython.pyspec.longintrepr import (
     _PyLong_CompactValue, _PyLong_IsCompact)
-from pyspec.typeobject import _PyObject_LookupSpecial
+from Objects.pyspec.typeobject import _PyObject_LookupSpecial
 
 
 @native

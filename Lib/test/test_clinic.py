@@ -6858,7 +6858,7 @@ class PyspecTypeTest(PyspecTestBase):
                      "import tm'")
         self.check_error("""
             import transmogrify as tm
-        """, "import a spec as 'from stringlib.pyspec import "
+        """, "import a spec as 'from Objects.stringlib.pyspec import "
              "transmogrify'")
         self.check_error("""
             class bytes:
