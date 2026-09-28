@@ -34,12 +34,18 @@ Level  What moves                         Parity check (and the review)
 2      method and slot tables, tp_doc     parity record unchanged
 3      function internals (spec bodies)   parity record unchanged,
                                           difftest, ``HelperTest``,
-                                          ``c_calls``, section 3 below
+                                          ``c_calls``, "Does a spec
+                                          body help" below
 4      facts used by the specializer      ``test_opt``,
        or the JIT                         ``test_pyspec_facts`` (debug)
 5      C API facts                        ``test_pyspec_catalog``
                                           (the ratchet)
 =====  =================================  ==============================
+
+Levels 1 and 2 need no new tooling knowledge beyond Argument Clinic;
+level 3 is where the spec language, ``@native`` and ``@inline`` come
+in; levels 4 and 5 need a consumer (the optimizer) or a data file (the
+docs) and are independent of each other.
 
 Before every PR: regenerate with ``./python Tools/clinic/clinic.py
 Objects/foo.c`` (not ``--make`` from a checkout that contains other
@@ -56,24 +62,27 @@ One command answers the reviewer's questions, on a build of the change
 
 It takes about 20 seconds, needs no other build, and prints a summary
 ready to paste; the exit status is 0 when every answer is fine.  For
-example (``bytes`` and ``bytearray`` against main)::
+example, the whole experiment branch against main, with ``--baseline``
+naming a debug build of main (so the record and the ratchet baseline
+are new, where a migration PR would leave both unchanged)::
 
-    pyspec review of 1a2b3c4d5e6 against main (merge base ee1bbf037ff), python 3.16 free-threaded=False debug=True pointer=64 platform=linux
+    pyspec review of 63ce50f2c9b against main (merge base ee1bbf037ff), python 3.16 free-threaded=False debug=True pointer=64 platform=linux
 
     - Behaviour: same as Tools/clinic/pyspec-baseline/parity.txt for bytearray, bytearray_iterator, bytes, bytes_iterator, mmap (87,737 lines in 251 sections)
-      - Tools/clinic/pyspec-baseline/parity.txt: unchanged since the base for this configuration
-      - on purpose: bytes /^C tp_vectorcall$/: bytes() is called through the vectorcall the spec generates
-      - (`python Tools/clinic/pyspec_parity.py check`)
+      - Tools/clinic/pyspec-baseline/parity.txt: new since the base
+      - vs ../build-main/python: no difference in 87,737 lines
+      - on purpose: bytes /^C tp_vectorcall$/: bytes() is called through the vectorcall the spec generates (differs from the baseline: C tp_vectorcall)
+      - (`python Tools/clinic/pyspec_parity.py check`; `... compare ../build-main/python`)
     - Generated code: up to date (clinic --dry-run on 10 C files of specs)
       - Objects/clinic/bytearrayobject_pyspec.c.h: new (384 lines, generated from Objects/pyspec/bytearrayobject.py)
       - Objects/clinic/bytesobject.c.h: +94/-9 lines, in bytes_new_impl, bytes_new, bytes_new_helper, bytes_new_nargs0, bytes_new_nargs1, bytes_new_nargs2, ... (8 names)
         - on purpose (bytes_new_impl, bytes_new, bytes_new_helper, ... (8 names)): bytes.__new__ has a spec body: clinic generates its vectorcall and per-arity entries around the parser
-      - Objects/clinic/bytesobject_pyspec.c.h: new (1049 lines, generated from Objects/pyspec/bytesobject.py)
+      - Objects/clinic/bytesobject_pyspec.c.h: new (1096 lines, generated from Objects/pyspec/bytesobject.py)
       - every other clinic output: identical to the base
-    - Specs vs interpreter: passed, 491 tests (`python -m test test_clinic`: ...)
-    - Facts: passed, 19 tests; debug build: facts also asserted at run time (`python -m test test_pyspec_facts`: ...)
+    - Specs vs interpreter: passed, 509 tests (`python -m test test_clinic`: ...)
+    - Facts: passed, 21 tests; debug build: facts also asserted at run time (`python -m test test_pyspec_facts`: ...)
     - Ratchet: passed, 12 tests (skipped=1); c_calls 0, capi 20, docs 0, docstrings 2, slots 3 (`python -m test test_pyspec_catalog`: ...)
-      - ratchet baseline: unchanged since the base
+      - ratchet baseline: +51/-0 lines since the base (added lines are new disconnects: say why)
 
     Result: OK
 
@@ -132,14 +141,16 @@ each protocol):
 
 *The record.*  ``Tools/clinic/pyspec-baseline/parity.txt`` holds, per
 build configuration, one line per section: its number of lines and a
-digest (500 lines, 18 KB, for the five spec'd types, instead of 9 MB of
-captured text; a capture takes about 4 seconds).  A change that keeps
-behaviour leaves it unchanged, so a reviewer needs no build of main:
-the test suite checks the record, and the PR's diff shows it untouched.
-The blocks recorded so far were captured on main (Linux, 64-bit, GIL,
-debug and release: a debug build rejects unknown error handlers where a
-release build does not, so each configuration has its own block); a
-configuration with no block skips the check.  To see *which* lines of
+digest (about 250 lines per configuration for the five spec'd types, 26
+KB for three configurations, instead of 9.6 MB of captured text per
+configuration; a
+capture takes about 4 seconds).  A change that keeps behaviour leaves
+it unchanged, so a reviewer needs no build of main: the test suite
+checks the record, and the PR's diff shows it untouched.  The blocks
+recorded so far were captured on main (Linux, 64-bit: GIL release, GIL
+debug, free-threaded debug; a debug build rejects unknown error
+handlers where a release build does not, so each configuration has its
+own block); a configuration with no block skips the check.  To see *which* lines of
 a section differ, compare with a build of the base::
 
     ./python Tools/clinic/pyspec_parity.py compare ../build-main/python [bytes]
@@ -225,7 +236,7 @@ Python; the docs and typeshed ratchets can compare with it.
 only, so clinic generates no tables for it and the hand-written method
 table stays (``Modules/pyspec/mmapmodule.py`` is such a spec).
 
-*Size:* WS7's census: ``tupleobject.c`` 4 functions (29 block lines
+*Size:* a census of the tree's clinic blocks: ``tupleobject.c`` 4 functions (29 block lines
 become 6, spec 29 lines), ``floatobject.c`` 14 (91 to 19, spec 96),
 ``listobject.c`` 14 (98 to 22, spec 82), ``bytesobject.c`` 26 (267 to
 46, spec 205), ``unicodeobject.c`` 49 (409 to 73, spec 372).
@@ -272,31 +283,28 @@ Checklist:
 Level 3: spec bodies
 ''''''''''''''''''''
 
-*Needs:* a body in the subset of `README.rst <README.rst>`__ instead of
-``...``; every C function the body calls declared ``@native``,
-with its Python reference, in the spec of its own C file; cases in
-``foo_cases.py``; each new helper in ``HelperTest`` of
-``test_pyspec_facts``.  Only ``object`` and ``str`` parameters (and
-``NULL`` defaults) are accepted.
+*Needs:* a body in the lowered subset of `README.rst <README.rst>`__
+(signature and statements) instead of ``...``; every C function the
+body calls declared ``@native``, with its Python reference, in the spec
+of its own C file; cases in ``foo_cases.py`` (``CASES`` for the body,
+``HELPERS`` for each new native function).
 
-A reference describes its C and nothing more: it is never compiled.
-When the body should not call a C function for some arguments (read a
-compact int inline, the size of an exact tuple), write that fast path
-as an ``@inline`` function in the spec of the C function, returning the
-C function's call last, and call it from the body
-(``PyNumber_AsSsize_t_fast``, ``PyObject_LengthHint_fast``).  Never
-give a reference an ``if`` its C does not have to steer the generated
-code; if the C needs the same fast path, build both from the same C
-pieces (``bytes_appender_has_room()``), and say so in the reference.
+A reference describes its C and nothing more: it is never compiled.  A
+fast path the generated code should take (read a compact int inline,
+the size of an exact tuple) is an ``@inline`` function next to the C
+function (README.rst, "Fast paths: ``@inline``"), never an ``if`` in
+the reference that the C does not have.
 
 *Gives:* the C impl is generated; for ``__new__`` also a vectorcall,
 per-arity and per-type entries and the tier-2 call table; the logic is
-tested as Python (the difftest).  Whether that is worth it is section 3.
+tested as Python (the difftest).  Whether that is worth it is "Does a
+spec body help, or just rewrite the C?" below.
 
 *Parity:* ``PyspecFilesTest.test_cases`` (difftest), ``HelperTest``, the
-``c_calls`` dimension of ``test_pyspec_catalog``, and section 3's
-measurements.  Review the generated ``foo_pyspec.c.h`` like hand-written
-C.
+``c_calls`` dimension of ``test_pyspec_catalog``, and the measurements
+of "Does a spec body help".  Review the generated ``foo_pyspec.c.h``
+like hand-written C (each group of lines names the spec line it comes
+from).
 
 *Size:* one function per PR.  The worked example below: spec +35 lines,
 hand-written C unchanged in size (the impls become helpers), generated
@@ -304,14 +312,14 @@ C +54/-20.
 
 Checklist:
 
-- [ ] section 3's decision recorded in the PR (numbers, not adjectives);
+- [ ] the decision of "Does a spec body help" recorded in the PR (numbers, not adjectives);
 - [ ] cases cover each branch of the body, errors included;
 - [ ] each reference models the exceptions of its C, messages included;
 - [ ] each reference describes only its C: no path the C does not have,
   no constant of one build (``sys.int_info.bits_per_digit``, not 30),
   and the native functions it calls are the ones the C calls
   (``c_calls``);
-- [ ] a fast path is an ``@inline`` function, measured with section 3
+- [ ] a fast path is an ``@inline`` function, measured as in "Performance" below
   where it is taken and where its test runs for nothing.
 
 Level 4: facts for the specializer and the JIT
@@ -339,7 +347,7 @@ Checklist:
 
 - [ ] the consumer and its test land in the same PR as the fact;
 - [ ] ``make regen-cases`` leaves the tree clean;
-- [ ] instruction counts with the JIT on show the gain (section 3).
+- [ ] instruction counts with the JIT on show the gain ("Performance" below).
 
 A new type is data only: running clinic on its C file gives each class
 with facts its call table and its entry in the registry of
@@ -388,18 +396,32 @@ Checklist:
 - [ ] baseline lines sorted; no new line without a reason in the PR;
 - [ ] fixes to the docs are upstreamable on their own.
 
+Replacing native C by another language (proposed, not implemented)
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+A function that is ``@native`` has a reference, cases in ``HELPERS``
+and no line in the ``c_calls`` baseline.  Rewriting its native code in
+another language keeps all three: the spec does not change, generated
+callers still call it through its C interface, and the same
+``HelperTest`` and parity record decide whether behaviour changed.
+What that language must bring first is its checker (README.rst,
+"Checking a reference against its native code"); no language but C has
+one today.
+
 
 Choosing what to migrate
 ------------------------
 
-Order (WS7's census): the easy ``Objects`` files first
-(``interpolationobject``, ``moduleobject``, ``sentinelobject``,
-``structseq``, ``descrobject``, ``enumobject``, ``classobject``,
-``tupleobject``), then small ones (``complexobject``, ``rangeobject``,
-``funcobject``, ``odictobject``, ``memoryobject``, ``longobject``,
-``typeobject``, ``dictobject``, ``floatobject``, ``listobject``,
-``exceptions``), then those needing rules (``codeobject``,
-``setobject``, ``bytearrayobject``, ``unicodeobject``), then Modules.
+Done: ``bytesobject`` (levels 1 to 5), ``bytearrayobject`` (levels 1,
+2 and 5, sharing the stringlib specs), ``mmapmodule`` (level 1, methods
+only, with ``#if``).  Order for the rest (by that census): the easy
+``Objects`` files first (``interpolationobject``, ``moduleobject``,
+``sentinelobject``, ``structseq``, ``descrobject``, ``enumobject``,
+``classobject``, ``tupleobject``), then small ones
+(``complexobject``, ``rangeobject``, ``funcobject``, ``odictobject``,
+``memoryobject``, ``longobject``, ``typeobject``, ``dictobject``,
+``floatobject``, ``listobject``, ``exceptions``), then those needing
+rules (``codeobject``, ``setobject``, ``unicodeobject``), then Modules.
 108 non-test files (1261 functions) use none of the features below.
 
 Features that need care:
@@ -428,9 +450,9 @@ Module-level functions
     from it.
 
 When not to migrate a function's internals (level 3): when nothing in
-section 3 comes out positive.  In practice: a method whose call
+"Does a spec body help" comes out positive.  In practice: a method whose call
 overhead is a small part of its cost (most ``bytes`` methods: 0 to 8 %,
-WS6); logic that needs ``Py_buffer``, a struct, pointer arithmetic or a
+measured with callgrind); logic that needs ``Py_buffer``, a struct, pointer arithmetic or a
 loop over raw memory (it ends up in ``@native`` helpers, so the
 C just moves); anything whose fact has no consumer.  Levels 1 and 2
 cost no speed and apply to any class without the features above; level
@@ -451,7 +473,7 @@ Performance
    iteration*.  Count calls of a C function with ``sys.setprofile``
    (``c_call`` events; type calls such as ``bytes(x)`` need a callgrind
    or perf count), and a benchmark's instructions with ``perf stat -e
-   instructions:u``.  Example (WS6/review): ``b[i]`` on pyflate, 1.28 M
+   instructions:u``.  Example: ``b[i]`` on pyflate, 1.28 M
    subscripts × 84 instructions = 107 M of 4.7 G, at most 2.3 %.  Only
    run pyperformance when the bound is well above its noise: two runs
    of the *same* binary differ by 1 to 2 % and pyperf calls it
@@ -506,7 +528,7 @@ Generated C review
 
 Read ``Objects/clinic/foo_pyspec.c.h`` as if it were a hand-written
 patch.  It should have the shape of good C.  The pitfalls found so far
-(phase 1, workstream A):
+(in migrating bytes):
 
 - a struct passed to or returned from an out-of-line helper, which puts
   it in memory: the appender's cursor spilled to the stack on every
@@ -568,10 +590,10 @@ Negative outcomes seen in this experiment:
 
 - ``bytes(list)`` got 28 % *slower* (31.8 against 22.8 instructions per
   item) with the first derived loops, from the pitfalls above, until
-  workstream A fixed the emitter; it is now 25 % faster than main.
+  the emitter was fixed; it is now 25 % faster than main.
 - ``bytes.fromhex`` facts: derived, never consumed (above).
 - Most ``bytes`` methods: call overhead is 0 to 8 % of their cost
-  (WS6), so a generated impl cannot gain more than that.
+  (callgrind), so a generated impl cannot gain more than that.
 
 Worked example: ``bytes.removeprefix``/``removesuffix``
 '''''''''''''''''''''''''''''''''''''''''''''''''''''''
@@ -644,8 +666,8 @@ statement                 JIT  before  before2   c_object  spec  spec vs
 Troubleshooting
 ---------------
 
-Clinic reports spec errors as ``path:line: error: message`` at the spec
-line.  The common ones:
+The common messages (the format and the kinds of error are in
+README.rst, "Errors"):
 
 ``'T.m' has no parameters or docstring, and class T in ... has no method 'm'``
     The class is in the spec, so every block of it needs a ``def``: add

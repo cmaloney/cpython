@@ -3,18 +3,26 @@ Specs: C types declared in Python
 
 ``Objects/pyspec/foo.py`` is the *spec* of ``Objects/foo.c``: its types
 written as ordinary Python, in the style of a typeshed stub.  Argument
-Clinic reads it when it processes ``foo.c``.  A method of ``class bytes``
-is the clinic function ``bytes.meth``.  A body of ``...`` means the C impl
+Clinic reads it when it processes ``foo.c``.  A method of ``class T``
+is the clinic function ``T.meth``.  A body of ``...`` means the C impl
 is written by hand, as with plain Argument Clinic; a real body is
-generated as C (if it is in the lowered subset, below).
-``Objects/stringlib/pyspec/`` holds the specs of the
-templates that bytes and bytearray share.  A spec body calls C functions
-by name; each one it calls is declared in the spec of its own file
-(``Objects/pyspec/abstract.py`` for ``Objects/abstract.c``,
+generated as C (if it is in the lowered subset, below).  The same holds
+in every directory: ``<dir>/pyspec/<stem>.py`` is the spec of
+``<dir>/<stem>.c`` (or of the header ``<dir>/<stem>.h``:
+``Objects/stringlib/pyspec/`` holds the specs of the templates that
+bytes and bytearray share), found by one glob
+(``Tools/clinic/libclinic/pyspec/specfiles.py``).  A spec body calls C
+functions by name; each one it calls is declared in the spec of its own
+file (``Objects/pyspec/abstract.py`` for ``Objects/abstract.c``,
 ``Python/pyspec/errors.py``, ``Include/cpython/pyspec/longintrepr.py``),
 ``@native``, with its Python reference (below).  Every piece of code
 that runs has one source: native code (C written by hand) that a
 reference only describes, or a spec body that clinic generates.
+
+``Objects/pyspec/bytesobject.py`` is the complete example: every kind
+of declaration below appears in it.  This file is the reference ("to do
+X, edit Y"); how to move a C file to a spec, step by step, and how to
+validate a change is in `MIGRATING.rst <MIGRATING.rst>`_.
 
 Files
 -----
@@ -23,11 +31,12 @@ Files
 ``Objects/pyspec/foo.py``              the spec: signatures, docstrings,
                                        decorators, bodies, the methods
                                        and slots of its types
-``Objects/pyspec/foo_cases.py``        test data: ``CASES``, ``TYPES``
-                                       and the names described in
+``Objects/pyspec/foo_cases.py``        test data: ``TYPES``, ``CASES``
+                                       and the other names described in
+                                       the docstring of
                                        ``bytesobject_cases.py``
 ``Objects/foo.c``                      one-line clinic block per spec
-                                       method (``bytes.split``) above its
+                                       method (``T.meth``) above its
                                        impl, as with plain Argument Clinic
 ``Objects/clinic/foo.c.h``             generated: argument parsing
 ``Objects/clinic/foo_pyspec.c.h``      generated: the spec bodies, the
@@ -51,7 +60,7 @@ Add a parameter             The method's signature in the spec (converter
 Add a C method              A ``def`` with body ``...`` in the spec, at its
                             place in the method table (the class body order
                             is ``T.__dict__`` order); in ``foo.c``, a block
-                            ``/*[clinic input]`` ``bytes.meth``
+                            ``/*[clinic input]`` ``T.meth``
                             ``[clinic start generated code]*/`` above the
                             impl.  Clinic writes the head and the table.
 Add a spec-body method      The same ``def`` with a body in the lowered
@@ -107,16 +116,18 @@ PyCFunction                 ``METH_VARARGS``, ``METH_FASTCALL``: the
                             ``__getitem__``): its slots and
                             ``METH_O="f"`` in ``@c_name``, and
                             ``@coexist``.
-Share a stringlib method    ``from stringlib.pyspec import transmogrify``,
-                            then ``center = transmogrify.B.center`` in the
+Share a stringlib method    ``from Objects.stringlib.pyspec import
+                            transmogrify``, then ``center =
+                            transmogrify.B.center`` in the
                             class; the method is declared once, in
                             ``Objects/stringlib/pyspec/transmogrify.py``.
                             ``critical_section(transmogrify.B.center)``:
                             clinic generates ``<class>_center()``, which
                             calls it in a critical section on self.
 Declare a method like       ``strip = bytesobject.bytes.strip`` (after
-another type's              ``from pyspec import bytesobject``) and the
-                            block ``bytearray.strip`` in ``foo.c``: a
+another type's              ``from Objects.pyspec import bytesobject``)
+                            and the block ``bytearray.strip`` in the C
+                            file: a
                             clinic function of this class with the other's
                             parameters, docstring and decorators; wrap it
                             (``critical_section(...)``) to add
@@ -135,9 +146,15 @@ Declare a new type          A class in the spec (its docstring, methods
                             it fills are the dunders of the class.
 Regenerate                  ``make clinic``, or
                             ``./python Tools/clinic/clinic.py Objects/foo.c``
+                            (the latter in a checkout that holds other
+                            worktrees: ``make clinic`` would regenerate
+                            theirs too); with ``--dry-run``, clinic only
+                            says what is out of date
 Test                        ``./python -m test test_clinic
                             test_pyspec_facts test_pyspec_catalog`` (after
                             rebuilding Python if the spec changed)
+Validate a change for       ``./python Tools/clinic/pyspec_review.py``
+review                      (MIGRATING.rst, "Validating a change")
 Change a C function a spec  Keep its Python reference in step: what it
 calls                       returns and raises, which Python code it may
                             run (``calls()``, ``runs_python()``) and which
@@ -174,9 +191,6 @@ Decorators
   accessor; its block in the C file starts with the same decorator.
 * ``@c_name("prefix")`` on a class: the prefix of its generated tables
   (``striter_methods``); the default is the class name.
-
-In a converter, ``c_param='x'`` names the C parameter (clinic's
-``name as x``).
 
 The spec language
 -----------------
@@ -323,7 +337,11 @@ Each group of lines of the spec is named in the C before its code,
 ``/* Objects/pyspec/bytesobject.py:90 */``, and the clinic block of a
 spec method says where its impl is generated.
 
-A backend for another language (Rust, say) would implement the methods
+Another language plugs in at two places, neither of which has an
+implementation yet: a backend, for spec bodies generated in that
+language (here), and a checker, for native functions written in it
+("Checking a reference against its native code", below).  A backend
+for another language (Rust, say) would implement the methods
 of ``CBackend`` for it: ``function()`` (an ``extern "C"`` function with
 the C signature of the entry, which clinic's C parsing code calls),
 ``prototype()``, ``comment()``, ``guard()`` (``#if``), the statements
@@ -478,7 +496,11 @@ runs (``PyObject_GetIter()`` runs ``__iter__``), and a ratchet
 dimension of its own next to ``c_calls``.  The spec, the reference, the
 facts, the fast paths and ``HelperTest`` stay as they are: the reference
 describes the function whatever its language, and generated code calls
-it through its C interface.
+it through its C interface.  No checker for another language exists
+yet.
+
+Errors
+------
 
 Clinic reports every error as ``path:line: error: message``, at the line
 of the spec when the error is in the spec (in the spec it was written
@@ -486,8 +508,11 @@ in, for code copied from another).  A spec error has a kind
 (``SpecErrorKind`` in ``Tools/clinic/libclinic/errors.py``): not valid
 in the spec language; expressible, but not lowered yet; in the lowered
 subset, but a use the emitter cannot lower (a local that changes type);
-or a disagreement between the spec and the blocks of the C file.  The
-implementation is in ``Tools/clinic/libclinic/pyspec/``.
+or a disagreement between the spec and the blocks of the C file.  The common messages and
+what to do about each are in "Troubleshooting" of `MIGRATING.rst
+<MIGRATING.rst>`_.  The implementation is in
+``Tools/clinic/libclinic/pyspec/`` (its ``__init__.py`` lists the
+modules).
 
 To migrate a C file to a spec, and to decide whether a function is
 worth a spec body, see `MIGRATING.rst <MIGRATING.rst>`_.
