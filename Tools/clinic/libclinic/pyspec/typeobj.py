@@ -30,11 +30,14 @@ from __future__ import annotations
 import ast
 import os
 import re
+from collections.abc import Callable
 
 from libclinic.formatting import docstring_for_c_string
 
 from . import frontend, slots
-from .frontend import CLINIC, PYCFUNCTION, README, SHARED, SLOT, SpecError
+from libclinic.errors import PYSPEC_README as README
+from libclinic.errors import SpecError
+from .frontend import CLINIC, PYCFUNCTION, SHARED, SLOT
 
 SUBTABLE_ORDER = ['as_async', 'as_number', 'as_sequence', 'as_mapping',
                   'as_buffer']
@@ -128,7 +131,8 @@ LOCKED_WRAPPERS = {
 _METHODDEF_FLAGS = r'\s*\\\n\s*\{"\w+",\s*[^,]+,\s*([\w|]+),'
 
 
-def _clinic_flags(spec: frontend.Spec, c_basename: str, error) -> str:
+def _clinic_flags(spec: frontend.Spec, c_basename: str,
+                  error: Callable[[str], SpecError]) -> str:
     """The calling convention of clinic function *c_basename*, declared
     by *spec*: the flags of the ``*_METHODDEF`` clinic generated for the
     C file of *spec* (``stringlib/clinic/transmogrify.h.h``)."""
@@ -213,6 +217,7 @@ class TypeGenerator:
         kind = other.method_kind(other_name)
         _, keywords = spec.c_name(name)
         locked = spec.is_locked(name)
+        flag: str | None
         if kind == PYCFUNCTION:
             docs, c_func, flag, doc_name = self._pycfunction(
                 other, other_name, meth)
@@ -272,7 +277,7 @@ class TypeGenerator:
         selected: dict[str, str | None] = {}
         where: dict[str, str] = {}
 
-        def select(slot, c_name, dunder):
+        def select(slot: str, c_name: str | None, dunder: str) -> None:
             if slot in selected and c_name is not None \
                     and selected[slot] not in (None, c_name):
                 raise spec.error(spec.functions[f'{self.cls_name}.{dunder}'],

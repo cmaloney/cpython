@@ -34,6 +34,10 @@ import builtins
 import os
 import sys
 import types
+from collections.abc import Callable, Iterator
+from typing import Any, TypeVar
+
+_F = TypeVar('_F', bound=Callable[..., Any])
 
 __all__ = [
     'NULL', 'PY_SSIZE_T_MAX', 'isinstance', 'iter', 'tp_name', 'fqname',
@@ -45,10 +49,10 @@ class _Null:
     """C NULL: an argument that was not passed, or a result that is
     absent."""
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return 'NULL'
 
-    def __bool__(self):
+    def __bool__(self) -> bool:
         raise TypeError('compare with "is NULL", do not test truthiness')
 
 
@@ -57,7 +61,7 @@ NULL = _Null()
 PY_SSIZE_T_MAX = sys.maxsize
 
 
-def _clinic_decorator(*args):
+def _clinic_decorator(*args: Any) -> Any:
     """``@d`` or ``@d(args)``: return the function unchanged."""
     if len(args) == 1 and callable(args[0]):
         return args[0]
@@ -80,14 +84,14 @@ def _define_clinic_decorators() -> list[str]:
 CLINIC_DECORATORS = _define_clinic_decorators()
 
 
-def c_name(*args, **kwargs):
+def c_name(*args: str, **kwargs: str) -> Callable[[_F], _F]:
     """``@c_name("x")`` / ``@c_name(slot="x")``: the C function of a
     method (see frontend.py); on a class, the prefix of its C tables
     (typeobj.py).  An identity decorator for Python."""
     return lambda func: func
 
 
-def c_implemented(func):
+def c_implemented(func: _F) -> _F:
     """The C function of the same name is written by hand and is the
     authority; the body is its Python reference: run when the spec runs
     as Python, and read for the facts of its calls.  It is never lowered
@@ -95,7 +99,7 @@ def c_implemented(func):
     return func
 
 
-def exact(tp, value=None):
+def exact(tp: type, value: Any = None) -> Any:
     """*value*, a new object of exactly type *tp*."""
     if value is not None and type(value) is not tp:
         raise AssertionError(f'exact({tp.__name__}, ...) is a '
@@ -103,20 +107,20 @@ def exact(tp, value=None):
     return value
 
 
-def unknown(value=None):
+def unknown(value: Any = None) -> Any:
     """*value*, a new object whose exact type is not known."""
     return value
 
 
-def calls(obj, name):
+def calls(obj: object, name: str) -> None:
     """The C invokes the special method *name* of type(obj) here."""
 
 
-def runs_python():
+def runs_python() -> None:
     """The C may run any Python code here."""
 
 
-def isinstance(obj, cls):
+def isinstance(obj: object, cls: type | tuple[type, ...]) -> bool:
     """PyXxx_Check(): looks at the real type only, never at __class__."""
     return issubclass(type(obj), cls)
 
@@ -124,17 +128,17 @@ def isinstance(obj, cls):
 class _Iterator:
     """The result of iter(): a for loop over it only calls __next__."""
 
-    def __init__(self, it):
+    def __init__(self, it: Iterator[Any]) -> None:
         self._it = it
 
-    def __iter__(self):
+    def __iter__(self) -> '_Iterator':
         return self
 
-    def __next__(self):
+    def __next__(self) -> Any:
         return next(self._it)
 
 
-def iter(obj):
+def iter(obj: Any) -> _Iterator:
     """PyObject_GetIter().
 
     ``for item in it:`` over its result is lowered to PyIter_Next() calls:
@@ -144,7 +148,7 @@ def iter(obj):
     return _Iterator(builtins.iter(obj))
 
 
-def tp_name(tp):
+def tp_name(tp: type) -> str:
     """``Py_TYPE(x)->tp_name``; used as ``%.200s`` in error messages."""
     if tp.__flags__ & (1 << 9):     # Py_TPFLAGS_HEAPTYPE
         return tp.__name__
@@ -153,14 +157,14 @@ def tp_name(tp):
     return f'{tp.__module__}.{tp.__qualname__}'
 
 
-def fqname(tp):
+def fqname(tp: type) -> str:
     """Fully qualified type name; used as ``%T`` in error messages."""
     if tp.__module__ in ('builtins', '__main__'):
         return tp.__qualname__
     return f'{tp.__module__}.{tp.__qualname__}'
 
 
-def load(path):
+def load(path: str) -> dict[str, Callable[..., Any]]:
     """Execute the spec at *path*; return its functions and methods.
 
     The result maps "PyBytes_FromObject" or "bytes.__new__" to the Python
@@ -176,32 +180,34 @@ def load(path):
     with open(path, encoding='utf-8') as f:
         tree = ast.parse(f.read(), path)
     classes = {node.name for node in tree.body
-               if isinstance(node, ast.ClassDef)}
+               if builtins.isinstance(node, ast.ClassDef)}
     base = os.path.dirname(os.path.dirname(os.path.abspath(path)))
     bases = [base, os.path.dirname(base)]
 
     class SpecCalls(ast.NodeTransformer):
-        def visit_ClassDef(self, node):
+        def visit_ClassDef(self, node: ast.ClassDef) -> ast.ClassDef:
             # Only the bodies of methods: a shared method of a class body
             # (``__reduce__ = bytearray.__reduce__``) is the spec's.
             node.body = [self.visit(stmt)
-                         if isinstance(stmt, ast.FunctionDef) else stmt
+                         if builtins.isinstance(stmt, ast.FunctionDef)
+                         else stmt
                          for stmt in node.body]
             return node
 
-        def visit_FunctionDef(self, node):
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
             # The Python reference of a C function models it with the
             # builtins.
-            if any(isinstance(d, ast.Name) and d.id == 'c_implemented'
+            if any(builtins.isinstance(d, ast.Name)
+                   and d.id == 'c_implemented'
                    for d in node.decorator_list):
                 return node
             return self.generic_visit(node)
 
-        def visit_Attribute(self, node):
+        def visit_Attribute(self, node: ast.Attribute) -> ast.Attribute:
             self.generic_visit(node)
-            if (isinstance(node.value, ast.Name)
+            if (builtins.isinstance(node.value, ast.Name)
                     and node.value.id in classes
-                    and isinstance(node.ctx, ast.Load)):
+                    and builtins.isinstance(node.ctx, ast.Load)):
                 node.value = ast.copy_location(
                     ast.Name(f'_spec_{node.value.id}', ast.Load()),
                     node.value)
@@ -217,11 +223,11 @@ def load(path):
     finally:
         for entry in bases:
             sys.path.remove(entry)
-    functions = {}
+    functions: dict[str, Any] = {}
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef):
+        if builtins.isinstance(node, ast.FunctionDef):
             functions[node.name] = getattr(module, node.name)
-        elif isinstance(node, ast.ClassDef):
+        elif builtins.isinstance(node, ast.ClassDef):
             spec_class = getattr(module, node.name)
             setattr(module, f'_spec_{node.name}', spec_class)
             # A class that is not a builtin (bytes_iterator) stays the
@@ -229,7 +235,7 @@ def load(path):
             setattr(module, node.name,
                     getattr(builtins, node.name, spec_class))
             for item in node.body:
-                if isinstance(item, ast.FunctionDef):
+                if builtins.isinstance(item, ast.FunctionDef):
                     functions[f'{node.name}.{item.name}'] = (
                         spec_class.__dict__[item.name])
     return {name: getattr(func, '__func__', func)

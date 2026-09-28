@@ -514,9 +514,8 @@ class Spec:
                 case ast.FunctionDef(name=name):
                     self._add_function(f'{node.name}.{name}', stmt)
                 case ast.Assign(targets=[ast.Name(name)], value=value) \
-                        if self._shared_source(value) is not None:
-                    self._add_shared(node.name, stmt, name,
-                                     *self._shared_source(value))
+                        if (source := self._shared_source(value)) is not None:
+                    self._add_shared(node.name, stmt, name, *source)
                 case ast.Assign(targets=[ast.Name(name)],
                                 value=ast.Name() | ast.Call()):
                     raise self.error(stmt, f"Python has no clones: write "

@@ -77,6 +77,7 @@ import builtins
 import copy
 import itertools
 import weakref
+from typing import Any
 
 from . import builtin_types, facts, frontend, subset
 
@@ -734,7 +735,8 @@ class Evaluator:
 # -- shared specializations (see the module docstring) -----------------------
 
 # spec -> {(callee, facts): Specialization or None, and name: Specialization}
-_SPECIALIZATIONS = weakref.WeakKeyDictionary()
+_SPECIALIZATIONS: weakref.WeakKeyDictionary[
+    frontend.Spec, dict[Any, Any]] = weakref.WeakKeyDictionary()
 
 
 class Specialization:
