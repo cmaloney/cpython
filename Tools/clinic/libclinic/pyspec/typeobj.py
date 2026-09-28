@@ -1,28 +1,17 @@
 """Generate the method and slot tables of the types of a spec.
 
 For each class of the spec of a C file that the C file declares (``class
-bytes_iterator "striterobject *" "&PyBytesIter_Type"``; the spec of a
-header only declares methods other specs share), Argument Clinic
-generates at the end of Objects/clinic/<stem>_pyspec.c.h (included at the
-end of the C file, after every function it names):
-
-* ``<prefix>_doc``: the class docstring;
-* the method table ``<prefix>_methods[]``: one entry per method of the
-  class that is not a slot, in the order of the spec.  A clinic function
-  is its ``*_METHODDEF`` macro; a hand-written PyCFunction
-  (``@c_name(METH_NOARGS="f")``, frontend.Spec.pycfunction()) is written
-  out with its docstring, as is a slot that also has one
-  (``@c_name(mp_subscript="f", METH_O="f")`` and ``@coexist``); a shared
-  method is the entry the other spec declares (see _shared_entry());
-* the sub-tables ``<prefix>_as_number`` etc. holding the slots of the
-  dunders (see slots.py).
-
-The prefix is the class name, or the ``@c_name("striter")`` of the class.
-The PyTypeObject itself is written in C, after the include, and names
-these tables; its own slots (tp_repr, tp_iter...) are C functions it
-names.  The dunders of those slots are declared in the class all the
-same: test_clinic checks that the type has exactly the slot wrappers the
-class declares.
+bytes_iterator "striterobject *" "&PyBytesIter_Type"``) and that
+declares slots, clinic writes at the end of clinic/<stem>_pyspec.c.h:
+``<prefix>_doc`` (the class docstring), ``<prefix>_methods[]`` (one entry
+per method that is not a slot, in the order of the spec: a clinic
+function's ``*_METHODDEF``, a hand-written PyCFunction written out, a
+shared method's entry, see _shared_entry()) and the sub-tables
+``<prefix>_as_number``... of the slots of its dunders (slots.py).  The
+prefix is the class name, or its ``@c_name("striter")``.  The
+PyTypeObject is written in C after the include and names these tables;
+test_clinic checks that the type has exactly the slot wrappers the class
+declares.
 """
 
 from __future__ import annotations
@@ -86,10 +75,6 @@ def _text_signature(node: ast.FunctionDef) -> str:
     if args.kwarg:
         params.append('**' + args.kwarg.arg)
     return f'({", ".join(params)})'
-
-
-def _c_string(text: str) -> str:
-    return docstring_for_c_string(text)
 
 
 def _c_stub(spec: frontend.Spec, name: str, kind: str) -> ast.FunctionDef:
@@ -187,7 +172,7 @@ class TypeGenerator:
         doc_name = 'NULL'
         if doc is not None:
             doc_name = f'{self.prefix}_{meth}__doc__'
-            docs = [f'PyDoc_STRVAR({doc_name},', _c_string(doc) + ');', '']
+            docs = [f'PyDoc_STRVAR({doc_name},', docstring_for_c_string(doc) + ');', '']
         return docs, entry.c_function, entry.flags, doc_name
 
     def _clinic_entry(self, name: str) -> str:
@@ -218,7 +203,6 @@ class TypeGenerator:
         _, keywords = spec.c_name(name)
         locked = any(frontend.decorator_name(d) == 'critical_section'
                      for d in shared.decorators)
-        flag: str | None
         if kind == PYCFUNCTION:
             docs, c_func, flag, doc_name = self._pycfunction(
                 other, other_name, meth)
@@ -232,15 +216,15 @@ class TypeGenerator:
             if not keywords and not locked:
                 return [], f'    {c_basename.upper()}_METHODDEF'
             c_func, doc_name = c_basename, f'{c_basename}__doc__'
-            flag = None if keywords else _clinic_flags(other, c_basename,
-                                                       error)
+            flag = '' if keywords else _clinic_flags(other, c_basename,
+                                                     error)
         else:
             raise error(f"{other_name} of {other.filename} is a {kind}; "
                         "only methods can be shared")
         if keywords:
             (given, c_func), = keywords.items()
             if given not in frontend.PYCFUNCTION_FLAGS or \
-                    flag not in (None, given):
+                    flag not in ('', given):
                 raise error(f"{name}: write c_name({flag or 'METH_NOARGS'}"
                             f"=\"f\")(...), the calling convention of "
                             f"{other_name}")
@@ -265,9 +249,7 @@ class TypeGenerator:
                      '}',
                      '']
             c_func = wrapper
-        if flag not in ('METH_NOARGS', 'METH_O'):
-            c_func = f'_PyCFunction_CAST({c_func})'
-        return docs, f'    {{"{meth}", {c_func}, {flag}, {doc_name}}},'
+        return docs, _method_def(meth, c_func, flag, doc_name)
 
     # -- slots -------------------------------------------------------------
 
@@ -385,7 +367,7 @@ class TypeGenerator:
         if class_doc is not None:
             lines = spec._clean_docstring(self.node.body[0], class_doc)
             out += [f'PyDoc_STRVAR({self.prefix}_doc,',
-                    _c_string('\n'.join(lines)) + ');', '']
+                    docstring_for_c_string('\n'.join(lines)) + ');', '']
         out += docs
 
         if table:
