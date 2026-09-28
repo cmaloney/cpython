@@ -283,6 +283,12 @@ class ParityTest(unittest.TestCase):
         names = [t.name for t in types]
         before = pyspec_parity.run_capture(baseline, names)
         after = pyspec_parity.run_capture(sys.executable, names)
+        header_before = pyspec_parity.parse(before)[0]
+        header_after = pyspec_parity.parse(after)[0]
+        if header_before != header_after:
+            # Debug and free-threaded builds differ observably.
+            self.skipTest(f'{baseline} is another configuration: '
+                          f'{header_before} (this python: {header_after})')
         diff = pyspec_parity.compare(before, after, types)
         self.assertFalse(diff, f'the types differ from {baseline}; a '
                          'difference made on purpose goes into the "known" '
