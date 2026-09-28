@@ -7,17 +7,24 @@ from typing import Any, TYPE_CHECKING
 
 import libclinic
 from libclinic import fail, warn
-from libclinic.function import Class
+from libclinic.function import (
+    Class, FunctionKind, GETTER, SETTER, SETTER_AND_DELETER)
 from libclinic.block_parser import Block, BlockParser
 from libclinic.codegen import BlockPrinter, Destination, CodeGen
 from libclinic.parser import Parser, PythonParser
 from libclinic.dsl_parser import DSLParser
-from libclinic.pyspec import emit, frontend, typeobj
+from libclinic.errors import SpecError
+from libclinic.pyspec import frontend
 if TYPE_CHECKING:
     from libclinic.clanguage import CLanguage
     from libclinic.function import (
         Module, Function, Property, ClassDict, ModuleDict)
     from libclinic.codegen import DestinationDict
+
+
+# The accessor of each kind of clinic function (see frontend.SpecBlock).
+ACCESSOR_KINDS: dict[FunctionKind, str] = {
+    GETTER: 'getter', SETTER: 'setter', SETTER_AND_DELETER: 'setter'}
 
 
 # maps strings to callables.
@@ -110,13 +117,8 @@ impl_definition block
         # The spec of the file (see libclinic.pyspec), read on first use.
         self._pyspec: frontend.Spec | None = None
         self._pyspec_read = False
-        # C basenames of the clinic functions implemented by spec methods.
-        self.pyspec_c_basenames: dict[str, str] = {}
-        # C type of the self (or class) parameter of the implemented spec
-        # methods other than __new__.
-        self.pyspec_self_ctypes: dict[str, str] = {}
-        # #if condition of the implemented spec methods under one.
-        self.pyspec_conditions: dict[str, str] = {}
+        # How the blocks of the file bind the spec (DSLParser.bind_spec()).
+        self.pyspec_bindings = frontend.PyspecBindings()
 
         self.line_prefix = self.line_suffix = ''
 
@@ -280,8 +282,8 @@ impl_definition block
                 try:
                     self._pyspec = frontend.Spec.load(path)
                 except SyntaxError as exc:
-                    raise frontend.SpecError(exc.msg, filename=path,
-                                             lineno=exc.lineno) from None
+                    raise SpecError(exc.msg, filename=path,
+                                    lineno=exc.lineno) from None
         return self._pyspec
 
     def check_spec_blocks(self) -> None:
@@ -294,15 +296,25 @@ impl_definition block
         for path, cls in self._clinic_classes(self, ''):
             if cls.name not in spec.classes:
                 continue
-            declared = {f.name for f in cls.functions}
-            for meth in spec.methods(cls.name):
-                if meth not in declared:
-                    raise spec.error(
-                        spec.functions[f'{cls.name}.{meth}'],
-                        f"{path}.{meth} has no clinic block in "
-                        f"{self.filename}; put this block above its "
-                        f"impl:\n/*[clinic input]\n{path}.{meth}\n"
-                        "[clinic start generated code]*/")
+            declared = {(f.name, ACCESSOR_KINDS.get(f.kind, ''))
+                        for f in cls.functions}
+            wanted = [(meth, '', spec.functions[f'{cls.name}.{meth}'])
+                      for meth in spec.methods(cls.name)]
+            for name, accessors in spec.accessors.items():
+                cls_name, _, meth = name.rpartition('.')
+                if cls_name == cls.name:
+                    wanted += [(meth, kind, node)
+                               for kind, node in accessors.items()]
+            for meth, kind, node in wanted:
+                if (meth, kind) in declared:
+                    continue
+                decorator = f'@{kind}\n' if kind else ''
+                raise spec.error(
+                    node,
+                    f"{path}.{meth} has no clinic block in "
+                    f"{self.filename}; put this block above its "
+                    f"impl:\n/*[clinic input]\n{decorator}{path}.{meth}\n"
+                    "[clinic start generated code]*/")
 
     def _clinic_classes(self, parent: Any, prefix: str
                         ) -> list[tuple[str, Class]]:
@@ -326,23 +338,21 @@ impl_definition block
         dirname, basename = os.path.split(os.path.abspath(self.filename))
         stem = os.path.splitext(basename)[0]
         spec_name = f"{os.path.basename(dirname)}/pyspec/{stem}.py"
+        # Only a file whose spec has bodies or types needs these.
+        from libclinic.pyspec import emit, typeobj
         parts = []
         if spec.implemented_functions():
+            self.pyspec_bindings.type_objects = {
+                path: cls.type_object
+                for path, cls in self._clinic_classes(self, '')}
             try:
-                type_objects = {
-                    path: cls.type_object
-                    for path, cls in self._clinic_classes(self, '')}
                 parts.append(emit.generate(spec, spec_name,
-                                           self.pyspec_c_basenames,
-                                           self.pyspec_self_ctypes,
-                                           self.pyspec_conditions,
-                                           type_objects))
-            except emit.SpecError as exc:
-                message = exc.message
-                if message.startswith('unsupported'):
-                    message += f"; see {frontend.README}"
-                raise frontend.SpecError(message, filename=spec.filename,
-                                         lineno=exc.lineno) from None
+                                           self.pyspec_bindings))
+            except SpecError as exc:
+                # An error in the spec itself, unless it names another.
+                if exc.filename is None:
+                    exc.filename = spec.filename
+                raise
         types = self.type_objects(spec)
         if types is not None:
             if not parts:
@@ -361,6 +371,7 @@ impl_definition block
         """The method and slot tables of the types of the spec that the C
         file declares (see pyspec/typeobj.py); a header declares no
         type."""
+        from libclinic.pyspec import typeobj
         if not self.filename.endswith('.c'):
             return None
         clinic_classes = self._clinic_classes(self, '')

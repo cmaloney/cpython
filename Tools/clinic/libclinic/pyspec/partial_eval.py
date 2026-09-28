@@ -77,8 +77,9 @@ import builtins
 import copy
 import itertools
 import weakref
+from typing import Any
 
-from . import builtin_types, facts, frontend
+from . import builtin_types, facts, frontend, subset
 
 # Fact values in an environment: NULL, NOTNULL, an exact type (of the
 # object the name refers to), Value(obj) for the object itself, IterOf(x,
@@ -376,8 +377,11 @@ def _with_call(stmt, value):
 
 def fast_paths(spec, name):
     """(test, value, parameters) of the fast paths of @c_implemented
-    function *name* of *spec*: its leading ``if test: return value``."""
+    function *name* of *spec*: its leading ``if test: return value``.
+    A reference facts.py cannot follow has none (subset.analysed())."""
     out = []
+    if subset.analysed(spec, name):
+        return out, spec.params(name)
     for stmt in spec.body(name):
         match stmt:
             case ast.If(test=test, body=[ast.Return(value=value)],
@@ -389,11 +393,11 @@ def fast_paths(spec, name):
 
 
 def _scoped(node, spec):
-    """*node*, written in *spec*, with its calls marked with the spec
-    whose names they use (frontend.Spec.c_function())."""
+    """*node*, written in *spec*, with its nodes marked with that spec:
+    its calls use its names (frontend.Spec.c_function()), and errors are
+    reported in it (SpecError.at())."""
     for child in ast.walk(node):
-        if isinstance(child, ast.Call) and not hasattr(child,
-                                                       'pyspec_scope'):
+        if not hasattr(child, 'pyspec_scope'):
             child.pyspec_scope = spec.filename
     return node
 
@@ -731,7 +735,8 @@ class Evaluator:
 # -- shared specializations (see the module docstring) -----------------------
 
 # spec -> {(callee, facts): Specialization or None, and name: Specialization}
-_SPECIALIZATIONS = weakref.WeakKeyDictionary()
+_SPECIALIZATIONS: weakref.WeakKeyDictionary[
+    frontend.Spec, dict[Any, Any]] = weakref.WeakKeyDictionary()
 
 
 class Specialization:

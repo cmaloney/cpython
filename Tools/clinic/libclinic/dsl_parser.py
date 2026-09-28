@@ -15,6 +15,7 @@ from libclinic.pyspec import frontend
 from libclinic import (
     ClinicError, VersionTuple,
     fail, warn, unspecified, unknown, NULL)
+from libclinic.errors import SpecError, SpecErrorKind
 from libclinic.function import (
     Module, Class, Property, Function, Parameter,
     FunctionKind,
@@ -273,6 +274,13 @@ class DSLParser:
     permit_long_summary = False
     permit_long_docstring_body = False
 
+    @classmethod
+    def decorator_names(cls) -> list[str]:
+        """The names of the clinic decorators: ``@name`` in a block (and on
+        a spec method, see libclinic.pyspec.runtime)."""
+        return sorted(name.removeprefix('at_') for name in dir(cls)
+                      if name.startswith('at_'))
+
     def __init__(self, clinic: Clinic) -> None:
         self.clinic = clinic
 
@@ -315,12 +323,8 @@ class DSLParser:
         self.vectorcall: bool = False
         self.permit_long_summary = False
         self.permit_long_docstring_body = False
-        # "T.meth" when the block was completed from the spec method
-        # T.meth (see spec_input()).
-        self.spec_function: str | None = None
-        # Where the spec declares it, and its decorators: (file, line).
-        self.spec_location: tuple[str, int] = ('', 0)
-        self.spec_decorators: dict[str, tuple[str, int]] = {}
+        # The block completed from a spec method (see spec_input()).
+        self.spec_block: frontend.SpecBlock | None = None
 
     def directive_module(self, name: str) -> None:
         fields = name.split('.')[:-1]
@@ -527,7 +531,7 @@ class DSLParser:
         block.output = []
         block_start = self.clinic.block_parser.line_number
         lines = block.input.split('\n')
-        stub = self.find_stub(lines)
+        stub = frontend.function_line_index(lines, self.directives)
         line_numbers = list(range(
             self.clinic.block_parser.block_start_line_number,
             self.clinic.block_parser.block_start_line_number + len(lines)))
@@ -544,11 +548,13 @@ class DSLParser:
                     # The lines from the spec replace the function line;
                     # clinic counts them at its line number.
                     spec_lines = self.spec_input(lines[index], lines[:index])
-                    lines[index:index + 1] = [l for l, _ in spec_lines]
-                    line_numbers[index:index + 1] = [line_number] * len(spec_lines)
-                    locations[index:index + 1] = [
-                        loc or location for _, loc in spec_lines]
-                    location = locations[index]
+                    if spec_lines:
+                        lines[index:index + 1] = [l for l, _ in spec_lines]
+                        line_numbers[index:index + 1] = (
+                            [line_number] * len(spec_lines))
+                        locations[index:index + 1] = [
+                            loc for _, loc in spec_lines]
+                        location = locations[index]
                 line = lines[index]
                 index += 1
                 if '\t' in line:
@@ -574,119 +580,25 @@ class DSLParser:
                      line_number=line_number)
             block.output = self.saved_output
 
-    def find_stub(self, lines: list[str]) -> int | None:
-        """The index of the function line, if the block is only that line.
-
-        Such a block may complete its input from the spec: see spec_input().
-        Blocks holding directives, clinic decorators (except those of
-        accessors) and a function line, which does not clone, qualify.
-        """
-        stub = None
-        for index, line in enumerate(lines):
-            if not self.valid_line(line):
-                continue
-            if stub is not None:
-                # Parameters or a docstring: a complete block.
-                return None
-            name = shlex.split(line)[0]
-            if name in ('@getter', '@setter', '@deleter'):
-                return None
-            if name not in self.directives:
-                stub = index
-        if stub is None or '=' in lines[stub]:
-            return None
-        return stub
-
     def spec_input(self, function_line: str, head: list[str]
-                   ) -> list[tuple[str, tuple[str, int] | None]]:
-        """Complete a one-line block from the spec method it names.
+                   ) -> list[tuple[str, frontend.Location]]:
+        """The lines replacing the function line of a one-line block
+        completed from the spec method it names, with where each is
+        written in the spec, or [] (see frontend.complete_block()).
 
-        If the function is a method of a class of the spec (for
-        Objects/foo.c, Objects/pyspec/foo.py), return the lines replacing
-        *function_line*: the clinic decorators of the spec method, the
-        function line, and the parameters and docstring taken from the
-        spec.  See
-        libclinic.pyspec.frontend.  Otherwise, return [function_line].
-        Each line comes with its location in the spec (None: the C file).
-
-        *head* holds the lines of the block before the function line.  The
-        checksum of the block is still computed on the input in the C file.
+        *head* holds the lines of the block before the function line.
         """
-        unchanged = [(function_line, None)]
         spec = self.clinic.pyspec
         if spec is None:
-            return unchanged
+            return []
         names = function_line.partition('->')[0].partition(' as ')[0].strip()
-        prefix, _, meth = names.rpartition('.')
+        prefix = names.rpartition('.')[0]
         _, cls = self.clinic._module_and_class(prefix.split('.') if prefix
                                                else [])
-        if cls is None or cls.name not in spec.classes:
-            return unchanged
-        name = f'{cls.name}.{meth}'
-        # A shared method with a block is a clinic function of this class
-        # declared by the method it names.
-        decl_spec, decl_name = spec, name
-        if name in spec.shared:
-            decl_spec, decl_name = spec.declaration(name)
-            kind = decl_spec.method_kind(decl_name)
-            if kind != frontend.CLINIC:
-                fail(f"{names!r} is not a clinic function: it shares "
-                     f"{decl_name}, a {kind} of {decl_spec.filename}; "
-                     "remove its block")
-            if spec.c_name(name)[1]:
-                fail(f"{names!r} is a clinic function: its @c_name in "
-                     f"{spec.filename} takes no keyword")
-        elif name in spec.functions:
-            kind = spec.method_kind(name)
-            if kind != frontend.CLINIC:
-                fail(f"{names!r} is not a clinic function: it is a "
-                     f"{kind} of {spec.filename}; remove its block")
-        if not decl_spec.has_method(decl_name):
-            fail(f"{names!r} has no parameters or docstring, and class "
-                 f"{cls.name} in {spec.filename} has no method {meth!r} "
-                 "to take them from")
-        for line in head:
-            if self.valid_line(line) and line.lstrip().startswith('@'):
-                fail(f"{names!r}: {shlex.split(line)[0]} of a spec method "
-                     f"is written in {spec.filename}")
-        decl_decorators, suffix, rest = decl_spec.clinic_input(decl_name)
-        where = decl_spec.filename
-        spec_decorators = [(line, (where, lineno))
-                           for line, lineno in decl_decorators]
-        if name in spec.shared:
-            spec_decorators += [(line, (spec.filename, lineno)) for line, lineno
-                                in spec.shared_decorators(name)]
-        for line, (filename, lineno) in spec_decorators:
-            decorator = line.split()[0]
-            if decorator not in self.directives:
-                raise frontend.SpecError(
-                    f"{names!r}: unknown clinic decorator {decorator}",
-                    filename=filename, lineno=lineno)
-        if suffix.startswith(' -> ') and '->' in function_line:
-            fail(f"{names!r}: the return converter is written in "
-                 f"{spec.filename}")
-        c_name, _ = spec.c_name(name)
-        if c_name is not None:
-            if ' as ' in function_line:
-                fail(f"{names!r}: the C name is written in "
-                     f"{spec.filename} (@c_name)")
-            left, arrow, right = function_line.partition('->')
-            function_line = (f'{left.rstrip()} as {c_name}'
-                             + (f' {arrow}{right}' if arrow else ''))
-        self.spec_function = name
-        # Where the function is declared: its def, or the shared method.
-        if name in spec.shared:
-            self.spec_location = (spec.filename, spec.shared[name].lineno)
-        else:
-            self.spec_location = (spec.filename, spec.functions[name].lineno)
-        self.spec_decorators = {line.split()[0][1:]: loc
-                                for line, loc in spec_decorators}
-        indent = function_line[:len(function_line) - len(function_line.lstrip())]
-        return [*spec_decorators,
-                (function_line.rstrip() + suffix,
-                 (where, decl_spec.functions[decl_name].lineno)),
-                *[(indent + line if line else line, (where, lineno))
-                  for line, lineno in rest]]
+        self.spec_block = frontend.complete_block(
+            spec, function_line, head, cls.name if cls else None,
+            self.directives)
+        return self.spec_block.lines if self.spec_block else []
 
     def locate(self, exc: ClinicError, location: tuple[str, int], *,
                keep_lineno: bool = False) -> None:
@@ -698,9 +610,9 @@ class DSLParser:
         """
         if exc.filename is not None:
             return
-        if (self.spec_function is not None
+        if (self.spec_block is not None
                 and location[0] == self.clinic.filename):
-            location = self.spec_location
+            location = self.spec_block.location
             keep_lineno = False
         exc.filename = location[0]
         if not (keep_lineno and exc.lineno is not None):
@@ -709,18 +621,23 @@ class DSLParser:
     def decorator_location(self, name: str, lineno: int | None
                            ) -> tuple[str | None, int | None]:
         """Where decorator @name of the current function is written."""
-        if self.spec_function is None:
+        if self.spec_block is None:
             return self.clinic.filename, lineno
-        return self.spec_decorators.get(name, self.spec_location)
+        return self.spec_block.decorators.get(name,
+                                              self.spec_block.location)
 
     def check_spec_duplicate(self, lineno: int) -> None:
         """A function is either in the spec or in its block, not both."""
         func = self.function
         assert func is not None
-        if self.spec_function is not None or func.cls is None:
+        if self.spec_block is not None or func.cls is None:
             return
         spec = self.clinic.pyspec
         name = f"{func.cls.name}.{func.name}"
+        if spec is not None and name in spec.accessors:
+            fail(f"{func.full_name!r} is declared both here and in "
+                 f"{spec.filename}; keep only @getter or @setter and its "
+                 "function line here", line_number=lineno)
         if (spec is not None and spec.has_method(name)
                 and not frontend.is_placeholder(spec.functions[name])):
             fail(f"{func.full_name!r} is declared both here and in "
@@ -1817,98 +1734,73 @@ class DSLParser:
                      line_number=lineno)
 
     def check_pyspec(self, lineno: int) -> None:
-        """Let a spec method with a body implement this function.
-
-        Its NAME_impl() comes from the spec (see libclinic.pyspec.emit) and
-        a vectorcall calling the NAME_nargsN() specializations is
-        generated.
-        """
-        func = self.function
-        assert func is not None
+        """Let a spec method with a body implement this function: its
+        NAME_impl() comes from the spec (see libclinic.pyspec.emit)."""
         spec = self.clinic.pyspec
-        name = self.spec_function
+        name = self.spec_block.name if self.spec_block else None
         if spec is None or name is None or not spec.implemented(name):
             return
-        if func.kind in (CALLABLE, CLASS_METHOD) and func.cls is not None:
-            self.check_pyspec_method(lineno)
-            return
-        description = spec.describe(name)
-        where = f"{name}() in {spec.filename}"
-        if func.kind is not METHOD_NEW:
-            fail(f"{where}: a spec can only implement __new__, methods and "
-                 "class methods", line_number=lineno)
-        assert func.cls is not None
-        if not func.cls.type_object:
-            fail(f"{where}: requires the type object of {func.cls.name!r}, "
-                 "which was declared without one", line_number=lineno)
-        type_object = frontend.TYPE_OBJECTS[description.new_type]
-        if type_object != func.cls.type_object:
-            fail(f"{where}: {description.new_type} is {type_object}, "
-                 f"{func.cls.name!r} is {func.cls.type_object}",
-                 line_number=lineno)
-        if func.critical_section:
-            fail(f"{where}: a spec cannot be used with @critical_section",
-                 line_number=lineno)
-        params = [p for p in func.parameters.values()
-                  if not isinstance(p.converter, (self_converter,
-                                                  defining_class_converter))]
-        spec_params = description.parameters[1:]
-        if len(params) != len(spec_params):
-            fail(f"{where} takes {len(spec_params)} parameters after the "
-                 f"class, {func.full_name} takes {len(params)}",
-                 line_number=lineno)
-        for p, sp in zip(params, spec_params):
-            if p.converter.type != sp.ctype:
-                fail(f"{where}: parameter {sp.name!r} is {sp.ctype!r}, "
-                     f"its converter gives {p.converter.type!r}",
-                     line_number=lineno)
-        func.vectorcall = True
-        func.pyspec = func.c_basename
-        self.clinic.pyspec_c_basenames[name] = func.c_basename
-        if func.condition:
-            self.clinic.pyspec_conditions[name] = func.condition
+        assert self.function is not None
+        self.bind_spec(self.function, spec.describe(name))
 
-    def check_pyspec_method(self, lineno: int) -> None:
-        """Let a spec method (or class method) with a body implement this
-        function: its NAME_impl() comes from the spec (see
-        libclinic.pyspec.emit); the parsing code is clinic's as usual."""
-        func = self.function
-        assert func is not None
-        spec = self.clinic.pyspec
-        name = self.spec_function
-        assert spec is not None and name is not None
-        where = f"{name}() in {spec.filename}"
+    def bind_spec(self, func: Function,
+                  description: frontend.SpecFunction) -> None:
+        """Bind the implemented spec method *description* to clinic
+        function *func*: check that they agree, and record the binding
+        (frontend.PyspecBindings) for the C generated from the spec.
+
+        A __new__ also gets a vectorcall calling its NAME_nargsN()
+        specializations; for other methods and class methods, the
+        parsing code is clinic's as usual."""
+        where = f"{description.name}() in {description.path}"
+
+        def error(message: str) -> SpecError:
+            return SpecError(f"{where}: {message}",
+                             kind=SpecErrorKind.BINDING)
+
         if func.critical_section:
-            fail(f"{where}: a spec cannot be used with @critical_section",
-                 line_number=lineno)
-        selves = [p for p in func.parameters.values()
-                  if isinstance(p.converter, self_converter)]
+            raise error("a spec cannot be used with @critical_section")
         params = [p for p in func.parameters.values()
                   if not isinstance(p.converter, (self_converter,
                                                   defining_class_converter))]
-        if len(selves) != 1:
-            fail(f"{where}: needs clinic's implicit self parameter",
-                 line_number=lineno)
-        # What self_converter.pre_render() will choose.
-        conv = selves[0].converter
-        assert isinstance(conv, self_converter)
-        self_ctype = (conv.specified_type or conv.type
-                      or correct_name_for_self(func)[0])
-        description = spec.describe(name, self_ctype)
+        if func.kind is METHOD_NEW:
+            assert func.cls is not None
+            if not func.cls.type_object:
+                raise error(f"requires the type object of {func.cls.name!r}, "
+                            "which was declared without one")
+            type_object = frontend.TYPE_OBJECTS.get(description.new_type or '')
+            if type_object != func.cls.type_object:
+                raise error(f"{description.new_type} is {type_object}, "
+                            f"{func.cls.name!r} is {func.cls.type_object}")
+            self_ctype = frontend.TYPE_CTYPE
+            func.vectorcall = True
+            what = 'after the class'
+        elif func.kind in (CALLABLE, CLASS_METHOD) and func.cls is not None:
+            selves = [p for p in func.parameters.values()
+                      if isinstance(p.converter, self_converter)]
+            if len(selves) != 1:
+                raise error("needs clinic's implicit self parameter")
+            # What self_converter.pre_render() will choose.
+            conv = selves[0].converter
+            assert isinstance(conv, self_converter)
+            self_ctype = (conv.specified_type or conv.type
+                          or correct_name_for_self(func)[0])
+            what = 'after self'
+        else:
+            raise error("a spec body implements __new__, methods and "
+                        "class methods")
         spec_params = description.parameters[1:]
         if len(params) != len(spec_params):
-            fail(f"{where} takes {len(spec_params)} parameters after self, "
-                 f"{func.full_name} takes {len(params)}", line_number=lineno)
+            raise error(f"takes {len(spec_params)} parameters {what}, "
+                        f"{func.full_name} takes {len(params)}")
         for p, sp in zip(params, spec_params):
             if p.converter.type != sp.ctype:
-                fail(f"{where}: parameter {sp.name!r} is {sp.ctype!r}, "
-                     f"its converter gives {p.converter.type!r}",
-                     line_number=lineno)
+                raise error(f"parameter {sp.name!r} is {sp.ctype!r}, its "
+                            f"converter gives {p.converter.type!r}")
         func.pyspec = func.c_basename
-        self.clinic.pyspec_c_basenames[name] = func.c_basename
-        if func.condition:
-            self.clinic.pyspec_conditions[name] = func.condition
-        self.clinic.pyspec_self_ctypes[name] = self_ctype
+        self.clinic.pyspec_bindings.functions[description.name] = (
+            frontend.SpecBinding(func.c_basename, self_ctype,
+                                 func.condition or ''))
 
     def do_post_block_processing_cleanup(self, lineno: int) -> None:
         """
