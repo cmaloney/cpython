@@ -14,7 +14,7 @@ machine.py.  Pyspec_parity.py compares the model with the C type
 A method whose body is still ``...`` is *delegated*: its model converts
 its arguments to host objects, calls the C method and converts the
 result back.  That is circular (the model uses the type it describes),
-and coverage() says which methods are.
+and check_circular() says which methods are.
 
 Two rules keep a body non-circular (check_circular()): a type another
 spec describes (bytearray, memoryview...) may be named as a type (type
@@ -25,6 +25,7 @@ machine.py touch host bytes.
 import ast
 import builtins
 import functools
+import importlib.machinery
 import os
 import sys
 import types
@@ -40,10 +41,6 @@ C_DEFAULTS = {'NULL': NULL, '0': 0, 'PY_SSIZE_T_MAX': sys.maxsize}
 # Host types a model may name as types but never call or read attributes
 # of, besides those the specs describe: the view of an exported buffer.
 TYPE_ONLY = ('memoryview',)
-
-
-class CircularError(AssertionError):
-    """A model used a host type it describes."""
 
 
 # -- the descriptors (Objects/descrobject.c) ---------------------------------
@@ -578,7 +575,7 @@ class Parser:
         if conv == 'bool':
             return builtins.bool(value)
         if conv == 'char':
-            for tp in _BYTES_TYPES():
+            for tp in _char_types():
                 if builtins.isinstance(value, tp):
                     items = machine.buffer_items(value)
                     if len(items) != 1:
@@ -598,7 +595,7 @@ class Parser:
         raise NotImplementedError(f'converter {conv} in the model')
 
 
-def _BYTES_TYPES():
+def _char_types():
     """The types of clinic's char converter: bytes, then bytearray (the
     model's where there is one)."""
     return (_current.builtins['bytes'], _current.builtins['bytearray'])
@@ -674,9 +671,7 @@ class Model:
         self.modules = {}           # absolute path -> module
         self.specs = {}             # absolute path -> frontend.Spec
         self.types = {}             # class name -> model class
-        self.raw = {}               # class name -> spec class
         self.kinds = {}             # "T.meth" -> 'pure' or 'delegated'
-        self.nodes = {}             # "T.meth" -> (spec, def)
         self.templates = {}         # see template()
         self.module_of_type = {}    # model class -> module of its spec
         self.builtins = dict(vars(builtins))
@@ -704,9 +699,6 @@ class Model:
                     self.module(os.path.join(path, item + '.py')))
         return package
 
-    def __hash__(self):
-        return id(self)
-
     def module(self, path):
         path = os.path.abspath(path)
         if path in self.modules:
@@ -720,7 +712,6 @@ class Model:
         module = types.ModuleType(f'_pyspec_model_{stem}')
         module.__file__ = path
         module.__builtins__ = self.builtins
-        import importlib.machinery
         module.__loader__ = importlib.machinery.SourceFileLoader(
             module.__name__, path)
         module.__spec__ = importlib.machinery.ModuleSpec(
@@ -737,7 +728,6 @@ class Model:
             if not (spec.declares_slots(node.name)
                     or node.name in self.builtins):
                 continue            # stringlib's B: methods only
-            self.raw[node.name] = raw
             model = self.build(spec, node, raw, module)
             self.types[node.name] = model
             setattr(module, node.name, model)
@@ -830,7 +820,6 @@ class Model:
                 kind = frontend.PYCFUNCTION
         else:
             node = spec.functions[name]
-        self.nodes[name] = (owner_spec, node)
         pure = has_body(node)
         self.kinds[name] = 'pure' if pure else 'delegated'
         func = self.body(raw, meth, owner, model) if pure else None
@@ -845,7 +834,7 @@ class Model:
                               func(cls, *parser(args, kwargs, where)))
         if kind == frontend.SLOT:
             call = slot_call(meth, func) if pure else \
-                self.delegate(model, meth, slot=True)
+                self.delegate(model, meth)
             return WrapperDescriptor(model, meth, call, *slot_doc(meth))
         convention = None
         if kind == frontend.PYCFUNCTION:
@@ -854,8 +843,6 @@ class Model:
                 keywords = spec.c_name(name)[1] or keywords
             convention = next(k for k in keywords
                               if k in frontend.PYCFUNCTION_FLAGS)
-            if convention == 'METH_FASTCALL' and not node.args.kwarg:
-                convention = 'METH_FASTCALL'
         static = 'staticmethod' in decorators
         parser = Parser(node, meth, f'{cls_name}.{meth}',
                         convention=convention, self_param=not static)
@@ -895,11 +882,11 @@ class Model:
                      else '$self, ')
             return {'METH_NOARGS': f'({first}/)',
                     'METH_O': f'({first}object, /)'}.get(convention)
-        return _text_signature(node, kind)
+        return _text_signature(node)
 
     # -- delegation: a method without a body calls the C ------------------
 
-    def delegate(self, model, meth, slot=False):
+    def delegate(self, model, meth):
         """(self, args, kwargs) -> the C method *meth* of the host type,
         on host copies of the arguments, its result as model objects."""
         host = getattr(builtins, model.__name__, None)
@@ -921,12 +908,9 @@ class Model:
         return host_types()
 
 
-def _text_signature(node, kind):
-    """The __text_signature__ clinic generates for a def: ``($self, /,
-    sep=None, maxsplit=-1)`` (a slot's or a PyCFunction's: typeobj.py)."""
-    if kind in (frontend.SLOT, frontend.PYCFUNCTION):
-        from .typeobj import _text_signature as c_signature
-        return c_signature(node)
+def _text_signature(node):
+    """The __text_signature__ clinic generates for a clinic function:
+    ``($self, /, sep=None, maxsplit=-1)``."""
     args = node.args
     static = 'staticmethod' in _decorators(node)
     positional = args.posonlyargs + args.args
@@ -1038,12 +1022,12 @@ def check_circular(model):
         for name, node in spec.functions.items():
             if not has_body(node):
                 continue
-            for what in _circular_uses(node, described, spec):
+            for what in _circular_uses(node, described):
                 out.setdefault(name, []).append(what)
     return out
 
 
-def _circular_uses(node, described, spec):
+def _circular_uses(node, described):
     for child in ast.walk(node):
         match child:
             case ast.Call(func=ast.Name(name)) if name in described:

@@ -18,7 +18,7 @@ ob_items(o)           the bytes o holds, a tuple of int  PyBytes_AS_STRING(o),
 ob_new(tp)            a new tp, its fields NULL           PyObject_GC_New()
 buffer_items(o)       the bytes of the buffer o exports,  PyObject_GetBuffer(),
                       NULL if it exports none             PyBuffer_Release()
-buffer_export(o)      the view of o's bytes (__buffer__)  bf_getbuffer
+buffer_export(o, f)   the view of o's bytes (__buffer__)  bf_getbuffer
 hash_secret()         (k0, k1): the key of the hash of    _Py_HashSecret
                       bytes (sys.hash_info.algorithm)
 has_slot(tp, slot)    whether type tp fills slot          tp->tp_as_...->slot
@@ -41,7 +41,6 @@ A primitive picks its machine from the type or object it is given.
 """
 
 import builtins
-import sys
 
 from .runtime import NULL
 
@@ -245,10 +244,3 @@ def from_host(tp, value):
     if _is_model(tp) and builtins.isinstance(value, builtins.bytes):
         return ob_alloc(tp, value)
     return value
-
-
-# The Python meaning of the primitives, per machine, for the report of
-# model.py: which touch host bytes, bytearray or memoryview.
-HOST_EDGES = ('buffer_items', 'buffer_export', 'from_host')
-
-del sys
