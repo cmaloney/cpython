@@ -42,9 +42,10 @@ Level  What moves                         Parity check (and the review)
                                           (the ratchet)
 =====  =================================  ==============================
 
-Levels 1 and 2 need no new tooling knowledge beyond Argument Clinic;
-level 3 is where the spec language, ``@native`` and ``@inline`` come
-in; levels 4 and 5 need a consumer (the optimizer) or a data file (the
+Levels 1 and 2 need the fewest new concepts: clinic's parameter
+lines written as Python, the dunders of the slots, and the review
+(below); level 3 is where the spec language, ``@native`` and
+``@inline`` come in; levels 4 and 5 need a consumer (the optimizer) or a data file (the
 docs) and are independent of each other.
 
 Before every PR: regenerate with ``./python Tools/clinic/clinic.py
@@ -60,28 +61,28 @@ One command answers the reviewer's questions, on a build of the change
 
     ./python Tools/clinic/pyspec_review.py
 
-It takes about 20 seconds, needs no other build, and prints a summary
-ready to paste; the exit status is 0 when every answer is fine.  For
+It takes about 25 seconds on a debug build, needs no other build, and
+prints a summary ready to paste; the exit status is 0 when every answer is fine.  For
 example, the whole experiment branch against main, with ``--baseline``
 naming a debug build of main (so the record and the ratchet baseline
 are new, where a migration PR would leave both unchanged)::
 
-    pyspec review of 63ce50f2c9b against main (merge base ee1bbf037ff), python 3.16 free-threaded=False debug=True pointer=64 platform=linux
+    pyspec review of c9d7955088f against main (merge base ee1bbf037ff), python 3.16 free-threaded=False debug=True pointer=64 platform=linux
 
     - Behaviour: same as Tools/clinic/pyspec-baseline/parity.txt for bytearray, bytearray_iterator, bytes, bytes_iterator, mmap (87,737 lines in 251 sections)
       - Tools/clinic/pyspec-baseline/parity.txt: new since the base
       - vs ../build-main/python: no difference in 87,737 lines
       - on purpose: bytes /^C tp_vectorcall$/: bytes() is called through the vectorcall the spec generates (differs from the baseline: C tp_vectorcall)
       - (`python Tools/clinic/pyspec_parity.py check`; `... compare ../build-main/python`)
-    - Generated code: up to date (clinic --dry-run on 10 C files of specs)
+    - Generated code: up to date (clinic --dry-run on 14 C files of specs)
       - Objects/clinic/bytearrayobject_pyspec.c.h: new (384 lines, generated from Objects/pyspec/bytearrayobject.py)
       - Objects/clinic/bytesobject.c.h: +94/-9 lines, in bytes_new_impl, bytes_new, bytes_new_helper, bytes_new_nargs0, bytes_new_nargs1, bytes_new_nargs2, ... (8 names)
         - on purpose (bytes_new_impl, bytes_new, bytes_new_helper, ... (8 names)): bytes.__new__ has a spec body: clinic generates its vectorcall and per-arity entries around the parser
       - Objects/clinic/bytesobject_pyspec.c.h: new (1096 lines, generated from Objects/pyspec/bytesobject.py)
       - every other clinic output: identical to the base
-    - Specs vs interpreter: passed, 509 tests (`python -m test test_clinic`: ...)
-    - Facts: passed, 21 tests; debug build: facts also asserted at run time (`python -m test test_pyspec_facts`: ...)
-    - Ratchet: passed, 12 tests (skipped=1); c_calls 0, capi 20, docs 0, docstrings 2, slots 3 (`python -m test test_pyspec_catalog`: ...)
+    - Specs vs interpreter: passed, 535 tests (`python -m test test_clinic`: generated files up to date, spec run as Python vs the interpreter, slots vs dunders)
+    - Facts: passed, 21 tests; debug build: facts also asserted at run time (`python -m test test_pyspec_facts`: call table and helpers vs the interpreter and their references)
+    - Ratchet: passed, 12 tests (skipped=1); c_calls 0, capi 20, docs 0, docstrings 2, slots 3 (`python -m test test_pyspec_catalog`: disconnects vs Tools/clinic/pyspec-baseline/*.txt)
       - ratchet baseline: +51/-0 lines since the base (added lines are new disconnects: say why)
 
     Result: OK
@@ -108,6 +109,10 @@ The questions, and the command that answers each on its own:
 4. *Is the ratchet ok?*  ``./python -m test -v test_pyspec_catalog``;
    the review shows the counts and how the baseline files changed since
    the base (only deletions are fine).
+5. *Does the spec's Python, run on its own, behave as the type?*  For a
+   type with pure-Python bodies (README.rst, "Pure Python"):
+   ``./python Tools/clinic/pyspec_parity.py model``, also run by
+   ``test_tools.test_pyspec_parity`` (``ModelTest``), not by the review.
 
 ``--baseline ../build-main/python`` adds a line-by-line comparison with
 a build of the merge base (same configuration) and says whether each
