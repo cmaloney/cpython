@@ -1,4 +1,8 @@
-# Pending design proposals (discussed with the user, not implemented)
+# Design proposals P1 and P2 (implemented)
+
+> **Historical.**  Both are implemented (phase 2; `@c_implemented` is now `@native`, phase
+> 4-C).  The reference is `Objects/pyspec/README.rst` ("Native functions: `@native`").
+> Where the implementation differs from this text, it is noted inline.
 
 ## P1: helpers connect to C by name (replaces `C.` escapes + `@helper` stubs)
 Today, one hand-written C helper appears in 3 places: the C definition, a `runtime.C`
@@ -21,9 +25,14 @@ The user dislikes RunsPython / OnError / NoError / New / Steals / Out / InOut an
   Python-level), `runs_python()` (escape hatch), `NULL` as a value (absent, not an error).
 - Error convention from "can the body raise" plus the return kind (object → NULL, int → -1).
 - Ownership (steals, borrowed, out params) is not in the spec: it comes from Doc/data/refcounts.dat.
+  *(As implemented: ownership is not read from `refcounts.dat`.  A native function has C's
+  convention, a new reference returned and arguments borrowed (README.rst, "Native
+  functions"); `refcounts.dat` is only checked against the headers by the ratchet's
+  `capi` dimension.)*
 - Validation: (1) the spec side is static by construction; (2) the C side reuses the
   cases generator's token-level escape check (Tools/cases_generator/analyzer.py,
   NON_ESCAPING_FUNCTIONS / find_escaping_api_calls) on the one named C function plus its
   static callees; every escaping C call must be accounted for by `calls()`/`runs_python()`
   on that path; (3) a dynamic difftest with call-recording dunders asserts that no Python
   runs where the spec says none.
+  *(As implemented: the C check is per function, not per path; `native_check.py`.)*

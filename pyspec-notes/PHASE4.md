@@ -1,5 +1,8 @@
 # Phase 4 brief: general mechanisms, bytes as data (2026-09-27)
 
+> **Historical** (the phase 4 brief; phase 4 is merged).  Superseded by
+> `pyspec-notes/README.md` and `Objects/pyspec/README.rst`.
+
 Base: branch `exp/ac_python_overloads_v0` at the commit that adds this file.
 Read `pyspec-notes/README.md` (state, decisions in force) and
 `pyspec-notes/DESIGN.md` (goals, resource rules) first.  This brief overrides
