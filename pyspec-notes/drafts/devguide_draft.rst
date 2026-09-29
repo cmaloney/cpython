@@ -10,8 +10,10 @@ A C file can keep the Python side of its Argument Clinic functions in a
 *spec file*: ``Objects/pyspec/bytesobject.py`` for
 ``Objects/bytesobject.c``.  A spec is ordinary Python, written like a
 typeshed stub.  Argument Clinic reads it while processing the C file, so
-``make clinic`` is still the only generator, and ``test_clinic`` the only
-test to run.
+``make clinic`` is still the only generator.  Each spec has a companion
+test-data file, ``Objects/pyspec/bytesobject_cases.py``, which names the
+Python type of each class of the spec (``TYPES``) and holds the cases
+of its tests.
 
 A spec gives three things:
 
@@ -166,8 +168,18 @@ add a parameter, a C method, a spec-body method, a slot, a hand-written
 PyCFunction or a shared stringlib method, declare a type, regenerate,
 test and validate (``Tools/clinic/pyspec_review.py``).
 
+To move a C file to a spec: write ``Objects/pyspec/foo.py``, add
+``Objects/pyspec/foo_cases.py`` with the class in ``TYPES`` (and its
+parity data, ``PARITY``, if the type needs samples), record the type's
+behaviour with ``./python Tools/clinic/pyspec_parity.py check --update``
+*before* the change, then shrink the clinic blocks.
+``Objects/pyspec/MIGRATING.rst`` has the steps and checklists per level.
+
 After changing a spec, run ``make clinic`` (or
 ``./python Tools/clinic/clinic.py Objects/bytesobject.c``), rebuild, and
-run ``./python -m test test_clinic``.  Clinic reports errors as
+run ``./python -m test test_clinic test_pyspec_facts test_pyspec_catalog
+test_tools.test_pyspec_parity``, or ``./python
+Tools/clinic/pyspec_review.py``, which runs them and says what changed
+against main.  Clinic reports errors as
 ``path:line: error: message``, at the line of the spec when the mistake is
 in the spec.
