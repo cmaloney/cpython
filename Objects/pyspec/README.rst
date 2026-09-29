@@ -416,8 +416,12 @@ identity.  Reported apart, the limits of a Python class: ``__mul__`` is
 both the operator and ``sq_repeat``'s slot wrapper; a heap type always
 has ``tp_as_sequence``; ``bytearray % b`` tests ``PyBytes_Check()``.
 ``ModelTest`` of ``test_tools.test_pyspec_parity`` fails when a method
-with a Python body diverges, and when a body is circular
-(``model.check_circular()``).
+with a Python body diverges, and when a body is circular: by its names
+(``model.check_circular()``, and ``check_circular_spec()`` for the
+bodies of every spec, also one whose model cannot be built yet), and by
+what it calls while the probes run (``model.circular_calls()``: a call
+of the builtin of a described type from the frame of a spec, under any
+name).
 
 bytes and its iterator are the example: every method and slot but
 ``__mod__``/``__rmod__`` has a Python body (with
@@ -548,20 +552,24 @@ Checking a reference against its native code
   does.
 * The checker of the language of the native file reads the native code
   (``NATIVE_CHECKERS`` in
-  ``Tools/clinic/libclinic/pyspec/disconnects.py``, by extension): every
-  call that may run Python code is accounted for by the reference (a
-  call of the same function, a ``calls()`` of the special method it
-  invokes, or ``runs_python()``); a reference that cannot fail has
-  native code that calls nothing that can; and the native code calls
-  every native function the reference calls.  The C checker,
+  ``Tools/clinic/libclinic/pyspec/native_check.py``, by extension):
+  every call that may run Python code is accounted for by the reference
+  (a call of the same function, a ``calls()`` of the special method it
+  invokes, or ``runs_python()``, which accounts for every call); a
+  reference that cannot fail has native code that calls nothing that
+  can; and every definition of the native code (each ``#if`` variant)
+  calls every native function the reference calls.  The C checker,
   ``CChecker``, uses the lexer and the escape analysis of the cases
-  generator (``Tools/cases_generator/``); ``test_pyspec_catalog`` holds
-  its disconnects to a ratchet (``c_calls``).
+  generator (``Tools/cases_generator/``), and counts calls through
+  pointers, the macros of the file and the calls in ``assert()``; the
+  docstring of ``native_check.py`` says exactly what counts, and what
+  it assumes of the release of a reference.  ``test_pyspec_catalog``
+  holds its disconnects to a ratchet (``c_calls``).
 
 A native file in another language needs only a checker of its own: a
 subclass of ``NativeChecker`` registered in ``NATIVE_CHECKERS`` for its
-extension (``.rs``), with ``function(name)``, the code of a function of
-the file; ``calls(code)``, the functions that code calls;
+extension (``.rs``), with ``functions(name)``, the code of each
+definition of a function of the file; ``calls(code)``, the functions that code calls;
 ``escaping_calls(code)``, those that may run Python code;
 ``runs_no_python(name)``, the calls audited to run none; and
 ``special_method(name)``, the special method whose Python code a call

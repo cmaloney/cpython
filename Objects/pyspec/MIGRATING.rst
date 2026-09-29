@@ -351,7 +351,7 @@ Checklist:
 
 A new type is data only: running clinic on its C file gives each class
 with facts its call table and its entry in the registry of
-``Include/internal/pycore_pyspec.h``, which the interpreter and the tests
+``Include/internal/pycore_pyspec_registry.h``, which the interpreter and the tests
 iterate over.  In ``foo_cases.py``:
 
 - [ ] ``TYPES`` names the type of every class; a class with a table that
@@ -718,7 +718,8 @@ A difftest failure on an exception message
     The C of a ``@native`` helper calls ``f``.  If ``f`` can run
     Python code, add ``calls(x, "__slot__")`` or ``runs_python()`` to
     the reference.  If it cannot (``memcmp``), add it to the audited
-    ``NO_PYTHON`` set of ``disconnects.py``.
+    ``NO_PYTHON`` set of ``native_check.py``.  ``f`` may be a call
+    through a pointer, named by its expression (``(*fn)``).
 ``its reference calls f(), which its native code does not`` (``test_pyspec_catalog``)
     The reference says the C calls ``f``; the C (or a function of its
     file it calls) does not.  Correct whichever is wrong.

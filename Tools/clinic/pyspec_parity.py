@@ -25,8 +25,9 @@ attribute, each protocol):
 Usage, from a build of the tree::
 
     # the committed record (Tools/clinic/pyspec-baseline/parity.txt),
-    # no other build needed:
-    ./python Tools/clinic/pyspec_parity.py check
+    # no other build needed (a configuration it has no block for is a
+    # SKIP line; with --strict, a failure):
+    ./python Tools/clinic/pyspec_parity.py check [--strict]
     ./python Tools/clinic/pyspec_parity.py check --update  # on purpose
 
     # every line, against a build of the tree before the change:
@@ -247,9 +248,14 @@ class TypeData:
       the type called with no arguments;
     * "pool": more argument values, label -> factory;
     * "known": differences the migration makes on purpose, regex of the
-      key of a line (without the type name) -> the reason;
+      key of a line (without the type name) -> the reason.  The regex
+      matches the whole key (re.fullmatch): ``C tp_vectorcall``, or
+      ``call .*\\.decode\\(.*`` for a family of lines;
     * "generated": differences in the generated C from main on purpose,
       regex of a C name -> the reason (for Tools/clinic/pyspec_review.py).
+      The regex matches from the start of the name (re.match), so that
+      one covers the functions clinic derives from a name
+      (``bytes_new`` covers ``bytes_new_nargs1``).
     """
 
     def __init__(self, name, tp, cases_path=None, parity=None,
@@ -275,7 +281,7 @@ class TypeData:
     def is_known(self, key):
         """The pattern of "known" matching the key of a line, or None."""
         for pattern, (regex, _) in self.known.items():
-            if regex.search(key):
+            if regex.fullmatch(key):
                 return pattern
         return None
 
@@ -416,18 +422,66 @@ def clean(text):
     return ADDRESS.sub(' at 0x...', text)
 
 
-def describe(value, known=()):
-    """The type and repr of a value, or which known object it is."""
-    for label, obj in known:
-        if value is obj:
-            return label
+# A longer repr is shortened to its start and the digest of all of it.
+MAX_REPR = 2000
+# What an iterator a call returns yields, at most.
+MAX_ITEMS = 20
+
+
+def shown(value):
+    """The repr of a value (addresses masked); a long one is its start
+    and the digest of all of it, so that any difference shows."""
     try:
         text = repr(value)
     except Exception as exc:
         text = f'<repr raised {type(exc).__qualname__}: {exc}>'
-    if len(text) > 2000:
-        text = text[:2000] + f'...<{len(text)} chars>'
-    return f'{type(value).__qualname__} {clean(text)}'
+    text = clean(text)
+    if len(text) > MAX_REPR:
+        digest = hashlib.sha256(text.encode('utf-8', 'surrogatepass'))
+        text = (f'{text[:MAX_REPR]}...<{len(text)} chars, sha256 '
+                f'{digest.hexdigest()[:16]}>')
+    return text
+
+
+def describe(value, known=()):
+    """The type and repr of a value, or which known object it is.  What
+    a repr does not show is added: the contents of a memoryview, and what
+    an iterator yields (at most MAX_ITEMS; this consumes it)."""
+    for label, obj in known:
+        if value is obj:
+            return label
+    text = f'{type(value).__qualname__} {shown(value)}'
+    if isinstance(value, memoryview):
+        text += f' {view_contents(value)}'
+    elif is_iterator(value):
+        text += f' yielding {yielded(value)}'
+    return text
+
+
+def view_contents(view):
+    """What a memoryview holds: its format, shape and bytes."""
+    try:
+        return (f'format={view.format!r} shape={view.shape} '
+                f'readonly={view.readonly} bytes={shown(view.tobytes())}')
+    except Exception as exc:        # released
+        return f'!{type(exc).__qualname__}: {clean(str(exc))}'
+
+
+def yielded(iterator):
+    """The items an iterator yields (at most MAX_ITEMS, then '...'), and
+    what it raises instead of StopIteration."""
+    items, end = [], ''
+    try:
+        for item in iterator:
+            if len(items) == MAX_ITEMS:
+                end = ' ...'
+                break
+            items.append(item)
+    except Timeout:
+        end = ' then !TIMEOUT'
+    except Exception as exc:
+        end = f' then !{type(exc).__qualname__}: {clean(str(exc))}'
+    return f'{shown(items)}{end}'
 
 
 def is_iterator(obj):
@@ -436,10 +490,12 @@ def is_iterator(obj):
 
 
 def watchable(obj):
-    """Whether a call can change obj in a way its repr (or, for an
-    iterator, what it yields next) shows."""
-    return obj is not None and (type(obj).__hash__ is None
-                                or is_iterator(obj))
+    """Whether to show what a call did to its receiver obj: always but
+    for no receiver.  Being hashable does not make an object immutable
+    (an mmap's position, the attributes of an instance of a class):
+    describe() before and after the call costs a repr of a sample, and
+    a line changes only when the receiver did."""
+    return obj is not None
 
 
 def rest(iterator):
@@ -498,6 +554,25 @@ def call_text(name, args, kwargs=()):
 
 # -- capturing ---------------------------------------------------------------
 
+# What str.splitlines() splits a line at, and the backslash that starts
+# an escape.
+LINE_BREAK = re.compile('[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]')
+ESCAPED = re.compile('[\\\\\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]')
+
+
+def escape(text):
+    """*text* on one line, and injectively: a backslash is doubled, a
+    newline is \\n and any other line break \\xNN or \\uNNNN."""
+    def one(match):
+        c = match.group()
+        if c == '\\':
+            return '\\\\'
+        if c == '\n':
+            return '\\n'
+        return f'\\x{ord(c):02x}' if ord(c) < 0x100 else f'\\u{ord(c):04x}'
+    return ESCAPED.sub(one, text)
+
+
 class Capture:
     """Lines "type key => value", in sections "[type section]"."""
 
@@ -507,7 +582,9 @@ class Capture:
     def add(self, name, section, key, value):
         if SEP in key:
             raise ValueError(f'{SEP!r} in key {key!r}')
-        value = str(value).replace('\n', '\\n')
+        if LINE_BREAK.search(key):
+            raise ValueError(f'a line break in key {key!r}')
+        value = escape(str(value))
         self.sections.setdefault((name, section), []).append(
             f'{name} {key}{SEP}{value}')
 
@@ -1591,7 +1668,10 @@ def report(comparison, limit):
     return 1
 
 
-def check_command(update, names, path):
+def check_command(update, names, path, strict=False):
+    """"check" against the record: 0 if the same (or updated), 1 if not.
+    Without a block for this configuration (or without the record) the
+    check is skipped: a SKIP line, and 1 with *strict*."""
     head, messages, _ = check_against_record(update, names, path)
     where = path or RECORD
     config = head.removeprefix('# ')
@@ -1599,10 +1679,14 @@ def check_command(update, names, path):
         print(f'updated {where} for {config}')
         return 0
     if messages is None:
-        print(f'{where} has no block for {config}: nothing to compare '
-              'with (compare with a build before the change, or run '
-              '"check --update" on one)')
-        return 0
+        what = ('has no block for' if os.path.exists(
+                    path or os.path.join(SRCDIR, RECORD))
+                else 'does not exist: no block for')
+        print(f'SKIP: {where} {what} {config}: nothing to compare with '
+              '(compare with a build before the change, or run "check '
+              '--update" on one)' + ('; --strict: a failure' if strict
+                                     else ''))
+        return 1 if strict else 0
     if not messages:
         print(f'same as {where} ({config})')
         return 0
@@ -1631,6 +1715,9 @@ def main(argv=None):
     p.add_argument('types', nargs='*', help='default: those of the file')
     p.add_argument('--update', action='store_true',
                    help='rewrite the record for this configuration')
+    p.add_argument('--strict', action='store_true',
+                   help='fail when the record has no block for this '
+                        'configuration (default: a SKIP line)')
     p.add_argument('--all', action='store_true',
                    help='show every differing line')
     p = sub.add_parser('model', help='compare with the spec run as '
@@ -1675,7 +1762,8 @@ def main(argv=None):
             if f.readline().startswith(RECORD_TITLE):
                 args.file, record = None, args.file
     if args.command == 'check' and args.file is None:
-        return check_command(args.update, args.types, record)
+        return check_command(args.update, args.types, record,
+                             args.strict)
     if args.command == 'check':
         with open(args.file, encoding='utf-8') as f:
             before = f.read().splitlines()

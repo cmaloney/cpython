@@ -22,7 +22,14 @@ prints, ready to paste into a PR description:
    with the ratchet counts.  --no-tests skips them.
 
 Each answer is also one command of its own, printed with it.  The exit
-status is 0 when every answer is fine.
+status is 0 when every answer is fine.  Not fine: a difference from the
+record or the baseline, a "known" difference not seen, generated code
+out of date or differing from the base in a C function no PARITY
+"generated" explains (NOT EXPLAINED), a failed test; and a missing
+record: the review fails when the record file is gone, or has no block
+for this configuration while the record of the base or of HEAD has one
+(a deleted block).  A configuration that was never recorded is a SKIP
+line, which fails only with --strict.
 """
 
 import argparse
@@ -80,7 +87,26 @@ def at_base(base, path):
 
 # -- 1. behaviour --------------------------------------------------------------
 
-def behaviour(base, baseline):
+def missing_block(what, recorded, exists, strict):
+    """(the line of the summary, ok) when the record has no block for
+    this configuration: *recorded* says where else it has one ('the
+    base', 'HEAD'), *exists* whether the record file exists."""
+    record = pyspec_parity.RECORD
+    if not exists:
+        return (f'- Behaviour: MISSING RECORD: {record} does not exist; '
+                f'{what} not checked (restore it, or "pyspec_parity.py '
+                'check --update" with a build of the base)'), False
+    if recorded:
+        return (f'- Behaviour: MISSING BLOCK: {record} has no block for '
+                f'this configuration, but it has one at '
+                f'{" and ".join(recorded)}; {what} not checked'), False
+    return (f'- Behaviour: SKIP: {record} has no block for this '
+            f'configuration; {what} not checked against it (record one '
+            'with a build of the base: "pyspec_parity.py check --update")'
+            + ('; --strict: a failure' if strict else '')), not strict
+
+
+def behaviour(base, baseline, strict=False):
     """(lines of the summary, ok)."""
     out, ok = [], True
     head, messages, current = pyspec_parity.check_against_record()
@@ -90,8 +116,13 @@ def behaviour(base, baseline):
             'sections)')
     record = pyspec_parity.RECORD
     if messages is None:
-        out.append(f'- Behaviour: {record} has no block for this '
-                   f'configuration; {what} not checked against it')
+        recorded = [where for where, ref in (('the base', base),
+                                             ('HEAD', 'HEAD'))
+                    if head in pyspec_parity.parse_record(
+                        at_base(ref, record) or '')]
+        exists = os.path.exists(os.path.join(SRCDIR, record))
+        line, ok = missing_block(what, recorded, exists, strict)
+        out.append(line)
     elif messages:
         ok = False
         out.append(f'- Behaviour: DIFFERS from {record} in '
@@ -225,7 +256,7 @@ def explain(names):
     reasons, unexplained = {}, []
     for name in names:
         for pattern, reason in rules:
-            if pattern.search(name):
+            if pattern.match(name):
                 reasons.setdefault(reason, []).append(name)
                 break
         else:
@@ -249,6 +280,22 @@ def shorten(names, n=6):
     if len(names) <= n:
         return ', '.join(names)
     return ', '.join(names[:n]) + f', ... ({len(names)} names)'
+
+
+def changed_output(path, old, new):
+    """(lines of the summary, ok) of a clinic output that differs from
+    the base: not ok when a C name that changed is NOT EXPLAINED by the
+    "generated" of a PARITY."""
+    names, added, removed = changed_names(old, new)
+    reasons, unexplained = explain(names)
+    out = [f'  - {path}: +{added}/-{removed} lines, in {shorten(names)}']
+    for reason, which in reasons.items():
+        out.append(f'    - on purpose ({shorten(which, 3)}): {reason}')
+    if unexplained:
+        out.append(f'    - NOT EXPLAINED: {shorten(unexplained)} (say '
+                   'why, or add it to the "generated" of the PARITY of '
+                   'the type)')
+    return out, not unexplained
 
 
 def generated(base):
@@ -279,16 +326,9 @@ def generated(base):
             out.append(f'  - {path}: new ({len(new.splitlines())} lines'
                        f'{source})')
             continue
-        names, added, removed = changed_names(at_base(base, path), new)
-        reasons, unexplained = explain(names)
-        out.append(f'  - {path}: +{added}/-{removed} lines, in '
-                   f'{shorten(names)}')
-        for reason, which in reasons.items():
-            out.append(f'    - on purpose ({shorten(which, 3)}): {reason}')
-        if unexplained:
-            out.append(f'    - NOT EXPLAINED: {shorten(unexplained)} (say '
-                       'why, or add it to the "generated" of the PARITY of '
-                       'the type)')
+        lines, explained = changed_output(path, at_base(base, path), new)
+        out += lines
+        ok &= explained
     other = 'every other' if differ else 'every'
     out.append(f'  - {other} clinic output: identical to the base')
     return out, ok
@@ -364,6 +404,9 @@ def main(argv=None):
                              'main, upstream/main or origin/main)')
     parser.add_argument('--no-tests', action='store_true',
                         help='skip the test modules')
+    parser.add_argument('--strict', action='store_true',
+                        help='fail when the record has no block for this '
+                             'configuration, even one never recorded')
     args = parser.parse_args(argv)
     ref, base = merge_base(args.base)
     head = git('rev-parse', '--short', 'HEAD').strip()
@@ -373,7 +416,7 @@ def main(argv=None):
     lines = [f'pyspec review of {head}{dirty} against {ref} (merge base '
              f'{base[:11]}), {config}', '']
     ok = True
-    parts = [behaviour(base, args.baseline), generated(base)]
+    parts = [behaviour(base, args.baseline, args.strict), generated(base)]
     if not args.no_tests:
         test_lines, test_ok = tests()
         test_lines.append(ratchet_baseline(base))

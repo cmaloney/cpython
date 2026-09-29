@@ -141,11 +141,111 @@ class ToolTest(unittest.TestCase):
     def test_known_differences(self):
         before = capture(make_class())
         after = capture(make_class('other message'))
-        known = {'known': {r"\)\.m\(": 'on purpose'}}
+        known = {'known': {r"call .*\)\.m\(.*": 'on purpose'}}
         self.assertEqual(changed(before, after, **known), set())
         data = pyspec_parity.TypeData('T', None, parity=known)
         comparison = pyspec_parity.Comparison(before, after, [data])
-        self.assertIn(('T', r"\)\.m\("), comparison.known_seen())
+        self.assertIn(('T', r"call .*\)\.m\(.*"), comparison.known_seen())
+
+    def test_known_matches_the_whole_key(self):
+        # A pattern is not searched in the key: '\.m\(' excuses no line.
+        before = capture(make_class())
+        after = capture(make_class('other message'))
+        known = {'known': {r"\.m\(": 'too broad'}}
+        self.assertIn(('.m', "call T().m('ab')"),
+                      changed(before, after, **known))
+
+    def test_iterator_result(self):
+        # What an iterator a call returns yields: not only its type.
+        def make(order):
+            class T:
+                def __reversed__(self):
+                    return iter(order)
+
+                def __repr__(self):
+                    return 'T()'
+            return T
+        keys = changed(capture(make([3, 2, 1])), capture(make([1, 2, 3])))
+        self.assertIn(('.__reversed__', 'call T().__reversed__()'), keys)
+        self.assertIn(('unary', 'reversed(T())'), keys)
+        # Bounded, and what it raises is shown.
+        self.assertEqual(pyspec_parity.describe(iter(range(100))),
+                         'range_iterator <range_iterator object at 0x...> '
+                         'yielding [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, '
+                         '12, 13, 14, 15, 16, 17, 18, 19] ...')
+
+        def gen():
+            yield 1
+            raise ValueError('bad')
+        self.assertEndsWith(pyspec_parity.describe(gen()),
+                            'yielding [1] then !ValueError: bad')
+
+    def test_memoryview_result(self):
+        def make(data, fmt='B'):
+            class T:
+                def view(self):
+                    return memoryview(data).cast(fmt)
+
+                def __repr__(self):
+                    return 'T()'
+            return T
+        before = capture(make(b'ab'))
+        self.assertEqual(changed(before, capture(make(b'ab'))), set())
+        self.assertIn(('.view', 'call T().view()'),
+                      changed(before, capture(make(b'ba'))))
+        self.assertIn(('.view', 'call T().view()'),
+                      changed(before, capture(make(b'ab', 'c'))))
+        view = memoryview(b'ab')
+        view.release()
+        self.assertIn('!ValueError', pyspec_parity.describe(view))
+
+    def test_long_result(self):
+        # A long repr differing after its first MAX_REPR characters.
+        def make(last):
+            class T:
+                def big(self):
+                    return 'a' * pyspec_parity.MAX_REPR + last
+
+                def __repr__(self):
+                    return 'T()'
+            return T
+        self.assertIn(('.big', 'call T().big()'),
+                      changed(capture(make('X')), capture(make('Y'))))
+
+    def test_hashable_receiver_changed(self):
+        # A hashable receiver is watched too.
+        def make(mutate):
+            class T:
+                def __init__(self):
+                    self.x = 0
+
+                def m(self, a):
+                    if mutate and a == 1:
+                        self.x = 5
+
+                def __repr__(self):
+                    return f'T(x={self.x})'
+            return T
+        self.assertIsNotNone(make(False).__hash__)
+        keys = changed(capture(make(False)), capture(make(True)))
+        self.assertIn(('.m', 'call T().m(1)'), keys)
+
+    def test_escaping(self):
+        # One line per value, and different values give different lines.
+        values = ['a\nb', 'a\\nb', 'a\\\nb', 'a\rb', 'a\\rb', 'a\x0bb',
+                  'a\u2028b', 'a\\u2028b', 'a\\b']
+        out = pyspec_parity.Capture()
+        for i, value in enumerate(values):
+            out.add('T', 's', f'k{i}', value)
+        lines = out.lines()
+        text = '\n'.join(lines)
+        self.assertEqual(text.splitlines(), lines)
+        _, sections = pyspec_parity.parse(lines)
+        found = [v for _, v in sections['T', 's']]
+        self.assertEqual(len(set(found)), len(values))
+        self.assertEqual(found[0], 'a\\nb')
+        with self.assertRaisesRegex(ValueError, 'line break'):
+            out.add('T', 's', 'a\rb', 1)
 
     def test_unknown_parity_key(self):
         with self.assertRaisesRegex(ValueError, 'unknown keys'):
@@ -210,6 +310,24 @@ class ToolTest(unittest.TestCase):
             self.assertEqual(status, 0)
             self.assertIn('no difference in bytes_iterator', out.getvalue())
 
+    @support.requires_subprocess()
+    def test_check_without_block(self):
+        # A record without a block for this configuration, or no record:
+        # a SKIP line; a failure with --strict.
+        with os_helper.temp_dir() as tmp:
+            record = os.path.join(tmp, 'parity.txt')
+            other = '# python 0.0 free-threaded=False debug=False'
+            pyspec_parity.write_record({other: {}}, record)
+            for path in (record, os.path.join(tmp, 'missing.txt')):
+                for strict, expected in ((False, 0), (True, 1)):
+                    with self.subTest(path=path, strict=strict):
+                        out = io.StringIO()
+                        with contextlib.redirect_stdout(out):
+                            status = pyspec_parity.check_command(
+                                False, ['bytes_iterator'], path, strict)
+                        self.assertEqual(status, expected)
+                        self.assertStartsWith(out.getvalue(), 'SKIP: ')
+
 
 class ReviewTest(unittest.TestCase):
     OLD = '''\
@@ -242,6 +360,36 @@ g(PyObject *module)
         new = self.OLD.replace('METH_NOARGS', 'METH_O')
         self.assertEqual(pyspec_review.changed_names(self.OLD, new)[0],
                          ['f'])
+
+    def test_not_explained(self):
+        # A changed C function no "generated" explains fails the review.
+        new = self.OLD.replace('return g_impl(module);',
+                               'return g_impl(module, 1);')
+        lines, ok = pyspec_review.changed_output('f.c.h', self.OLD, new)
+        self.assertFalse(ok)
+        self.assertIn('NOT EXPLAINED: g', lines[-1])
+        old = self.OLD.replace('g(', 'bytes_new(')
+        new = old.replace('return g_impl(module);',
+                          'return g_impl(module, 1);')
+        lines, ok = pyspec_review.changed_output('f.c.h', old, new)
+        self.assertTrue(ok)
+        self.assertIn('on purpose', lines[-1])
+
+    def test_missing_block(self):
+        # No block for this configuration: a failure when the record is
+        # gone or had a block at the base or HEAD; else a SKIP, which
+        # fails with --strict.
+        missing = pyspec_review.missing_block
+        line, ok = missing('bytes', [], False, False)
+        self.assertFalse(ok)
+        self.assertIn('MISSING RECORD', line)
+        line, ok = missing('bytes', ['HEAD'], True, False)
+        self.assertFalse(ok)
+        self.assertIn('MISSING BLOCK', line)
+        line, ok = missing('bytes', [], True, False)
+        self.assertTrue(ok)
+        self.assertIn('SKIP', line)
+        self.assertFalse(missing('bytes', [], True, True)[1])
 
     def test_explain(self):
         reasons, unexplained = pyspec_review.explain(
@@ -308,7 +456,14 @@ class ModelTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.comparison = pyspec_parity.ModelComparison(cls.NAMES)
+        with imports_under_tool('clinic'):
+            from libclinic.pyspec import model
+        cls.model = model
+        _, pymodel = pyspec_parity.model_types(cls.NAMES)
+        # Every call the bodies make while the probes run.
+        with model.circular_calls(pymodel) as cls.circular:
+            cls.comparison = pyspec_parity.ModelComparison(cls.NAMES,
+                                                           pymodel)
 
     def test_python_bodies_agree(self):
         diverging = self.comparison.diverging()
@@ -331,12 +486,35 @@ class ModelTest(unittest.TestCase):
     def test_not_circular(self):
         # No body calls a host type the specs describe; only the
         # delegated methods use the C.
-        with imports_under_tool('clinic'):
-            from libclinic.pyspec import model
-        self.assertEqual(model.check_circular(self.comparison.model), {
+        self.assertEqual(self.model.check_circular(self.comparison.model), {
             'bytes.__mod__': ['delegated to the C'],
             'bytes.__rmod__': ['delegated to the C'],
         })
+
+    def test_every_spec_not_circular(self):
+        # The same, statically, for the bodies of every spec (and those it
+        # imports), whether or not its model can be built yet.
+        with imports_under_tool('clinic'):
+            from libclinic.pyspec import specfiles
+        for path, _ in specfiles.spec_files():
+            with self.subTest(spec=os.path.relpath(path,
+                                                   pyspec_parity.SRCDIR)):
+                self.assertEqual(self.model.check_circular_spec(path), {})
+
+    def test_not_circular_at_run_time(self):
+        # While the probes ran, no body called a host type the specs
+        # describe, under any name (check_circular() reads names only).
+        self.assertEqual(self.circular, [])
+        # What it catches: a call in the code of a spec, not elsewhere.
+        spec = next(iter(self.comparison.model.specs))
+        code = 'import builtins\nbuiltins.bytearray(b"a").hex()\n'
+        with self.model.circular_calls(self.comparison.model) as found:
+            exec(compile(code, spec, 'exec'), {})
+            exec(compile(code, __file__, 'exec'), {})
+        self.assertEqual([where for where, _ in found],
+                         [f'{spec}:2', f'{spec}:2'])
+        self.assertIn('bytearray', found[0][1])
+        self.assertIn('hex', found[1][1])
 
     def test_coverage(self):
         total = self.comparison.totals()

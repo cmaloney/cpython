@@ -828,6 +828,9 @@
     <ClInclude Include="..\Include\internal\pycore_pyspec.h">
       <Filter>Include\internal</Filter>
     </ClInclude>
+    <ClInclude Include="..\Include\internal\pycore_pyspec_registry.h">
+      <Filter>Include\internal</Filter>
+    </ClInclude>
     <ClInclude Include="..\Include\internal\pycore_pystate.h">
       <Filter>Include\internal</Filter>
     </ClInclude>

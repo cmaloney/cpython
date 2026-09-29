@@ -15,10 +15,12 @@ Objects/clinic/foo_pyspec.c.h, which foo.c includes at its end.
   emit, ir      lowers the implemented functions to the form of ir.py...
   c_backend     ...which it writes as C
   call_table    the call tables of the tier-2 optimizer, and their
-                registry (Include/internal/pycore_pyspec.h)
+                registry (Include/internal/pycore_pyspec_registry.h)
   typeobj       the method and slot tables of the types
   slots         the dunder <-> slot table, from slotdefs[]
   specfiles     every spec of the tree (one glob) and its test data
   disconnects   the ratchet of disagreements between the code and the
                 files describing it (Lib/test/test_pyspec_catalog.py)
+  native_check  its c_calls dimension: the native code of each @native
+                function vs its Python reference
 """
