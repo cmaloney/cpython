@@ -26,6 +26,11 @@ build `../build-p4-fi-rel` (both clang 21, srcdir this worktree).
 6. `test_opt`: new exit tests for `_BINARY_OP_SUBSCR_BYTES_INT` (negative index) and
    `_GUARD_NOT_EXHAUSTED_BYTES`; the subclass test asserts instead of `if ex`; the seven
    pyspec class-call tests use `builtins_as_globals()` (below).
+7. `test_clinic.PyspecFactsTest.test_independent_of_host` (outside this stream's
+   files; one hunk): runs in a subprocess.  In-process it patched `builtins.hasattr`
+   per spec file, 2 of the process's 3 `_Py_MAX_ALLOWED_BUILTINS_MODIFICATIONS` (each
+   also invalidates every executor), so `test_clinic test_capi` failed 21 upstream
+   test_opt tests.  The subprocess prints how many C files it checked (asserted > 0).
 
 ## Not changed
 - `_CALL_BUILTIN_CLASS_0_INLINE`: not dead by construction.  `direct_spec_class_call()`
@@ -40,10 +45,6 @@ build `../build-p4-fi-rel` (both clang 21, srcdir this worktree).
   _PySpecCallTable)` lines.
 - Report-only: `_ASSERT_RESULT_*` uops exist in release builds (never emitted there);
   `_RECORD_ARG0_TYPE` adds a record per traced `CALL_BUILTIN_CLASS`.
-- `test_clinic.PyspecFilesTest.test_independent_of_host` (other stream) patches
-  `builtins.hasattr` per spec file: 2 of the process's 3
-  `_Py_MAX_ALLOWED_BUILTINS_MODIFICATIONS`, each of which also invalidates every
-  executor.  Patching the name in the libclinic modules instead would avoid it.
 
 ## Upstream issue draft: test_opt depends on the state of builtins left by other tests
 
@@ -83,3 +84,12 @@ and inspected within one test.  Candidates: `_Py_Executors_InvalidateAll()` from
 of the first three builtins modifications happening during the test, or a
 dependency invalidation (bloom filter false positive) triggered by a watched
 dict/type/function changed by a finalizer of an earlier module's garbage.
+
+## Tests (`../build-p4-fi`)
+- `python -m test test_clinic test_bytes test_mmap test_pyspec_facts
+  test_pyspec_catalog test_tools.test_pyspec_parity test_opcache test_generated_cases
+  test_capi.test_opt test_capi`: 3,053 tests, pass.
+- `Tools/clinic/pyspec_review.py --baseline ../build-str1-dbg/python`: Result OK.
+- Clinic on the ten spec-backed files and `make regen-cases`: tree clean.
+- With `--randseed 4287815718` (test_iter first) the 16 upstream tests above still
+  fail; every test the branch added passes.
