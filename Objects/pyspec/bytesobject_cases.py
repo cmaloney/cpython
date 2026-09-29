@@ -16,6 +16,14 @@ example, each section below says what its names mean):
   HELPERS, HELPER_CALLERS, NOT_CALLABLE, FACTS_ONLY
                the hand-written C functions (test_pyspec_facts HelperTest)
   SLOT_USES    the uops that use the facts of a slot (SlotFactsTest)
+  C_FUNCTIONS  what the interpreter runs for a top-level (C API)
+               function of the spec (PyspecFilesTest)
+  PARITY       per class of TYPES, the data of
+               Tools/clinic/pyspec_parity.py: samples, argument pool,
+               known and generated differences
+
+SOURCES, HEX_INPUTS and the classes below are local to this file: they
+build the cases.
 
 The call-table entries of a class are called with the cases of
 CASES["<class>.__new__"] and CASES["<class>.<method>"]

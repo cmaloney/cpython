@@ -3,9 +3,11 @@
 transmogrify.h is a C template included by bytesobject.c and
 bytearrayobject.c; clinic class B stands for either type.  Argument Clinic
 reads this file while processing transmogrify.h (see
-Tools/clinic/libclinic/pyspec/): each method of ``class B`` is a clinic
-function, implemented in C by hand.  The spec of a type shares these
-methods with ``center = transmogrify.B.center``.
+Objects/pyspec/README.rst): each method of ``class B`` is a clinic
+function, implemented in C by hand; its body is its pure-Python
+implementation (``@native(facts=False)``, README.rst "Pure Python"),
+which only the model runs.  The spec of a type shares these methods
+with ``center = transmogrify.B.center``.
 """
 
 from libclinic.pyspec.runtime import (
