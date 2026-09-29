@@ -639,7 +639,10 @@ class Analysed:
             case ast.Call(func=ast.Name()) as call:
                 # (``T.meth(...)`` in a reference is the builtin's: a
                 # model, see runtime.load().)
+                # (A pure-Python function models a value: the reference
+                # accounts for its effects, as for a builtin's.)
                 return (self.spec.c_function(call) is not None
+                        and self.spec.pure_python_function(call) is None
                         or self.spec.inline_function(call) is not None
                         or self.spec.call_target(call.func) is not None)
         return False

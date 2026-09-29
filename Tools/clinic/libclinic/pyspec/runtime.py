@@ -78,9 +78,13 @@ def c_name(*args: str, **kwargs: str) -> Callable[[_F], _F]:
     return lambda func: func
 
 
-def native(func: _F) -> _F:
+def native(func: _F | None = None, *, facts: bool = True) -> Any:
     """Implemented natively; the body is its Python reference, run as
-    Python and read for facts, never compiled."""
+    Python and read for facts, never compiled.  ``@native(facts=False)``:
+    the body is a pure-Python implementation that only the model runs
+    (model.py); tools read it as ``...``."""
+    if func is None:
+        return lambda func: func
     return func
 
 

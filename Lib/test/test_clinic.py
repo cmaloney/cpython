@@ -6931,9 +6931,11 @@ class PyspecTypeTest(PyspecTestBase):
         """, "bytes.nbytes is defined twice")
 
     def test_class_body(self):
-        # A spec class holds a docstring, defs, shared methods and pass:
-        # anything else is an error, not ignored.
-        for stmt in ("x = 1", "if True: pass", "center: int",
+        # A spec class holds a docstring, defs, shared methods, fields
+        # (``it_index: Py_ssize_t``: the struct stays C, the model of the
+        # spec allocates them) and pass: anything else is an error, not
+        # ignored.
+        for stmt in ("x = 1", "if True: pass", "center: int = 1",
                      "center = tm.B.center"):
             with self.subTest(stmt=stmt):
                 self.check_error(f"""
@@ -6958,6 +6960,43 @@ class PyspecTypeTest(PyspecTestBase):
                 def meth(self, /): ...
                 def meth(self, /): ...
         """, "bytes.meth is defined twice")
+
+    def test_class_fields(self):
+        # A field of the C struct is for the model of the spec only
+        # (Objects/pyspec/README.rst, "Pure Python"): the same tables.
+        marker = "            def meth(self, a: object, /):\n"
+        with_field = self.SPEC.replace(
+            marker, "            ob_sval: 'char[]'\n\n" + marker)
+        self.assertNotEqual(with_field, self.SPEC)
+        self.assertEqual(self.types_header(with_field, self.BLOCKS),
+                         self.types_header(self.SPEC, self.BLOCKS))
+
+    def test_pure_python_body(self):
+        # @native(facts=False): the body is a pure-Python implementation
+        # that only the model runs; for clinic it is ``...``, on a slot, a
+        # PyCFunction and a clinic method alike.
+        pure = self.SPEC
+        for old, new in [
+                ("            def __repr__(self, /): ...\n",
+                 "            @native(facts=False)\n"
+                 "            def __repr__(self, /):\n"
+                 "                return 'b' + repr(str(self))\n"),
+                ("                '''Meth.'''\n"
+                 "                ...\n",
+                 "                '''Meth.'''\n"
+                 "                return a\n"),
+                ("            def meth(self, a: object, /):\n",
+                 "            @native(facts=False)\n"
+                 "            def meth(self, a: object, /):\n"),
+                ("            def __getnewargs__(self, /):\n"
+                 "                ...\n",
+                 "            @native(facts=False)\n"
+                 "            def __getnewargs__(self, /):\n"
+                 "                return (self,)\n")]:
+            self.assertIn(old, pure)
+            pure = pure.replace(old, new)
+        self.assertEqual(self.types_header(pure, self.BLOCKS),
+                         self.types_header(self.SPEC, self.BLOCKS))
 
     def test_class_decorators(self):
         # The PyTypeObject is written in C: a class takes only the prefix
