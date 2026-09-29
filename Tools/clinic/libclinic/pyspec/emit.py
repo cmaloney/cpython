@@ -254,6 +254,11 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
         """Argument *arg* of a C function parameter of type *ctype*."""
         match arg:
             case ast.Constant(str() as text) if ctype == OBJECT:
+                if not (text.isidentifier() and text.isascii()):
+                    # (_Py_ID() names a static interned str by the text.)
+                    raise spec_error(arg, 'a str constant passed as an '
+                                     'object must be an ASCII identifier '
+                                     f'(an interned _Py_ID()), not {text!r}')
                 return ir.Identifier(text)
             case ast.Constant(str() as text):
                 return ir.String(text)

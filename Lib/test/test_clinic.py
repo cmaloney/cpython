@@ -8691,6 +8691,28 @@ class PyspecSoundnessTest(PyspecTestBase):
         self.assertFalse(self.reference_facts(spec, 'tested').returns_null)
 
 
+    def test_str_constant_object_argument(self):
+        # A str constant passed as an object is a _Py_ID(): an ASCII
+        # identifier only.
+        spec = """
+            @native
+            def getattr_(x: object, name: object):
+                runs_python()
+                return unknown(x)
+
+            def Py_f(x: object):
+                return getattr_(x, %r)
+        """
+        self.assertIn("getattr_(x, &_Py_ID(__name__))",
+                      self.generated_file(spec % '__name__', self.NO_BLOCK))
+        for text in ('not an identifier', 'caf\xe9', '1st'):
+            with self.subTest(text):
+                self.expect_located_failure(
+                    spec % text, self.NO_BLOCK,
+                    "a str constant passed as an object must be an ASCII "
+                    f"identifier (an interned _Py_ID()), not {text!r}", 8)
+
+
 class VectorcallFunctionalTest(unittest.TestCase):
     """Runtime tests for @vectorcall exemplar types."""
 
