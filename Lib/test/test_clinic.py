@@ -8601,6 +8601,96 @@ class PyspecSoundnessTest(PyspecTestBase):
         self.assertEqual(facts.alias, 0)
 
 
+    # -- references and NULL in the generated C --------------------------
+
+    def test_return_borrowed_loop_item(self):
+        # An item borrowed from a tuple is returned as a new reference.
+        spec = """
+            from libclinic.pyspec.runtime import iter
+
+            @native
+            def check(x: object) -> int:
+                return 1
+
+            def Py_find(x: object):
+                if type(x) is tuple:
+                    it = iter(x)
+                    for item in it:
+                        if check(item):
+                            return item
+                return x
+        """
+        out = self.generated_file(spec, self.NO_BLOCK)
+        self.assertIn("item = PyTuple_GET_ITEM(x, item_index);", out)
+        self.assertIn("return Py_NewRef(item);", out)
+        self.assertNotIn("return item;", out)
+
+    NO_BLOCK = """
+        /*[clinic input]
+        output preset block
+        [clinic start generated code]*/
+    """
+
+    MAYBE_NULL = """
+        @native
+        def lookup(x: object):
+            if len(x) > 3:
+                return NULL
+            runs_python()
+            return unknown(x)
+
+        @native
+        def conv(x: object):
+            runs_python()
+            return unknown(x)
+    """
+
+    def test_return_null_without_exception(self):
+        # A local that is NULL, or may be NULL without an exception set,
+        # is not a result.
+        for body, lineno, errmsg in (
+            ("f = lookup(x)\nreturn f", 16,
+             "cannot return 'f': it may be NULL without an exception here"),
+            ("try:\n    z = conv(x)\nexcept TypeError:\n    return z\n"
+             "return z", 18,
+             "cannot return 'z': it holds no reference here"),
+        ):
+            with self.subTest(body):
+                spec = (dedent(self.MAYBE_NULL) + "\ndef Py_f(x: object):\n"
+                        + "".join(f"    {line}\n"
+                                  for line in body.splitlines()))
+                self.expect_located_failure(spec, self.NO_BLOCK, errmsg,
+                                            lineno)
+        # Tested, it is.
+        spec = dedent(self.MAYBE_NULL) + dedent("""
+            def Py_f(x: object):
+                f = lookup(x)
+                if f is NULL:
+                    return conv(x)
+                return f
+        """)
+        self.assertIn("return f;", self.generated_file(spec, self.NO_BLOCK))
+
+    def test_reference_returning_null_local(self):
+        # A native function returning a local that may be NULL may return
+        # NULL without an exception: its callers check for it.
+        spec = dedent(self.MAYBE_NULL) + dedent("""
+            @native
+            def outer(x: object):
+                f = lookup(x)
+                return f
+
+            @native
+            def tested(x: object):
+                f = lookup(x)
+                if f is NULL:
+                    return conv(x)
+                return f
+        """)
+        self.assertTrue(self.reference_facts(spec, 'outer').returns_null)
+        self.assertFalse(self.reference_facts(spec, 'tested').returns_null)
+
+
 class VectorcallFunctionalTest(unittest.TestCase):
     """Runtime tests for @vectorcall exemplar types."""
 

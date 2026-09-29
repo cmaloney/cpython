@@ -144,6 +144,11 @@ class Flow:
     # The parameters assigned on the path: they no longer hold the
     # argument (no alias).
     moved: frozenset[str] = frozenset()
+    # The names that may hold NULL without an exception set: the result
+    # of a call that may return NULL, the target of a try in a handler.
+    nullable: frozenset[str] = frozenset()
+    # Whether the last call analysed may return NULL (see Analyzer.call).
+    null_result: bool = False
 
     def branch(self, env: Env) -> Flow:
         return dc.replace(self, env=dict(env))
@@ -155,12 +160,13 @@ class Flow:
         for name in names:
             self.env.pop(name, None)
         self.moved |= names.intersection(self.params)
+        self.nullable -= names
 
     def join(self, before: Env, paths: Sequence[tuple[Flow, list[ast.stmt]]]
              ) -> None:
         """This path continues after the *paths* (a Flow, the statements
         it ran), which started from the facts *before*: of the paths that
-        fall through, a name keeps a fact they all agree on, and a name
+        fall through, a name keeps a fact they all agree on, else a name
         none of them assigns keeps its fact before them."""
         through = [(flow, stmts) for flow, stmts in paths
                    if not subset.terminates(stmts)]
@@ -168,15 +174,18 @@ class Flow:
             return      # Unreachable after them.
         assigned = subset.assigned_names(
             [stmt for _, stmts in through for stmt in stmts])
-        env: Env = {name: fact for name, fact in before.items()
-                    if name not in assigned}
-        for name in assigned:
+        env: Env = {}
+        for name in set(before).union(*(flow.env for flow, _ in through)):
             facts = [flow.env.get(name) for flow, _ in through]
             first = facts[0]
             if first is not None and all(fact == first for fact in facts):
                 env[name] = first
+            elif name not in assigned and name in before:
+                env[name] = before[name]
         self.env = env
         self.moved = frozenset().union(*(flow.moved for flow, _ in through))
+        self.nullable = frozenset().union(*(flow.nullable
+                                            for flow, _ in through))
 
 
 class Analyzer(subset.Walker[Flow, None]):
@@ -301,8 +310,11 @@ class Analyzer(subset.Walker[Flow, None]):
 
     def assign(self, stmt: ast.Assign, flow: Flow) -> None:
         name = ast.unparse(stmt.targets[0])
+        flow.null_result = False
         tp = self.value_type(stmt.value, flow)
         flow.forget([name])
+        if flow.null_result:
+            flow.nullable |= {name}
         if tp is not None:
             flow.env[name] = tp
 
@@ -313,7 +325,13 @@ class Analyzer(subset.Walker[Flow, None]):
                 pass
             case ast.Name('NULL'):
                 flow.facts.returns_null = True
+            case ast.Name(name) if flow.env.get(name) is known.NULL:
+                flow.facts.returns_null = True
             case value:
+                if (isinstance(value, ast.Name) and value.id in flow.nullable
+                        and flow.env.get(value.id) is None):
+                    # May be NULL without an exception: an absent result.
+                    flow.facts.returns_null = True
                 alias = (list(flow.params).index(value.id)
                          if isinstance(value, ast.Name)
                          and value.id in flow.params
@@ -334,6 +352,8 @@ class Analyzer(subset.Walker[Flow, None]):
         # without the facts of the names it assigns.
         raised = flow.branch(before)
         raised.forget(subset.assigned_names(stmt.body))
+        # (In the C, the target of a call that failed is NULL.)
+        raised.nullable |= subset.assigned_names(stmt.body)
         body = flow.branch(before)
         self.block(stmt.body, body)
         self.block(stmt.orelse, body)
@@ -434,6 +454,7 @@ class Analyzer(subset.Walker[Flow, None]):
             callee = self.function_facts(name)      # a spec function
         if callee is not None:
             facts.add(callee)
+            flow.null_result = callee.returns_null
             return callee.result_type
         name = node.func.id if isinstance(node.func, ast.Name) else None
         match name, node.args:
