@@ -15,6 +15,10 @@ effects: the rest models the values the C computes.  ``calls(x,
 type(x) runs (builtin_types.TypeFacts); a call of an object and a
 function about which nothing is known may do anything.
 
+The release of a reference is not an effect here: releasing an object
+of a type not known exactly may run its __del__, which "runs no Python
+code" does not count (emit.py, "Ownership"; a snapshot checks it).
+
 Anything outside what this follows (subset.py) has the worst facts: any
 result, NULL or not, may raise anything, may run Python code.  Nothing
 here fails on a construct it does not know.

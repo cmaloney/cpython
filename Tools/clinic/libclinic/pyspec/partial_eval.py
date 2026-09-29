@@ -42,7 +42,10 @@ may run Python code becomes ``return FALLBACK``, and the rest runs with
 the list locked (``with critical_section(x):``), so it iterates a
 consistent snapshot, borrows its items and reads its size once.  On
 FALLBACK the call restarts through the generic function; as the
-snapshot ran no Python code, that cannot be observed.
+snapshot ran no Python code, that cannot be observed.  Releasing an
+object may run Python code (a __del__): a statement assigning a local
+an object whose type is not known to be released safely (RELEASED_SAFELY)
+is one that may, unless the local is returned right after it.
 
 Capacity.  A buffer (a C struct local) initialized with the length of a
 sequence, ``w = init(len(x))``, has room for one unit per item of x: in
@@ -805,6 +808,12 @@ def _snapshot(context: Context, spec: Spec, callee: str, name: str,
     return special
 
 
+# The exact types whose release runs no Python code: they hold no
+# references to other objects.
+RELEASED_SAFELY: tuple[object, ...] = (bytes, int, str, float, complex, bool,
+                                       type(None))
+
+
 @dc.dataclass
 class _Path:
     """The snapshot of a path: the facts, and whether it is in the loop."""
@@ -821,16 +830,46 @@ class _Snapshot(subset.Walker[_Path, list[ast.stmt] | None]):
         self.analyzer = analyzer
         self.loop = loop
         self.returns = False        # some path returns a result
+        # The local the statement after the one mapped returns, if any.
+        self.returned_next: str | None = None
 
     def runs_python(self, stmts: list[ast.stmt], env: Env) -> bool:
-        return self.analyzer.facts(stmts, env).runs_python
+        return (self.analyzer.facts(stmts, env).runs_python
+                or any(self.releases_unknown(stmt, env) for stmt in stmts))
+
+    def releases_unknown(self, stmt: ast.stmt, env: Env) -> bool:
+        """Whether *stmt* assigns a local an object of a type whose
+        release may run Python code (a __del__, the release of what it
+        holds): the release, in the snapshot, would run it.  (A local
+        returned by the next statement is not released.)"""
+        match stmt:
+            case ast.Assign(targets=[ast.Name(name)],
+                            value=ast.Call() as call) \
+                    if name != self.returned_next:
+                pass
+            case _:
+                return False
+        found = self.analyzer.spec.c_function(call)
+        if found is not None and frontend.is_native(found[1]) and \
+                subset.c_signature(found[1])[1] != 'PyObject *':
+            return False        # a C value
+        if marks.get(call, marks.Length) is not None:
+            return False        # len()
+        flow = facts.Flow(dict(env), facts.Facts())
+        self.analyzer.assign(stmt, flow)
+        return flow.env.get(name) not in RELEASED_SAFELY
 
     def block(self, stmts: list[ast.stmt], env: Env,
               in_loop: bool = False) -> list[ast.stmt] | None:
         """*stmts* with the statements that may run Python code replaced
         by ``return FALLBACK``; None if one is outside the loop."""
         out: list[ast.stmt] = []
-        for stmt in stmts:
+        for i, stmt in enumerate(stmts):
+            match stmts[i + 1:i + 2]:
+                case [ast.Return(ast.Name(name))]:
+                    self.returned_next = name
+                case _:
+                    self.returned_next = None
             new = self.statement(stmt, _Path(env, in_loop))
             if new is None:
                 return None

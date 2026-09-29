@@ -31,6 +31,14 @@ assigned again only where it holds none.  A loop variable is released
 right after its last use in the body; it is borrowed from a tuple, and
 in a snapshot (no Python code runs, the locked list keeps it alive).  A
 C struct local is released by the ``finally`` clause around its use.
+
+A release (Py_DECREF) of an object whose type is not known exactly may
+run Python code: its __del__, or the release of what it holds.  The
+facts of a function (facts.py) do not count releases, so "runs no
+Python code" assumes the locals it releases have no such finalizer.  A
+snapshot, where no Python code may run, does not rely on it: it keeps
+no local of such a type that it could release (partial_eval.py,
+_Snapshot.releases_unknown()).
 """
 
 from __future__ import annotations
@@ -373,8 +381,9 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
             case ast.Call() if self.c_function(node) is not None:
                 expr, _, convention = self.lower_call(node)
                 if convention is not None:
-                    raise spec_error(node, 'a call in a condition cannot '
-                                     f'fail: {ast.unparse(node)}')
+                    raise spec_error(node, 'a call in a condition must '
+                                     'not be able to fail: '
+                                     f'{ast.unparse(node)}')
                 return expr
             case ast.Compare(left=ast.Call(func=ast.Name('type'), args=[obj]),
                              ops=[ast.Is() | ast.IsNot() as op],

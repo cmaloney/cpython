@@ -8843,6 +8843,103 @@ class PyspecSoundnessTest(PyspecTestBase):
             f"classes and assignments; see {pyspec_frontend.README}", 7)
 
 
+    # -- snapshots -------------------------------------------------------
+
+    def test_snapshot_release_of_unknown_type(self):
+        # Releasing an object of a type not known exactly may run Python
+        # code (a __del__): not in a snapshot, where no Python code runs.
+        spec = """
+            from libclinic.pyspec.runtime import iter
+
+            @native
+            def check(x: object) -> int:
+                return 1
+
+            @native
+            def conv(x: object):
+                return unknown(x)
+
+            @native
+            def conv_bytes(x: object):
+                return exact(bytes, b'')
+
+            class bytes:
+                def __new__(cls, x: object, /):
+                    if type(x) is list:
+                        return from_list(x)
+                    return x
+
+            def from_list(x: object):
+                it = iter(x)
+                for item in it:
+                    if check(item):
+                        v = CONV(item)
+                        if check(v):
+                            return v
+                        return x
+                return x
+        """
+        held = PyspecNativeTest.function
+        out = self.generated(spec.replace('CONV', 'conv_bytes'))
+        self.assertIn("v = conv_bytes(item);",
+                      held(out, "from_list_list_lock_held"))
+        out = self.generated(spec.replace('CONV', 'conv'))
+        body = held(out, "from_list_list_lock_held")
+        self.assertNotIn("v = conv(item);", body)
+        self.assertIn("return Py_NotImplemented;", body)
+        # Returned right away, it is not released.
+        out = self.generated(spec.replace('CONV', 'conv').replace(
+            "if check(v):\n                            return v\n"
+            "                        return x\n",
+            "return v\n"))
+        self.assertIn("v = conv(item);",
+                      held(out, "from_list_list_lock_held"))
+
+
+    # -- small ones --------------------------------------------------------
+
+    def test_try_else_every_branch_returns(self):
+        spec = dedent(self.MAYBE_NULL) + dedent("""
+            def Py_f(x: object):
+                try:
+                    z = conv(x)
+                except TypeError:
+                    return x
+                else:
+                    return z
+        """)
+        out = self.generated_file(spec, self.NO_BLOCK)
+        self.assertIn("return Py_NewRef(x);", out)
+        self.assertIn("return z;", out)
+
+    def test_condition_call_that_can_fail(self):
+        spec = dedent(self.MAYBE_NULL) + dedent("""
+            @native
+            def check(x: object) -> int:
+                runs_python()
+                return 1
+
+            def Py_f(x: object):
+                if check(x):
+                    return x
+                return x
+        """)
+        self.expect_located_failure(
+            spec, self.NO_BLOCK, "a call in a condition must not be able "
+            "to fail: check(x)", 20)
+
+    def test_mro_of_spec_class_with_base(self):
+        # A spec class of a type whose base is not object (bool: int).
+        spec = pyspec_frontend.Spec(dedent("""
+            class bool:
+                def __len__(self, /):
+                    ...
+        """))
+        types = pyspec_context.Context(spec).types()
+        self.assertEqual(types.mro(bool), [bool, int, object])
+        self.assertEqual(types.special(bool, '__index__'), (None, int))
+
+
 class VectorcallFunctionalTest(unittest.TestCase):
     """Runtime tests for @vectorcall exemplar types."""
 

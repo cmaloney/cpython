@@ -211,8 +211,12 @@ class TypeFacts:
         out = []
         while tp is not None:
             if self.spec_class(tp) is not None:
+                # The class describes its special methods; its base is
+                # that of its row (bool: int), not always object.
                 out.append(tp)
-                tp = object
+                if tp not in TABLE:
+                    return None
+                tp = TABLE[tp].base
             elif tp in TABLE:
                 out.append(tp)
                 tp = TABLE[tp].base
