@@ -225,7 +225,7 @@ def explain(names):
     reasons, unexplained = {}, []
     for name in names:
         for pattern, reason in rules:
-            if pattern.search(name):
+            if pattern.match(name):
                 reasons.setdefault(reason, []).append(name)
                 break
         else:
