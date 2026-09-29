@@ -1851,6 +1851,11 @@ class DSLParser:
         try:
             self.function.docstring = self.format_docstring()
         except ClinicError as exc:
+            if self.spec_block is not None:
+                # The docstring is written in the spec.
+                exc.filename, exc.lineno = (self.spec_block.docstring
+                                            or self.spec_block.location)
+                raise
             if exc.lineno is None:
                 exc.lineno = lineno
             exc.filename = self.clinic.filename

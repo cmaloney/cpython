@@ -193,8 +193,14 @@ def terminates(stmts: list[ast.stmt]) -> bool:
         return True
     if isinstance(last, ast.If):
         return terminates(last.body) and terminates(last.orelse)
-    if isinstance(last, ast.Try) and not last.handlers:
-        return terminates(last.body) or terminates(last.finalbody)
+    if isinstance(last, ast.Try):
+        if terminates(last.finalbody):
+            return True
+        # Every way out of the body (the else clause after it, each
+        # handler) exits.
+        return ((terminates(last.body) or terminates(last.orelse))
+                and all(terminates(handler.body)
+                        for handler in last.handlers))
     return False
 
 

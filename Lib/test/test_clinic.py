@@ -8473,6 +8473,473 @@ class PyspecNativeTest(PyspecTestBase):
                          (other, 2))
 
 
+class PyspecSoundnessTest(PyspecTestBase):
+    """The facts and the generated C are sound on every path: facts join
+    after branches, and the C never returns a NULL without an exception
+    or a borrowed reference."""
+
+    def generated(self, spec):
+        return self.generated_file(spec, PyspecTest.BLOCK)
+
+    def reference_facts(self, spec, name, env=None):
+        spec = pyspec_frontend.Spec(dedent(spec))
+        analyzer = pyspec_context.Context(spec).analyzer()
+        return analyzer.reference_facts(name, env or {})
+
+    # -- facts join after branches ---------------------------------------
+
+    def test_facts_join_after_if(self):
+        # r is exactly bytes on one path only: its type is not known after
+        # the if (neither in the facts nor in the call table).
+        spec = """
+            class bytes:
+                def __new__(cls, a: object, /):
+                    return conv(a)
+
+            @native
+            def conv(x: object):
+                r = exact(bytes, b'')
+                if len(r) == 0:
+                    calls(x, "__bytes__")
+                    r = unknown(x)
+                return r
+        """
+        self.assertIsNone(self.reference_facts(spec, 'conv').result_type)
+        self.assertIn("/* bytes(x): result type not known exactly; may run "
+                      "Python code */", self.generated(spec))
+
+    def test_facts_join_after_if_keeps_agreement(self):
+        spec = """
+            @native
+            def conv(x: object):
+                r = exact(bytes, b'')
+                if len(r) == 0:
+                    calls(x, "__bytes__")
+                    r = exact(bytes, x)
+                return r
+        """
+        self.assertIs(self.reference_facts(spec, 'conv').result_type, bytes)
+
+    def test_facts_join_after_try(self):
+        spec = """
+            @native
+            def index(x: object):
+                calls(x, "__index__")
+                return exact(bytes, b'')
+
+            @native
+            def conv(x: object):
+                try:
+                    r = index(x)
+                except TypeError:
+                    r = unknown(x)
+                return r
+
+            @native
+            def in_handler(x: object):
+                r = unknown(x)
+                try:
+                    r = index(x)
+                except TypeError:
+                    return r
+                return r
+        """
+        self.assertIsNone(self.reference_facts(spec, 'conv').result_type)
+        # The handler starts before r is assigned.
+        self.assertIsNone(self.reference_facts(spec, 'in_handler')
+                          .result_type)
+
+    def test_facts_after_loop(self):
+        spec = """
+            from libclinic.pyspec.runtime import iter
+            @native
+            def conv(x: object):
+                r = exact(bytes, b'')
+                it = iter(x)
+                for item in it:
+                    r = unknown(item)
+                return r
+
+            @native
+            def in_body(x: object):
+                r = exact(bytes, b'')
+                it = iter(x)
+                for item in it:
+                    calls(r, "__index__")
+                    r = unknown(item)
+                return exact(bytes, b'')
+        """
+        self.assertIsNone(self.reference_facts(spec, 'conv').result_type)
+        # From the second iteration, r may be anything.
+        self.assertTrue(self.reference_facts(spec, 'in_body').runs_python)
+
+    def test_alias_after_reassignment(self):
+        # x no longer holds the argument: the result is not an alias of
+        # it (the optimizer would drop the call).
+        spec = """
+            @native
+            def conv(x: object):
+                if type(x) is bytes:
+                    x = exact(bytes, x + b'!')
+                    return x
+                runs_python()
+                return unknown(x)
+
+            @native
+            def joined(x: object):
+                if type(x) is bytes:
+                    x = exact(bytes, x + b'!')
+                return x
+        """
+        facts = self.reference_facts(spec, 'conv', {'x': bytes})
+        self.assertEqual((facts.result_type, facts.alias), (bytes, None))
+        facts = self.reference_facts(spec, 'joined', {'x': bytes})
+        self.assertEqual((facts.result_type, facts.alias), (bytes, None))
+        # Unassigned, it is an alias.
+        facts = self.reference_facts(spec.replace("x = exact", "y = exact"),
+                                     'joined', {'x': bytes})
+        self.assertEqual(facts.alias, 0)
+
+
+    # -- references and NULL in the generated C --------------------------
+
+    def test_return_borrowed_loop_item(self):
+        # An item borrowed from a tuple is returned as a new reference.
+        spec = """
+            from libclinic.pyspec.runtime import iter
+
+            @native
+            def check(x: object) -> int:
+                return 1
+
+            def Py_find(x: object):
+                if type(x) is tuple:
+                    it = iter(x)
+                    for item in it:
+                        if check(item):
+                            return item
+                return x
+        """
+        out = self.generated_file(spec, self.NO_BLOCK)
+        self.assertIn("item = PyTuple_GET_ITEM(x, item_index);", out)
+        self.assertIn("return Py_NewRef(item);", out)
+        self.assertNotIn("return item;", out)
+
+    NO_BLOCK = """
+        /*[clinic input]
+        output preset block
+        [clinic start generated code]*/
+    """
+
+    MAYBE_NULL = """
+        @native
+        def lookup(x: object):
+            if len(x) > 3:
+                return NULL
+            runs_python()
+            return unknown(x)
+
+        @native
+        def conv(x: object):
+            runs_python()
+            return unknown(x)
+    """
+
+    def test_return_null_without_exception(self):
+        # A local that is NULL, or may be NULL without an exception set,
+        # is not a result.
+        for body, lineno, errmsg in (
+            ("f = lookup(x)\nreturn f", 16,
+             "cannot return 'f': it may be NULL without an exception here"),
+            ("try:\n    z = conv(x)\nexcept TypeError:\n    return z\n"
+             "return z", 18,
+             "cannot return 'z': it holds no reference here"),
+        ):
+            with self.subTest(body):
+                spec = (dedent(self.MAYBE_NULL) + "\ndef Py_f(x: object):\n"
+                        + "".join(f"    {line}\n"
+                                  for line in body.splitlines()))
+                self.expect_located_failure(spec, self.NO_BLOCK, errmsg,
+                                            lineno)
+        # Tested, it is.
+        spec = dedent(self.MAYBE_NULL) + dedent("""
+            def Py_f(x: object):
+                f = lookup(x)
+                if f is NULL:
+                    return conv(x)
+                return f
+        """)
+        self.assertIn("return f;", self.generated_file(spec, self.NO_BLOCK))
+
+    def test_reference_returning_null_local(self):
+        # A native function returning a local that may be NULL may return
+        # NULL without an exception: its callers check for it.
+        spec = dedent(self.MAYBE_NULL) + dedent("""
+            @native
+            def outer(x: object):
+                f = lookup(x)
+                return f
+
+            @native
+            def tested(x: object):
+                f = lookup(x)
+                if f is NULL:
+                    return conv(x)
+                return f
+        """)
+        self.assertTrue(self.reference_facts(spec, 'outer').returns_null)
+        self.assertFalse(self.reference_facts(spec, 'tested').returns_null)
+
+
+    def test_str_constant_object_argument(self):
+        # A str constant passed as an object is a _Py_ID(): an ASCII
+        # identifier only.
+        spec = """
+            @native
+            def getattr_(x: object, name: object):
+                runs_python()
+                return unknown(x)
+
+            def Py_f(x: object):
+                return getattr_(x, %r)
+        """
+        self.assertIn("getattr_(x, &_Py_ID(__name__))",
+                      self.generated_file(spec % '__name__', self.NO_BLOCK))
+        for text in ('not an identifier', 'caf\xe9', '1st'):
+            with self.subTest(text):
+                self.expect_located_failure(
+                    spec % text, self.NO_BLOCK,
+                    "a str constant passed as an object must be an ASCII "
+                    f"identifier (an interned _Py_ID()), not {text!r}", 8)
+
+
+    def test_residuals_do_not_share_marks(self):
+        # The marks of a residual (the error check of a call, for the
+        # facts it was evaluated with) are its own: evaluating the same
+        # body with other facts does not change them.
+        spec = pyspec_frontend.Spec(dedent("""
+            @native
+            def g(x: object):
+                if type(x) is int:
+                    return x
+                raise TypeError("no")
+
+            def Py_f(x: object):
+                y = g(x)
+                return y
+        """))
+        context = pyspec_context.Context(spec)
+
+        def checks(body):
+            return [pyspec_marks.get(node, pyspec_marks.CallCheck)
+                    for stmt in body for node in ast.walk(stmt)
+                    if isinstance(node, ast.Call)]
+
+        exact_int = context.residual(spec, 'Py_f', {'x': int})
+        expected = [pyspec_marks.CallCheck(raises=False, null=False)]
+        self.assertEqual(checks(exact_int), expected)
+        any_type = context.residual(spec, 'Py_f', {})
+        self.assertEqual(checks(any_type),
+                         [pyspec_marks.CallCheck(raises=True, null=False)])
+        self.assertEqual(checks(exact_int), expected)
+        self.assertEqual(checks(spec.body('Py_f')), [None])
+
+
+    # -- the front end -----------------------------------------------------
+
+    METHOD_BLOCK = """
+        /*[clinic input]
+        output preset block
+        class bytes "PyObject *" "&PyBytes_Type"
+        bytes.foo
+        [clinic start generated code]*/
+    """
+
+    def test_docstring_error_in_the_spec(self):
+        spec = """
+            class bytes:
+                def foo(self, a: object, /):
+                    \"\"\"%s
+
+                    Body.
+                    \"\"\"
+                    ...
+        """
+        spec = dedent(spec)
+        self.expect_located_failure(
+            spec % ('A summary line far longer than the 68 characters that '
+                    'clinic allows it'), self.METHOD_BLOCK,
+            "Summary line for 'bytes.foo' is too long!\nThe summary line "
+            "must be no longer than 68 characters.", 4)
+        self.expect_located_failure(
+            spec % 'Summary.\n        Second line without a blank line.',
+            self.METHOD_BLOCK,
+            "Docstring for 'bytes.foo' does not have a summary line!\n"
+            "Every non-blank function docstring must start with a single "
+            "line summary followed by an empty line.", 4)
+
+    def test_import_as(self):
+        other = os.path.join(self.tmp_dir, 'pyspec', 'other.py')
+        with open(other, 'w', encoding='utf-8') as f:
+            f.write(dedent("""\
+                @native
+                def conv(x: object):
+                    runs_python()
+                    return unknown(x)
+            """))
+        spec = """
+            from pyspec.other import conv as other_conv
+
+            def Py_f(x: object):
+                return other_conv(x)
+        """
+        self.assertIn("return conv(x);",
+                      self.generated_file(spec, self.NO_BLOCK))
+
+    def test_slot_with_method_c_name(self):
+        # A METH_ flag of @c_name names the C of the method table entry:
+        # the facts of the slot are keyed by the slot.
+        spec = """
+            class bytes:
+                def __new__(cls, x: object, /):
+                    return x
+
+                @native
+                @c_name(METH_O="foo_contains")
+                def __contains__(self, key, /):
+                    return False
+        """
+        self.assertIn("_PySpec_SLOT(as_sequence.sq_contains)",
+                      self.generated_file(spec, PyspecTest.BLOCK))
+
+    def test_class_defined_twice(self):
+        spec = """
+            class bytes:
+                def foo(self, a: object, /):
+                    ...
+
+            class bytes:
+                def bar(self, a: object, /):
+                    ...
+        """
+        self.expect_located_failure(spec, self.METHOD_BLOCK,
+                                    "class bytes is defined twice", 6)
+
+    def test_top_level_statements(self):
+        spec = """
+            import sys
+            import collections.abc
+            from collections.abc import Sequence
+            LIMIT = 10
+
+            if sys.maxsize > 2**32:
+                def f(x: object):
+                    ...
+        """
+        self.expect_located_failure(
+            spec, self.NO_BLOCK,
+            "unsupported top-level statement in a spec: "
+            "'if sys.maxsize > 2 ** 32:'; a spec holds imports, functions, "
+            f"classes and assignments; see {pyspec_frontend.README}", 7)
+
+
+    # -- snapshots -------------------------------------------------------
+
+    def test_snapshot_release_of_unknown_type(self):
+        # Releasing an object of a type not known exactly may run Python
+        # code (a __del__): not in a snapshot, where no Python code runs.
+        spec = """
+            from libclinic.pyspec.runtime import iter
+
+            @native
+            def check(x: object) -> int:
+                return 1
+
+            @native
+            def conv(x: object):
+                return unknown(x)
+
+            @native
+            def conv_bytes(x: object):
+                return exact(bytes, b'')
+
+            class bytes:
+                def __new__(cls, x: object, /):
+                    if type(x) is list:
+                        return from_list(x)
+                    return x
+
+            def from_list(x: object):
+                it = iter(x)
+                for item in it:
+                    if check(item):
+                        v = CONV(item)
+                        if check(v):
+                            return v
+                        return x
+                return x
+        """
+        held = PyspecNativeTest.function
+        out = self.generated(spec.replace('CONV', 'conv_bytes'))
+        self.assertIn("v = conv_bytes(item);",
+                      held(out, "from_list_list_lock_held"))
+        out = self.generated(spec.replace('CONV', 'conv'))
+        body = held(out, "from_list_list_lock_held")
+        self.assertNotIn("v = conv(item);", body)
+        self.assertIn("return Py_NotImplemented;", body)
+        # Returned right away, it is not released.
+        out = self.generated(spec.replace('CONV', 'conv').replace(
+            "if check(v):\n                            return v\n"
+            "                        return x\n",
+            "return v\n"))
+        self.assertIn("v = conv(item);",
+                      held(out, "from_list_list_lock_held"))
+
+
+    # -- small ones --------------------------------------------------------
+
+    def test_try_else_every_branch_returns(self):
+        spec = dedent(self.MAYBE_NULL) + dedent("""
+            def Py_f(x: object):
+                try:
+                    z = conv(x)
+                except TypeError:
+                    return x
+                else:
+                    return z
+        """)
+        out = self.generated_file(spec, self.NO_BLOCK)
+        self.assertIn("return Py_NewRef(x);", out)
+        self.assertIn("return z;", out)
+
+    def test_condition_call_that_can_fail(self):
+        spec = dedent(self.MAYBE_NULL) + dedent("""
+            @native
+            def check(x: object) -> int:
+                runs_python()
+                return 1
+
+            def Py_f(x: object):
+                if check(x):
+                    return x
+                return x
+        """)
+        self.expect_located_failure(
+            spec, self.NO_BLOCK, "a call in a condition must not be able "
+            "to fail: check(x)", 20)
+
+    def test_mro_of_spec_class_with_base(self):
+        # A spec class of a type whose base is not object (bool: int).
+        spec = pyspec_frontend.Spec(dedent("""
+            class bool:
+                def __len__(self, /):
+                    ...
+        """))
+        types = pyspec_context.Context(spec).types()
+        self.assertEqual(types.mro(bool), [bool, int, object])
+        self.assertEqual(types.special(bool, '__index__'), (None, int))
+
+
 class VectorcallFunctionalTest(unittest.TestCase):
     """Runtime tests for @vectorcall exemplar types."""
 

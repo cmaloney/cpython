@@ -31,6 +31,14 @@ assigned again only where it holds none.  A loop variable is released
 right after its last use in the body; it is borrowed from a tuple, and
 in a snapshot (no Python code runs, the locked list keeps it alive).  A
 C struct local is released by the ``finally`` clause around its use.
+
+A release (Py_DECREF) of an object whose type is not known exactly may
+run Python code: its __del__, or the release of what it holds.  The
+facts of a function (facts.py) do not count releases, so "runs no
+Python code" assumes the locals it releases have no such finalizer.  A
+snapshot, where no Python code may run, does not rely on it: it keeps
+no local of such a type that it could release (partial_eval.py,
+_Snapshot.releases_unknown()).
 """
 
 from __future__ import annotations
@@ -85,6 +93,10 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
         self.live: set[str] = set()     # owned locals that may hold a value
         self.nonnull: set[str] = set()  # locals known not NULL
         self.loop_vars: list[str] = []  # owned variables of enclosing loops
+        self.borrowed: set[str] = set()  # borrowed variables of such loops
+        # Object locals that may hold NULL without an exception set (the
+        # result of a call that may return NULL): unless known not NULL.
+        self.maybe_null: set[str] = set()
         # The finally clauses around the statement lowered, innermost last.
         self.finally_blocks: list[list[ast.stmt]] = []
         self.body: list[ir.Stmt] = []
@@ -250,6 +262,11 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
         """Argument *arg* of a C function parameter of type *ctype*."""
         match arg:
             case ast.Constant(str() as text) if ctype == OBJECT:
+                if not (text.isidentifier() and text.isascii()):
+                    # (_Py_ID() names a static interned str by the text.)
+                    raise spec_error(arg, 'a str constant passed as an '
+                                     'object must be an ASCII identifier '
+                                     f'(an interned _Py_ID()), not {text!r}')
                 return ir.Identifier(text)
             case ast.Constant(str() as text):
                 return ir.String(text)
@@ -364,8 +381,9 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
             case ast.Call() if self.c_function(node) is not None:
                 expr, _, convention = self.lower_call(node)
                 if convention is not None:
-                    raise spec_error(node, 'a call in a condition cannot '
-                                     f'fail: {ast.unparse(node)}')
+                    raise spec_error(node, 'a call in a condition must '
+                                     'not be able to fail: '
+                                     f'{ast.unparse(node)}')
                 return expr
             case ast.Compare(left=ast.Call(func=ast.Name('type'), args=[obj]),
                              ops=[ast.Is() | ast.IsNot() as op],
@@ -425,8 +443,14 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
             return name, ctype, convention
         self.add(ir.Assign(name, expr))
         self.nonnull.discard(name)
+        self.maybe_null.discard(name)
         if ctype == OBJECT:
             self.live.add(name)
+            check_mark = marks.get(value, marks.CallCheck)
+            if convention == ir.Convention.NULL_OR_MISSING or (
+                    convention is None and check_mark is not None
+                    and check_mark.null):
+                self.maybe_null.add(name)
         if later is not None:
             self.release_dead(later)
         if check and convention is not None:
@@ -452,11 +476,14 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
         """A nested block, where the locals *null* are NULL and *nonnull*
         are not, and what it leaves (see Branch)."""
         saved = self.live, self.nonnull
+        saved_null = set(self.maybe_null)
         self.live = saved[0] - set(null)
         self.nonnull = saved[1] - set(null) | set(nonnull)
         body = self.collect(lambda: self.statements(stmts, later))
         left = None if terminates(stmts) else (self.live, self.nonnull)
         self.live, self.nonnull = saved
+        # (What a branch assigns may be NULL after it.)
+        self.maybe_null |= saved_null
         return body, left
 
     def join(self, branches: list[Branch]) -> None:
@@ -561,6 +588,18 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
                 self.add(*self.cleanup(), ir.Return(ir.Fallback()))
             case ast.Name(id) if id in self.params:
                 self.add(*self.cleanup(), ir.Return(ir.NewRef(ir.Name(id))))
+            case ast.Name(id) if self.locals.get(id) == OBJECT and (
+                    id not in self.live and id not in self.borrowed
+                    or id in self.maybe_null and id not in self.nonnull):
+                # No function the subset lowers returns NULL without an
+                # exception (it has no ``return NULL``).
+                what = ('holds no reference here' if id not in self.live
+                        else 'may be NULL without an exception here')
+                raise spec_error(stmt, f'cannot return {id!r}: it {what}')
+            case ast.Name(id) if id in self.borrowed:
+                # A borrowed loop variable: a new reference, taken before
+                # the exit releases anything (the sequence, maybe).
+                self.add(ir.Return(ir.NewRef(ir.Name(id)), self.cleanup()))
             case ast.Name(id) if self.locals.get(id) == OBJECT:
                 self.add(*self.cleanup(keep=id), ir.Return(ir.Name(id)))
             case ast.Constant() | ast.Tuple():
@@ -715,11 +754,15 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
             self.live.add(item)
             self.nonnull.add(item)
             self.loop_vars.append(item)
+        else:
+            self.borrowed.add(item)
         # The names used by the next iterations stay alive.
         body = self.collect(lambda: self.statements(
             stmt.body, (set(later) | loaded_names([stmt])) - {item}))
         if owned:
             self.loop_vars.pop()
+        else:
+            self.borrowed.discard(item)
         if self.live != live_before:
             raise spec_error(stmt, 'a loop body must release what it '
                              'assigns: ' + ', '.join(sorted(

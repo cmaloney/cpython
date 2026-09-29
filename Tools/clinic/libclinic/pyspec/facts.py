@@ -15,6 +15,10 @@ effects: the rest models the values the C computes.  ``calls(x,
 type(x) runs (builtin_types.TypeFacts); a call of an object and a
 function about which nothing is known may do anything.
 
+The release of a reference is not an effect here: releasing an object
+of a type not known exactly may run its __del__, which "runs no Python
+code" does not count (emit.py, "Ownership"; a snapshot checks it).
+
 Anything outside what this follows (subset.py) has the worst facts: any
 result, NULL or not, may raise anything, may run Python code.  Nothing
 here fails on a construct it does not know.
@@ -25,7 +29,7 @@ from __future__ import annotations
 import ast
 import builtins
 import dataclasses as dc
-from collections.abc import Callable, Hashable, Sequence
+from collections.abc import Callable, Hashable, Iterable, Sequence
 from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from . import builtin_types, frontend, known, marks, subset
@@ -141,9 +145,51 @@ class Flow:
     facts: Facts
     params: Sequence[str] = ()
     reference: bool = False
+    # The parameters assigned on the path: they no longer hold the
+    # argument (no alias).
+    moved: frozenset[str] = frozenset()
+    # The names that may hold NULL without an exception set: the result
+    # of a call that may return NULL, the target of a try in a handler.
+    nullable: frozenset[str] = frozenset()
+    # Whether the last call analysed may return NULL (see Analyzer.call).
+    null_result: bool = False
 
     def branch(self, env: Env) -> Flow:
         return dc.replace(self, env=dict(env))
+
+    def forget(self, names: Iterable[str]) -> None:
+        """Names assigned (by code whose values are not followed): no
+        facts about them."""
+        names = set(names)
+        for name in names:
+            self.env.pop(name, None)
+        self.moved |= names.intersection(self.params)
+        self.nullable -= names
+
+    def join(self, before: Env, paths: Sequence[tuple[Flow, list[ast.stmt]]]
+             ) -> None:
+        """This path continues after the *paths* (a Flow, the statements
+        it ran), which started from the facts *before*: of the paths that
+        fall through, a name keeps a fact they all agree on, else a name
+        none of them assigns keeps its fact before them."""
+        through = [(flow, stmts) for flow, stmts in paths
+                   if not subset.terminates(stmts)]
+        if not through:
+            return      # Unreachable after them.
+        assigned = subset.assigned_names(
+            [stmt for _, stmts in through for stmt in stmts])
+        env: Env = {}
+        for name in set(before).union(*(flow.env for flow, _ in through)):
+            facts = [flow.env.get(name) for flow, _ in through]
+            first = facts[0]
+            if first is not None and all(fact == first for fact in facts):
+                env[name] = first
+            elif name not in assigned and name in before:
+                env[name] = before[name]
+        self.env = env
+        self.moved = frozenset().union(*(flow.moved for flow, _ in through))
+        self.nullable = frozenset().union(*(flow.nullable
+                                            for flow, _ in through))
 
 
 class Analyzer(subset.Walker[Flow, None]):
@@ -252,6 +298,8 @@ class Analyzer(subset.Walker[Flow, None]):
             flow.facts.python()
             flow.facts.returns.append((None, None))
         # (In a Python reference: the model of a value, no effects.)
+        # Its values are not followed: no facts about what it assigns.
+        flow.forget(subset.assigned_names([stmt]))
 
     def pass_(self, stmt: ast.stmt, flow: Flow) -> None:
         pass
@@ -259,13 +307,18 @@ class Analyzer(subset.Walker[Flow, None]):
     def if_(self, stmt: ast.If, flow: Flow) -> None:
         self.expression(stmt.test, flow)
         body_env, else_env = known.refine(stmt.test, flow.env)
-        self.block(stmt.body, flow.branch(body_env))
-        self.block(stmt.orelse, flow.branch(else_env))
+        body, orelse = flow.branch(body_env), flow.branch(else_env)
+        self.block(stmt.body, body)
+        self.block(stmt.orelse, orelse)
+        flow.join(flow.env, [(body, stmt.body), (orelse, stmt.orelse)])
 
     def assign(self, stmt: ast.Assign, flow: Flow) -> None:
         name = ast.unparse(stmt.targets[0])
+        flow.null_result = False
         tp = self.value_type(stmt.value, flow)
-        flow.env.pop(name, None)
+        flow.forget([name])
+        if flow.null_result:
+            flow.nullable |= {name}
         if tp is not None:
             flow.env[name] = tp
 
@@ -276,10 +329,17 @@ class Analyzer(subset.Walker[Flow, None]):
                 pass
             case ast.Name('NULL'):
                 flow.facts.returns_null = True
+            case ast.Name(name) if flow.env.get(name) is known.NULL:
+                flow.facts.returns_null = True
             case value:
+                if (isinstance(value, ast.Name) and value.id in flow.nullable
+                        and flow.env.get(value.id) is None):
+                    # May be NULL without an exception: an absent result.
+                    flow.facts.returns_null = True
                 alias = (list(flow.params).index(value.id)
                          if isinstance(value, ast.Name)
-                         and value.id in flow.params else None)
+                         and value.id in flow.params
+                         and value.id not in flow.moved else None)
                 flow.facts.returns.append((self.value_type(value, flow),
                                            alias))
 
@@ -291,10 +351,31 @@ class Analyzer(subset.Walker[Flow, None]):
             flow.facts.raises.add(_exception_name(stmt.exc, flow.env))
 
     def try_(self, stmt: ast.Try, flow: Flow) -> None:
-        self.block(stmt.body, flow)
+        before = flow.env
+        # A handler or the finally clause may start anywhere in the body:
+        # without the facts of the names it assigns.
+        raised = flow.branch(before)
+        raised.forget(subset.assigned_names(stmt.body))
+        # (In the C, the target of a call that failed is NULL.)
+        raised.nullable |= subset.assigned_names(stmt.body)
+        body = flow.branch(before)
+        self.block(stmt.body, body)
+        self.block(stmt.orelse, body)
+        paths = [(body, stmt.body + stmt.orelse)]
         for handler in stmt.handlers:
-            self.block(handler.body, flow.branch(flow.env))
-        self.block(stmt.orelse, flow.branch(flow.env))
+            handled = raised.branch(raised.env)
+            if handler.name:
+                handled.forget([handler.name])
+            self.block(handler.body, handled)
+            paths.append((handled, handler.body))
+        if stmt.finalbody:
+            # Also after an exception no handler catches: every name the
+            # statement assigns may be anything.
+            paths.append((raised, []))
+            raised.forget(subset.assigned_names(
+                [*stmt.orelse, *(stmt for handler in stmt.handlers
+                                 for stmt in handler.body)]))
+        flow.join(before, paths)
         self.block(stmt.finalbody, flow)
 
     finally_ = try_
@@ -314,8 +395,12 @@ class Analyzer(subset.Walker[Flow, None]):
         if not is_known:
             flow.facts.python()
         item: known.Fact = item_type or known.NOTNULL
-        self.block(stmt.body, dc.replace(flow, env=flow.env | {
-            stmt.target.id: item}))
+        # The body runs any number of times: what it assigns has no facts
+        # when it starts, nor after the loop.
+        flow.forget(subset.assigned_names([stmt]))
+        body = flow.branch(flow.env | {stmt.target.id: item})
+        self.block(stmt.body, body)
+        flow.moved |= body.moved
         return None
 
     def expression(self, node: ast.expr, flow: Flow) -> None:
@@ -325,6 +410,7 @@ class Analyzer(subset.Walker[Flow, None]):
         for child in ast.walk(node):
             if isinstance(child, ast.NamedExpr):
                 self.value_type(child.value, flow)
+                flow.forget([child.target.id])
             elif (isinstance(child, ast.Call)
                     and not any(child is value for value in named)
                     and not (isinstance(child.func, ast.Name)
@@ -372,6 +458,7 @@ class Analyzer(subset.Walker[Flow, None]):
             callee = self.function_facts(name)      # a spec function
         if callee is not None:
             facts.add(callee)
+            flow.null_result = callee.returns_null
             return callee.result_type
         name = node.func.id if isinstance(node.func, ast.Name) else None
         match name, node.args:
