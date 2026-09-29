@@ -31,6 +31,7 @@ type:
 """
 
 import builtins
+import dis
 import functools
 import gc
 import os
@@ -279,10 +280,16 @@ class DirectCallTest(unittest.TestCase):
                     self.assertTrue(guard_accepts(calls[index], args))
                     if args and arg_type not in typed:
                         self.assertIsNone(calls[index]['arg_type'])
-            if calls:
-                index = _testinternalcapi.pyspec_find_call(tp, 1, None)
-                if index is not None:
+            # An unknown argument type: the generic entry, if any.
+            index = _testinternalcapi.pyspec_find_call(tp, 1, None)
+            with self.subTest(cls=cls_name, arg_type=None):
+                if any(e['nargs'] == 1 and e['arg_type'] is None
+                       for e in calls):
+                    self.assertIsNotNone(index)
+                    self.assertEqual(calls[index]['nargs'], 1)
                     self.assertIsNone(calls[index]['arg_type'])
+                else:
+                    self.assertIsNone(index)
 
     def test_methods(self):
         # Each method entry, with the cases of the method: self and the
@@ -645,6 +652,57 @@ def specialize_and_run(func, *args):
 
 
 @functools.cache
+def cases_analysis(name):
+    """The cases generator's analysis of Python/<name>."""
+    with test_tools.imports_under_tool('cases_generator'):
+        import analyzer
+    return analyzer.analyze_files([os.path.join(SRCDIR, 'Python', name)])
+
+
+def call_args(tokens, func):
+    """The arguments (as text, without spaces) of the first call of *func*
+    in *tokens* (of the cases generator's lexer), or None."""
+    texts = [t.text for t in tokens]
+    for i, text in enumerate(texts[:-1]):
+        if text == func and texts[i + 1] == '(':
+            break
+    else:
+        return None
+    args, current, depth = [], '', 0
+    for text in texts[i + 2:]:
+        if text == ')' and depth == 0:
+            return args + [current]
+        if text == ',' and depth == 0:
+            args.append(current)
+            current = ''
+            continue
+        depth += (text == '(') - (text == ')')
+        current += text
+    return None
+
+
+def instructions_with(uop):
+    """The (specialized) instructions whose code includes *uop*."""
+    return {name for name, inst in cases_analysis('bytecodes.c')
+            .instructions.items()
+            if any(part.name == uop for part in inst.parts)}
+
+
+def executors_uops(func):
+    """The uops of the executors of func's code."""
+    import _opcode
+    code = func.__code__
+    uops = []
+    for i in range(0, len(code.co_code), 2):
+        try:
+            ex = _opcode.get_executor(code, i)
+        except ValueError:
+            continue
+        uops.extend(op[0] for op in ex)
+    return uops
+
+
+@functools.cache
 def slot_uses():
     """[(uop, use, SpecInfo)] of the SLOT_USES of every spec."""
     return [(uop, use, info) for info in specs()
@@ -690,37 +748,54 @@ class SlotFactsTest(unittest.TestCase):
                 self.assertFalse(entry['may_run_python'])
 
     def test_uop_names_the_slot(self):
-        # The uop's optimizer code looks the facts up by the slot the
-        # table keys them by (call_table.slot_member()).
-        path = os.path.join(SRCDIR, 'Python', 'optimizer_bytecodes.c')
-        with open(path, encoding='utf-8') as f:
-            text = f.read()
+        # The uop's optimizer code (as the cases generator reads
+        # Python/optimizer_bytecodes.c) looks the facts up by the class,
+        # the slot the table keys them by (call_table.slot_member()) and
+        # the argument type of the use: spec_slot_result(ctx, &T,
+        # _PySpec_SLOT(member), &A or NULL).
+        abstract = cases_analysis('optimizer_bytecodes.c')
         for uop, use, info in slot_uses():
             with self.subTest(uop=uop):
-                start = text.index(f'op({uop},')
-                end = text.find('\n    op(', start + 1)
+                args = call_args(abstract.uops[uop].body.tokens(),
+                                 'spec_slot_result')
+                self.assertIsNotNone(args)
+                self.assertEqual(len(args), 4, args)
                 member = call_table.slot_member(info.spec, use['cls'],
                                                 use['slot'])
-                self.assertIn(f'_PySpec_SLOT({member})', text[start:end])
+                self.assertEqual(args[2], f'_PySpec_SLOT({member})')
+                self.assertEqual(args[3],
+                                 call_table._type_object(use['arg_type']))
+                tp = info.cases.TYPES[use['cls']]
+                if tp in builtin_types.TABLE:
+                    self.assertEqual(args[1], call_table._type_object(tp))
+                else:
+                    # Declared in the C file (class T "..." "&T_Type").
+                    self.assertTrue(args[1].startswith('&'), args)
 
     def test_uops_do_not_escape(self):
         # A uop that does not escape (no HAS_ESCAPES_FLAG, as the cases
         # generator analyses Python/bytecodes.c) runs no Python code: the
         # slot it copies must not either (test_table_is_derived).
-        with test_tools.imports_under_tool('cases_generator'):
-            import analyzer
-        analysis = analyzer.analyze_files(
-            [os.path.join(SRCDIR, 'Python', 'bytecodes.c')])
+        analysis = cases_analysis('bytecodes.c')
         for uop, _, _ in slot_uses():
             with self.subTest(uop=uop):
                 self.assertFalse(analysis.uops[uop].properties.escapes)
 
+    @support.requires_specialization
     def test_uops_agree(self):
-        # The specialized code gives what the slot gives, with the facts.
+        # The specialized code gives what the slot gives, with the facts;
+        # the specialized instruction (and, with the JIT, the uop in an
+        # executor) is what ran.
+        jit = getattr(sys, '_jit', None)
+        jit = jit is not None and jit.is_enabled()
         for uop, use, info in slot_uses():
             _, entry = self.slot_entry(use, info)
+            specialized = instructions_with(uop)
+            self.assertTrue(specialized, uop)
+            ran, in_executor = set(), False
             for args in use['inputs']:
                 with self.subTest(uop=uop, args=args):
+                    support.reset_code(use['run'])
                     got = specialize_and_run(use['run'], *args)
                     self.assertEqual(got, use['reference'](*args))
                     for kind, value in got:
@@ -728,6 +803,13 @@ class SlotFactsTest(unittest.TestCase):
                             self.assertIs(type(value), entry['result_type'])
                             if use.get('compact'):
                                 self.assertTrue(sys._is_immortal(value))
+                    ran |= {i.opname for i in
+                            dis.get_instructions(use['run'], adaptive=True)}
+                    in_executor |= uop in executors_uops(use['run'])
+            with self.subTest(uop=uop):
+                self.assertTrue(ran & specialized, (specialized, ran))
+                if jit:
+                    self.assertTrue(in_executor, uop)
 
     @requires_jit()
     @unittest.skipUnless(support.Py_DEBUG, 'debug builds only')
