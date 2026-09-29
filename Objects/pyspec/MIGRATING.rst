@@ -351,7 +351,7 @@ Checklist:
 
 A new type is data only: running clinic on its C file gives each class
 with facts its call table and its entry in the registry of
-``Include/internal/pycore_pyspec.h``, which the interpreter and the tests
+``Include/internal/pycore_pyspec_registry.h``, which the interpreter and the tests
 iterate over.  In ``foo_cases.py``:
 
 - [ ] ``TYPES`` names the type of every class; a class with a table that
