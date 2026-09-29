@@ -36,6 +36,9 @@ Usage, from a build of the tree::
     ../build-main/python Tools/clinic/pyspec_parity.py capture list -o list.parity
     ./python Tools/clinic/pyspec_parity.py check list.parity
 
+    # the spec run as pure Python (its model) against the C type:
+    ./python Tools/clinic/pyspec_parity.py model bytes bytes_iterator
+
 The types are those of the TYPES of every ``<stem>_cases.py`` next to a
 spec; one is named as a class of TYPES (``bytes_iterator``, ``mmap``), a
 builtin (``tuple``) or ``module.name``.  The PARITY of the same

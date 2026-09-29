@@ -188,7 +188,9 @@ Commits (small, on the worktree branch):
    `longobject.py`, `Python/pyspec/pyhash.py` (SipHash-1-3 as `pyhash.c`, key from
    `hash_secret()`, `sys.hash_info` checked), `pystrhex.py`.
 3. `f81d865e969` the model and `pyspec_parity.py model`, `ModelTest`.
-4. docs: this report, README.rst ("Pure Python", decorators, class fields), CONCEPT.md 7.3.
+4. `b3f823cf5a9` tidy of the model; `399c2af5280` docs: this report, README.rst ("Pure
+   Python", decorators, class fields), CONCEPT.md 7.3; a last commit adds the `model`
+   command to the usage of pyspec_parity.py.
 
 **Generated C**: clinic on the spec-backed files leaves every generated file identical to
 the base except `Objects/clinic/bytesobject_pyspec.c.h`, where only the 23 `/*
