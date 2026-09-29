@@ -7702,17 +7702,18 @@ class PyspecFactsTest(TestCase):
                     [change.filename for change in writer.changes], [])
 
     def test_registry_up_to_date(self):
-        # The registry in pycore_pyspec.h lists the call table of every
-        # class of call_table.table_classes() of the core specs.
+        # The registry, pycore_pyspec_registry.h, lists the call table of
+        # every class of call_table.table_classes() of the core specs.
         root = test_tools.basepath
         header = os.path.join(root, pyspec_call_table.REGISTRY_HEADER)
         with open(header, encoding='utf-8') as f:
             text = f.read()
         expected = pyspec_call_table.registry_text(
             pyspec_call_table.registry(root))
-        self.assertIn(pyspec_call_table.REGISTRY_START + '\n' + expected
-                      + pyspec_call_table.REGISTRY_END, text,
-                      'run "make clinic"')
+        self.assertEqual(text, expected, 'run "make clinic"')
+        with open(os.path.join(root, pyspec_call_table.PYSPEC_HEADER),
+                  encoding='utf-8') as f:
+            self.assertIn('#include "pycore_pyspec_registry.h"\n', f.read())
 
     def test_unknown_is_worst(self):
         # A C function whose body is ... may do anything: a call of it may
