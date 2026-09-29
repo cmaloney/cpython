@@ -69,7 +69,12 @@ Add a spec-body method      The same ``def`` with a body in the lowered
 Keep a method's C, with     ``@native`` on the ``def``: any
 its Python reference        signature, any Python body; clinic output is
                             that of ``...``.
-Add an accessor             ``@getter def attr(self) -> conv:`` (its
+Give a C method its pure    ``@native(facts=False)`` on the ``def`` and
+Python                      the Python as its body ("Pure Python",
+                            below); clinic output is that of ``...``;
+                            check it with ``./python
+                            Tools/clinic/pyspec_parity.py model``.
+Add an accessor            ``@getter def attr(self) -> conv:`` (its
                             docstring) and ``@setter def attr(self,
                             value: object):``; in ``foo.c`` the blocks
                             ``@getter`` ``T.attr`` and ``@setter``
@@ -185,7 +190,12 @@ Decorators
   hand) and the body is its Python reference, which describes it and is
   never compiled (below); on a clinic method, clinic generates what it
   does for ``...``.
-* ``@inline``: a top-level function whose body clinic generates into
+* ``@native(facts=False)``: implemented natively too, and the body is
+  its pure-Python implementation, which only the model runs ("Pure
+  Python", below).  Clinic, the facts, the checker and ``HelperTest``
+  read the function as ``...``; a Python reference may call it as part
+  of the model of a value.
+* ``@inline``:a top-level function whose body clinic generates into
   each caller, never as a C function of its own: a fast path (below).
 * ``@getter``, ``@setter`` (and ``@deleter`` after ``@setter``): an
   accessor; its block in the C file starts with the same decorator.
@@ -200,9 +210,11 @@ with the ``ast`` module; the tests run it.
 
 * A class body holds a docstring, ``def``\ s, shared methods
   (``x = module.Class.x``, or ``Class.x`` of the same spec, possibly
-  wrapped in ``critical_section(...)`` or ``c_name(...)(...)``) and
-  ``pass``.  Two methods with the same signature are two full ``def``\ s:
-  Python has no clones.
+  wrapped in ``critical_section(...)`` or ``c_name(...)(...)``), the
+  fields of its C struct (``it_index: Py_ssize_t``, ``ob_sval:
+  'char[]'`` for the bytes an object holds: the struct stays C, the
+  model allocates them, "Pure Python") and ``pass``.  Two methods with
+  the same signature are two full ``def``\ s: Python has no clones.
 * A signature is any signature clinic can state: positional-only,
   positional-or-keyword and keyword-only parameters, ``*args``,
   ``**kwargs``, any converter (the annotation, with its options:
@@ -354,14 +366,66 @@ file.  The partial evaluation, the facts, the lowering and the call
 tables of the tier-2 optimizer (C data of the interpreter, from
 ``call_table.py``) stay as they are.
 
-Pure Python and PEP 399
------------------------
+Pure Python
+-----------
 
-A spec is not (yet) a pure-Python implementation: bodies call C API
-functions by name, and ``@native`` references model the C with the
-host's builtins (``_PyBytes_FromSize`` is ``bytes(size)``).  How far it
-is from one, and how specs could serve PEP 399's pure-Python/accelerator
-pairs, is in ``pyspec-notes/drafts/CONCEPT.md`` section 7.3.
+A spec is *Python which is lowered* when running its Python would
+behave exactly as the C does: the C is the same program, lowered (by
+hand, or by clinic) for speed.  For a type that means:
+
+1. every method and slot of the class, and every function its bodies
+   call, has a Python body: generated (lowered by clinic), ``@native``
+   (a reference the facts read) or ``@native(facts=False)`` (a
+   pure-Python implementation only the model runs); no ``...`` is left;
+2. the bodies are *non-circular*: they compute with the host types no
+   spec describes (``int``, ``str``, ``tuple``, ``list``, ``slice``, the
+   exceptions), call other spec functions, and name a type a spec
+   describes (``bytearray``) or ``memoryview`` only as a type, never
+   calling it or reading its attributes; the classes of the spec stand
+   for themselves, so ``bytes(...)`` in a body is the model's;
+3. what Python cannot say is a *machine primitive*
+   (``Tools/clinic/libclinic/pyspec/machine.py``): ``ob_alloc(tp,
+   items)`` and ``ob_items(o)`` (the object and the bytes it holds),
+   ``ob_new(tp)`` (an object with its fields), ``buffer_items(o)`` and
+   ``buffer_export(o, flags)`` (the buffer protocol), ``hash_secret()``,
+   ``has_slot(tp, slot)`` (what abstract.c's dispatch looks at) and
+   ``from_host(tp, v)`` (a value from host code the model does not
+   describe, a codec).  Each has a Python meaning and stands for C; on
+   the host (the tests of the references) a primitive reads the builtin;
+4. the fields of the C struct are declared in the class (``it_index:
+   Py_ssize_t``; ``ob_sval: 'char[]'``: the bytes, ``ob_items()``);
+5. the C types the template files are compiled for are parameters: a
+   method of ``Objects/stringlib/pyspec/`` runs with ``B`` and
+   ``STRINGLIB_NEW`` of the spec that shares it (``STRINGLIB_NEW =
+   new_bytes`` in bytesobject.py).
+
+The *model* (``Tools/clinic/libclinic/pyspec/model.py``) runs a spec so:
+Python classes built from it, named like the builtins, whose methods
+run the bodies through clinic's argument parsing (from the signature and
+the converters) and models of the descriptors and slot wrappers of
+``descrobject.c`` and ``typeobject.c``.  A method still ``...`` calls
+the C (it is *delegated*, and circular).  Nothing of this is compiled:
+clinic's output, the facts and the call tables do not change.
+
+``./python Tools/clinic/pyspec_parity.py model`` compares the model
+with the C type, line by line, with the parity tool's probes (the host
+objects of the pool become model objects), and says which lines differ.
+Left out: the type object (flags, sizes, ``help()``, the C layout),
+``sys.getsizeof()``, and pickle and copy, which find the builtin by
+identity.  Reported apart, the limits of a Python class: ``__mul__`` is
+both the operator and ``sq_repeat``'s slot wrapper; a heap type always
+has ``tp_as_sequence``; ``bytearray % b`` tests ``PyBytes_Check()``.
+``ModelTest`` of ``test_tools.test_pyspec_parity`` fails when a method
+with a Python body diverges, and when a body is circular
+(``model.check_circular()``).
+
+bytes and its iterator are the example: every method and slot but
+``__mod__``/``__rmod__`` has a Python body (with
+``Objects/pyspec/bytes_methods.py``, ``longobject.py``, and
+``Python/pyspec/pyhash.py``, SipHash-1-3, and ``pystrhex.py``).  The
+design, the numbers and how this relates to PEP 399's pure-Python
+modules are in ``pyspec-notes/reports/phase5_pure_python.md`` and
+``pyspec-notes/drafts/CONCEPT.md`` section 7.3.
 
 Conditional compilation
 -----------------------

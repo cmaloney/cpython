@@ -310,7 +310,7 @@ with a C signature, type checks, reference counts, index loops, critical section
 names).  The call tables stay C data of the interpreter.  This is a design, checked only
 against the C backend's interface.
 
-### 7.3 Pure-Python implementations and PEP 399 (analysis, not implemented)
+### 7.3 Pure-Python implementations and PEP 399 (analysis; a prototype for bytes)
 
 [PEP 399](https://peps.python.org/pep-0399/) asks that a stdlib module with a C
 accelerator also ship a pure-Python version, and that one test suite exercise both
@@ -330,7 +330,9 @@ of bytes); 3 have generated bodies (`bytes.__new__`, `__bytes__`, `fromhex`); 4 
 are `@native` with a Python reference.  At top level: 2 generated bodies
 (`PyBytes_FromObject`, `bytes_from_iterator`), 19 `@native` helpers with references, 3
 `@inline` fast paths.  C keeps the object layout and memory, the 141 method bodies, the
-primitives the bodies call, argument parsing (generated) and the specialized uops.
+primitives the bodies call, argument parsing (generated) and the specialized uops.  (Since
+the prototype below, bytes, bytes_iterator and the stringlib templates have pure-Python
+bodies for 60 of those; 81 method `def`s remain `...`: bytearray 58, mmap 21, `bytes.%` 2.)
 
 **Why even the Python parts are not an implementation.**  Bodies are C semantics in
 Python syntax: `bytes.__new__` calls `_PyObject_LookupSpecial`, `PyNumber_AsSsize_t_fast`
@@ -339,7 +341,8 @@ and `_PyBytes_FromSize` by name and tests `is NULL`; they run as Python only bec
 references model the C *with the host's builtins*, circularly: `_PyBytes_FromSize` is
 `bytes(size)`, `_PyBytes_FromBuffer` is `memoryview(x).tobytes()`, `bytes.__len__` is
 `len(bytes(self))`.  That is enough for facts and for a difftest run on CPython, not
-for PyPy or GraalPy.
+for PyPy or GraalPy.  (This was the state before the prototype below; the bytes
+references now use machine primitives, `ob_alloc(bytes, ...)`, `ob_items(self)`.)
 
 **Where pyspec could extend PEP 399.**  The existing pairs (`bisect`/`_bisect`,
 `heapq`/`_heapq`, `datetime`/`_datetime`, `json`/`_json`, `pickle`/`_pickle`) could make
@@ -360,6 +363,44 @@ made exhaustive.  What it would take:
 
 A small first experiment: `bisect` (a PEP 399 pair, clinic-based): `Lib/bisect.py`'s
 functions as the spec of `Modules/_bisectmodule.c`, the C kept `@native` first.
+
+**What "Python which is lowered" takes, and what the prototype shows** (phase 5, workstream
+PY; `pyspec-notes/reports/phase5_pure_python.md`).  Definition: every method, slot and
+called function has a Python body; the bodies are non-circular (they compute with host
+types no spec describes, `int`, `str`, `tuple`..., name a described type such as
+`bytearray` or `memoryview` only as a type, and the spec's own classes stand for
+themselves); what Python cannot say is one of eight *machine primitives*
+(`libclinic/pyspec/machine.py`: allocate an object and read the bytes it holds, fields,
+import and export a buffer, the hash key, a slot of another type, a codec's result), each a
+Python meaning and a C one; and running it gives the C type's behaviour.  The spec gained
+`@native(facts=False)` (a pure-Python body only the model runs; clinic, the facts, the
+checker read `...`, so nothing new is compiled and the call tables do not change), struct
+fields in a class (`it_index: Py_ssize_t`), and templates instantiated per type (`B`,
+`STRINGLIB_NEW`).  The *model* (`libclinic/pyspec/model.py`) builds Python classes from a
+spec: clinic's argument parsing from the signature, models of the descriptors and slot
+wrappers, the class names bound to the model classes.
+
+The prototype: all of `bytes` and `bytes_iterator` but `%` (65 of 67 members; 60 method
+bodies plus the stringlib templates, `bytes_methods.c`, SipHash-1-3 of `pyhash.c`,
+`pystrhex.c`), and the bytes references made non-circular with their facts unchanged.
+`pyspec_parity.py model` runs the parity probes on the model: **36,086 of 36,189 compared
+lines identical (99.7 %)**; every method section is identical except the explicit calls of
+`__mul__`/`__rmul__` with a non-integer (72 lines: a Python class cannot have `sq_repeat`
+apart from `nb_multiply`); 31 protocol lines are other limits of a Python class (a heap type
+always has `tp_as_sequence`; `bytearray % b` tests `PyBytes_Check()`; weakrefs to
+subclasses).  Excluded, 889 lines: the type object (flags, sizes, `help()`, layout),
+`sys.getsizeof`, pickle and copy (they find the builtin by identity).  `ModelTest` fails when
+a method with a Python body diverges or a body is circular.  The only generated-file change
+is the `/* spec.py:N */` comments.  Running the model costs 3 s against 1 s for the C per
+parity run, 100-900x per call: a proof and a reference, not a bytes to use.
+
+Next: bytearray needs a mutable-storage primitive and bodies of its own for the declarations
+it shares with bytes (or templates); mmap is protocol logic over an OS "mapped memory"
+primitive; `%` needs format-string samples in the parity data; and merging
+`@native(facts=False)` into `@native` needs call-table slot entries gated on a consumer, the
+C checker reading clinic `_impl`s, and `HelperTest` calling methods.  For Rust and PEP 399
+the pure body is the language-neutral contract: a native implementation, in C or Rust, is
+checked against it by the same comparison.
 
 ## 8. Costs and open questions
 
