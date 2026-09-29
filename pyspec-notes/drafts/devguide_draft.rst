@@ -178,8 +178,8 @@ behaviour with ``./python Tools/clinic/pyspec_parity.py check --update``
 After changing a spec, run ``make clinic`` (or
 ``./python Tools/clinic/clinic.py Objects/bytesobject.c``), rebuild, and
 run ``./python -m test test_clinic test_pyspec_facts test_pyspec_catalog
-test_tools.test_pyspec_parity``, or ``./python
-Tools/clinic/pyspec_review.py``, which runs them and says what changed
-against main.  Clinic reports errors as
+test_tools.test_pyspec_parity``.  ``./python
+Tools/clinic/pyspec_review.py`` runs the first three and the parity
+check, and says what changed against main.  Clinic reports errors as
 ``path:line: error: message``, at the line of the spec when the mistake is
 in the spec.
