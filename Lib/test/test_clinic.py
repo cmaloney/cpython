@@ -5857,7 +5857,12 @@ class PyspecTest(PyspecTestBase):
                     "Doc."
                     return a
         """
-        output = self.generated_file(spec, block)
+        # The #ifndef of its METHODDEF goes to the buffer of the "block"
+        # preset, which nothing dumps.
+        with support.captured_stdout() as stdout:
+            output = self.generated_file(spec, block)
+        self.assertIn("Destination buffer 'buffer' not empty at end of "
+                      "file, emptying.", stdout.getvalue())
         self.assertIn("#if defined(CONDITION)\n"
                       "static PyObject *bytes_meth_impl(PyBytesObject *self, "
                       "PyObject *a);\n"
@@ -6325,7 +6330,10 @@ class PyspecStubTest(PyspecTestBase):
                 def other(self):
                     ...
         """
-        generated = self.generate(spec, dedent(self.CLASS) + dedent("""
+        # The #ifndef of its METHODDEF goes to the buffer of the "block"
+        # preset, which nothing dumps.
+        with support.captured_stdout() as stdout:
+            generated = self.generate(spec, dedent(self.CLASS) + dedent("""
             /*[clinic input]
             bytes.meth
             [clinic start generated code]*/
@@ -6343,6 +6351,8 @@ class PyspecStubTest(PyspecTestBase):
             [clinic start generated code]*/
             #endif
         """))
+        self.assertIn("Destination buffer 'buffer' not empty at end of "
+                      "file, emptying.", stdout.getvalue())
         self.assertIn("bytes_meth_impl(PyBytesObject *self, PyObject *a)",
                       generated)
         self.assertIn("bytes_other_impl(PyBytesObject *self, PyObject *a)",
@@ -7856,8 +7866,13 @@ class PyspecLanguageTest(PyspecTestBase):
                 "@setter\n@deleter\nbytes.nbytes\n"
                 "    value: object = NULL\n")
         os_helper.unlink(self.spec_path)
-        expected = self.output(self.generate(None, self.blocks(*full)))
-        actual = self.output(self.generate(spec, self.blocks(*stubs)))
+        # The #ifndef of the GETSETDEF goes to the buffer of the "block"
+        # preset, which nothing dumps: plain clinic warns the same.
+        with support.captured_stdout() as stdout:
+            expected = self.output(self.generate(None, self.blocks(*full)))
+            actual = self.output(self.generate(spec, self.blocks(*stubs)))
+        self.assertEqual(stdout.getvalue().count(
+            "Destination buffer 'buffer' not empty at end of file"), 2)
         self.assertEqual(actual, expected)
         self.assertIn("bytes_nbytes_get_impl(PyBytesObject *self)", actual)
         self.assertIn("bytes_nbytes_set_impl(PyBytesObject *self, "
