@@ -249,7 +249,8 @@ class TypeData:
       regex of a C name -> the reason (for Tools/clinic/pyspec_review.py).
     """
 
-    def __init__(self, name, tp, cases_path=None, parity=None):
+    def __init__(self, name, tp, cases_path=None, parity=None,
+                 convert=None):
         parity = parity or {}
         unknown = set(parity) - {'samples', 'pool', 'known', 'generated'}
         if unknown:
@@ -263,6 +264,10 @@ class TypeData:
         self.known = {pattern: (re.compile(pattern), reason)
                       for pattern, reason in parity.get('known', {}).items()}
         self.generated = dict(parity.get('generated', {}))
+        # What every argument value and sample goes through first: for a
+        # model of the type (model_types()), the host objects of the
+        # types it models become model objects.
+        self.convert = convert
 
     def is_known(self, key):
         """The pattern of "known" matching the key of a line, or None."""
@@ -520,8 +525,15 @@ class TypeCapture:
         self.tp = tp = data.tp
         self.out = out
         self.section = 'type'
-        samples = data.samples or {label: f for label, f in POOL.items()
-                                   if type(f()) is tp}
+        convert = data.convert or (lambda value: value)
+
+        def converted(factories):
+            return {label: (lambda f=f: convert(f()))
+                    for label, f in factories.items()}
+
+        samples = converted(data.samples) or {
+            label: f for label, f in converted(POOL).items()
+            if type(f()) is tp}
         if not samples:
             try:
                 tp()
@@ -531,15 +543,21 @@ class TypeCapture:
                     'its PARITY in its <stem>_cases.py') from None
             samples = {f'{name}()': tp}
         self.samples = dict(samples)
-        self.pool = dict(POOL)
+        self.pool = converted(POOL)
         for label, f in list(self.samples.items())[:2]:
             self.pool.setdefault(label, f)
-        self.pool.update(data.pool)
+        self.pool.update(converted(data.pool))
         # Receivers probed as fully as the first sample.
         self.full = {'Sub'}
         self.sub = None
         if tp.__flags__ & (1 << 10):        # Py_TPFLAGS_BASETYPE
-            self.sub = type('Sub', (tp,), {'__module__': 'parity'})
+            try:
+                self.sub = type('Sub', (tp,), {'__module__': 'parity'})
+            except TypeError:
+                # A model of a type that is not a BASETYPE (model_types()):
+                # a heap type always has the flag.
+                self.sub = None
+        if self.sub is not None:
             label, first = next(iter(self.samples.items()))
             try:
                 self.sub(first())
@@ -1340,6 +1358,215 @@ def check_against_record(update=False, names=None, path=None):
     return head, check_record(expected, current, types), current
 
 
+# -- the model: the spec run as a pure-Python type --------------------------
+#
+# ``model`` compares the C type with its spec run as Python
+# (Tools/clinic/libclinic/pyspec/model.py): every line of every section,
+# less what a Python class cannot have like a static C type, below, with
+# the reason.  Objects/pyspec/README.rst, "Pure Python".
+
+MODEL_EXCLUDED_SECTIONS = {
+    'type': 'the type object: flags, sizes, MRO and module are those of a '
+            'heap type (the PyTypeObject stays C)',
+    'help': "pydoc's rendering of the type object (its MRO and flags)",
+    'C': 'the C layout of the type object',
+    'pickle': 'pickle and copyreg find the builtin by identity (the model '
+              'is another class of the same name)',
+    '.__getattribute__': 'tp_getattro is in the PyTypeObject, not in the '
+                         'spec',
+    '.__module__': 'a heap type keeps __module__ in its dict',
+}
+MODEL_EXCLUDED_KEYS = {
+    r'^sys\.getsizeof\(': 'the size of the C struct',
+    r'^copy\.(deep)?copy\(': 'copy.py dispatches on the builtin by identity',
+}
+# Lines where a model differs because it is a Python class, not because
+# of its bodies: (section regex, key regex) -> the reason.  They count as
+# differing; the report gives the reason.
+MODEL_LIMITS = {
+    (r'^\.__r?mul__$', r'\.__r?mul__\('):
+        'a Python class has no sq_repeat apart from nb_multiply: the '
+        'operator and an explicit call of the slot wrapper '
+        '(wrap_indexargfunc(), which converts the operand first) are one '
+        'method; the model reports the operator\'s errors',
+    (r'^unary$', r'^weakref\.ref\(Sub\('):
+        'a subclass of a Python class gets __weakref__, one of a '
+        'variable-size C type cannot',
+    (r'^binary$', r'^bytearray\(.*\) % '):
+        "bytearray's % tests PyBytes_Check() on its operand: the builtin "
+        'type, by identity',
+    (r'^(inplace|subscript)$', r'( \*= |^del |\] = )'):
+        'a heap type always has tp_as_sequence: PyNumber_InPlaceMultiply(), '
+        'PyObject_SetItem() and PyObject_DelItem() take another path for a '
+        'type without one',
+}
+
+
+def model_types(names, model=None):
+    """(the TypeData of the models of the named types, the Model): each
+    converts the argument values and samples to model objects."""
+    tools = os.path.dirname(os.path.abspath(__file__))
+    saved = list(sys.path)
+    sys.path.insert(0, tools)
+    try:
+        from libclinic.pyspec import model as pymodel
+        datas = [resolve(name) for name in names]
+        if model is None:
+            model = pymodel.Model(datas[0].spec_path)
+    finally:
+        sys.path[:] = saved
+    out = []
+    for data in datas:
+        twin = copy.copy(data)
+        twin.tp = model.types[data.name]
+        twin.convert = functools.partial(pymodel.to_model, model=model)
+        out.append(twin)
+    return out, model
+
+
+def model_excluded(section, key):
+    """The reason line *key* of *section* is left out of a comparison of
+    a model, or None."""
+    if section in MODEL_EXCLUDED_SECTIONS:
+        return MODEL_EXCLUDED_SECTIONS[section]
+    for pattern, reason in MODEL_EXCLUDED_KEYS.items():
+        if re.search(pattern, key):
+            return reason
+    return None
+
+
+def model_limit(section, key):
+    """The reason a differing line of a model is a limit of a Python
+    class (MODEL_LIMITS), or None."""
+    for (sections, keys), reason in MODEL_LIMITS.items():
+        if re.search(sections, section) and re.search(keys, key):
+            return reason
+    return None
+
+
+class ModelComparison:
+    """The C types and their models (the specs run as pure Python), line
+    by line.
+
+    sections: {(type, section): Counts};
+    changed:  {(type, section): [(key, C, model, limit reason or None)]}.
+    """
+
+    class Counts:
+        def __init__(self):
+            self.lines = self.identical = self.excluded = self.limits = 0
+
+        @property
+        def compared(self):
+            return self.lines - self.excluded
+
+        def add(self, other):
+            for name in ('lines', 'identical', 'excluded', 'limits'):
+                setattr(self, name, getattr(self, name)
+                        + getattr(other, name))
+
+    def __init__(self, names, model=None):
+        datas = [resolve(name) for name in names]
+        twins, self.model = model_types(names, model)
+        host = capture_types(datas)
+        modelled = capture_types(twins)
+        _, host = parse(host)
+        _, modelled = parse(modelled)
+        self.sections = {}
+        self.changed = {}
+        for key in {**host, **modelled}:
+            data = next(d for d in datas if d.name == key[0])
+            lines = {}
+            for side, entries in ((0, host.get(key, [])),
+                                  (1, modelled.get(key, []))):
+                for k, v in entries:
+                    if data.is_known(k) is None:
+                        lines.setdefault(k, [[], []])[side].append(v)
+            counts = self.Counts()
+            for k, (a, b) in lines.items():
+                n = max(len(a), len(b))
+                counts.lines += n
+                if model_excluded(key[1], k):
+                    counts.excluded += n
+                    continue
+                for i in range(n):
+                    x = a[i] if i < len(a) else None
+                    y = b[i] if i < len(b) else None
+                    if x == y:
+                        counts.identical += 1
+                        continue
+                    limit = model_limit(key[1], k)
+                    counts.limits += limit is not None
+                    self.changed.setdefault(key, []).append((k, x, y, limit))
+            self.sections[key] = counts
+
+    def kind(self, name, section):
+        """'pure', 'delegated' or '' (not a method) of a section."""
+        if section.startswith('.'):
+            return self.model.kinds.get(f'{name}{section}', '')
+        return ''
+
+    def totals(self, kind=None):
+        """The Counts over the sections of *kind* (all by default)."""
+        total = self.Counts()
+        for (name, section), counts in self.sections.items():
+            if kind is None or self.kind(name, section) == kind:
+                total.add(counts)
+        return total
+
+    def diverging(self):
+        """{(type, section): [(key, C, model)]}: the lines that differ
+        for no known limit, in the sections of pure methods and the
+        protocols (not those of delegated methods)."""
+        out = {}
+        for (name, section), changes in self.changed.items():
+            if self.kind(name, section) == 'delegated':
+                continue
+            lines = [c[:3] for c in changes if c[3] is None]
+            if lines:
+                out[name, section] = lines
+        return out
+
+    @staticmethod
+    def percent(counts):
+        if not counts.compared:
+            return 'no lines'
+        return (f'{counts.identical}/{counts.compared} identical '
+                f'({100 * counts.identical / counts.compared:.1f}%)')
+
+    def text(self, limit=3):
+        out = []
+        for (name, section), counts in self.sections.items():
+            kind = self.kind(name, section)
+            if counts.excluded == counts.lines:
+                status = 'excluded: ' + model_excluded(section, '')
+            else:
+                status = f'{counts.identical}/{counts.compared} identical'
+                if counts.limits:
+                    status += f', {counts.limits} limits of a Python class'
+                if counts.excluded:
+                    status += f' ({counts.excluded} excluded)'
+            out.append(f'{name} {section}: {status}'
+                       + (f' [{kind}]' if kind else ''))
+            changes = self.changed.get((name, section), [])
+            for key, a, b, reason in (changes if limit is None
+                                      else changes[:limit]):
+                out.append(f'    {key}\n        C:     {a}\n'
+                           f'        model: {b}')
+                if reason:
+                    out.append(f'        limit: {reason}')
+        out.append('')
+        for kind, label in (('pure', 'methods with a Python body'),
+                            ('delegated', 'methods delegated to the C'),
+                            ('', 'protocols, type calls, iteration')):
+            out.append(f'{label}: {self.percent(self.totals(kind))}')
+        total = self.totals()
+        out.append(f'all: {self.percent(total)}; {total.limits} lines '
+                   f'differ for a limit of a Python class; '
+                   f'{total.excluded} lines excluded')
+        return '\n'.join(out) + '\n'
+
+
 # -- the command line --------------------------------------------------------
 
 def report(comparison, limit):
@@ -1403,6 +1630,12 @@ def main(argv=None):
                    help='rewrite the record for this configuration')
     p.add_argument('--all', action='store_true',
                    help='show every differing line')
+    p = sub.add_parser('model', help='compare with the spec run as '
+                                     'pure Python')
+    p.add_argument('types', nargs='*', help='default: bytes, '
+                                            'bytes_iterator')
+    p.add_argument('--all', action='store_true',
+                   help='show every differing line')
     p = sub.add_parser('compare', help='compare with another interpreter')
     p.add_argument('baseline', help='the python before the change')
     p.add_argument('types', nargs='*', help=all_specs)
@@ -1411,6 +1644,11 @@ def main(argv=None):
     args = parser.parse_args(argv)
     limit = None if getattr(args, 'all', False) else 10
 
+    if args.command == 'model':
+        names = args.types or ['bytes', 'bytes_iterator']
+        comparison = ModelComparison(names)
+        sys.stdout.write(comparison.text(limit=None if args.all else 3))
+        return 0
     if args.command == 'capture':
         names = args.types or list(spec_types())
         if os.environ.get('PYTHONHASHSEED') != '0':
