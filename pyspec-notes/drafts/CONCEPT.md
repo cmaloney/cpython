@@ -310,6 +310,57 @@ with a C signature, type checks, reference counts, index loops, critical section
 names).  The call tables stay C data of the interpreter.  This is a design, checked only
 against the C backend's interface.
 
+### 7.3 Pure-Python implementations and PEP 399 (analysis, not implemented)
+
+[PEP 399](https://peps.python.org/pep-0399/) asks that a stdlib module with a C
+accelerator also ship a pure-Python version, and that one test suite exercise both
+(`import_fresh_module`), so other VMs get a usable implementation.  Pyspec shares the
+spirit (one semantic source; tests that tie implementations together) but not, today,
+the substance:
+
+| | PEP 399 | pyspec today |
+|---|---|---|
+| scope | stdlib modules | builtins and core C files (where pure Python cannot bootstrap the type) |
+| direction | two independent implementations, Python and C | one source; C generated from it or checked against it |
+| role of the Python | a runnable implementation for any VM | a contract, plus bodies with C semantics |
+
+**How much is Python today** (counted over every spec file on the branch): of 172
+methods, 141 are signatures only (`...`; all of bytearray, mmap and stringlib, and 44
+of bytes); 3 have generated bodies (`bytes.__new__`, `__bytes__`, `fromhex`); 4 slots
+are `@native` with a Python reference.  At top level: 2 generated bodies
+(`PyBytes_FromObject`, `bytes_from_iterator`), 19 `@native` helpers with references, 3
+`@inline` fast paths.  C keeps the object layout and memory, the 141 method bodies, the
+primitives the bodies call, argument parsing (generated) and the specialized uops.
+
+**Why even the Python parts are not an implementation.**  Bodies are C semantics in
+Python syntax: `bytes.__new__` calls `_PyObject_LookupSpecial`, `PyNumber_AsSsize_t_fast`
+and `_PyBytes_FromSize` by name and tests `is NULL`; they run as Python only because
+`libclinic/pyspec/runtime.py` gives those names Python meanings.  And `@native`
+references model the C *with the host's builtins*, circularly: `_PyBytes_FromSize` is
+`bytes(size)`, `_PyBytes_FromBuffer` is `memoryview(x).tobytes()`, `bytes.__len__` is
+`len(bytes(self))`.  That is enough for facts and for a difftest run on CPython, not
+for PyPy or GraalPy.
+
+**Where pyspec could extend PEP 399.**  The existing pairs (`bisect`/`_bisect`,
+`heapq`/`_heapq`, `datetime`/`_datetime`, `json`/`_json`, `pickle`/`_pickle`) could make
+the pure-Python module the spec, with clinic generating the accelerator or checking a
+hand-written one (`@native`) against it, which removes the duplication PEP 399 accepts
+as a cost.  The difftest and parity record are PEP 399's "same tests against both",
+made exhaustive.  What it would take:
+
+1. Lowering *Python* semantics (`<`, `+`, indexing, attributes, `while`) to generic C API
+   calls (`PyObject_RichCompare`, `PyNumber_Add`), competitive with hand-written C only
+   where the facts let clinic specialize; today's lowered subset has C-API calls,
+   `if`/`try`/`for`, and little else.
+2. Two layers in a spec: a host-independent semantic reference that any VM could run,
+   and optional C-oriented bodies or native code checked against it.  Today the two are
+   mixed, and references are circular.
+3. Module-level functions in specs (not expressible yet), and the parity tool probing
+   module functions, not only types.
+
+A small first experiment: `bisect` (a PEP 399 pair, clinic-based): `Lib/bisect.py`'s
+functions as the spec of `Modules/_bisectmodule.c`, the C kept `@native` first.
+
 ## 8. Costs and open questions
 
 - **Tool size.**  `Tools/clinic/libclinic/pyspec/` is 7,794 lines (5,610 lines of code)

@@ -354,6 +354,15 @@ file.  The partial evaluation, the facts, the lowering and the call
 tables of the tier-2 optimizer (C data of the interpreter, from
 ``call_table.py``) stay as they are.
 
+Pure Python and PEP 399
+-----------------------
+
+A spec is not (yet) a pure-Python implementation: bodies call C API
+functions by name, and ``@native`` references model the C with the
+host's builtins (``_PyBytes_FromSize`` is ``bytes(size)``).  How far it
+is from one, and how specs could serve PEP 399's pure-Python/accelerator
+pairs, is in ``pyspec-notes/drafts/CONCEPT.md`` section 7.3.
+
 Conditional compilation
 -----------------------
 
