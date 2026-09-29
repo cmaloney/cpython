@@ -3643,6 +3643,23 @@ pyspec_no_python(PyObject *self, PyObject *args)
  * The test checks each shape against the C signature in the spec. */
 typedef void (*pyspec_func)(void);
 
+/* pyspec_helper() calls each function through the pointer type of its
+ * shape, so a function whose C parameter types differ (a const
+ * PyLongObject *, not a PyObject *) gets a wrapper of that exact type:
+ * calling it through another function pointer type is undefined behaviour
+ * (-fsanitize=function). */
+static int
+pyspec_long_is_compact(PyObject *op)
+{
+    return _PyLong_IsCompact((const PyLongObject *)op);
+}
+
+static Py_ssize_t
+pyspec_long_compact_value(PyObject *op)
+{
+    return _PyLong_CompactValue((const PyLongObject *)op);
+}
+
 static const struct {
     const char *name;
     const char *shape;
@@ -3655,8 +3672,9 @@ static const struct {
      (pyspec_func)_PyObject_LookupSpecial},
     {"PyUnicode_AsEncodedString", "Oss->O",
      (pyspec_func)PyUnicode_AsEncodedString},
-    {"_PyLong_IsCompact", "O->i", (pyspec_func)_PyLong_IsCompact},
-    {"_PyLong_CompactValue", "O->n", (pyspec_func)_PyLong_CompactValue},
+    {"_PyLong_IsCompact", "O->i", (pyspec_func)pyspec_long_is_compact},
+    {"_PyLong_CompactValue", "O->n",
+     (pyspec_func)pyspec_long_compact_value},
 };
 
 /* pyspec_helper_shapes() -> {name: shape} of those. */
