@@ -125,6 +125,14 @@ Types are described by Python-syntax specs that Argument Clinic reads
   **must-inline markers only as a rare exception** (none needed so far: `reports/phase4_P.md`).
 - Heavy commands run memory-capped (`systemd-run --user --scope -p MemoryMax=...`),
   serially, `make -j8` (an OOM once took down the desktop).
+- **Scope (2026-09-29): purely "can this be done".**  Nothing is pushed or proposed yet;
+  publishing the branch happens later, by the user.  Commit history stays as it is (no
+  squashing or splitting into the PR series now; PR_SERIES.md is a plan, not a task).
+- **Parity must eventually run on PRs as checks reviewers can see** (CI output, not
+  only a local command); the committed record vs a base build is not decided.
+- **Bracket `@text_signature`: undecided** (it keeps help()'s `sub[, start[, end]]`
+  notation but makes `inspect.signature` raise, hiding 13 bytes/bytearray methods from
+  stubtest).
 
 ## Performance vs main
 PGO+LTO release JIT, clang 21, `PYTHONHASHSEED=1`, instructions / cycles per iteration,
