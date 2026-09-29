@@ -25,8 +25,9 @@ attribute, each protocol):
 Usage, from a build of the tree::
 
     # the committed record (Tools/clinic/pyspec-baseline/parity.txt),
-    # no other build needed:
-    ./python Tools/clinic/pyspec_parity.py check
+    # no other build needed (a configuration it has no block for is a
+    # SKIP line; with --strict, a failure):
+    ./python Tools/clinic/pyspec_parity.py check [--strict]
     ./python Tools/clinic/pyspec_parity.py check --update  # on purpose
 
     # every line, against a build of the tree before the change:
@@ -1667,7 +1668,10 @@ def report(comparison, limit):
     return 1
 
 
-def check_command(update, names, path):
+def check_command(update, names, path, strict=False):
+    """"check" against the record: 0 if the same (or updated), 1 if not.
+    Without a block for this configuration (or without the record) the
+    check is skipped: a SKIP line, and 1 with *strict*."""
     head, messages, _ = check_against_record(update, names, path)
     where = path or RECORD
     config = head.removeprefix('# ')
@@ -1675,10 +1679,14 @@ def check_command(update, names, path):
         print(f'updated {where} for {config}')
         return 0
     if messages is None:
-        print(f'{where} has no block for {config}: nothing to compare '
-              'with (compare with a build before the change, or run '
-              '"check --update" on one)')
-        return 0
+        what = ('has no block for' if os.path.exists(
+                    path or os.path.join(SRCDIR, RECORD))
+                else 'does not exist: no block for')
+        print(f'SKIP: {where} {what} {config}: nothing to compare with '
+              '(compare with a build before the change, or run "check '
+              '--update" on one)' + ('; --strict: a failure' if strict
+                                     else ''))
+        return 1 if strict else 0
     if not messages:
         print(f'same as {where} ({config})')
         return 0
@@ -1707,6 +1715,9 @@ def main(argv=None):
     p.add_argument('types', nargs='*', help='default: those of the file')
     p.add_argument('--update', action='store_true',
                    help='rewrite the record for this configuration')
+    p.add_argument('--strict', action='store_true',
+                   help='fail when the record has no block for this '
+                        'configuration (default: a SKIP line)')
     p.add_argument('--all', action='store_true',
                    help='show every differing line')
     p = sub.add_parser('model', help='compare with the spec run as '
@@ -1751,7 +1762,8 @@ def main(argv=None):
             if f.readline().startswith(RECORD_TITLE):
                 args.file, record = None, args.file
     if args.command == 'check' and args.file is None:
-        return check_command(args.update, args.types, record)
+        return check_command(args.update, args.types, record,
+                             args.strict)
     if args.command == 'check':
         with open(args.file, encoding='utf-8') as f:
             before = f.read().splitlines()

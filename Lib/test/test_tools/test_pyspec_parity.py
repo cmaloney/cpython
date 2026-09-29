@@ -310,6 +310,24 @@ class ToolTest(unittest.TestCase):
             self.assertEqual(status, 0)
             self.assertIn('no difference in bytes_iterator', out.getvalue())
 
+    @support.requires_subprocess()
+    def test_check_without_block(self):
+        # A record without a block for this configuration, or no record:
+        # a SKIP line; a failure with --strict.
+        with os_helper.temp_dir() as tmp:
+            record = os.path.join(tmp, 'parity.txt')
+            other = '# python 0.0 free-threaded=False debug=False'
+            pyspec_parity.write_record({other: {}}, record)
+            for path in (record, os.path.join(tmp, 'missing.txt')):
+                for strict, expected in ((False, 0), (True, 1)):
+                    with self.subTest(path=path, strict=strict):
+                        out = io.StringIO()
+                        with contextlib.redirect_stdout(out):
+                            status = pyspec_parity.check_command(
+                                False, ['bytes_iterator'], path, strict)
+                        self.assertEqual(status, expected)
+                        self.assertStartsWith(out.getvalue(), 'SKIP: ')
+
 
 class ReviewTest(unittest.TestCase):
     OLD = '''\
@@ -342,6 +360,36 @@ g(PyObject *module)
         new = self.OLD.replace('METH_NOARGS', 'METH_O')
         self.assertEqual(pyspec_review.changed_names(self.OLD, new)[0],
                          ['f'])
+
+    def test_not_explained(self):
+        # A changed C function no "generated" explains fails the review.
+        new = self.OLD.replace('return g_impl(module);',
+                               'return g_impl(module, 1);')
+        lines, ok = pyspec_review.changed_output('f.c.h', self.OLD, new)
+        self.assertFalse(ok)
+        self.assertIn('NOT EXPLAINED: g', lines[-1])
+        old = self.OLD.replace('g(', 'bytes_new(')
+        new = old.replace('return g_impl(module);',
+                          'return g_impl(module, 1);')
+        lines, ok = pyspec_review.changed_output('f.c.h', old, new)
+        self.assertTrue(ok)
+        self.assertIn('on purpose', lines[-1])
+
+    def test_missing_block(self):
+        # No block for this configuration: a failure when the record is
+        # gone or had a block at the base or HEAD; else a SKIP, which
+        # fails with --strict.
+        missing = pyspec_review.missing_block
+        line, ok = missing('bytes', [], False, False)
+        self.assertFalse(ok)
+        self.assertIn('MISSING RECORD', line)
+        line, ok = missing('bytes', ['HEAD'], True, False)
+        self.assertFalse(ok)
+        self.assertIn('MISSING BLOCK', line)
+        line, ok = missing('bytes', [], True, False)
+        self.assertTrue(ok)
+        self.assertIn('SKIP', line)
+        self.assertFalse(missing('bytes', [], True, True)[1])
 
     def test_explain(self):
         reasons, unexplained = pyspec_review.explain(
