@@ -1005,5 +1005,8 @@ def residual(context: Context, spec: Spec, name: str, env: Env,
     """The residual of spec function *name* under *env*.  With *inline*
     false, tail calls of spec functions stay calls (except where the
     block is versioned); *arities*: see Evaluator.arity_call()."""
+    # A private copy: the evaluator marks the nodes it keeps (a CallCheck
+    # for the facts of this *env*), which the spec's own nodes must not
+    # carry into another residual.
     return remove_dead_iterators(Evaluator(context, spec, arities, name).block(
-        spec.body(name), env, inline=inline, top=True))
+        copy.deepcopy(spec.body(name)), env, inline=inline, top=True))

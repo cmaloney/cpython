@@ -8713,6 +8713,38 @@ class PyspecSoundnessTest(PyspecTestBase):
                     f"identifier (an interned _Py_ID()), not {text!r}", 8)
 
 
+    def test_residuals_do_not_share_marks(self):
+        # The marks of a residual (the error check of a call, for the
+        # facts it was evaluated with) are its own: evaluating the same
+        # body with other facts does not change them.
+        spec = pyspec_frontend.Spec(dedent("""
+            @native
+            def g(x: object):
+                if type(x) is int:
+                    return x
+                raise TypeError("no")
+
+            def Py_f(x: object):
+                y = g(x)
+                return y
+        """))
+        context = pyspec_context.Context(spec)
+
+        def checks(body):
+            return [pyspec_marks.get(node, pyspec_marks.CallCheck)
+                    for stmt in body for node in ast.walk(stmt)
+                    if isinstance(node, ast.Call)]
+
+        exact_int = context.residual(spec, 'Py_f', {'x': int})
+        expected = [pyspec_marks.CallCheck(raises=False, null=False)]
+        self.assertEqual(checks(exact_int), expected)
+        any_type = context.residual(spec, 'Py_f', {})
+        self.assertEqual(checks(any_type),
+                         [pyspec_marks.CallCheck(raises=True, null=False)])
+        self.assertEqual(checks(exact_int), expected)
+        self.assertEqual(checks(spec.body('Py_f')), [None])
+
+
 class VectorcallFunctionalTest(unittest.TestCase):
     """Runtime tests for @vectorcall exemplar types."""
 
