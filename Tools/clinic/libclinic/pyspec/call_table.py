@@ -321,7 +321,9 @@ def slot_member(spec: Spec, cls_name: str, dunder: str) -> str:
     """The slot keying the facts of *dunder* of class *cls_name*, as a
     member of PyHeapTypeObject (``as_mapping.mp_subscript``): the first
     one in slotdefs[] the class fills, which its wrapper calls."""
-    _, named = spec.c_name(f'{cls_name}.{dunder}')
+    _, c_names = spec.c_name(f'{cls_name}.{dunder}')
+    # (The METH_ flags name the C of a method table entry, not a slot.)
+    named = {key for key in c_names if not key.startswith('METH_')}
     for slotdef in slots.candidates(dunder):
         if not named or slotdef.slot in named:
             return f'{slotdef.subtable or "ht_type"}.{slotdef.slot}'

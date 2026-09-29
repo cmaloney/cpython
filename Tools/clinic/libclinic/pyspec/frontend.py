@@ -235,6 +235,12 @@ def spec_classes() -> dict[type, Spec]:
     return out
 
 
+def _stdlib(module: str) -> bool:
+    """Whether *module* (``collections.abc``) is of the standard
+    library."""
+    return module.partition('.')[0] in sys.stdlib_module_names
+
+
 # The decorators a shared method may have.
 SHARED_DECORATORS = ('critical_section', 'c_name')
 
@@ -257,25 +263,39 @@ class Spec:
         # One Spec per file (absolute path), shared with the specs it
         # imports (load_spec()).
         self.loaded: dict[str, Spec] = {} if loaded is None else loaded
-        # Functions imported with ``from pkg.module import f``: name ->
-        # path of the spec.
-        self.imported_functions: dict[str, str] = {}
+        # Functions imported with ``from pkg.module import f [as g]``:
+        # name -> (path of the spec, name there).
+        self.imported_functions: dict[str, tuple[str, str]] = {}
         for node in self.module.body:
             match node:
                 case ast.FunctionDef(name=name):
                     self._add_function(name, node)
+                case ast.ClassDef(name=name) if name in self.classes:
+                    raise self.error(node, f"class {name} is defined "
+                                     "twice")
                 case ast.ClassDef():
                     self._add_class(node)
                 case ast.ImportFrom():
                     self._add_import(node)
                 case ast.Import(names=names) if all(
-                        a.name in sys.stdlib_module_names for a in names):
+                        _stdlib(a.name) for a in names):
                     pass    # for the Python reference of a function
                 case ast.Import():
                     raise self.error(node, "import a spec as 'from "
                                      "Objects.stringlib.pyspec import "
                                      "transmogrify' (its path from the "
                                      "source root)")
+                case (ast.Assign() | ast.AnnAssign() | ast.Pass()
+                      | ast.Expr(ast.Constant(str()))):
+                    pass    # (constants of the Python references)
+                case _:
+                    # (A spec has no conditional compilation: see
+                    # "Conditional compilation" in the README.)
+                    raise self.error(node, "unsupported top-level "
+                                     f"statement in a spec: "
+                                     f"{ast.unparse(node).splitlines()[0]!r}"
+                                     "; a spec holds imports, functions, "
+                                     f"classes and assignments; see {README}")
         self.loaded.setdefault(os.path.abspath(filename), self)
 
     def error(self, node: ast.AST | None, message: str,
@@ -340,7 +360,7 @@ class Spec:
         function of a spec), by the path from the source root.  Imports
         of the standard library are for Python references."""
         if node.module is None or node.module.startswith('libclinic') \
-                or node.module in sys.stdlib_module_names:
+                or _stdlib(node.module):
             return
         root = specfiles.import_root(self.filename)
         parts = node.module.split('.')
@@ -351,7 +371,7 @@ class Spec:
             if os.path.exists(path):
                 self.imports[name] = path
             elif os.path.exists(module):
-                self.imported_functions[name] = module
+                self.imported_functions[name] = (module, alias.name)
             else:
                 raise self.error(node, f"imported spec {path} not found: a "
                                  "spec imports another by its path from the "
@@ -376,10 +396,11 @@ class Spec:
         """(spec, def) of function *name* of this spec or imported."""
         if name in self.functions:
             return self, self.functions[name]
-        path = self.imported_functions.get(name)
-        if path is None:
+        imported = self.imported_functions.get(name)
+        if imported is None:
             return None
-        return self.load_spec(path).resolve(name)
+        path, original = imported
+        return self.load_spec(path).resolve(original)
 
     def _called(self, call: ast.Call
                 ) -> tuple[Spec, ast.FunctionDef] | None:
@@ -396,7 +417,7 @@ class Spec:
         """(spec, def) of the C function (@native or ...) *call* calls."""
         found = self._called(call)
         if (found is None or is_inline(found[1])
-                or found[0].implemented(ast.unparse(call.func))):
+                or found[0].implemented(found[1].name)):
             return None
         return found
 
@@ -928,6 +949,8 @@ class SpecBlock:
     location: Location
     # Where each clinic decorator of the method is written: {name: where}.
     decorators: dict[str, Location]
+    # Where its docstring starts, or None (the checks of the docstring).
+    docstring: Location | None = None
 
 
 def _valid_line(line: str) -> bool:
@@ -1048,9 +1071,12 @@ def complete_block(spec: Spec, function_line: str, head: list[str],
     location = (spec.filename, spec.shared[name].lineno
                 if name in spec.shared else node.lineno)
     indent = function_line[:len(function_line) - len(function_line.lstrip())]
+    docstring = ((where, node.body[0].lineno)
+                 if docstring_of(node.body) is not None else None)
     return SpecBlock(
         name, [*spec_decorators,
                (function_line.rstrip() + suffix, (where, node.lineno)),
                *[(indent + line if line else line, (where, lineno))
                  for line, lineno in rest]],
-        location, {line.split()[0][1:]: loc for line, loc in spec_decorators})
+        location, {line.split()[0][1:]: loc for line, loc in spec_decorators},
+        docstring)

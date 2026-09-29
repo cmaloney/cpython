@@ -8745,6 +8745,104 @@ class PyspecSoundnessTest(PyspecTestBase):
         self.assertEqual(checks(spec.body('Py_f')), [None])
 
 
+    # -- the front end -----------------------------------------------------
+
+    METHOD_BLOCK = """
+        /*[clinic input]
+        output preset block
+        class bytes "PyObject *" "&PyBytes_Type"
+        bytes.foo
+        [clinic start generated code]*/
+    """
+
+    def test_docstring_error_in_the_spec(self):
+        spec = """
+            class bytes:
+                def foo(self, a: object, /):
+                    \"\"\"%s
+
+                    Body.
+                    \"\"\"
+                    ...
+        """
+        spec = dedent(spec)
+        self.expect_located_failure(
+            spec % ('A summary line far longer than the 68 characters that '
+                    'clinic allows it'), self.METHOD_BLOCK,
+            "Summary line for 'bytes.foo' is too long!\nThe summary line "
+            "must be no longer than 68 characters.", 4)
+        self.expect_located_failure(
+            spec % 'Summary.\n        Second line without a blank line.',
+            self.METHOD_BLOCK,
+            "Docstring for 'bytes.foo' does not have a summary line!\n"
+            "Every non-blank function docstring must start with a single "
+            "line summary followed by an empty line.", 4)
+
+    def test_import_as(self):
+        other = os.path.join(self.tmp_dir, 'pyspec', 'other.py')
+        with open(other, 'w', encoding='utf-8') as f:
+            f.write(dedent("""\
+                @native
+                def conv(x: object):
+                    runs_python()
+                    return unknown(x)
+            """))
+        spec = """
+            from pyspec.other import conv as other_conv
+
+            def Py_f(x: object):
+                return other_conv(x)
+        """
+        self.assertIn("return conv(x);",
+                      self.generated_file(spec, self.NO_BLOCK))
+
+    def test_slot_with_method_c_name(self):
+        # A METH_ flag of @c_name names the C of the method table entry:
+        # the facts of the slot are keyed by the slot.
+        spec = """
+            class bytes:
+                def __new__(cls, x: object, /):
+                    return x
+
+                @native
+                @c_name(METH_O="foo_contains")
+                def __contains__(self, key, /):
+                    return False
+        """
+        self.assertIn("_PySpec_SLOT(as_sequence.sq_contains)",
+                      self.generated_file(spec, PyspecTest.BLOCK))
+
+    def test_class_defined_twice(self):
+        spec = """
+            class bytes:
+                def foo(self, a: object, /):
+                    ...
+
+            class bytes:
+                def bar(self, a: object, /):
+                    ...
+        """
+        self.expect_located_failure(spec, self.METHOD_BLOCK,
+                                    "class bytes is defined twice", 6)
+
+    def test_top_level_statements(self):
+        spec = """
+            import sys
+            import collections.abc
+            from collections.abc import Sequence
+            LIMIT = 10
+
+            if sys.maxsize > 2**32:
+                def f(x: object):
+                    ...
+        """
+        self.expect_located_failure(
+            spec, self.NO_BLOCK,
+            "unsupported top-level statement in a spec: "
+            "'if sys.maxsize > 2 ** 32:'; a spec holds imports, functions, "
+            f"classes and assignments; see {pyspec_frontend.README}", 7)
+
+
 class VectorcallFunctionalTest(unittest.TestCase):
     """Runtime tests for @vectorcall exemplar types."""
 
