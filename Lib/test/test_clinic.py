@@ -8473,6 +8473,134 @@ class PyspecNativeTest(PyspecTestBase):
                          (other, 2))
 
 
+class PyspecSoundnessTest(PyspecTestBase):
+    """The facts and the generated C are sound on every path: facts join
+    after branches, and the C never returns a NULL without an exception
+    or a borrowed reference."""
+
+    def generated(self, spec):
+        return self.generated_file(spec, PyspecTest.BLOCK)
+
+    def reference_facts(self, spec, name, env=None):
+        spec = pyspec_frontend.Spec(dedent(spec))
+        analyzer = pyspec_context.Context(spec).analyzer()
+        return analyzer.reference_facts(name, env or {})
+
+    # -- facts join after branches ---------------------------------------
+
+    def test_facts_join_after_if(self):
+        # r is exactly bytes on one path only: its type is not known after
+        # the if (neither in the facts nor in the call table).
+        spec = """
+            class bytes:
+                def __new__(cls, a: object, /):
+                    return conv(a)
+
+            @native
+            def conv(x: object):
+                r = exact(bytes, b'')
+                if len(r) == 0:
+                    calls(x, "__bytes__")
+                    r = unknown(x)
+                return r
+        """
+        self.assertIsNone(self.reference_facts(spec, 'conv').result_type)
+        self.assertIn("/* bytes(x): result type not known exactly; may run "
+                      "Python code */", self.generated(spec))
+
+    def test_facts_join_after_if_keeps_agreement(self):
+        spec = """
+            @native
+            def conv(x: object):
+                r = exact(bytes, b'')
+                if len(r) == 0:
+                    calls(x, "__bytes__")
+                    r = exact(bytes, x)
+                return r
+        """
+        self.assertIs(self.reference_facts(spec, 'conv').result_type, bytes)
+
+    def test_facts_join_after_try(self):
+        spec = """
+            @native
+            def index(x: object):
+                calls(x, "__index__")
+                return exact(bytes, b'')
+
+            @native
+            def conv(x: object):
+                try:
+                    r = index(x)
+                except TypeError:
+                    r = unknown(x)
+                return r
+
+            @native
+            def in_handler(x: object):
+                r = unknown(x)
+                try:
+                    r = index(x)
+                except TypeError:
+                    return r
+                return r
+        """
+        self.assertIsNone(self.reference_facts(spec, 'conv').result_type)
+        # The handler starts before r is assigned.
+        self.assertIsNone(self.reference_facts(spec, 'in_handler')
+                          .result_type)
+
+    def test_facts_after_loop(self):
+        spec = """
+            from libclinic.pyspec.runtime import iter
+            @native
+            def conv(x: object):
+                r = exact(bytes, b'')
+                it = iter(x)
+                for item in it:
+                    r = unknown(item)
+                return r
+
+            @native
+            def in_body(x: object):
+                r = exact(bytes, b'')
+                it = iter(x)
+                for item in it:
+                    calls(r, "__index__")
+                    r = unknown(item)
+                return exact(bytes, b'')
+        """
+        self.assertIsNone(self.reference_facts(spec, 'conv').result_type)
+        # From the second iteration, r may be anything.
+        self.assertTrue(self.reference_facts(spec, 'in_body').runs_python)
+
+    def test_alias_after_reassignment(self):
+        # x no longer holds the argument: the result is not an alias of
+        # it (the optimizer would drop the call).
+        spec = """
+            @native
+            def conv(x: object):
+                if type(x) is bytes:
+                    x = exact(bytes, x + b'!')
+                    return x
+                runs_python()
+                return unknown(x)
+
+            @native
+            def joined(x: object):
+                if type(x) is bytes:
+                    x = exact(bytes, x + b'!')
+                return x
+        """
+        facts = self.reference_facts(spec, 'conv', {'x': bytes})
+        self.assertEqual((facts.result_type, facts.alias), (bytes, None))
+        facts = self.reference_facts(spec, 'joined', {'x': bytes})
+        self.assertEqual((facts.result_type, facts.alias), (bytes, None))
+        # Unassigned, it is an alias.
+        facts = self.reference_facts(spec.replace("x = exact", "y = exact"),
+                                     'joined', {'x': bytes})
+        self.assertEqual(facts.alias, 0)
+
+
 class VectorcallFunctionalTest(unittest.TestCase):
     """Runtime tests for @vectorcall exemplar types."""
 
