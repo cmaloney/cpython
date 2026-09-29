@@ -296,5 +296,53 @@ class ParityTest(unittest.TestCase):
                          f'\n{diff}')
 
 
+class ModelTest(unittest.TestCase):
+    """The specs of bytes and bytes_iterator run as pure Python (their
+    model: Tools/clinic/libclinic/pyspec/model.py) against the C types,
+    every line of the parity tool but the excluded sections
+    (MODEL_EXCLUDED_SECTIONS) and the limits of a Python class
+    (MODEL_LIMITS): a method or a protocol with a Python body that
+    diverges fails.  ``pyspec_parity.py model`` shows the lines."""
+
+    NAMES = ['bytes', 'bytes_iterator']
+
+    @classmethod
+    def setUpClass(cls):
+        cls.comparison = pyspec_parity.ModelComparison(cls.NAMES)
+
+    def test_python_bodies_agree(self):
+        diverging = self.comparison.diverging()
+        lines = [f'{name} {section}: {key}\n    C:     {c}\n    model: {m}'
+                 for (name, section), changes in diverging.items()
+                 for key, c, m in changes[:5]]
+        self.assertFalse(diverging, 'the model differs from the C type '
+                         '("python Tools/clinic/pyspec_parity.py model '
+                         '--all"):\n' + '\n'.join(lines))
+
+    def test_what_is_pure(self):
+        # Every method and slot runs a Python body but printf-style
+        # formatting, which calls the C.
+        kinds = self.comparison.model.kinds
+        self.assertEqual(sorted(k for k, v in kinds.items()
+                                if v == 'delegated'),
+                         ['bytes.__mod__', 'bytes.__rmod__'])
+        self.assertGreater(len(kinds), 60)
+
+    def test_not_circular(self):
+        # No body calls a host type the specs describe; only the
+        # delegated methods use the C.
+        with imports_under_tool('clinic'):
+            from libclinic.pyspec import model
+        self.assertEqual(model.check_circular(self.comparison.model), {
+            'bytes.__mod__': ['delegated to the C'],
+            'bytes.__rmod__': ['delegated to the C'],
+        })
+
+    def test_coverage(self):
+        total = self.comparison.totals()
+        self.assertGreater(total.compared, 30_000)
+        self.assertLess(total.limits, 150)
+
+
 if __name__ == '__main__':
     unittest.main()

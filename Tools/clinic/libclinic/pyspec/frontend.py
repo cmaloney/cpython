@@ -160,20 +160,37 @@ def without_docstring(node: ast.FunctionDef) -> list[ast.stmt]:
     return node.body[1:] if docstring_of(node.body) is not None else node.body
 
 
-def is_stub(node: ast.FunctionDef) -> bool:
-    """True if the body is only a docstring and/or ``...``: C about which
-    nothing is known (a call of it may do anything)."""
+def is_literal_stub(node: ast.FunctionDef) -> bool:
+    """True if the body is only a docstring and/or ``...``."""
     body = without_docstring(node)
     return not body or (len(body) == 1 and isinstance(body[0], ast.Expr)
                         and isinstance(body[0].value, ast.Constant)
                         and body[0].value.value is Ellipsis)
 
 
+def is_pure_python(node: ast.FunctionDef) -> bool:
+    """``@native(facts=False)``: C written by hand; the body is its
+    pure-Python implementation, which only the model runs (model.py);
+    for clinic and the facts it is ``...``."""
+    return any(isinstance(d, ast.Call) and decorator_name(d) == 'native'
+               and any(kw.arg == 'facts' and isinstance(kw.value,
+                                                        ast.Constant)
+                       and kw.value.value is False for kw in d.keywords)
+               for d in node.decorator_list)
+
+
+def is_stub(node: ast.FunctionDef) -> bool:
+    """True if the body is only a docstring and/or ``...``, or a
+    pure-Python body (is_pure_python()): C about which nothing is known
+    (a call of it may do anything)."""
+    return is_literal_stub(node) or is_pure_python(node)
+
+
 def is_placeholder(node: ast.FunctionDef) -> bool:
     """True for ``def meth(self): ...``: only the place of a method whose
     signature depends on #if, which keeps its full clinic block in C."""
     args = node.args
-    return (is_stub(node) and docstring_of(node.body) is None
+    return (is_literal_stub(node) and docstring_of(node.body) is None
             and len(args.posonlyargs + args.args) == 1
             and not (args.vararg or args.kwonlyargs or args.kwarg))
 
@@ -200,8 +217,8 @@ def has_decorator(node: ast.FunctionDef, name: str) -> bool:
 
 def is_native(node: ast.FunctionDef) -> bool:
     """``@native``: C written by hand; the body is its Python reference,
-    never compiled."""
-    return has_decorator(node, 'native')
+    never compiled, read for facts (not ``@native(facts=False)``)."""
+    return has_decorator(node, 'native') and not is_pure_python(node)
 
 
 def is_inline(node: ast.FunctionDef) -> bool:
@@ -421,6 +438,15 @@ class Spec:
             return None
         return found
 
+    def pure_python_function(self, call: ast.Call
+                             ) -> tuple[Spec, ast.FunctionDef] | None:
+        """(spec, def) of the ``@native(facts=False)`` function *call*
+        calls: in a Python reference, part of the model of a value."""
+        found = self.c_function(call)
+        if found is None or not is_pure_python(found[1]):
+            return None
+        return found
+
     def inline_function(self, call: ast.Call
                         ) -> tuple[Spec, ast.FunctionDef] | None:
         """(spec, def) of the @inline function *call* calls."""
@@ -442,13 +468,19 @@ class Spec:
 
     def _add_class(self, node: ast.ClassDef) -> None:
         """Only these statements may be in a spec class: a docstring,
-        ``def``, ``meth = module.Class.meth`` and ``pass``."""
+        ``def``, ``meth = module.Class.meth``, ``field: ctype`` and
+        ``pass``."""
         self.classes[node.name] = node
         for i, stmt in enumerate(node.body):
             match stmt:
                 case ast.Expr(ast.Constant(str())) if i == 0:
                     pass
                 case ast.Pass():
+                    pass
+                case ast.AnnAssign(target=ast.Name(), value=None):
+                    # A field of the C struct (``it_index: Py_ssize_t``,
+                    # ``ob_sval: 'char[]'``): the struct stays C; the
+                    # model (model.py) allocates the fields.
                     pass
                 case ast.FunctionDef(name=name) if accessor_kind(stmt):
                     self._add_accessor(f'{node.name}.{name}',

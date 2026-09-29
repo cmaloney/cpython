@@ -451,6 +451,10 @@ class Analyzer(subset.Walker[Flow, None]):
         """Exact result type of call *node*; its effects go to the facts
         of *flow*."""
         facts, env = flow.facts, flow.env
+        if flow.reference and self.spec.pure_python_function(node):
+            # In a Python reference, a pure-Python function models a
+            # value, like a builtin (the reference accounts for effects).
+            return None
         mark = marks.get(node, marks.Specialized)
         callee = (self.function_facts(mark.special.callee, mark.special)
                   if mark else self.call_facts(node, env))
