@@ -416,8 +416,12 @@ identity.  Reported apart, the limits of a Python class: ``__mul__`` is
 both the operator and ``sq_repeat``'s slot wrapper; a heap type always
 has ``tp_as_sequence``; ``bytearray % b`` tests ``PyBytes_Check()``.
 ``ModelTest`` of ``test_tools.test_pyspec_parity`` fails when a method
-with a Python body diverges, and when a body is circular
-(``model.check_circular()``).
+with a Python body diverges, and when a body is circular: by its names
+(``model.check_circular()``, and ``check_circular_spec()`` for the
+bodies of every spec, also one whose model cannot be built yet), and by
+what it calls while the probes run (``model.circular_calls()``: a call
+of the builtin of a described type from the frame of a spec, under any
+name).
 
 bytes and its iterator are the example: every method and slot but
 ``__mod__``/``__rmod__`` has a Python body (with

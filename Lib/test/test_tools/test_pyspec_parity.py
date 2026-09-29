@@ -456,7 +456,14 @@ class ModelTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.comparison = pyspec_parity.ModelComparison(cls.NAMES)
+        with imports_under_tool('clinic'):
+            from libclinic.pyspec import model
+        cls.model = model
+        _, pymodel = pyspec_parity.model_types(cls.NAMES)
+        # Every call the bodies make while the probes run.
+        with model.circular_calls(pymodel) as cls.circular:
+            cls.comparison = pyspec_parity.ModelComparison(cls.NAMES,
+                                                           pymodel)
 
     def test_python_bodies_agree(self):
         diverging = self.comparison.diverging()
@@ -479,12 +486,35 @@ class ModelTest(unittest.TestCase):
     def test_not_circular(self):
         # No body calls a host type the specs describe; only the
         # delegated methods use the C.
-        with imports_under_tool('clinic'):
-            from libclinic.pyspec import model
-        self.assertEqual(model.check_circular(self.comparison.model), {
+        self.assertEqual(self.model.check_circular(self.comparison.model), {
             'bytes.__mod__': ['delegated to the C'],
             'bytes.__rmod__': ['delegated to the C'],
         })
+
+    def test_every_spec_not_circular(self):
+        # The same, statically, for the bodies of every spec (and those it
+        # imports), whether or not its model can be built yet.
+        with imports_under_tool('clinic'):
+            from libclinic.pyspec import specfiles
+        for path, _ in specfiles.spec_files():
+            with self.subTest(spec=os.path.relpath(path,
+                                                   pyspec_parity.SRCDIR)):
+                self.assertEqual(self.model.check_circular_spec(path), {})
+
+    def test_not_circular_at_run_time(self):
+        # While the probes ran, no body called a host type the specs
+        # describe, under any name (check_circular() reads names only).
+        self.assertEqual(self.circular, [])
+        # What it catches: a call in the code of a spec, not elsewhere.
+        spec = next(iter(self.comparison.model.specs))
+        code = 'import builtins\nbuiltins.bytearray(b"a").hex()\n'
+        with self.model.circular_calls(self.comparison.model) as found:
+            exec(compile(code, spec, 'exec'), {})
+            exec(compile(code, __file__, 'exec'), {})
+        self.assertEqual([where for where, _ in found],
+                         [f'{spec}:2', f'{spec}:2'])
+        self.assertIn('bytearray', found[0][1])
+        self.assertIn('hex', found[1][1])
 
     def test_coverage(self):
         total = self.comparison.totals()

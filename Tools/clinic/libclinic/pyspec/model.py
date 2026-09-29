@@ -24,6 +24,7 @@ machine.py touch host bytes.
 
 import ast
 import builtins
+import contextlib
 import functools
 import importlib.machinery
 import os
@@ -1035,3 +1036,87 @@ def _circular_uses(node, described):
             case ast.Attribute(value=ast.Name(name), attr=attr) \
                     if name in described:
                 yield f'uses {name}.{attr} at line {child.lineno}'
+
+
+def check_circular_spec(path):
+    """{function: [what]}: check_circular() without a model, for the spec
+    at *path* (also one whose model cannot be built yet): the uses of host
+    types the specs describe in its bodies and in those of the specs it
+    imports, less the classes of these specs (the model classes of its
+    model)."""
+    spec = frontend.Spec.load(os.path.abspath(path))
+    specs, todo = {}, [spec]
+    while todo:
+        s = todo.pop()
+        if s.filename in specs:
+            continue
+        specs[s.filename] = s
+        todo += [s.load_spec(p) for p in s.imports.values()]
+    described = set(host_types()) | set(TYPE_ONLY)
+    for s in specs.values():
+        described -= set(s.classes)
+    out = {}
+    for s in specs.values():
+        for name, node in s.functions.items():
+            if has_body(node):
+                for what in _circular_uses(node, described):
+                    out.setdefault(name, []).append(what)
+    return out
+
+
+# -- the dynamic non-circularity check ---------------------------------------
+
+def _host_callee(obj, described):
+    """Whether calling *obj* runs a host type the specs describe: the
+    type, a method of it (bound or not), a method of one of its
+    instances."""
+    if obj in described:
+        return True
+    for attr in ('__objclass__', '__self__'):
+        owner = getattr(obj, attr, None)
+        if owner in described or type(owner) in described:
+            return True
+    return False
+
+
+@contextlib.contextmanager
+def circular_calls(model):
+    """The dynamic check_circular(): while in the block, the calls that
+    the bodies of *model*'s specs make of a host type the specs describe
+    (the builtin bytes, bytearray, memoryview..., not the model classes),
+    under any name, [(spec path:line, what)].  Only the frames of spec
+    code count: the machine primitives (machine.py) and the delegated
+    methods (this file) use host objects on purpose."""
+    mon = sys.monitoring
+    tool = next((t for t in (3, 4) if mon.get_tool(t) is None), None)
+    if tool is None:
+        raise RuntimeError('no free sys.monitoring tool id')
+    described = tuple(host_types().values()) + tuple(
+        getattr(builtins, name) for name in TYPE_ONLY)
+    specs = model.specs         # as it grows
+    found = []
+
+    def on_call(code, offset, callee, arg0):
+        if code.co_filename not in specs:
+            return mon.DISABLE
+        try:
+            host = _host_callee(callee, described)
+        except Exception:
+            host = False
+        if host:
+            line = next((line for start, end, line in code.co_lines()
+                         if start <= offset < end), None)
+            found.append((f'{code.co_filename}:{line}',
+                          f'{code.co_qualname}() calls {callee!r}'))
+        return None
+
+    mon.use_tool_id(tool, 'pyspec model circular_calls')
+    try:
+        mon.register_callback(tool, mon.events.CALL, on_call)
+        mon.set_events(tool, mon.events.CALL)
+        yield found
+    finally:
+        mon.set_events(tool, 0)
+        mon.register_callback(tool, mon.events.CALL, None)
+        mon.free_tool_id(tool)
+        mon.restart_events()
