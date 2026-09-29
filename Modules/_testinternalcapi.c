@@ -3426,19 +3426,22 @@ pyspec_table(PyObject *self, PyObject *tp)
     PyTypeObject *type = (PyTypeObject *)tp;
     for (Py_ssize_t i = 0; i < table->ncalls; i++) {
         if (pyspec_append_entry(calls, type, 0, &table->calls[i],
-                                NULL) < 0) {
+                                NULL) < 0)
+        {
             goto error;
         }
     }
     for (Py_ssize_t i = 0; i < table->nmethods; i++) {
         if (pyspec_append_entry(methods, type, 1, &table->methods[i],
-                                NULL) < 0) {
+                                NULL) < 0)
+        {
             goto error;
         }
     }
     for (Py_ssize_t i = 0; i < table->nslots; i++) {
         if (pyspec_append_entry(slots, type, 0, &table->slots[i].facts,
-                                &table->slots[i]) < 0) {
+                                &table->slots[i]) < 0)
+        {
             goto error;
         }
     }
@@ -3710,12 +3713,14 @@ pyspec_helper(PyObject *self, PyObject *args)
     const char *name;
     PyObject *callargs, *null;
     if (!PyArg_ParseTuple(args, "sO!O", &name, &PyTuple_Type, &callargs,
-                          &null)) {
+                          &null))
+    {
         return NULL;
     }
     size_t row = 0;
     while (row < Py_ARRAY_LENGTH(pyspec_helpers) &&
-           strcmp(pyspec_helpers[row].name, name) != 0) {
+           strcmp(pyspec_helpers[row].name, name) != 0)
+    {
         row++;
     }
     if (row == Py_ARRAY_LENGTH(pyspec_helpers)) {
