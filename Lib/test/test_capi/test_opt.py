@@ -83,6 +83,22 @@ def pops_after(uops, uop, n):
     i = uops.index(uop)
     return [op for op in uops[i + 1:] if op.startswith("_POP_TOP")][:n]
 
+def builtins_as_globals(func):
+    """func with fresh globals holding the builtins it uses, so that they
+    are module globals: LOAD_GLOBAL specializes them and the optimizer
+    promotes them to constants whatever other tests did to builtins
+    earlier in the process.  More than
+    _Py_MAX_ALLOWED_BUILTINS_MODIFICATIONS modifications of builtins stop
+    the promotion of builtins for the rest of the process, and a key of
+    a str subclass (test_iter) makes the keys of builtins general, which
+    LOAD_GLOBAL_BUILTIN never specializes (a copy of vars(builtins)
+    keeps that kind: the dict is built by insertion)."""
+    import builtins
+    names = {name: getattr(builtins, name)
+             for name in func.__code__.co_names if hasattr(builtins, name)}
+    return types.FunctionType(func.__code__, names, func.__name__,
+                              func.__defaults__, func.__closure__)
+
 def iter_ops(ex):
     for item in ex:
         yield item
@@ -2761,6 +2777,51 @@ class TestUopsOptimization(unittest.TestCase):
         # The items are compact ints: no guard for c.
         self.assertNotIn("_GUARD_NOS_INT", uops)
 
+    def test_binary_subscr_bytes_int_negative_index_exits(self):
+        # A negative index leaves the trace (the uop handles only a
+        # non-negative compact index), and so does an index out of range.
+        def testfunc(b, keys):
+            x = 0
+            for i in keys:
+                try:
+                    x += b[i]
+                except IndexError:
+                    x += 1000
+            return x
+
+        b = b"\x01\x02\x03"
+        warm = [0, 1, 2] * TIER2_THRESHOLD
+        self.assertEqual(testfunc(b, warm), 6 * TIER2_THRESHOLD)
+        ex = get_first_executor(testfunc)
+        self.assertIsNotNone(ex)
+        self.assertIn("_BINARY_OP_SUBSCR_BYTES_INT", get_opnames(ex))
+        keys = [0, -1, 1, -3, 2, 3, -4] * TIER2_THRESHOLD
+        self.assertEqual(testfunc(b, keys),
+                         (1 + 3 + 2 + 1 + 3 + 1000 + 1000) * TIER2_THRESHOLD)
+
+    def test_for_iter_bytes_exhausted_exits(self):
+        # The trace of the inner loop leaves through
+        # _GUARD_NOT_EXHAUSTED_BYTES at the end of each bytes.
+        def testfunc(items):
+            total = 0
+            count = 0
+            for b in items:
+                for c in b:
+                    total = c + total
+                count += 1
+            return total, count
+
+        items = [b"\x01\x02\x03", b"", b"\xff"] * TIER2_THRESHOLD
+        self.assertEqual(testfunc(items),
+                         (261 * TIER2_THRESHOLD, 3 * TIER2_THRESHOLD))
+        uops = [op for ex in get_all_executors(testfunc)
+                for op in get_opnames(ex)]
+        self.assertIn("_GUARD_NOT_EXHAUSTED_BYTES", uops)
+        self.assertIn("_ITER_NEXT_BYTES", uops)
+        # Traced again, now exiting at the end of each bytes.
+        self.assertEqual(testfunc(items),
+                         (261 * TIER2_THRESHOLD, 3 * TIER2_THRESHOLD))
+
     def test_binary_op_subscr_str_int(self):
         def testfunc(n):
             x = 0
@@ -3421,6 +3482,7 @@ class TestUopsOptimization(unittest.TestCase):
             def __bytes__(self):
                 return Sub(b"ab")
 
+        @builtins_as_globals
         def testfunc(n):
             x = 0
             c = C()
@@ -3443,6 +3505,7 @@ class TestUopsOptimization(unittest.TestCase):
         # The recorded argument type has its own entry: it is guarded and
         # the result is known to be exactly bytes, removing the
         # isinstance() call and the guard of b + b.
+        @builtins_as_globals
         def testfunc(n, source):
             x = 0
             for _ in range(n):
@@ -3479,6 +3542,7 @@ class TestUopsOptimization(unittest.TestCase):
 
     def test_call_builtin_class_pyspec_known_arg_type(self):
         # The argument type is already known: no guard is needed.
+        @builtins_as_globals
         def testfunc(n):
             x = 0
             for i in range(n):
@@ -3516,6 +3580,7 @@ class TestUopsOptimization(unittest.TestCase):
         # removed.
         # The borrowed argument is made a strong reference in the result
         # slot, and the class takes its slot: both pops are free.
+        @builtins_as_globals
         def testfunc(n, b):
             x = 0
             for _ in range(n):
@@ -3545,6 +3610,7 @@ class TestUopsOptimization(unittest.TestCase):
         class Sub(bytes):
             pass
 
+        @builtins_as_globals
         def testfunc(n, b):
             x = 0
             for _ in range(n):
@@ -3578,6 +3644,7 @@ class TestUopsOptimization(unittest.TestCase):
     def test_call_builtin_class_pyspec_alias_owned_arg(self):
         # A strong (not borrowed) argument moves to the result slot: no
         # incref, no decref, no call.
+        @builtins_as_globals
         def testfunc(n):
             x = 0
             for i in range(n):
@@ -3634,13 +3701,20 @@ class TestUopsOptimization(unittest.TestCase):
 
         res = testfunc(TIER2_THRESHOLD, Sub(b"abc"))
         self.assertEqual(res, TIER2_THRESHOLD)
-        ex = get_first_executor(testfunc)
-        if ex is not None:
-            self.assertNotIn("_COPY_1", get_opnames(ex))
+        # CALL_METHOD_DESCRIPTOR_NOARGS guards that self is exactly the
+        # class of the descriptor: for a subclass instance it deopts, so
+        # no trace has the call (the tracer stops at the CALL), let alone
+        # the alias of an exact bytes.
+        for ex in get_all_executors(testfunc):
+            uops = get_opnames(ex)
+            self.assertNotIn("_CALL_METHOD_DESCRIPTOR_NOARGS", uops)
+            self.assertNotIn("_CALL_METHOD_DESCRIPTOR_NOARGS_INLINE", uops)
+            self.assertNotIn("_COPY_1", uops)
 
     def test_call_builtin_class_pyspec_constant(self):
         # bytes() is the empty bytes singleton: the call is folded away,
         # and so is len() of it.
+        @builtins_as_globals
         def testfunc(n):
             x = 0
             for _ in range(n):
