@@ -718,7 +718,8 @@ A difftest failure on an exception message
     The C of a ``@native`` helper calls ``f``.  If ``f`` can run
     Python code, add ``calls(x, "__slot__")`` or ``runs_python()`` to
     the reference.  If it cannot (``memcmp``), add it to the audited
-    ``NO_PYTHON`` set of ``disconnects.py``.
+    ``NO_PYTHON`` set of ``native_check.py``.  ``f`` may be a call
+    through a pointer, named by its expression (``(*fn)``).
 ``its reference calls f(), which its native code does not`` (``test_pyspec_catalog``)
     The reference says the C calls ``f``; the C (or a function of its
     file it calls) does not.  Correct whichever is wrong.

@@ -21,4 +21,6 @@ Objects/clinic/foo_pyspec.c.h, which foo.c includes at its end.
   specfiles     every spec of the tree (one glob) and its test data
   disconnects   the ratchet of disagreements between the code and the
                 files describing it (Lib/test/test_pyspec_catalog.py)
+  native_check  its c_calls dimension: the native code of each @native
+                function vs its Python reference
 """

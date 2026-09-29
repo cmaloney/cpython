@@ -8512,6 +8512,146 @@ class PyspecNativeTest(PyspecTestBase):
                          (other, 2))
 
 
+class PyspecNativeCheckTest(PyspecTestBase):
+    """What the C checker (Tools/clinic/libclinic/pyspec/native_check.py,
+    the c_calls ratchet) counts as a call that may run Python code."""
+
+    def check(self, c_code, reference='return x'):
+        """{C function: [what may run Python code]} of @native functions
+        f_<name>(x) -> object, each with *reference* as its body, one per
+        function of *c_code*."""
+        from libclinic.pyspec import disconnects
+        c_code = dedent(c_code)
+        names = sorted(set(re.findall(r'\b(f_\w+)\(PyObject \*x\)',
+                                      c_code)))
+        spec = ''.join(f'@native\ndef {name}(x: object) -> object:\n'
+                       f'    {reference}\n\n' for name in names)
+        root = os.path.join(self.tmp_dir, 'tree')
+        os.makedirs(os.path.join(root, 'Objects', 'pyspec'), exist_ok=True)
+        with open(os.path.join(root, 'Objects', 'pyspec', 'foo.py'), 'w',
+                  encoding='utf-8') as f:
+            f.write(spec)
+        with open(os.path.join(root, 'Objects', 'foo.c'), 'w',
+                  encoding='utf-8') as f:
+            f.write(c_code)
+        out = {name: [] for name in names}
+        for line in disconnects.c_calls(root):
+            m = re.fullmatch(r'Objects/pyspec/foo.py: (\w+): calls (.*?)\(\), '
+                             r'which may run Python code: (.*)', line)
+            if m:
+                out[m[1]].append(f'{m[2]}: {m[3]}')
+        return out
+
+    def test_call_through_a_pointer(self):
+        found = self.check("""
+            static PyObject *f_star(PyObject *x) { return (*fn)(x); }
+            static PyObject *f_table(PyObject *x) { return table[0](x); }
+            static PyObject *f_member(PyObject *x) { return st->tab[1](x); }
+            static PyObject *f_cast(PyObject *x)
+            {
+                return ((unaryfunc)fn)(x);
+            }
+            static PyObject *f_slot(PyObject *x)
+            {
+                return (*Py_TYPE(x)->tp_iternext)(x);
+            }
+            static PyObject *f_not_a_call(PyObject *x)
+            {
+                if (x) (void)(x);
+                return (PyObject *)(x) + (Py_ssize_t)(1) + (char)(2);
+            }
+        """)
+        self.assertEqual(found, {
+            'f_cast': ['((unaryfunc)fn): account for it with runs_python()'],
+            'f_member': ['st->tab[1]: account for it with runs_python()'],
+            'f_not_a_call': [],
+            'f_slot': ['tp_iternext: account for it with '
+                       'calls(x, "__next__") or runs_python()'],
+            'f_star': ['(*fn): account for it with runs_python()'],
+            'f_table': ['table[0]: account for it with runs_python()'],
+        })
+        # Accounted for by runs_python().
+        self.assertEqual(self.check("""
+            static PyObject *f_star(PyObject *x) { return (*fn)(x); }
+        """, reference='runs_python(); return x'), {'f_star': []})
+
+    def test_macros(self):
+        # A macro of the file is expanded; a release (Py_SETREF) is not a
+        # call, by the release assumption, but its arguments are code.
+        found = self.check("""
+            #define HELPER_CALL(o) \\
+                PyObject_Str(o)
+            #define other_name PyObject_Repr
+            static PyObject *f_macro(PyObject *x) { return HELPER_CALL(x); }
+            static PyObject *f_alias(PyObject *x) { return other_name(x); }
+            static PyObject *f_release(PyObject *x)
+            {
+                Py_SETREF(x, Py_NewRef(x));
+                Py_CLEAR(x);
+                return PyBytes_AS_STRING(x);
+            }
+            static PyObject *f_in_release(PyObject *x)
+            {
+                Py_SETREF(x, PyObject_Str(x));
+                return x;
+            }
+        """)
+        self.assertEqual(found, {
+            'f_alias': ['PyObject_Repr: account for it with runs_python()'],
+            'f_in_release': ['PyObject_Str: account for it with '
+                             'runs_python()'],
+            'f_macro': ['PyObject_Str: account for it with runs_python()'],
+            'f_release': [],
+        })
+
+    def test_escaping_despite_the_cases_generator(self):
+        # The cases generator lists PyLong_AsLong() as not escaping (for
+        # its uses); it calls __index__.
+        found = self.check("""
+            static PyObject *f_aslong(PyObject *x)
+            {
+                return PyLong_AsLong(x);
+            }
+        """)
+        self.assertEqual(found, {'f_aslong': [
+            'PyLong_AsLong: account for it with calls(x, "__index__") or '
+            'runs_python()']})
+        self.assertEqual(self.check("""
+            static PyObject *f_aslong(PyObject *x)
+            {
+                return PyLong_AsLong(x);
+            }
+        """, reference='calls(x, "__index__"); return x'), {'f_aslong': []})
+
+    def test_every_definition(self):
+        # Each #if variant is read, not only the first; a call in an
+        # assert() counts (a debug build makes it).
+        found = self.check("""
+            #ifdef MS_WINDOWS
+            static PyObject *f_twice(PyObject *x) { return x; }
+            #else
+            static PyObject *f_twice(PyObject *x) { return PyObject_Str(x); }
+            #endif
+            static PyObject *f_assert(PyObject *x)
+            {
+                assert(PyObject_IsTrue(x) >= 0);
+                return x;
+            }
+            static PyObject *f_split(PyObject *x)
+            {
+                return PyObject_CallMethod
+                    (x, "x", NULL);
+            }
+        """)
+        self.assertEqual(found, {
+            'f_assert': ['PyObject_IsTrue: account for it with '
+                         'runs_python()'],
+            'f_split': ['PyObject_CallMethod: account for it with '
+                        'runs_python()'],
+            'f_twice': ['PyObject_Str: account for it with runs_python()'],
+        })
+
+
 class PyspecSoundnessTest(PyspecTestBase):
     """The facts and the generated C are sound on every path: facts join
     after branches, and the C never returns a NULL without an exception
