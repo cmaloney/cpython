@@ -14,7 +14,8 @@ bytes and bytearray share), found by one glob
 (``Tools/clinic/libclinic/pyspec/specfiles.py``).  A spec body calls C
 functions by name; each one it calls is declared in the spec of its own
 file (``Objects/pyspec/abstract.py`` for ``Objects/abstract.c``,
-``Python/pyspec/errors.py``, ``Include/cpython/pyspec/longintrepr.py``),
+``Python/pyspec/errors.py``, ``Include/cpython/pyspec/longintrepr.py``,
+``Objects/pyspec/bytes_methods.py``...),
 ``@native``, with its Python reference (below).  Every piece of code
 that runs has one source: native code (C written by hand) that a
 reference only describes, or a spec body that clinic generates.
@@ -156,8 +157,10 @@ Regenerate                  ``make clinic``, or
                             theirs too); with ``--dry-run``, clinic only
                             says what is out of date
 Test                        ``./python -m test test_clinic
-                            test_pyspec_facts test_pyspec_catalog`` (after
-                            rebuilding Python if the spec changed)
+                            test_pyspec_facts test_pyspec_catalog
+                            test_tools.test_pyspec_parity`` (after
+                            rebuilding Python if the spec changed; the
+                            last runs the parity record and the model)
 Validate a change for       ``./python Tools/clinic/pyspec_review.py``
 review                      (MIGRATING.rst, "Validating a change")
 Change a C function a spec  Keep its Python reference in step: what it
@@ -423,13 +426,25 @@ what it calls while the probes run (``model.circular_calls()``: a call
 of the builtin of a described type from the frame of a spec, under any
 name).
 
-bytes and its iterator are the example: every method and slot but
-``__mod__``/``__rmod__`` has a Python body (with
+bytes and its iterator are the example: 67 of their 69 members, every
+method and slot but ``__mod__``/``__rmod__``, have a Python body (with
 ``Objects/pyspec/bytes_methods.py``, ``longobject.py``, and
-``Python/pyspec/pyhash.py``, SipHash-1-3, and ``pystrhex.py``).  The
-design, the numbers and how this relates to PEP 399's pure-Python
-modules are in ``pyspec-notes/reports/phase5_pure_python.md`` and
-``pyspec-notes/drafts/CONCEPT.md`` section 7.3.
+``Python/pyspec/pyhash.py``, SipHash-1-3, and ``pystrhex.py``).  On a
+debug build ``pyspec_parity.py model`` finds 36,086 of 36,189 compared
+lines identical (99.7 %); the 103 others are the limits of a Python
+class above, and 889 lines are left out.  Running the model is slow (a
+parity run takes about three times as long as for the C; single calls
+are 100 to 900 times slower): it is a check and a reference, not a
+replacement.  It is also what makes the spec language-neutral: an
+implementation in another language, or a pure-Python module paired
+with an accelerator in the spirit of PEP 399, would be checked against
+the same bodies by the same comparison.  Not yet done: ``%`` (the
+parity samples have no format strings), ``bytearray`` (it needs a
+mutable-storage primitive, and bodies of its own for the methods it
+shares with bytes) and ``mmap`` (protocol logic over an OS primitive,
+mapped memory).  ``@critical_section`` does nothing in the model: the
+model states single-threaded behaviour, and what free threading
+guarantees is a property of the C, checked by the C tests.
 
 Conditional compilation
 -----------------------

@@ -1,5 +1,8 @@
 # pyspec v1 design brief (shared by all workstreams)
 
+> **Historical** (the brief of the early workstreams, at `bc4667e90c0`).  Superseded by
+> `pyspec-notes/README.md` (state and decisions in force) and `Objects/pyspec/README.rst`.
+
 Repo: /home/firebird347/projects/python/cpython, branch exp/ac_python_overloads_v0,
 checkpoint commit bc4667e90c0.  Read these first:
   Objects/pyspec/bytesobject.py        (current spec: bytes_new + PyBytes_FromObject bodies)

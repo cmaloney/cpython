@@ -120,7 +120,12 @@ The fix only claims an exact `str` result when it is guaranteed:
 
 - the argument is known to be an exact `str` (unchanged: the result is the argument);
 - the argument is known to be an exact `int` or `float`, whose `str()` builds an exact
-  `str`. This keeps the existing `str(42) + 'foo'` optimization;
+  `str`. This keeps the existing `str(42) + 'foo'` optimization. (One exception is
+  fixed separately: for an `int` of more than about 1000 digits, `str()` returns what
+  `_pylong.int_to_decimal_string()` returns if it is any `str`, so a monkeypatched
+  `_pylong` can make it a subclass; the companion issue, "Require an exact str from
+  `_pylong.int_to_decimal_string()`", checks `PyUnicode_CheckExact()`, so the claim
+  holds for every `int`);
 - otherwise the result is only known to be non-NULL.
 
 Tests added to `test_capi.test_opt`, next to the existing `CALL_STR_1` tests:

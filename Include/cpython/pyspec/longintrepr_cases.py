@@ -1,7 +1,8 @@
 """Test data for Include/cpython/pyspec/longintrepr.py (see the docstring
 of Objects/pyspec/bytesobject_cases.py for the names).  Both functions
-are static inline: _testinternalcapi.pyspec_inline_helpers() gives their
-addresses."""
+are static inline: the pyspec_helpers[] table of
+Modules/_testinternalcapi.c calls them through wrappers of the right
+pointer type, and _testinternalcapi.pyspec_helper() calls a row."""
 
 # The bounds of a digit of either size (PyLong_SHIFT 15 or 30), on both
 # sides.

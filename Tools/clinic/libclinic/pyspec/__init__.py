@@ -23,4 +23,9 @@ Objects/clinic/foo_pyspec.c.h, which foo.c includes at its end.
                 files describing it (Lib/test/test_pyspec_catalog.py)
   native_check  its c_calls dimension: the native code of each @native
                 function vs its Python reference
+  machine       the machine primitives of pure-Python bodies
+                (@native(facts=False)): object memory, buffers, the hash
+                key, slots of other types, codec results
+  model         a spec run as Python classes, compared with the C type by
+                Tools/clinic/pyspec_parity.py model
 """
