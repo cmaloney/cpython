@@ -5857,7 +5857,12 @@ class PyspecTest(PyspecTestBase):
                     "Doc."
                     return a
         """
-        output = self.generated_file(spec, block)
+        # The #ifndef of its METHODDEF goes to the buffer of the "block"
+        # preset, which nothing dumps.
+        with support.captured_stdout() as stdout:
+            output = self.generated_file(spec, block)
+        self.assertIn("Destination buffer 'buffer' not empty at end of "
+                      "file, emptying.", stdout.getvalue())
         self.assertIn("#if defined(CONDITION)\n"
                       "static PyObject *bytes_meth_impl(PyBytesObject *self, "
                       "PyObject *a);\n"
@@ -6325,7 +6330,10 @@ class PyspecStubTest(PyspecTestBase):
                 def other(self):
                     ...
         """
-        generated = self.generate(spec, dedent(self.CLASS) + dedent("""
+        # The #ifndef of its METHODDEF goes to the buffer of the "block"
+        # preset, which nothing dumps.
+        with support.captured_stdout() as stdout:
+            generated = self.generate(spec, dedent(self.CLASS) + dedent("""
             /*[clinic input]
             bytes.meth
             [clinic start generated code]*/
@@ -6343,6 +6351,8 @@ class PyspecStubTest(PyspecTestBase):
             [clinic start generated code]*/
             #endif
         """))
+        self.assertIn("Destination buffer 'buffer' not empty at end of "
+                      "file, emptying.", stdout.getvalue())
         self.assertIn("bytes_meth_impl(PyBytesObject *self, PyObject *a)",
                       generated)
         self.assertIn("bytes_other_impl(PyBytesObject *self, PyObject *a)",
@@ -7680,26 +7690,40 @@ class PyspecFactsTest(TestCase):
         # The generated code does not depend on the builtins of the Python
         # running Argument Clinic (PYTHON_FOR_REGEN may be as old as 3.10,
         # where no builtin type has __buffer__, and bytes had no
-        # __bytes__).
-        from unittest import mock
-        real_hasattr = hasattr
+        # __bytes__).  In a subprocess: patching builtins here would use
+        # up this process's budget of builtins modifications
+        # (_Py_MAX_ALLOWED_BUILTINS_MODIFICATIONS), after which the JIT
+        # stops promoting builtins to constants (test_capi.test_opt).
+        from test.support.script_helper import assert_python_ok
+        code = dedent(f'''
+            import builtins, sys
+            sys.path.insert(0, {os.path.join(test_tools.toolsdir, 'clinic')!r})
+            import libclinic
+            from libclinic.cli import parse_file
+            from libclinic.pyspec import builtin_types, frontend, specfiles
+            real_hasattr = hasattr
 
-        def old_hasattr(obj, name):
-            if name in pyspec_builtin_types.SPECIALS \
-                    and isinstance(obj, type):
-                return False
-            return real_hasattr(obj, name)
+            def old_hasattr(obj, name):
+                if name in builtin_types.SPECIALS and isinstance(obj, type):
+                    return False
+                return real_hasattr(obj, name)
 
-        for spec_path, c_file in spec_files():
-            spec = pyspec_frontend.Spec.load(spec_path)
-            if c_file is None or not spec.implemented_functions():
-                continue
-            with self.subTest(spec=spec_path):
+            builtins.hasattr = old_hasattr
+            root = {test_tools.basepath!r}
+            checked = 0
+            for spec_path, c_file in specfiles.spec_files(root):
+                spec = frontend.Spec.load(spec_path)
+                if c_file is None or not spec.implemented_functions():
+                    continue
                 writer = libclinic.FileWriter(dry_run=True)
-                with mock.patch('builtins.hasattr', old_hasattr):
-                    parse_file(c_file, limited_capi=False, writer=writer)
-                self.assertEqual(
-                    [change.filename for change in writer.changes], [])
+                parse_file(c_file, limited_capi=False, writer=writer)
+                checked += 1
+                for change in writer.changes:
+                    print(spec_path, change.filename)
+            print("checked", checked)
+        ''')
+        rc, out, err = assert_python_ok('-c', code)
+        self.assertRegex(out.decode(), r'\Achecked [1-9][0-9]*\n\Z')
 
     def test_registry_up_to_date(self):
         # The registry in pycore_pyspec.h lists the call table of every
@@ -7895,8 +7919,13 @@ class PyspecLanguageTest(PyspecTestBase):
                 "@setter\n@deleter\nbytes.nbytes\n"
                 "    value: object = NULL\n")
         os_helper.unlink(self.spec_path)
-        expected = self.output(self.generate(None, self.blocks(*full)))
-        actual = self.output(self.generate(spec, self.blocks(*stubs)))
+        # The #ifndef of the GETSETDEF goes to the buffer of the "block"
+        # preset, which nothing dumps: plain clinic warns the same.
+        with support.captured_stdout() as stdout:
+            expected = self.output(self.generate(None, self.blocks(*full)))
+            actual = self.output(self.generate(spec, self.blocks(*stubs)))
+        self.assertEqual(stdout.getvalue().count(
+            "Destination buffer 'buffer' not empty at end of file"), 2)
         self.assertEqual(actual, expected)
         self.assertIn("bytes_nbytes_get_impl(PyBytesObject *self)", actual)
         self.assertIn("bytes_nbytes_set_impl(PyBytesObject *self, "

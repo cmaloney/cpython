@@ -1700,7 +1700,8 @@ dummy_func(void) {
             res = PyJitRef_StripReferenceInfo(arg);
         }
         else if (sym_matches_type(arg, &PyLong_Type) ||
-                 sym_matches_type(arg, &PyFloat_Type)) {
+                 sym_matches_type(arg, &PyFloat_Type))
+        {
             // str() of an exact int or float is an exact str.
             res = sym_new_type(ctx, &PyUnicode_Type);
         }
@@ -1964,7 +1965,8 @@ dummy_func(void) {
                                       method->d_method->ml_meth, NULL, 1,
                                       sym_get_type(self_or_null));
             if (spec != NULL && spec->arg_type != NULL &&
-                !sym_matches_type(self_or_null, spec->arg_type)) {
+                !sym_matches_type(self_or_null, spec->arg_type))
+            {
                 spec = NULL;
             }
         }
