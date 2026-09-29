@@ -4985,7 +4985,11 @@ dummy_func(
             if (res_o == NULL) {
                 ERROR_NO_POP();
             }
-            /* callable is immortal: there is no reference to release. */
+            /* callable is immortal (the optimizer emits this uop only
+             * for an immortal class; asserted above): overwriting it
+             * releases nothing.  PyStackRef_CLOSE() would be a no-op
+             * here that costs 8 instructions per call with the JIT
+             * (bytes(16), release build, Tools/clinic/pyspec_bench.py). */
             callable = PyStackRef_FromPyObjectSteal(res_o);
         }
 
