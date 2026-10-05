@@ -8,14 +8,17 @@ file contains and how to do each task in it is in `README.rst
 <README.rst>`_; this guide does not repeat it.
 
 The model in one paragraph: the spec holds the signatures, docstrings
-and clinic decorators of a class's methods, and declares its slots as
-dunders.  The ``PyTypeObject`` stays hand-written in ``foo.c``.  Clinic
-generates only what comes from the spec: ``<prefix>_doc`` (the class
-docstring), ``<prefix>_methods[]`` and the sub-tables
-``<prefix>_as_number``, ``_as_sequence``, ``_as_mapping`` and
-``_as_buffer``, into ``Objects/clinic/foo_pyspec.c.h``; ``foo.c``
+and clinic decorators of a class's methods (``@ac.stub``, or
+``@ac.generate`` for a spec body), and declares its slots as dunders.
+What clinic outputs is opt-in, so a class can move one method at a time.
+The ``PyTypeObject`` stays hand-written in ``foo.c``.  With
+``@ac.generate`` on the class, clinic generates what comes from the
+spec: ``<prefix>_doc`` (the class docstring), ``<prefix>_methods[]`` and
+the sub-tables ``<prefix>_as_number``, ``_as_sequence``, ``_as_mapping``
+and ``_as_buffer``, into ``Objects/clinic/foo_pyspec.c.h``; ``foo.c``
 includes that file and then defines the ``PyTypeObject``\ s that name
-them.  The prefix is the class name, or the class's ``@c_name``.
+them.  The prefix is the class name, or the class's
+``@ac.generate(prefix="x")``.
 
 
 Levels of migration
@@ -44,9 +47,10 @@ Level  What moves                         Parity check (and the review)
 
 Levels 1 and 2 need the fewest new concepts: clinic's parameter
 lines written as Python, the dunders of the slots, and the review
-(below); level 3 is where the spec language, ``@native`` and
-``@inline`` come in; levels 4 and 5 need a consumer (the optimizer) or a data file (the
-docs) and are independent of each other.
+(below); level 3 is where the spec language,
+``@ac.stub(optimizer_info=True)`` and ``@ac.inline`` come in; levels 4 and 5
+need a consumer (the optimizer) or a data file (the docs) and are
+independent of each other.
 
 Before every PR: regenerate with ``./python Tools/clinic/clinic.py
 Objects/foo.c`` (not ``--make`` from a checkout that contains other
@@ -222,14 +226,16 @@ covered.  This checks that nothing changed; the type's own tests
 Level 1: signatures and docstrings
 ''''''''''''''''''''''''''''''''''
 
-*Needs:* ``Objects/pyspec/foo.py`` with a ``class`` per clinic class,
-one ``def`` per clinic function with the body ``...``, parameters
-written as clinic parameter lines (converter as annotation), the
-docstring, and the clinic decorators (``@c_name`` for ``as``).  Each
-block in ``foo.c`` shrinks to its function line (``bytes.split``).  The
-``class`` directives and ``[python input]`` converter blocks stay in
-``foo.c``; a spec names a custom converter in its annotation.  A
-``TYPES`` entry and an empty ``CASES`` in ``foo_cases.py``.
+*Needs:* ``Objects/pyspec/foo.py`` with a ``class`` (no decorator) per
+clinic class, one ``@ac.stub`` ``def`` per clinic function with the
+body ``...``, parameters written as clinic parameter lines (the
+converter as annotation, ``ac.object``), the docstring, and the clinic
+decorators (``@ac.permit_long_summary``...; ``@ac.stub("x")`` for
+``as x``).  Each block in ``foo.c`` shrinks to its function line
+(``bytes.split``).  The ``class`` directives and ``[python input]``
+converter blocks stay in ``foo.c``; a spec names a custom converter in
+its annotation (``ac.bytesvalue``).  A ``TYPES`` entry and an empty
+``CASES`` in ``foo_cases.py``.
 
 *Gives:* one place for each signature and docstring, readable as
 Python; the docs and typeshed ratchets can compare with it.
@@ -237,9 +243,11 @@ Python; the docs and typeshed ratchets can compare with it.
 *Parity:* ``git diff HEAD~ -- Objects/clinic/foo.c.h`` is empty.  In
 ``foo.c`` only the blocks and their ``input=`` checksums change.
 
-*A PR of its own:* a class that declares no slot declares its methods
-only, so clinic generates no tables for it and the hand-written method
-table stays (``Modules/pyspec/mmapmodule.py`` is such a spec).
+*A PR of its own:* a class without ``@ac.generate`` gets no tables: the
+hand-written method table stays (``Modules/pyspec/mmapmodule.py`` is
+such a spec).  It may declare only some of the methods (and slots) of
+the type: the others keep their full clinic blocks in ``foo.c``, so a
+first PR can move a single method (``bytes.__new__``) with its body.
 
 *Size:* a census of the tree's clinic blocks: ``tupleobject.c`` 4 functions (29 block lines
 become 6, spec 29 lines), ``floatobject.c`` 14 (91 to 19, spec 96),
@@ -249,18 +257,21 @@ become 6, spec 29 lines), ``floatobject.c`` 14 (91 to 19, spec 96),
 Checklist:
 
 - [ ] the class body order is the order of the existing method table;
-- [ ] every block of the class is a one-line block (clinic refuses a
-  class that is half in the spec);
+- [ ] every block of a method the class declares is a one-line block
+  (clinic refuses a block that repeats the spec);
 - [ ] ``Objects/clinic/foo.c.h`` unchanged; ``test_clinic`` passes.
 
 Level 2: method and slot tables
 '''''''''''''''''''''''''''''''
 
-*Needs:* the slots as dunders in the class (``def __len__(self, /):
-...``, no docstring, the whole richcompare group); declaring a slot is
-what makes clinic generate the tables of the class.  ``@c_name`` where
-the C name is not the default, and hand-written ``PyCFunction``\ s as
-``@c_name(METH_O="f")``.  In ``foo.c``: delete the hand-written
+*Needs:* ``@ac.generate`` on the class (``@ac.generate(prefix="x")``
+when the prefix of its C tables is not the class name), which makes
+clinic generate its tables, and every slot as a dunder in the class
+(``@ac.stub def __len__(self, /): ...``, no docstring, the whole
+richcompare group).  ``@ac.stub("f")`` where the C name is not the
+default (``@ac.stub(slots=["mp_length", "sq_length"])`` for a dunder of
+several slots), and hand-written ``PyCFunction``\ s as
+``@ac.stub(METH_O="f")``.  In ``foo.c``: delete the hand-written
 ``PyDoc_STRVAR`` of the type, the ``PyMethodDef`` array and the
 sub-tables; include ``clinic/foo_pyspec.c.h`` before the
 ``PyTypeObject``, which keeps its text and names the generated symbols.
@@ -282,22 +293,24 @@ Checklist:
 - [ ] parity record unchanged, for every type of the file (iterators
   too, each in ``TYPES``);
 - [ ] ``test_clinic`` (slot wrappers vs dunders) passes;
-- [ ] accessors (``@getter``/``@setter`` in the class) keep their
+- [ ] accessors (``@ac.getter``/``@ac.setter`` in the class) keep their
   ``tp_getset`` table in C.
 
 Level 3: spec bodies
 ''''''''''''''''''''
 
-*Needs:* a body in the lowered subset of `README.rst <README.rst>`__
-(signature and statements) instead of ``...``; every C function the
-body calls declared ``@native``, with its Python reference, in the spec
-of its own C file; cases in ``foo_cases.py`` (``CASES`` for the body,
-``HELPERS`` for each new native function).
+*Needs:* ``@ac.generate`` and a body in the lowered subset of
+`README.rst <README.rst>`__ (signature and statements) instead of
+``@ac.stub`` and ``...``; every C function the body calls declared
+``@ac.stub(optimizer_info=True)``, with its Python reference, in the spec of
+its own C file (and called by its module, ``abstract.f(...)``); cases in
+``foo_cases.py`` (``CASES`` for the body, ``HELPERS`` for each new
+native function).
 
 A reference describes its C and nothing more: it is never compiled.  A
 fast path the generated code should take (read a compact int inline,
-the size of an exact tuple) is an ``@inline`` function next to the C
-function (README.rst, "Fast paths: ``@inline``"), never an ``if`` in
+the size of an exact tuple) is an ``@ac.inline`` function next to the C
+function (README.rst, "Fast paths: ``@ac.inline``"), never an ``if`` in
 the reference that the C does not have.
 
 *Gives:* the C impl is generated; for ``__new__`` also a vectorcall,
@@ -324,7 +337,8 @@ Checklist:
   no constant of one build (``sys.int_info.bits_per_digit``, not 30),
   and the native functions it calls are the ones the C calls
   (``c_calls``);
-- [ ] a fast path is an ``@inline`` function, measured as in "Performance" below
+- [ ] a fast path is an ``@ac.inline`` function, measured as in
+  "Performance" below
   where it is taken and where its test runs for nothing.
 
 Level 4: facts for the specializer and the JIT
@@ -364,9 +378,9 @@ iterate over.  In ``foo_cases.py``:
   (``class T "..." "&T_Type"``);
 - [ ] ``CASES["T.__new__"]`` and ``CASES["T.meth"]`` have inputs for every
   call-table entry (``DirectCallTest`` fails on an entry none reaches);
-- [ ] ``HELPERS`` has inputs for every ``@native`` function, or it
-  is in ``NOT_CALLABLE`` (static) or ``HELPER_CALLERS`` (hidden: its C
-  entry point); an exported or header one also needs its row in
+- [ ] ``HELPERS`` has inputs for every ``@ac.stub(optimizer_info=True)``
+  function, or it is in ``NOT_CALLABLE`` (static) or ``HELPER_CALLERS``
+  (hidden: its C entry point); an exported or header one also needs its row in
   ``pyspec_helpers`` of ``Modules/_testinternalcapi.c`` (its signature
   is checked against the spec);
 - [ ] ``SLOT_USES`` lists each uop that takes the facts of a slot;
@@ -404,11 +418,11 @@ Checklist:
 Replacing native C by another language (proposed, not implemented)
 ''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
 
-A function that is ``@native`` has a reference, cases in ``HELPERS``
-and no line in the ``c_calls`` baseline.  Rewriting its native code in
-another language keeps all three: the spec does not change, generated
-callers still call it through its C interface, and the same
-``HelperTest`` and parity record decide whether behaviour changed.
+A function that is ``@ac.stub(optimizer_info=True)`` has a reference, cases
+in ``HELPERS`` and no line in the ``c_calls`` baseline.  Rewriting its
+native code in another language keeps all three: the spec does not
+change, generated callers still call it through its C interface, and the
+same ``HelperTest`` and parity record decide whether behaviour changed.
 What that language must bring first is its checker (README.rst,
 "Checking a reference against its native code"); no language but C has
 one today.
@@ -418,7 +432,7 @@ Choosing what to migrate
 ------------------------
 
 Done: ``bytesobject`` (levels 1 to 5), ``bytearrayobject`` (levels 1,
-2 and 5, sharing the stringlib specs), ``mmapmodule`` (level 1, methods
+2 and 5, sharing the stringlib C functions), ``mmapmodule`` (level 1, methods
 only, with ``#if``).  Order for the rest (by that census): the easy
 ``Objects`` files first (``interpolationobject``, ``moduleobject``,
 ``sentinelobject``, ``structseq``, ``descrobject``, ``enumobject``,
@@ -445,23 +459,31 @@ Optional groups
     Not supported (41 functions).  Keep the class in plain clinic.
 Getters and setters
     Declared in the spec (``@getter``, ``@setter``), their blocks keep
-    the decorator; the ``tp_getset`` table stays hand-written.
+    the decorator (clinic inserts a missing one); the ``tp_getset``
+    table stays hand-written.
 Shared stringlib code
-    Declare the method once in ``Objects/stringlib/pyspec/`` and share
-    it (``center = transmogrify.B.center``).  Convert both users (bytes
-    and bytearray) in one PR series so the docstring is written once.
+    The method is a C function of a header both C files include: name
+    it, ``center = ac.stub("stringlib_center")`` (bytearray:
+    ``ac.stub("stringlib_center", critical_section=True)``).  Its
+    signature and docstring stay in C, in the clinic block of the
+    header (``B.center as stringlib_center``), which clinic reads; a
+    PyCFunction written by hand gives its calling convention by its
+    parameters, and its docstring by its model.  The model is the def
+    of the C name in ``Objects/stringlib/pyspec/`` (``def
+    stringlib_center(self, width, fillchar=b' ', /)``), with the
+    parameters of the C.
 Module-level functions
     Not handled: only methods of classes of the spec take their input
     from it.
 
 When not to migrate a function's internals (level 3): when nothing in
-"Does a spec body help" comes out positive.  In practice: a method whose call
-overhead is a small part of its cost (most ``bytes`` methods: 0 to 8 %,
-measured with callgrind); logic that needs ``Py_buffer``, a struct, pointer arithmetic or a
-loop over raw memory (it ends up in ``@native`` helpers, so the
-C just moves); anything whose fact has no consumer.  Levels 1 and 2
-cost no speed and apply to any class without the features above; level
-3 only where it pays.
+"Does a spec body help" comes out positive.  In practice: a method whose
+call overhead is a small part of its cost (most ``bytes`` methods: 0 to
+8 %, measured with callgrind); logic that needs ``Py_buffer``, a struct,
+pointer arithmetic or a loop over raw memory (it ends up in
+``@ac.stub(optimizer_info=True)`` helpers, so the C just moves); anything
+whose fact has no consumer.  Levels 1 and 2 cost no speed and apply to
+any class without the features above; level 3 only where it pays.
 
 
 Does a spec body help, or just rewrite the C?
@@ -606,7 +628,8 @@ Worked example: ``bytes.removeprefix``/``removesuffix``
 The candidate: two methods whose C is a type-dispatch shell around a
 ``memcmp``.  The spec body::
 
-    def removeprefix(self, prefix: object, /):
+    @ac.generate
+    def removeprefix(self, prefix: ac.object, /):
         n = bytes_prefix_len(self, prefix)
         if n > 0:
             return bytes_trim(self, n, 0)
@@ -614,13 +637,13 @@ The candidate: two methods whose C is a type-dispatch shell around a
             return self
         return bytes_copy(self)
 
-with three ``@native`` helpers in C (``bytes_prefix_len``,
-``bytes_suffix_len``, ``bytes_trim``).  The first attempt kept the
-parameter ``prefix: Py_buffer`` and clinic refused it (``parameter
-'prefix' needs an annotation from ['object', 'str']``), so the buffer
-is taken in the helper.  To separate the effect of that converter
-change from the spec, a third build keeps the hand-written C with the
-``object`` converter (``c_object``).
+with three ``@ac.stub(optimizer_info=True)`` helpers in C
+(``bytes_prefix_len``, ``bytes_suffix_len``, ``bytes_trim``).  The first
+attempt kept the parameter ``prefix: Py_buffer`` and clinic refused it
+(``parameter 'prefix' needs an annotation from ['object', 'str']``), so
+the buffer is taken in the helper.  To separate the effect of that
+converter change from the spec, a third build keeps the hand-written C
+with the ``object`` converter (``c_object``).
 
 Builds: release JIT, non-PGO, identical flags (``CC=clang
 --enable-experimental-jit --with-tail-call-interp``), clang 22, at
@@ -675,41 +698,58 @@ The common messages (the format and the kinds of error are in
 README.rst, "Errors"):
 
 ``'T.m' has no parameters or docstring, and class T in ... has no method 'm'``
-    The class is in the spec, so every block of it needs a ``def``: add
-    it, or keep the whole class in plain clinic.
+    A one-line block names a method the class does not declare: add its
+    ``def``, or give the block its full clinic input.
 ``T.m has no clinic block in foo.c; put this block above its impl``
-    Add the one-line block it prints.
-``'T.m': @x of a spec method is written in ...`` / ``the C name is written in ... (@c_name)``
+    Clinic inserts a missing block itself, in the order of the class:
+    after the block of the method before it, else before the block of
+    the method after it, else before the include of
+    ``clinic/foo_pyspec.c.h``; always after the ``class`` directive and
+    under its ``#if`` only.  This error means there was no such place
+    (the class has no other block and ``foo.c`` no include yet): add
+    the one-line block it prints.
+``'T.m': @x of a spec method is written in ...`` / ``the C name is written in ... (@ac.stub("x") or @ac.generate("x"))``
     Move the decorator or the ``as`` name from the C block to the spec.
 ``unknown clinic decorator @x``
     A typo, or a decorator clinic does not have.
+``T.m needs @ac.stub (C written by hand) or @ac.generate (C generated from its body)``
+    Every method of a spec class says what clinic outputs for it:
+    ``@ac.stub`` for a method written in C (``...``, or its Python),
+    ``@ac.generate`` for a spec body.
+``a spec decorator is @ac.<name> ...`` / ``an annotation is a clinic converter, ac.<converter> ...`` / ``write rt.NULL ...``
+    Every name a spec takes from the tooling is qualified by its group:
+    ``from libclinic.pyspec import ac, rt, machine``, then
+    ``@ac.critical_section``, ``x: ac.object``, ``rt.NULL``.
 ``f(): ... is expressible, but not lowered to C yet; see "The lowered subset" ...``
     The signature or the body of a function clinic would generate is
     outside the lowered subset of README.rst: a converter other than
-    ``object`` and ``str`` (take ``object`` and convert in a
-    ``@native`` helper, see the worked example: that changes the
-    generated parser), a default other than ``NULL``, a keyword-only
-    parameter, a statement or expression the table does not list
-    (assign a call to a local before comparing it).  Or keep the C:
-    ``...``, or ``@native`` with the body as its reference.
+    ``ac.object`` and ``ac.str`` (take ``ac.object`` and convert in an
+    ``@ac.stub(optimizer_info=True)`` helper, see the worked example: that
+    changes the generated parser), a default other than ``rt.NULL``, a
+    keyword-only parameter, a statement or expression the table does not
+    list (assign a call to a local before comparing it).  Or keep the C:
+    ``@ac.stub``, with ``...``, its pure Python or (``optimizer_info=True``)
+    the body as its reference.
 ``unsupported ...`` (the same hint)
     A use the partial evaluation produced that the emitter cannot lower
-    yet, e.g. in the body of an ``@inline`` function of another spec
+    yet, e.g. in the body of an ``@ac.inline`` function of another spec
     (reported there).
-``f(): 'x = ...' in an @inline function (lowered: fast paths ...)``
-    The body of an ``@inline`` function is ``if <test>: return
+``f(): 'x = ...' in an @ac.inline function (lowered: fast paths ...)``
+    The body of an ``@ac.inline`` function is ``if <test>: return
     <value>`` statements, then ``return <value>``.
-``isinstance() is the builtin here, not the C's: import it ...``
-    Running as Python, the spec (or a spec it imports) calls the builtin
-    ``isinstance()`` or ``iter()``: import them from
-    ``libclinic.pyspec.runtime``.
+``isinstance() is Python's builtin here, not the C's: write rt.isinstance() ...``
+    The spec (or a spec it imports) calls the builtin ``isinstance()`` or
+    ``iter()``: write ``rt.isinstance()``, ``rt.iter()``.
 ``imported spec ... not found: a spec imports another by its path from the source root``
-    Write ``from Objects.pyspec.abstract import ...``, not ``from
-    pyspec.abstract import ...``.
+    Write ``from Objects.pyspec import abstract``, not ``from pyspec
+    import abstract``.
+``import the spec, 'from Objects.pyspec import abstract', and call abstract.f(...)``
+    A spec calls the functions of another spec by its module:
+    ``abstract.f(...)``.
 ``m: use ... as the body of a function implemented in C, not pass``
     Write ``...``.
-``the body of a @native function is its Python reference``
-    Give the reference a body, or drop ``@native``.
+``the body of @ac.stub(optimizer_info=True) is the Python reference of the C``
+    Give the reference a body, or drop ``optimizer_info=True``.
 ``'T.x' is an accessor in ...: its block starts with @getter or @setter``
     Write ``@getter`` (or ``@setter``) above ``T.x`` in the block.
 ``conflicting types for 'x_impl'`` (C compiler)
@@ -719,12 +759,13 @@ README.rst, "Errors"):
 A difftest failure on an exception message
     The reference does not model the C's error: raise the same
     exception and message in the reference.
-``calls f(), which may run Python code: account for it with runs_python()`` (``test_pyspec_catalog``)
-    The C of a ``@native`` helper calls ``f``.  If ``f`` can run
-    Python code, add ``calls(x, "__slot__")`` or ``runs_python()`` to
-    the reference.  If it cannot (``memcmp``), add it to the audited
-    ``NO_PYTHON`` set of ``native_check.py``.  ``f`` may be a call
-    through a pointer, named by its expression (``(*fn)``).
+``calls f(), which may run Python code: account for it with rt.runs_python()`` (``test_pyspec_catalog``)
+    The C of an ``@ac.stub(optimizer_info=True)`` helper calls ``f``.  If
+    ``f`` can run Python code, add ``rt.calls(x, "__slot__")`` or
+    ``rt.runs_python()`` to the reference.  If it cannot (``memcmp``),
+    add it to the audited ``NO_PYTHON`` set of ``native_check.py``.
+    ``f`` may be a call through a pointer, named by its expression
+    (``(*fn)``).
 ``its reference calls f(), which its native code does not`` (``test_pyspec_catalog``)
     The reference says the C calls ``f``; the C (or a function of its
     file it calls) does not.  Correct whichever is wrong.

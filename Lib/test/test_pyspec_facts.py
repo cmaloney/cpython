@@ -18,9 +18,9 @@ type:
   and by calling the entry in the debug-build tripwire
   (_testinternalcapi.pyspec_no_python()).
 * HelperTest calls the hand-written C functions the specs call
-  (@native, HELPERS) directly, compares them with their Python
-  references, and checks the facts derived from the references the same
-  way.
+  (@ac.stub(optimizer_info=True), HELPERS) directly, compares them with their
+  Python references, and checks the facts derived from the references
+  the same way.
 * SlotFactsTest checks the slot facts that specialized uops use
   (_PySpec_FindSlot(), SLOT_USES) against the derivation, and the uops
   against the slots.
@@ -46,7 +46,7 @@ _testinternalcapi = import_helper.import_module('_testinternalcapi')
 test_tools.skip_if_missing('clinic')
 with test_tools.imports_under_tool('clinic'):
     from libclinic.pyspec import (builtin_types, call_table, context,
-                                  frontend, known, runtime, subset,
+                                  frontend, known, rt, runtime, subset,
                                   specfiles)
 
 SRCDIR = test_tools.basepath
@@ -342,8 +342,8 @@ NO_NULL = object()
 
 @functools.cache
 def helpers():
-    """{C function: SpecInfo of its spec} of every @native function
-    of the specs."""
+    """{C function: SpecInfo of its spec} of every function written in C
+    with a Python reference (@ac.stub(optimizer_info=True)) of the specs."""
     defined = {}
     for info in specs():
         for name in info.spec.native_functions():
@@ -361,7 +361,7 @@ def c_shape(node):
 
 
 class HelperTest(unittest.TestCase):
-    """Every hand-written C function a spec calls (@native) that
+    """Every hand-written C function with a reference a spec calls that
     can be called from Python, called directly with the HELPERS of its
     spec's cases: the same outcome as its Python reference, and the facts
     derived from the reference for the exact types of the arguments hold
@@ -437,11 +437,11 @@ class HelperTest(unittest.TestCase):
                     func, c_args, scalar = self.c_call(info, name, args)
                     out, result, ran = python_calls(func, *c_args)
                     if not facts_only:
-                        ref_args = [runtime.NULL if a is null else a
+                        ref_args = [rt.NULL if a is null else a
                                     for a in args]
                         expected, ref = outcome(info.references[name],
                                                 *ref_args)
-                        if ref is runtime.NULL:
+                        if ref is rt.NULL:
                             expected = ('returns', type(None), None)
                         elif scalar and expected[0] == 'returns':
                             # A C int for a Python int or bool.

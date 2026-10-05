@@ -1,0 +1,62 @@
+diff --color -u '--color=never' -x overloads.py -x __pycache__ /home/firebird347/projects/python/cpython/Tools/clinic/libclinic/pyspec/frontend.py tree/Tools/clinic/libclinic/pyspec/frontend.py
+--- /home/firebird347/projects/python/cpython/Tools/clinic/libclinic/pyspec/frontend.py	2026-09-28 22:40:52.042301881 -0700
++++ tree/Tools/clinic/libclinic/pyspec/frontend.py	2026-09-29 13:31:33.689962859 -0700
+@@ -45,7 +45,7 @@
+ 
+ from libclinic.errors import PYSPEC_README as README
+ from libclinic.errors import SpecError, SpecErrorKind
+-from . import builtin_types, marks, slots, specfiles, subset
++from . import builtin_types, marks, overloads, slots, specfiles, subset
+ 
+ 
+ TYPE_CTYPE = 'PyTypeObject *'
+@@ -267,7 +267,10 @@
+                  loaded: dict[str, Spec] | None = None) -> None:
+         self.filename = filename
+         self.source = source
+-        self.module = ast.parse(source, filename)
++        # Overload sets become one def with the dispatch if-tree as its
++        # body (overloads.py): everything below sees an ordinary spec.
++        self.module = overloads.desugar_module(
++            ast.parse(source, filename), filename)
+         # Top-level functions by name and methods by "T.name", in the
+         # order of the file.
+         self.functions: dict[str, ast.FunctionDef] = {}
+diff --color -u '--color=never' -x overloads.py -x __pycache__ /home/firebird347/projects/python/cpython/Tools/clinic/libclinic/pyspec/model.py tree/Tools/clinic/libclinic/pyspec/model.py
+--- /home/firebird347/projects/python/cpython/Tools/clinic/libclinic/pyspec/model.py	2026-09-28 23:06:42.332778654 -0700
++++ tree/Tools/clinic/libclinic/pyspec/model.py	2026-09-29 13:31:38.542065936 -0700
+@@ -31,7 +31,7 @@
+ import sys
+ import types
+ 
+-from . import frontend, machine, specfiles
++from . import frontend, machine, overloads, specfiles
+ from .runtime import NULL, tp_name
+ 
+ SPEC_ROOTS = ('Objects', 'Modules', 'Python', 'Include')
+@@ -706,7 +706,7 @@
+             return self.modules[path]
+         with open(path, encoding='utf-8') as f:
+             source = f.read()
+-        tree = ast.parse(source, path)
++        tree = overloads.desugar_module(ast.parse(source, path), path)
+         classes = {n.name for n in tree.body if isinstance(n, ast.ClassDef)}
+         tree = ast.fix_missing_locations(_SpecCalls(classes).visit(tree))
+         stem = os.path.splitext(os.path.basename(path))[0]
+diff --color -u '--color=never' -x overloads.py -x __pycache__ /home/firebird347/projects/python/cpython/Tools/clinic/libclinic/pyspec/runtime.py tree/Tools/clinic/libclinic/pyspec/runtime.py
+--- /home/firebird347/projects/python/cpython/Tools/clinic/libclinic/pyspec/runtime.py	2026-09-28 22:40:52.042520891 -0700
++++ tree/Tools/clinic/libclinic/pyspec/runtime.py	2026-09-29 13:31:33.690029763 -0700
+@@ -187,6 +187,13 @@
+     from . import specfiles
+     with open(path, encoding='utf-8') as f:
+         tree = ast.parse(f.read(), path)
++    # Overload sets: desugared as clinic reads them (the default), or, with
++    # PYSPEC_OVERLOADS=dispatch, interpreted by overloads.dispatch().
++    from . import overloads
++    if os.environ.get('PYSPEC_OVERLOADS') == 'dispatch':
++        tree = overloads.prepare_dispatch(tree)
++    else:
++        tree = overloads.desugar_module(tree, path)
+     check_shadowed_builtins(tree, path)
+     classes = {node.name for node in tree.body
+                if builtins.isinstance(node, ast.ClassDef)}

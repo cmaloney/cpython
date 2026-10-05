@@ -2,14 +2,15 @@
 
 ``Model(path).types`` are Python classes built from the classes of the
 spec at *path* (and of the specs it imports): each method and slot runs
-its spec body -- a generated one, a ``@native`` reference or a
-``@native(facts=False)`` pure-Python body -- through what the C around
-it does: the argument parsing clinic generates for its signature (Parser)
-and the descriptors and slot wrappers of Objects/descrobject.c and
-Objects/typeobject.c.  The specs run with their class names bound to the
-model classes, and store their bytes and fields with the primitives of
-machine.py.  Pyspec_parity.py compares the model with the C type
-(``pyspec_parity.py model``; Objects/pyspec/README.rst, "Pure Python").
+its spec body -- a generated one (``@ac.generate``), a Python reference
+(``@ac.stub(optimizer_info=True)``) or a pure-Python body (``@ac.stub``) --
+through what the C around it does: the argument parsing clinic generates
+for its signature (Parser) and the descriptors and slot wrappers of
+Objects/descrobject.c and Objects/typeobject.c.  The specs run with
+their class names bound to the model classes, and store their bytes and
+fields with the primitives of machine.py.  Pyspec_parity.py compares the
+model with the C type (``pyspec_parity.py model``;
+Objects/pyspec/README.rst, "Pure Python").
 
 A method whose body is still ``...`` is *delegated*: its model converts
 its arguments to host objects, calls the C method and converts the
@@ -31,8 +32,8 @@ import os
 import sys
 import types
 
-from . import frontend, machine, specfiles
-from .runtime import NULL, tp_name
+from . import cfunctions, frontend, machine, specfiles
+from .rt import NULL, tp_name
 
 SPEC_ROOTS = ('Objects', 'Modules', 'Python', 'Include')
 
@@ -658,7 +659,7 @@ def _decorators(node):
 
 def has_body(node):
     """Whether spec function *node* has a body the model runs: generated,
-    a @native reference or a pure-Python @native(facts=False) body."""
+    a @ac.stub(optimizer_info=True) reference or a pure-Python @ac.stub body."""
     return not frontend.is_literal_stub(node)
 
 
@@ -726,9 +727,9 @@ class Model:
                 continue
             raw = getattr(module, node.name)
             setattr(module, f'_spec_{node.name}', raw)
-            if not (spec.declares_slots(node.name)
+            if not (spec.describes_type(node.name)
                     or node.name in self.builtins):
-                continue            # stringlib's B: methods only
+                continue            # declares methods and slots only
             model = self.build(spec, node, raw, module)
             self.types[node.name] = model
             setattr(module, node.name, model)
@@ -766,19 +767,17 @@ class Model:
                                              model))
         return model
 
-    def body(self, raw, meth, owner, model):
-        """The function of the body of *meth*, for class *model*.  A
-        method shared from a template (``ctype.B.lower``) runs in the
-        template instantiated for *model* (template())."""
+    def body(self, raw, meth):
+        """The function of the body of method *meth* of spec class
+        *raw*."""
         func = raw.__dict__[meth]
-        func = getattr(func, '__func__', func)
-        if owner != model.__name__ and 'B' in func.__globals__:
-            func = self.template(func.__globals__, model)[1](func)
-        return func
+        return getattr(func, '__func__', func)
 
     def template(self, globals, model):
         """The functions of the template module with *globals*
-        (Objects/stringlib/pyspec/), for class *model*: in C each file
+        (Objects/stringlib/pyspec/, the spec of a header whose C
+        functions a type names, ``center = ac.stub("stringlib_center")``),
+        for class *model*: in C each file
         that includes the template defines STRINGLIB_NEW and friends
         before; here B is *model* and STRINGLIB_NEW the function of that
         name of the spec of *model* (its constructor from bytes)."""
@@ -802,11 +801,46 @@ class Model:
         self.templates[key] = namespace, instantiate
         return self.templates[key]
 
+    def c_function_member(self, spec, cls_name, meth, model):
+        """The descriptor of ``meth = ac.stub("f")``: the C function f of a
+        header (cfunctions.py), whose model is the def f of the spec of
+        the header, run in the template instantiated for *model*; its
+        arguments parsed as the C does, with its docstring."""
+        name = f'{cls_name}.{meth}'
+        method = spec.c_method(name)
+        found = cfunctions.model_def(spec, method)
+        pure = found is not None and has_body(found[1])
+        self.kinds[name] = 'pure' if pure else 'delegated'
+        if pure:
+            template = self.module(found[0].filename)
+            func = getattr(template, method.c_name)
+            func = self.template(func.__globals__, model)[1](func)
+        if method.function is not None:
+            # A clinic function: its parameters and docstring are C's.
+            node = cfunctions.clinic_def(method)
+            convention = None
+            doc, text = method.clinic_doc()
+        else:
+            node = found[1] if found else cfunctions.convention_def(method)
+            convention = method.flags.replace('|', ' | ').split(' | ')[0]
+            doc = found[0].docstring(method.c_name) if found else None
+            text = self.text_signature(node, frontend.PYCFUNCTION,
+                                       convention)
+        parser = Parser(node, meth, name, convention=convention)
+        if pure:
+            def call(obj, args, kwargs, where):
+                return func(obj, *parser(args, kwargs, where))
+        else:
+            call = self.delegate(model, meth)
+        return MethodDescriptor(model, meth, call, doc, text)
+
     def member(self, spec, cls_name, meth, raw, model):
         """The descriptor of method *meth* of class *cls_name*."""
         name = f'{cls_name}.{meth}'
         kind = spec.method_kind(name)
         owner_spec, owner = spec, cls_name
+        if kind == frontend.SHARED and spec.shared[name].c_function:
+            return self.c_function_member(spec, cls_name, meth, model)
         if kind == frontend.SHARED:
             shared = spec.shared[name]
             owner_spec = spec.imported(shared.module) if shared.module \
@@ -814,16 +848,17 @@ class Model:
             owner = shared.cls
             node = owner_spec.functions[f'{owner}.{meth}']
             decorators = shared.decorators
-            c_name = next((d for d in decorators
-                           if frontend.decorator_name(d) == 'c_name'), None)
+            stub = next((d for d in decorators
+                         if frontend.decorator_name(d) == frontend.STUB),
+                        None)
             kind = owner_spec.method_kind(f'{owner}.{meth}')
-            if c_name is not None:
+            if stub is not None:
                 kind = frontend.PYCFUNCTION
         else:
             node = spec.functions[name]
         pure = has_body(node)
         self.kinds[name] = 'pure' if pure else 'delegated'
-        func = self.body(raw, meth, owner, model) if pure else None
+        func = self.body(raw, meth) if pure else None
         doc = self.docstring(owner_spec, f'{owner}.{meth}', node)
         decorators = _decorators(node)
         if meth == '__new__':

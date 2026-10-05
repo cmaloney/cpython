@@ -7,8 +7,8 @@ bytes_new_impl(), plus bytes_new_nargsN() for each positional argument
 count N, the __new__ partially evaluated for exactly the class and N
 arguments, which the vectorcall clinic generates calls); a top-level
 function becomes the C function of its name, non-static when it starts
-with Py or _Py (a header declares it).  Stubs and @native functions are
-C written by hand: only called.
+with Py or _Py (a header declares it).  @ac.stub functions (with a
+reference or not) are C written by hand: only called.
 
 The passes, sharing one context.Context: the check of the lowered subset
 (subset.py), partial evaluation (partial_eval.py, which marks its
@@ -163,7 +163,7 @@ class FunctionLowering(subset.Walker[frozenset[str], None]):
         path = marks.scope(stmt) or self.spec.filename
         match stmt:
             case ast.If(test=header) | ast.For(iter=header):
-                # (The test of an @inline function is from its spec.)
+                # (The test of an @ac.inline function is from its spec.)
                 end = header.end_lineno or 0
                 last = (end if stmt.lineno <= end <= (stmt.end_lineno or 0)
                         else stmt.lineno)

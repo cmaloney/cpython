@@ -3,38 +3,37 @@
 Argument Clinic reads this file while processing bytearrayobject.c (see
 Objects/pyspec/README.rst).  Each method of ``class bytearray`` is a
 clinic function (parameters, docstring and clinic decorators) with a
-one-line block in bytearrayobject.c above its hand-written impl.
+one-line block in bytearrayobject.c above its hand-written impl
+(``@ac.stub``).
 
 A method declared elsewhere is shared, not repeated:
 
-* ``strip = critical_section(bytesobject.bytes.strip)``: bytes.strip's
+* ``strip = ac.critical_section(bytesobject.bytes.strip)``: bytes.strip's
   parameters, docstring and decorators, and @critical_section; the block
   ``bytearray.strip`` makes it a clinic function of bytearray;
-* ``center = critical_section(transmogrify.B.center)``: the C function of
-  the stringlib template, which clinic calls from bytearray_center() in a
-  critical section on self (no block: bytearray has no impl of its own);
-* ``__length_hint__ = c_name(METH_NOARGS="f")(...)``: the docstring of
+* ``center = ac.stub("stringlib_center", critical_section=True)``: the
+  C function of the stringlib template (transmogrify.h, which
+  bytearrayobject.c includes; clinic reads its signature and docstring
+  from the C), which clinic calls from bytearray_center() in a critical
+  section on self (no block: bytearray has no impl of its own);
+* ``__length_hint__ = ac.stub(METH_NOARGS="f")(...)``: the docstring of
   another method, with its own hand-written C function f.
 
-The classes are the whole types: clinic generates their docstring,
-method tables and slot tables at the end of
+The classes are the whole types (``@ac.generate``): clinic generates
+their docstring, method tables and slot tables at the end of
 Objects/clinic/bytearrayobject_pyspec.c.h, which PyByteArray_Type and
 PyByteArrayIter_Type (in C) name.  Dunders are slots (C functions with the
 slot's signature, from slotdefs[]).
 """
 
-from libclinic.pyspec.runtime import NULL
+# Argument Clinic (converters, decorators) and the primitives with a C
+# meaning (rt.NULL).
+from libclinic.pyspec import ac, rt
 
-# Argument Clinic decorators (no-ops in Python).
-from libclinic.pyspec.runtime import (
-    critical_section, permit_long_summary, text_signature)
-from libclinic.pyspec.runtime import c_name
-
-# Methods declared by bytes, and by the stringlib templates.
+# Methods declared by bytes.
 from Objects.pyspec import bytesobject
-from Objects.stringlib.pyspec import ctype, transmogrify
 
-
+@ac.generate
 class bytearray:
     """bytearray(iterable_of_ints) -> bytearray
     bytearray(string, encoding[, errors]) -> bytearray
@@ -50,15 +49,16 @@ class bytearray:
       - an integer
     """
 
+    @ac.stub
     def __init__(
         self,
-        source: object(c_param='arg') = NULL,
-        encoding: str = NULL,
-        errors: str = NULL,
+        source: ac.object(c_param='arg') = rt.NULL,
+        encoding: ac.str = rt.NULL,
+        errors: ac.str = rt.NULL,
     ):
         ...
 
-    @c_name(METH_NOARGS="bytearray_alloc")
+    @ac.stub(METH_NOARGS="bytearray_alloc")
     def __alloc__(self, /):
         """B.__alloc__() -> int
 
@@ -66,25 +66,26 @@ class bytearray:
         """
         ...
 
-    @critical_section
-    @c_name("bytearray_reduce")
+    @ac.critical_section
+    @ac.stub("bytearray_reduce")
     def __reduce__(self):
         """Return state information for pickling."""
         ...
 
-    @critical_section
-    @c_name("bytearray_reduce_ex")
-    def __reduce_ex__(self, proto: int = 0, /):
+    @ac.critical_section
+    @ac.stub("bytearray_reduce_ex")
+    def __reduce_ex__(self, proto: ac.int = 0, /):
         """Return state information for pickling."""
         ...
 
-    @c_name("bytearray_sizeof")
+    @ac.stub("bytearray_sizeof")
     def __sizeof__(self):
         """Returns the size of the bytearray object in memory, in bytes."""
         ...
 
-    @critical_section
-    def append(self, item: bytesvalue, /):
+    @ac.stub
+    @ac.critical_section
+    def append(self, item: ac.bytesvalue, /):
         """Append a single item to the end of the bytearray.
 
           item
@@ -92,26 +93,29 @@ class bytearray:
         """
         ...
 
-    capitalize = critical_section(ctype.B.capitalize)
+    capitalize = ac.stub("stringlib_capitalize", critical_section=True)
 
-    center = critical_section(transmogrify.B.center)
+    center = ac.stub("stringlib_center", critical_section=True)
 
+    @ac.stub
     def clear(self):
         """Remove all items from the bytearray."""
         ...
 
-    @critical_section
+    @ac.stub
+    @ac.critical_section
     def copy(self):
         """Return a copy of B."""
         ...
 
-    count = critical_section(bytesobject.bytes.count)
+    count = ac.critical_section(bytesobject.bytes.count)
 
-    @critical_section
+    @ac.stub
+    @ac.critical_section
     def decode(
         self,
-        encoding: str(c_default="NULL") = 'utf-8',
-        errors: str(c_default="NULL") = 'strict',
+        encoding: ac.str(c_default="NULL") = 'utf-8',
+        errors: ac.str(c_default="NULL") = 'strict',
     ):
         """Decode the bytearray using the codec registered for encoding.
 
@@ -126,14 +130,15 @@ class bytearray:
         """
         ...
 
-    @permit_long_summary
-    @critical_section
-    @text_signature("($self, suffix[, start[, end]], /)")
+    @ac.stub
+    @ac.permit_long_summary
+    @ac.critical_section
+    @ac.text_signature("($self, suffix[, start[, end]], /)")
     def endswith(
         self,
-        suffix: object(c_param='subobj'),
-        start: slice_index(accept={int, NoneType}, c_default='0') = None,
-        end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
+        suffix: ac.object(c_param='subobj'),
+        start: ac.slice_index(accept={int, ac.NoneType}, c_default='0') = None,
+        end: ac.slice_index(accept={int, ac.NoneType}, c_default='PY_SSIZE_T_MAX') = None,
         /,
     ):
         """Return True if the bytearray ends with the specified suffix, False otherwise.
@@ -147,11 +152,12 @@ class bytearray:
         """
         ...
 
-    expandtabs = critical_section(transmogrify.B.expandtabs)
+    expandtabs = ac.stub("stringlib_expandtabs", critical_section=True)
 
-    @permit_long_summary
-    @critical_section
-    def extend(self, iterable_of_ints: object, /):
+    @ac.stub
+    @ac.permit_long_summary
+    @ac.critical_section
+    def extend(self, iterable_of_ints: ac.object, /):
         """Append all the items from the iterator or sequence to the end of the bytearray.
 
           iterable_of_ints
@@ -159,14 +165,15 @@ class bytearray:
         """
         ...
 
-    @permit_long_summary
-    @critical_section
-    @text_signature("($self, sub[, start[, end]], /)")
+    @ac.stub
+    @ac.permit_long_summary
+    @ac.critical_section
+    @ac.text_signature("($self, sub[, start[, end]], /)")
     def find(
         self,
-        sub: object,
-        start: slice_index(accept={int, NoneType}, c_default='0') = None,
-        end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
+        sub: ac.object,
+        start: ac.slice_index(accept={int, ac.NoneType}, c_default='0') = None,
+        end: ac.slice_index(accept={int, ac.NoneType}, c_default='PY_SSIZE_T_MAX') = None,
         /,
     ):
         """Return the lowest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start:end].
@@ -180,8 +187,9 @@ class bytearray:
         """
         ...
 
+    @ac.stub
     @classmethod
-    def fromhex(cls, string: object, /):
+    def fromhex(cls, string: ac.object, /):
         r"""Create a bytearray object from a string of hexadecimal numbers.
 
         Spaces between two numbers are accepted.
@@ -190,8 +198,9 @@ class bytearray:
         """
         ...
 
-    @critical_section
-    def hex(self, sep: object = NULL, bytes_per_sep: Py_ssize_t = 1):
+    @ac.stub
+    @ac.critical_section
+    def hex(self, sep: ac.object = rt.NULL, bytes_per_sep: ac.Py_ssize_t = 1):
         """Create a string of hexadecimal numbers from a bytearray object.
 
           sep
@@ -213,14 +222,15 @@ class bytearray:
         """
         ...
 
-    @permit_long_summary
-    @critical_section
-    @text_signature("($self, sub[, start[, end]], /)")
+    @ac.stub
+    @ac.permit_long_summary
+    @ac.critical_section
+    @ac.text_signature("($self, sub[, start[, end]], /)")
     def index(
         self,
-        sub: object,
-        start: slice_index(accept={int, NoneType}, c_default='0') = None,
-        end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
+        sub: ac.object,
+        start: ac.slice_index(accept={int, ac.NoneType}, c_default='0') = None,
+        end: ac.slice_index(accept={int, ac.NoneType}, c_default='PY_SSIZE_T_MAX') = None,
         /,
     ):
         """Return the lowest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start:end].
@@ -234,8 +244,9 @@ class bytearray:
         """
         ...
 
-    @critical_section
-    def insert(self, index: Py_ssize_t, item: bytesvalue, /):
+    @ac.stub
+    @ac.critical_section
+    def insert(self, index: ac.Py_ssize_t, item: ac.bytesvalue, /):
         """Insert a single item into the bytearray before the given index.
 
           index
@@ -245,24 +256,25 @@ class bytearray:
         """
         ...
 
-    isalnum = critical_section(ctype.B.isalnum)
+    isalnum = ac.stub("stringlib_isalnum", critical_section=True)
 
-    isalpha = critical_section(ctype.B.isalpha)
+    isalpha = ac.stub("stringlib_isalpha", critical_section=True)
 
-    isascii = critical_section(ctype.B.isascii)
+    isascii = ac.stub("stringlib_isascii", critical_section=True)
 
-    isdigit = critical_section(ctype.B.isdigit)
+    isdigit = ac.stub("stringlib_isdigit", critical_section=True)
 
-    islower = critical_section(ctype.B.islower)
+    islower = ac.stub("stringlib_islower", critical_section=True)
 
-    isspace = critical_section(ctype.B.isspace)
+    isspace = ac.stub("stringlib_isspace", critical_section=True)
 
-    istitle = critical_section(ctype.B.istitle)
+    istitle = ac.stub("stringlib_istitle", critical_section=True)
 
-    isupper = critical_section(ctype.B.isupper)
+    isupper = ac.stub("stringlib_isupper", critical_section=True)
 
-    @critical_section
-    def join(self, iterable_of_bytes: object, /):
+    @ac.stub
+    @ac.critical_section
+    def join(self, iterable_of_bytes: ac.object, /):
         """Concatenate any number of bytes/bytearray objects.
 
         The bytearray whose method is called is inserted in between each
@@ -272,13 +284,14 @@ class bytearray:
         """
         ...
 
-    ljust = critical_section(transmogrify.B.ljust)
+    ljust = ac.stub("stringlib_ljust", critical_section=True)
 
-    lower = critical_section(ctype.B.lower)
+    lower = ac.stub("stringlib_lower", critical_section=True)
 
     # Not bytes.lstrip, whose docstring has "leading  ASCII" (two spaces).
-    @critical_section
-    def lstrip(self, bytes: object = None, /):
+    @ac.stub
+    @ac.critical_section
+    def lstrip(self, bytes: ac.object = None, /):
         """Strip leading bytes contained in the argument.
 
         If the argument is omitted or None, strip leading ASCII whitespace.
@@ -287,8 +300,9 @@ class bytearray:
 
     maketrans = bytesobject.bytes.maketrans
 
-    @critical_section
-    def partition(self, sep: object, /):
+    @ac.stub
+    @ac.critical_section
+    def partition(self, sep: ac.object, /):
         """Partition the bytearray into three parts using the given separator.
 
         This will search for the separator sep in the bytearray.  If the
@@ -301,8 +315,9 @@ class bytearray:
         """
         ...
 
-    @critical_section
-    def pop(self, index: Py_ssize_t = -1, /):
+    @ac.stub
+    @ac.critical_section
+    def pop(self, index: ac.Py_ssize_t = -1, /):
         """Remove and return a single item from B.
 
           index
@@ -313,8 +328,9 @@ class bytearray:
         """
         ...
 
-    @critical_section
-    def remove(self, value: bytesvalue, /):
+    @ac.stub
+    @ac.critical_section
+    def remove(self, value: ac.bytesvalue, /):
         """Remove the first occurrence of a value in the bytearray.
 
           value
@@ -322,10 +338,11 @@ class bytearray:
         """
         ...
 
-    replace = critical_section(bytesobject.bytes.replace)
+    replace = ac.critical_section(bytesobject.bytes.replace)
 
-    @critical_section
-    def removeprefix(self, prefix: Py_buffer, /):
+    @ac.stub
+    @ac.critical_section
+    def removeprefix(self, prefix: ac.Py_buffer, /):
         """Return a bytearray with the given prefix string removed if present.
 
         If the bytearray starts with the prefix string, return
@@ -334,8 +351,9 @@ class bytearray:
         """
         ...
 
-    @critical_section
-    def removesuffix(self, suffix: Py_buffer, /):
+    @ac.stub
+    @ac.critical_section
+    def removesuffix(self, suffix: ac.Py_buffer, /):
         """Return a bytearray with the given suffix string removed if present.
 
         If the bytearray ends with the suffix string and that suffix is not
@@ -344,8 +362,9 @@ class bytearray:
         """
         ...
 
-    @critical_section
-    def resize(self, size: Py_ssize_t, /):
+    @ac.stub
+    @ac.critical_section
+    def resize(self, size: ac.Py_ssize_t, /):
         """Resize the internal buffer of bytearray to len.
 
           size
@@ -353,19 +372,21 @@ class bytearray:
         """
         ...
 
-    @critical_section
+    @ac.stub
+    @ac.critical_section
     def reverse(self):
         """Reverse the order of the values in B in place."""
         ...
 
-    @permit_long_summary
-    @critical_section
-    @text_signature("($self, sub[, start[, end]], /)")
+    @ac.stub
+    @ac.permit_long_summary
+    @ac.critical_section
+    @ac.text_signature("($self, sub[, start[, end]], /)")
     def rfind(
         self,
-        sub: object,
-        start: slice_index(accept={int, NoneType}, c_default='0') = None,
-        end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
+        sub: ac.object,
+        start: ac.slice_index(accept={int, ac.NoneType}, c_default='0') = None,
+        end: ac.slice_index(accept={int, ac.NoneType}, c_default='PY_SSIZE_T_MAX') = None,
         /,
     ):
         """Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start:end].
@@ -379,14 +400,15 @@ class bytearray:
         """
         ...
 
-    @permit_long_summary
-    @critical_section
-    @text_signature("($self, sub[, start[, end]], /)")
+    @ac.stub
+    @ac.permit_long_summary
+    @ac.critical_section
+    @ac.text_signature("($self, sub[, start[, end]], /)")
     def rindex(
         self,
-        sub: object,
-        start: slice_index(accept={int, NoneType}, c_default='0') = None,
-        end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
+        sub: ac.object,
+        start: ac.slice_index(accept={int, ac.NoneType}, c_default='0') = None,
+        end: ac.slice_index(accept={int, ac.NoneType}, c_default='PY_SSIZE_T_MAX') = None,
         /,
     ):
         """Return the highest index in B where subsection 'sub' is found, such that 'sub' is contained within B[start:end].
@@ -400,10 +422,11 @@ class bytearray:
         """
         ...
 
-    rjust = critical_section(transmogrify.B.rjust)
+    rjust = ac.stub("stringlib_rjust", critical_section=True)
 
-    @critical_section
-    def rpartition(self, sep: object, /):
+    @ac.stub
+    @ac.critical_section
+    def rpartition(self, sep: ac.object, /):
         """Partition the bytearray into three parts using the given separator.
 
         This will search for the separator sep in the bytearray, starting at
@@ -417,9 +440,10 @@ class bytearray:
         """
         ...
 
-    @permit_long_summary
-    @critical_section
-    def rsplit(self, sep: object = None, maxsplit: Py_ssize_t = -1):
+    @ac.stub
+    @ac.permit_long_summary
+    @ac.critical_section
+    def rsplit(self, sep: ac.object = None, maxsplit: ac.Py_ssize_t = -1):
         """Return a list of the sections in the bytearray, using sep as the delimiter.
 
           sep
@@ -435,11 +459,12 @@ class bytearray:
         """
         ...
 
-    rstrip = critical_section(bytesobject.bytes.rstrip)
+    rstrip = ac.critical_section(bytesobject.bytes.rstrip)
 
-    @permit_long_summary
-    @critical_section
-    def split(self, sep: object = None, maxsplit: Py_ssize_t = -1):
+    @ac.stub
+    @ac.permit_long_summary
+    @ac.critical_section
+    def split(self, sep: ac.object = None, maxsplit: ac.Py_ssize_t = -1):
         """Return a list of the sections in the bytearray, using sep as the delimiter.
 
           sep
@@ -452,9 +477,10 @@ class bytearray:
         """
         ...
 
-    @permit_long_summary
-    @critical_section
-    def splitlines(self, keepends: bool = False):
+    @ac.stub
+    @ac.permit_long_summary
+    @ac.critical_section
+    def splitlines(self, keepends: ac.bool = False):
         """Return a list of the lines in the bytearray, breaking at line boundaries.
 
         Line breaks are not included in the resulting list unless keepends
@@ -462,14 +488,15 @@ class bytearray:
         """
         ...
 
-    @permit_long_summary
-    @critical_section
-    @text_signature("($self, prefix[, start[, end]], /)")
+    @ac.stub
+    @ac.permit_long_summary
+    @ac.critical_section
+    @ac.text_signature("($self, prefix[, start[, end]], /)")
     def startswith(
         self,
-        prefix: object(c_param='subobj'),
-        start: slice_index(accept={int, NoneType}, c_default='0') = None,
-        end: slice_index(accept={int, NoneType}, c_default='PY_SSIZE_T_MAX') = None,
+        prefix: ac.object(c_param='subobj'),
+        start: ac.slice_index(accept={int, ac.NoneType}, c_default='0') = None,
+        end: ac.slice_index(accept={int, ac.NoneType}, c_default='PY_SSIZE_T_MAX') = None,
         /,
     ):
         """Return True if the bytearray starts with the specified prefix, False otherwise.
@@ -483,12 +510,13 @@ class bytearray:
         """
         ...
 
-    strip = critical_section(bytesobject.bytes.strip)
+    strip = ac.critical_section(bytesobject.bytes.strip)
 
-    swapcase = critical_section(ctype.B.swapcase)
+    swapcase = ac.stub("stringlib_swapcase", critical_section=True)
 
-    @critical_section
-    def take_bytes(self, n: object = None, /):
+    @ac.stub
+    @ac.critical_section
+    def take_bytes(self, n: ac.object = None, /):
         """Take *n* bytes from the bytearray and return them as a bytes object.
 
           n
@@ -496,69 +524,83 @@ class bytearray:
         """
         ...
 
-    title = critical_section(ctype.B.title)
+    title = ac.stub("stringlib_title", critical_section=True)
 
-    translate = critical_section(bytesobject.bytes.translate)
+    translate = ac.critical_section(bytesobject.bytes.translate)
 
-    upper = critical_section(ctype.B.upper)
+    upper = ac.stub("stringlib_upper", critical_section=True)
 
-    zfill = critical_section(transmogrify.B.zfill)
+    zfill = ac.stub("stringlib_zfill", critical_section=True)
 
     # -- Slots: C functions with the signature of their slot (see "Methods
     # that are not clinic functions" in libclinic/pyspec/frontend.py).  The
     # C name is bytearray_ plus the slot without its prefix (bytearray_repr
-    # for tp_repr) unless @c_name gives it.  No __hash__: PyType_Ready()
+    # for tp_repr) unless @ac.stub gives it.  No __hash__: PyType_Ready()
     # makes bytearray unhashable (tp_hash is PyObject_HashNotImplemented).
 
+    @ac.stub
     def __repr__(self, /): ...
+    @ac.stub
     def __str__(self, /): ...
 
     # tp_richcompare: one C function, bytearray_richcompare(), for all six.
+    @ac.stub
     def __lt__(self, value, /): ...
+    @ac.stub
     def __le__(self, value, /): ...
+    @ac.stub
     def __eq__(self, value, /): ...
+    @ac.stub
     def __ne__(self, value, /): ...
+    @ac.stub
     def __gt__(self, value, /): ...
+    @ac.stub
     def __ge__(self, value, /): ...
 
+    @ac.stub
     def __iter__(self, /): ...
 
     # The buffer (bytearray_getbuffer) and its release: exports forbid
     # resizing.
+    @ac.stub
     def __buffer__(self, flags, /): ...
+    @ac.stub
     def __release_buffer__(self, buffer, /): ...
 
     # nb_remainder: bytearray_mod() for both.
-    @c_name("bytearray_mod")
+    @ac.stub("bytearray_mod")
     def __mod__(self, value, /): ...
+    @ac.stub
     def __rmod__(self, value, /): ...
 
-    @c_name(mp_length="bytearray_length", sq_length="bytearray_length")
+    @ac.stub(slots=["mp_length", "sq_length"])
     def __len__(self, /): ...
 
-    @c_name(mp_subscript="bytearray_subscript", sq_item="bytearray_getitem")
+    @ac.stub(slots=["mp_subscript"], sq_item="bytearray_getitem")
     def __getitem__(self, key, /): ...
 
     # mp_ass_subscript and sq_ass_item: one C function each for both.
-    @c_name(mp_ass_subscript="bytearray_ass_subscript",
-            sq_ass_item="bytearray_setitem")
+    @ac.stub(slots=["mp_ass_subscript"], sq_ass_item="bytearray_setitem")
     def __setitem__(self, key, value, /): ...
+    @ac.stub
     def __delitem__(self, key, /): ...
 
-    @c_name(sq_concat="PyByteArray_Concat")
+    @ac.stub(sq_concat="PyByteArray_Concat")
     def __add__(self, value, /): ...
 
     # sq_repeat: bytearray_repeat() for both.
-    @c_name(sq_repeat="bytearray_repeat")
+    @ac.stub(slots=["sq_repeat"])
     def __mul__(self, value, /): ...
+    @ac.stub
     def __rmul__(self, value, /): ...
 
+    @ac.stub
     def __contains__(self, key, /): ...
 
-    @c_name(sq_inplace_concat="bytearray_iconcat")
+    @ac.stub(sq_inplace_concat="bytearray_iconcat")
     def __iadd__(self, value, /): ...
 
-    @c_name(sq_inplace_repeat="bytearray_irepeat")
+    @ac.stub(sq_inplace_repeat="bytearray_irepeat")
     def __imul__(self, value, /): ...
 
 
@@ -566,17 +608,19 @@ class bytearray:
 # the struct (bytesiterobject), its dealloc, traverse, __iter__
 # (PyObject_SelfIter) and __next__ are C; the method table is
 # bytearrayiter_methods.
-@c_name("bytearrayiter")
+@ac.generate(prefix="bytearrayiter")
 class bytearray_iterator:
+    @ac.stub
     def __iter__(self, /): ...
+    @ac.stub
     def __next__(self, /): ...
 
-    __length_hint__ = c_name(METH_NOARGS="bytearrayiter_length_hint")(
+    __length_hint__ = ac.stub(METH_NOARGS="bytearrayiter_length_hint")(
         bytesobject.bytes_iterator.__length_hint__)
 
     # The docstring (and text signature) of bytearray.__reduce__.
-    __reduce__ = c_name(METH_NOARGS="bytearrayiter_reduce")(
+    __reduce__ = ac.stub(METH_NOARGS="bytearrayiter_reduce")(
         bytearray.__reduce__)
 
-    __setstate__ = c_name(METH_O="bytearrayiter_setstate")(
+    __setstate__ = ac.stub(METH_O="bytearrayiter_setstate")(
         bytesobject.bytes_iterator.__setstate__)

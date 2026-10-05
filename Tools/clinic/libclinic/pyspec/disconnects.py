@@ -19,13 +19,13 @@ slots       The slot tables of Doc/c-api/typeobj.rst vs slotdefs[] in
 docstrings  The same docstring written by hand in two places.
 typeshed    Optional: typeshed's stdlib/builtins.pyi vs the signatures of
             the spec (the runtime's for methods without a spec).
-c_calls     The C of each @native function vs its Python reference (the
-            C checker of native_check.py, which says what counts as a
-            call that may run Python code): every such call is
-            accounted for by the reference: a call of the same function,
-            a calls() of the special method it invokes, or
-            runs_python(); and the C calls the native functions the
-            reference calls.
+c_calls     The C of each function with a Python reference
+            (@ac.stub(optimizer_info=True)) vs the reference (the C checker
+            of native_check.py, which says what counts as a call that
+            may run Python code): every such call is accounted for by
+            the reference: a call of the same function, an rt.calls()
+            of the special method it invokes, or rt.runs_python(); and
+            the C calls the native functions the reference calls.
 
 Signatures are compared by shape: the kind and optionality of each
 parameter, its name unless it is positional-only, and its default when
@@ -743,11 +743,12 @@ def typeshed(srcdir, typeshed_dir):
 
 
 
-# -- Dimension: the native code of the @native functions vs their Python
-# references: native_check.py (README.rst, "Checking a reference against
-# its native code").
+# -- Dimension: the native code of the functions with a Python reference
+# (@ac.stub(optimizer_info=True)) vs the references: native_check.py
+# (README.rst, "Checking a reference against its native code").
 
 def c_calls(srcdir):
-    """The disconnects of the @native functions implemented in C."""
+    """The disconnects of the functions with a Python reference
+    implemented in C."""
     from . import native_check
     return native_check.c_calls(srcdir)

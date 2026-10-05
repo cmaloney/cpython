@@ -50,7 +50,7 @@ SPEC_ERROR_HINTS = {
     SpecErrorKind.NOT_LOWERED: (
         f'see "The lowered subset" in {PYSPEC_README}; a function '
         'implemented natively (in C) keeps this as its Python reference '
-        'with @native'),
+        'with @ac.stub(optimizer_info=True)'),
 }
 
 
@@ -72,7 +72,7 @@ class SpecError(ClinicError):
            kind: SpecErrorKind = SpecErrorKind.INVALID,
            filename: str | None = None) -> 'SpecError':
         """An error at the line of *node*, in the spec it was written in:
-        a node copied from another spec (the body of an @inline function,
+        a node copied from another spec (the body of an @ac.inline function,
         partial_eval.py) is marked with that spec (marks.Scope), else
         *filename*."""
         from libclinic.pyspec.marks import scope

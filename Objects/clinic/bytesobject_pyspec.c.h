@@ -16,7 +16,7 @@ bytes_new_impl(PyTypeObject *cls, PyObject *source, const char *encoding, const 
 {
     PyObject *value = NULL;
 
-    /* Objects/pyspec/bytesobject.py:92 */
+    /* Objects/pyspec/bytesobject.py:76 */
     if (cls != &PyBytes_Type) {
         if ((source == NULL) && (encoding == NULL) && (errors == NULL)) {
             value = bytes_new_nargs0();
@@ -72,7 +72,7 @@ bytes_new_impl(PyTypeObject *cls, PyObject *source, const char *encoding, const 
 static PyObject *
 bytes___bytes___impl(PyBytesObject *self)
 {
-    /* Objects/pyspec/bytesobject.py:144 */
+    /* Objects/pyspec/bytesobject.py:131 */
     if (PyBytes_CheckExact(self)) {
         return Py_NewRef(self);
     }
@@ -84,7 +84,7 @@ bytes_fromhex_impl(PyTypeObject *cls, PyObject *string)
 {
     PyObject *result = NULL;
 
-    /* Objects/pyspec/bytesobject.py:244 */
+    /* Objects/pyspec/bytesobject.py:233 */
     if (cls == &PyBytes_Type) {
         return _PyBytes_FromHex(string, 0);
     }
@@ -102,7 +102,7 @@ PyBytes_FromObject(PyObject *x)
 {
     PyObject *it = NULL;
 
-    /* Objects/pyspec/bytesobject.py:769 */
+    /* Objects/pyspec/bytesobject.py:755 */
     if (x == NULL) {
         PyErr_BadInternalCall();
         return NULL;
@@ -131,7 +131,7 @@ PyBytes_FromObject(PyObject *x)
                 }
             }
             else {
-                /* Objects/pyspec/bytesobject.py:785 */
+                /* Objects/pyspec/bytesobject.py:771 */
                 PyObject *_return_value = bytes_from_iterator(it, x);
                 Py_DECREF(it);
                 return _return_value;
@@ -150,7 +150,7 @@ bytes_from_iterator(PyObject *it, PyObject *x)
     PyObject *item = NULL;
     Py_ssize_t value;
 
-    /* Objects/pyspec/bytesobject.py:792 */
+    /* Objects/pyspec/bytesobject.py:779 */
     if (PyList_CheckExact(x)) {
         size = PyList_GET_SIZE(x);
     }
@@ -211,7 +211,7 @@ bytes_from_iterator(PyObject *it, PyObject *x)
 static PyObject *
 bytes_new_nargs0(void)
 {
-    /* Objects/pyspec/bytesobject.py:100 */
+    /* Objects/pyspec/bytesobject.py:84 */
     return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
 }
 
@@ -260,7 +260,7 @@ bytes_new_nargs1(PyObject *source)
     Py_ssize_t size;
     PyObject *it_1 = NULL;
 
-    /* Objects/pyspec/bytesobject.py:110 */
+    /* Objects/pyspec/bytesobject.py:95 */
     if (PyBytes_CheckExact(source)) {
         return Py_NewRef(source);
     }
@@ -294,12 +294,12 @@ bytes_new_nargs1(PyObject *source)
             size = _PyLong_CompactValue((const PyLongObject *)source);
         }
         else {
-            /* Objects/pyspec/bytesobject.py:128 */
+            /* Objects/pyspec/bytesobject.py:115 */
             size = PyNumber_AsSsize_t(source, PyExc_OverflowError);
             if (size == -1 && PyErr_Occurred()) {
                 if (PyErr_ExceptionMatches(PyExc_TypeError)) {
                     PyErr_Clear();
-                    /* Objects/pyspec/bytesobject.py:131 */
+                    /* Objects/pyspec/bytesobject.py:118 */
                     return PyBytes_FromObject(source);
                 }
                 else {
@@ -313,11 +313,11 @@ bytes_new_nargs1(PyObject *source)
         }
         return _PyBytes_FromSize(size, 1);
     }
-    /* Objects/pyspec/bytesobject.py:774 */
+    /* Objects/pyspec/bytesobject.py:760 */
     if (PyObject_CheckBuffer(source)) {
         return _PyBytes_FromBuffer(source);
     }
-    /* Objects/pyspec/bytesobject.py:780 */
+    /* Objects/pyspec/bytesobject.py:766 */
     if (PyList_CheckExact(source)) {
         return bytes_from_iterator_list(source);
     }
@@ -335,7 +335,7 @@ bytes_new_nargs1(PyObject *source)
             }
         }
         else {
-            /* Objects/pyspec/bytesobject.py:785 */
+            /* Objects/pyspec/bytesobject.py:771 */
             PyObject *_return_value = bytes_from_iterator(it_1, source);
             Py_DECREF(it_1);
             return _return_value;
@@ -353,7 +353,7 @@ bytes_new_nargs1(PyObject *source)
 static PyObject *
 bytes_new_nargs2(PyObject *source, const char *encoding)
 {
-    /* Objects/pyspec/bytesobject.py:102 */
+    /* Objects/pyspec/bytesobject.py:86 */
     if (!PyUnicode_Check(source)) {
         PyErr_SetString(PyExc_TypeError, "encoding without a string argument");
         return NULL;
@@ -369,7 +369,7 @@ bytes_new_nargs2(PyObject *source, const char *encoding)
 static PyObject *
 bytes_new_nargs3(PyObject *source, const char *encoding, const char *errors)
 {
-    /* Objects/pyspec/bytesobject.py:102 */
+    /* Objects/pyspec/bytesobject.py:86 */
     if (!PyUnicode_Check(source)) {
         PyErr_SetString(PyExc_TypeError, "encoding without a string argument");
         return NULL;
@@ -384,7 +384,7 @@ bytes_new_nargs3(PyObject *source, const char *encoding, const char *errors)
 static PyObject *
 bytes_new_nargs1_bytes(PyObject *source)
 {
-    /* Objects/pyspec/bytesobject.py:111 */
+    /* Objects/pyspec/bytesobject.py:96 */
     return Py_NewRef(source);
 }
 
@@ -395,7 +395,7 @@ bytes_new_nargs1_bytes(PyObject *source)
 static PyObject *
 bytes_new_nargs1_bytearray(PyObject *source)
 {
-    /* Objects/pyspec/bytesobject.py:775 */
+    /* Objects/pyspec/bytesobject.py:761 */
     return _PyBytes_FromBuffer(source);
 }
 
@@ -414,7 +414,7 @@ bytes_new_nargs1_int(PyObject *source)
 {
     Py_ssize_t size;
 
-    /* Objects/pyspec/bytesobject.py:129 */
+    /* Objects/pyspec/bytesobject.py:116 */
     if (_PyLong_IsCompact((const PyLongObject *)source)) {
         size = _PyLong_CompactValue((const PyLongObject *)source);
     }
@@ -424,7 +424,7 @@ bytes_new_nargs1_int(PyObject *source)
             return NULL;
         }
     }
-    /* Objects/pyspec/bytesobject.py:132 */
+    /* Objects/pyspec/bytesobject.py:119 */
     if (size < 0) {
         PyErr_SetString(PyExc_ValueError, "negative count");
         return NULL;
@@ -439,7 +439,7 @@ bytes_new_nargs1_int(PyObject *source)
 static PyObject *
 bytes_new_nargs1_str(PyObject *source)
 {
-    /* Objects/pyspec/bytesobject.py:125 */
+    /* Objects/pyspec/bytesobject.py:112 */
     PyErr_SetString(PyExc_TypeError, "string argument without an encoding");
     return NULL;
 }
@@ -454,7 +454,7 @@ bytes_new_nargs1_range(PyObject *source)
 {
     PyObject *it_1 = NULL;
 
-    /* Objects/pyspec/bytesobject.py:781 */
+    /* Objects/pyspec/bytesobject.py:767 */
     it_1 = PyObject_GetIter(source);
     if (it_1 == NULL) {
         return NULL;
@@ -834,7 +834,7 @@ bytes_from_iterator_tuple(PyObject *x)
     PyObject *item = NULL;
     Py_ssize_t value;
 
-    /* Objects/pyspec/bytesobject.py:792 */
+    /* Objects/pyspec/bytesobject.py:779 */
     size = PyTuple_GET_SIZE(x);
     if (bytes_appender_init(&writer, size) < 0) {
         return NULL;
@@ -887,7 +887,7 @@ bytes_from_iterator_list_lock_held(PyObject *x)
     PyObject *item = NULL;
     Py_ssize_t value;
 
-    /* Objects/pyspec/bytesobject.py:792 */
+    /* Objects/pyspec/bytesobject.py:779 */
     size = PyList_GET_SIZE(x);
     if (bytes_appender_init(&writer, size) < 0) {
         return NULL;

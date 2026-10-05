@@ -118,9 +118,10 @@ Types are described by Python-syntax specs that Argument Clinic reads
 - **Spec language: expressible vs lowered.**  A spec may say anything in Python; one
   explicit boundary (`subset.py`) says what is generated and analysed; the rest is
   worst case and reported as "expressible, not lowered yet".
-- **`@native` / `@inline`**: a native function's reference is never compiled, not even
-  in part; a fast path generated code takes is an `@inline` function next to it, never an
-  `if` in the reference that the C does not have.
+- **`@ac.stub(optimizer_info=True)` / `@ac.inline`** (were `@native` / `@inline`): a
+  native function's reference is never compiled, not even in part; a fast path generated
+  code takes is an `@ac.inline` function next to it, never an `if` in the reference that
+  the C does not have.
 - **PGO+LTO arbitrates micro costs** (with an A/A pair and a fixed `PYTHONHASHSEED`);
   **must-inline markers only as a rare exception** (none needed so far: `reports/phase4_P.md`).
 - Heavy commands run memory-capped (`systemd-run --user --scope -p MemoryMax=...`),
@@ -133,6 +134,51 @@ Types are described by Python-syntax specs that Argument Clinic reads
 - **Bracket `@text_signature`: undecided** (it keeps help()'s `sub[, start[, end]]`
   notation but makes `inspect.signature` raise, hiding 13 bytes/bytearray methods from
   stubtest).
+- **Spec surface (2026-10-05)** (`Objects/pyspec/README.rst` has the details):
+  - Output is opt-in, by a decorator whose arguments hold every option:
+    `@ac.generate("c_name"?)` = clinic generates the C from the body;
+    `@ac.stub("c_name"?, METH_*=, slot=, slots=[...], critical_section=)` = the clinic
+    parts are in the spec, the C is hand-written, a body is its pure-Python model;
+    `optimizer_info=True` = the body is the reference the optimizer's facts read (and
+    the C checker verifies).  `@c_name`, `@native`, `@native(facts=False)` are gone.
+    C names default by a mangling (clinic's default; `<prefix>_<slot member>` for slots).
+  - No decorator = nothing emitted (a Python-only helper); an undecorated method of a
+    spec class is an error (typo protection).
+  - A class emits type-level tables only with `@ac.generate(doc=, methods=, slots=,
+    prefix=)`; without it the C keeps its tables, so a type migrates incrementally (just
+    `bytes.__new__`, the rest plain Argument Clinic).  Tests check exactly what a class
+    generates, and a subset otherwise.
+  - Names are grouped: `ac.` (converters from clinic's registries, clinic decorators),
+    `rt.` (`rt.NULL`, `rt.isinstance`...), `machine.`, module-qualified C calls
+    (`abstract.PyNumber_AsSsize_t`).  Bare `isinstance`/`iter` in a spec is an error.
+  - Clinic inserts the one-line block of a new spec method into the C file in spec order
+    (with a placeholder impl for hand-written C); adding a method is spec + `make clinic`.
+  - Shared stringlib methods name the C function: `center = ac.stub("stringlib_center")`;
+    clinic reads signature, convention and docstring from the C (transmogrify.h is back
+    to upstream's full clinic input).  No template class `B` in the specs.
+  - Generated C stayed byte-identical through all of this (only line comments moved).
+
+## Open decisions (2026-10-05)
+- **Overloads for dispatch-heavy bodies** (`drafts/overloads/`): land the desugaring as
+  an optional spelling in the frontend (hooks after `ast.parse`, nothing downstream
+  changes)?  Today it would serve `bytes.__new__` and `PyBytes_FromObject`; it grows with
+  `int.__new__`, `str.__new__`, `bytearray.__init__`.  Needs a non-`NotImplemented`
+  "next" for binary slots, and a purity check for shared tests.
+- **`bytearray.strip = bytesobject.bytes.strip`** stays as is: it declares a new clinic
+  function of bytearray with bytes' parameters, not a call of an existing C function, so
+  `ac.stub("...")` does not fit.  A different spelling may be wanted.
+- **ctype docstrings** live only in the Python models (the branch had removed the C
+  `PyDoc_STRVAR`s); moving them back to C would make C their only source but change the
+  generated tables.
+- **Old shared-method path** (`ac.critical_section(module.Class.meth)` without a block,
+  `_clinic_flags()` reading another file's `clinic/*.h`) is used only by tests now:
+  remove, or move onto `cfunctions.py`.
+- **Undecorated top-level functions**: today a silent Python-only helper; erroring on them
+  too (typo protection, as for methods) is possible.
+- The hand-written-PyCFunction convention is read with a regex, from local includes
+  only; C names are not checked for uniqueness across specs; a stringlib model def
+  (`stringlib_center(self, width, ...)`) has the method's signature, not the C one, so a
+  spec body calling it would be wrong (nothing does yet).
 
 ## Performance vs main
 PGO+LTO release JIT, clang 21, `PYTHONHASHSEED=1`, instructions / cycles per iteration,

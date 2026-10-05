@@ -1,11 +1,12 @@
-"""The native code of the @native functions vs their Python references.
+"""The native code of the functions with a Python reference vs the
+references (@ac.stub(optimizer_info=True)).
 
 The c_calls dimension of the ratchet (disconnects.py,
 Lib/test/test_pyspec_catalog.py; Objects/pyspec/README.rst, "Checking a
 reference against its native code").  The checker of the language of
 the native file (NATIVE_CHECKERS, by extension) reads the native code of
-each @native function, and _check_native() compares it with the
-reference:
+each function with a reference, and _check_native() compares it with
+the reference:
 
 * every call that may run Python code is accounted for by the
   reference: a call of the same function, a calls() of the special
@@ -374,16 +375,17 @@ NATIVE_CHECKERS = {'.c': CChecker, '.h': CChecker}
 
 
 def native_calls(srcdir, extensions):
-    """The disconnects of the @native functions whose native file (the
-    file their spec describes) has one of *extensions*."""
+    """The disconnects of the functions with a Python reference whose
+    native file (the file their spec describes) has one of
+    *extensions*."""
     from . import context
     specs = [frontend.Spec.load(path)
              for path, _ in specfiles.spec_files(srcdir)]
     contexts: dict[frontend.Spec, context.Context] = {}
 
     def reference_facts(name, spec=None):
-        """The facts of @native function *name* (of *spec*, else of the
-        spec defining it), for any arguments."""
+        """The facts of the reference of function *name* (of *spec*,
+        else of the spec defining it), for any arguments."""
         if spec is None:
             spec = next(s.resolve(name) for s in specs if s.resolve(name))[0]
         if spec not in contexts:
@@ -412,8 +414,7 @@ def native_calls(srcdir, extensions):
 def _check_native(spec, name, checker, native_file, rel, native,
                   reference_facts):
     node = spec.functions[name]
-    positional, keywords = spec.c_name(name)
-    c_name = positional or next(iter(keywords.values()), name)
+    c_name = spec.native_c_name(name)
     where = f'{rel}: {name}'
     variants = checker.functions(c_name)
     if not variants:
@@ -454,11 +455,11 @@ def _check_native(spec, name, checker, native_file, rel, native,
             elif inner := checker.functions(callee):
                 todo += inner
             else:
-                what = ''.join(f'calls(x, "{d}") or ' for d in
+                what = ''.join(f'rt.calls(x, "{d}") or ' for d in
                                sorted(checker.special_method(callee)))
                 out.append(f'{where}: calls {callee}(), which may '
                            'run Python code: account for it with '
-                           f'{what}runs_python()')
+                           f'{what}rt.runs_python()')
     # The native functions the reference calls: each definition of the
     # native code calls them, or a function of its file does (the
     # reference describes what it calls).
@@ -489,5 +490,6 @@ def _check_native(spec, name, checker, native_file, rel, native,
 
 
 def c_calls(srcdir):
-    """The disconnects of the @native functions implemented in C."""
+    """The disconnects of the functions with a Python reference
+    implemented in C."""
     return native_calls(srcdir, ('.c', '.h'))

@@ -1,19 +1,14 @@
-"""The names a spec imports, with their meaning as Python.
+"""Run a spec as Python: load() (the reference behaviour, for the tests).
 
-A spec imports them with ``from libclinic.pyspec.runtime import ...``;
-load() runs a spec as Python (the reference behaviour, for the tests),
-while clinic reads the same file with the ast module.  They are:
-
-* builtins with a fixed C meaning: ``NULL``, ``isinstance`` (the real
-  type), ``iter`` (PyObject_GetIter()), ``tp_name`` and ``fqname`` (type
-  names in messages).  Clinic gives isinstance and iter their C meaning
-  by name, so a spec must import them (SHADOWED_BUILTINS);
-* the clinic decorators and ``@c_name``, ``@native``, ``@inline``:
-  identity decorators for Python;
-* the primitives of a Python reference, where the effect happens:
-  ``exact(T, value)``, ``unknown(value)``, ``calls(x, "__name__")``,
-  ``runs_python()`` (Objects/pyspec/README.rst, "Native functions").
-  As Python they only return their value (exact() checks its type).
+Clinic reads a spec with the ast module (frontend.py); the tests run the
+same file as Python.  The names it uses from the tooling are imported by
+group (``from libclinic.pyspec import ac, rt, machine``): ac.py (Argument
+Clinic: converters and decorators, identities for Python), rt.py (the
+primitives with a C meaning) and machine.py (the object memory, for pure
+Python bodies).  A bare ``isinstance`` or ``iter`` would be Python's
+builtin, not the C's: load() refuses a spec that uses one
+(check_shadowed_builtins()), and checks the annotations the way clinic
+does (check_annotations()).
 """
 
 import ast
@@ -21,138 +16,10 @@ import builtins
 import os
 import sys
 import types
-from collections.abc import Callable, Iterator
-from typing import Any, TypeVar
+from collections.abc import Callable
+from typing import Any
 
-_F = TypeVar('_F', bound=Callable[..., Any])
-
-__all__ = [
-    'NULL', 'PY_SSIZE_T_MAX', 'isinstance', 'iter', 'tp_name', 'fqname',
-    'native', 'inline', 'exact', 'unknown', 'calls', 'runs_python',
-]
-
-# The builtins this module redefines with their C meaning: a spec that
-# uses one must import it from here (check_shadowed_builtins()).
-SHADOWED_BUILTINS = ('isinstance', 'iter')
-
-
-class _Null:
-    """C NULL: an argument that was not passed, or a result that is
-    absent."""
-
-    def __repr__(self) -> str:
-        return 'NULL'
-
-    def __bool__(self) -> bool:
-        raise TypeError('compare with "is NULL", do not test truthiness')
-
-
-NULL = _Null()
-
-PY_SSIZE_T_MAX = sys.maxsize
-
-
-def _clinic_decorator(*args: Any) -> Any:
-    """``@d`` or ``@d(args)``: return the function unchanged."""
-    if len(args) == 1 and callable(args[0]):
-        return args[0]
-    return lambda func: func
-
-
-# The clinic decorators other than @classmethod and @staticmethod: for
-# Python, identity decorators.
-def _define_clinic_decorators() -> list[str]:
-    from libclinic.dsl_parser import DSLParser
-    names = [name for name in DSLParser.decorator_names()
-             if name not in ('classmethod', 'staticmethod')]
-    for name in names:
-        globals()[name] = _clinic_decorator
-    return names
-
-
-CLINIC_DECORATORS = _define_clinic_decorators()
-
-
-def c_name(*args: str, **kwargs: str) -> Callable[[_F], _F]:
-    """The C name of a method, or the prefix of the tables of a class."""
-    return lambda func: func
-
-
-def native(func: _F | None = None, *, facts: bool = True) -> Any:
-    """Implemented natively; the body is its Python reference, run as
-    Python and read for facts, never compiled.  ``@native(facts=False)``:
-    the body is a pure-Python implementation that only the model runs
-    (model.py); tools read it as ``...``."""
-    if func is None:
-        return lambda func: func
-    return func
-
-
-def inline(func: _F) -> _F:
-    """The body is generated into each caller."""
-    return func
-
-
-def exact(tp: type, value: Any = None) -> Any:
-    """*value*, a new object of exactly type *tp*."""
-    if value is not None and type(value) is not tp:
-        raise AssertionError(f'exact({tp.__name__}, ...) is a '
-                             f'{type(value).__name__}')
-    return value
-
-
-def unknown(value: Any = None) -> Any:
-    """*value*, a new object whose exact type is not known."""
-    return value
-
-
-def calls(obj: object, name: str) -> None:
-    """The C invokes the special method *name* of type(obj) here."""
-
-
-def runs_python() -> None:
-    """The C may run any Python code here."""
-
-
-def isinstance(obj: object, cls: type | tuple[type, ...]) -> bool:
-    """PyXxx_Check(): looks at the real type only, never at __class__."""
-    return issubclass(type(obj), cls)
-
-
-class _Iterator:
-    """The result of iter(): a for loop over it only calls __next__."""
-
-    def __init__(self, it: Iterator[Any]) -> None:
-        self._it = it
-
-    def __iter__(self) -> '_Iterator':
-        return self
-
-    def __next__(self) -> Any:
-        return next(self._it)
-
-
-def iter(obj: Any) -> _Iterator:
-    """PyObject_GetIter().  ``for item in it:`` over the result is
-    PyIter_Next() calls in C; a Python for loop would first call
-    ``it.__iter__()``, which the wrapper makes a no-op, as in C."""
-    return _Iterator(builtins.iter(obj))
-
-
-def tp_name(tp: type) -> str:
-    """``Py_TYPE(x)->tp_name``; used as ``%.200s`` in error messages."""
-    if tp.__flags__ & (1 << 9):     # Py_TPFLAGS_HEAPTYPE
-        return tp.__name__
-    if tp.__module__ == 'builtins':
-        return tp.__qualname__
-    return f'{tp.__module__}.{tp.__qualname__}'
-
-
-def fqname(tp: type) -> str:
-    """Fully qualified type name; used as ``%T`` in error messages."""
-    if tp.__module__ in ('builtins', '__main__'):
-        return tp.__qualname__
-    return f'{tp.__module__}.{tp.__qualname__}'
+from .rt import SHADOWED_BUILTINS
 
 
 # The imported specs check_shadowed_builtins() accepted.
@@ -160,22 +27,123 @@ _checked: set[str] = set()
 
 
 def check_shadowed_builtins(tree: ast.Module, path: str) -> None:
-    """A SpecError at the first use of a SHADOWED_BUILTINS name that the
-    spec *tree* does not import from here: as Python it would be the
-    builtin, whose meaning is not the C's."""
+    """A SpecError at the first use of a bare SHADOWED_BUILTINS name in
+    the spec *tree*: as Python it is the builtin, whose meaning is not the
+    C's (``rt.isinstance``, ``rt.iter``)."""
     from libclinic.errors import SpecError
-    imported = {alias.name for node in tree.body
-                if builtins.isinstance(node, ast.ImportFrom)
-                and node.module == __name__
-                for alias in node.names
-                if alias.asname in (None, alias.name)}
     for node in ast.walk(tree):
         if (builtins.isinstance(node, ast.Name)
-                and node.id in SHADOWED_BUILTINS
-                and node.id not in imported):
-            raise SpecError(f"{node.id}() is the builtin here, not the C's: "
-                            f"import it with 'from {__name__} import "
-                            f"{node.id}'", filename=path, lineno=node.lineno)
+                and node.id in SHADOWED_BUILTINS):
+            raise SpecError(f"{node.id}() is Python's builtin here, not the "
+                            f"C's: write rt.{node.id}() (from "
+                            "libclinic.pyspec import rt)", filename=path,
+                            lineno=node.lineno)
+
+
+def check_annotations(tree: ast.Module, path: str) -> None:
+    """A SpecError at the first annotation of a def of *tree* that is not
+    what clinic reads: in a class, ``ac.<converter>`` or
+    ``ac.<converter>(...)``; at the top level, ``ac.<C type>``, a string
+    or None (frontend.Spec checks the same)."""
+    from libclinic.errors import SpecError
+    from .frontend import group_aliases
+    aliases = {name for name, group in group_aliases(tree).items()
+               if group == 'ac'}
+
+    def qualified(node: ast.expr, call: bool) -> bool:
+        if call and builtins.isinstance(node, ast.Call):
+            node = node.func
+        return (builtins.isinstance(node, ast.Attribute)
+                and builtins.isinstance(node.value, ast.Name)
+                and node.value.id in aliases)
+
+    def check(func: ast.FunctionDef, method: bool) -> None:
+        args = func.args
+        annotations = [a.annotation for a in (
+            *args.posonlyargs, *args.args, *args.kwonlyargs,
+            *filter(None, (args.vararg, args.kwarg)))] + [func.returns]
+        for annotation in annotations:
+            if annotation is None or qualified(annotation, call=method):
+                continue
+            if not method and builtins.isinstance(annotation, ast.Constant) \
+                    and (annotation.value is None
+                         or builtins.isinstance(annotation.value, str)):
+                continue
+            wanted = ('ac.<converter>(...)' if method
+                      else 'ac.<C type>, a string or None')
+            raise SpecError(f"{func.name}(): an annotation is {wanted}, not "
+                            f"{ast.unparse(annotation)}", filename=path,
+                            lineno=annotation.lineno)
+
+    for node in tree.body:
+        if builtins.isinstance(node, ast.FunctionDef):
+            check(node, method=False)
+        elif builtins.isinstance(node, ast.ClassDef):
+            for item in node.body:
+                if builtins.isinstance(item, ast.FunctionDef):
+                    check(item, method=True)
+
+
+def _is_reference(decorator: ast.expr) -> bool:
+    """``@ac.stub(optimizer_info=True)`` (the qualifier is not checked here)."""
+    return (builtins.isinstance(decorator, ast.Call)
+            and builtins.isinstance(decorator.func, ast.Attribute)
+            and decorator.func.attr == 'stub'
+            and any(kw.arg == 'optimizer_info'
+                    and builtins.isinstance(kw.value, ast.Constant)
+                    and kw.value.value is True
+                    for kw in decorator.keywords))
+
+
+def _check(tree: ast.Module, path: str) -> None:
+    check_shadowed_builtins(tree, path)
+    check_annotations(tree, path)
+
+
+def _c_functions(path: str, module: types.ModuleType
+                 ) -> dict[str, Callable[..., Any]]:
+    """{"T.meth": function} of the methods ``meth = ac.stub("f")`` of the
+    spec at *path* (run as *module*): the C function f of a header the C
+    file includes, whose model is the def f of the spec of the header
+    (frontend.Spec.c_method(), cfunctions.model_def()).  That spec is a
+    template: here B is the builtin T, and STRINGLIB_NEW and
+    STRINGLIB_MUTABLE those of *module*.  The class attribute becomes
+    the function."""
+    import importlib
+    from . import cfunctions, frontend, specfiles
+    spec = frontend.Spec.load(path)
+    assert spec is not None
+    out = {}
+    # The template instantiated for each class: {(template, class):
+    # namespace}.
+    instances: dict[tuple[str, str], dict[str, Any]] = {}
+    for name, shared in spec.shared.items():
+        if shared.c_function is None:
+            continue
+        found = cfunctions.model_def(spec, spec.c_method(name))
+        if found is None:
+            continue
+        rel = os.path.splitext(specfiles.display_path(found[0].filename))[0]
+        template = importlib.import_module(rel.replace('/', '.'))
+        cls_name, _, meth = name.partition('.')
+        spec_class = getattr(module, cls_name)
+        namespace = instances.get((template.__name__, cls_name))
+        if namespace is None:
+            namespace = dict(template.__dict__)
+            namespace['B'] = getattr(builtins, cls_name, spec_class)
+            for macro in ('STRINGLIB_NEW', 'STRINGLIB_MUTABLE'):
+                if hasattr(module, macro):
+                    namespace[macro] = getattr(module, macro)
+            for key, value in template.__dict__.items():
+                if (builtins.isinstance(value, types.FunctionType)
+                        and value.__module__ == template.__name__):
+                    namespace[key] = types.FunctionType(
+                        value.__code__, namespace, value.__name__,
+                        value.__defaults__, value.__closure__)
+            instances[(template.__name__, cls_name)] = namespace
+        out[name] = namespace[shared.c_function]
+        setattr(spec_class, meth, out[name])
+    return out
 
 
 def load(path: str) -> dict[str, Callable[..., Any]]:
@@ -187,7 +155,7 @@ def load(path: str) -> dict[str, Callable[..., Any]]:
     from . import specfiles
     with open(path, encoding='utf-8') as f:
         tree = ast.parse(f.read(), path)
-    check_shadowed_builtins(tree, path)
+    _check(tree, path)
     classes = {node.name for node in tree.body
                if builtins.isinstance(node, ast.ClassDef)}
     bases = [specfiles.import_root(path)]
@@ -205,9 +173,7 @@ def load(path: str) -> dict[str, Callable[..., Any]]:
         def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
             # The Python reference of a C function models it with the
             # builtins.
-            if any(builtins.isinstance(d, ast.Name)
-                   and d.id == 'native'
-                   for d in node.decorator_list):
+            if any(_is_reference(d) for d in node.decorator_list):
                 return node
             return self.generic_visit(node)
 
@@ -228,6 +194,7 @@ def load(path: str) -> dict[str, Callable[..., Any]]:
     sys.path[:0] = bases
     try:
         exec(compile(tree, path, 'exec'), module.__dict__)
+        c_functions = _c_functions(path, module)
     finally:
         for entry in bases:
             sys.path.remove(entry)
@@ -238,13 +205,14 @@ def load(path: str) -> dict[str, Callable[..., Any]]:
                 and not name.startswith('libclinic.')
                 and spec_path not in _checked):
             with open(spec_path, encoding='utf-8') as f:
-                check_shadowed_builtins(ast.parse(f.read(), spec_path),
-                                        spec_path)
+                _check(ast.parse(f.read(), spec_path), spec_path)
             _checked.add(spec_path)
     functions: dict[str, Any] = {}
+    lines: dict[str, int] = {}
     for node in tree.body:
         if builtins.isinstance(node, ast.FunctionDef):
             functions[node.name] = getattr(module, node.name)
+            lines[node.name] = node.lineno
         elif builtins.isinstance(node, ast.ClassDef):
             spec_class = getattr(module, node.name)
             setattr(module, f'_spec_{node.name}', spec_class)
@@ -256,5 +224,17 @@ def load(path: str) -> dict[str, Callable[..., Any]]:
                 if builtins.isinstance(item, ast.FunctionDef):
                     functions[f'{node.name}.{item.name}'] = (
                         spec_class.__dict__[item.name])
-    return {name: getattr(func, '__func__', func)
-            for name, func in functions.items()}
+                    lines[f'{node.name}.{item.name}'] = item.lineno
+    functions.update(c_functions)
+    out = {name: getattr(func, '__func__', func)
+           for name, func in functions.items()}
+    # The annotations are evaluated only on use: evaluate them, so that an
+    # option a converter does not have fails here (ac.Converter).
+    from libclinic.errors import SpecError
+    for name, func in out.items():
+        try:
+            func.__annotations__
+        except TypeError as exc:
+            raise SpecError(f"{name}(): {exc}", filename=path,
+                            lineno=lines[name]) from None
+    return out

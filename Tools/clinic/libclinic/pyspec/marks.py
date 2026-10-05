@@ -50,7 +50,8 @@ def of(node: ast.AST) -> list[Mark]:
 @dc.dataclass(frozen=True)
 class Scope(Mark):
     """A node written in the spec *filename*, copied into another (an
-    @inline body): its calls resolve, and its errors are reported, there."""
+    @ac.inline body): its calls resolve, and its errors are reported,
+    there."""
     filename: str
 
 
@@ -113,7 +114,7 @@ class Loop(Mark):
 
 @dc.dataclass(frozen=True)
 class FirstPath(Mark):
-    """The ``if`` of the first fast path of an @inline call whose first
+    """The ``if`` of the first fast path of an @ac.inline call whose first
     argument is the name *buffer* ("Capacity" in partial_eval.py)."""
     buffer: str | None
 

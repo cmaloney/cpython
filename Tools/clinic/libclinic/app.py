@@ -14,7 +14,7 @@ from libclinic.codegen import BlockPrinter, Destination, CodeGen
 from libclinic.parser import Parser, PythonParser
 from libclinic.dsl_parser import DSLParser
 from libclinic.errors import SpecError
-from libclinic.pyspec import frontend
+from libclinic.pyspec import blocks, frontend
 if TYPE_CHECKING:
     from libclinic.clanguage import CLanguage
     from libclinic.function import (
@@ -119,6 +119,8 @@ impl_definition block
         self._pyspec_read = False
         # How the blocks of the file bind the spec (DSLParser.bind_spec()).
         self.pyspec_bindings = frontend.PyspecBindings()
+        # The spec blocks the file lacks, by the line they go before.
+        self.spec_inserts: dict[int, list[blocks.Missing]] = {}
 
         self.line_prefix = self.line_suffix = ''
 
@@ -199,18 +201,31 @@ impl_definition block
         d = self.get_destination(name)
         return d.buffers[item]
 
+    def get_parser(self, dsl_name: str) -> Parser:
+        if dsl_name not in self.parsers:
+            assert dsl_name in parsers, f"No parser to handle {dsl_name!r} block."
+            self.parsers[dsl_name] = parsers[dsl_name](self)
+        return self.parsers[dsl_name]
+
     def parse(self, input: str) -> str:
         printer = self.printer
+        if self.pyspec is not None:
+            # (The includes of the C file: pyspec/cfunctions.py.)
+            self.pyspec.c_input = (self.filename, input)
+        self.spec_inserts = self.missing_spec_blocks(input)
         self.block_parser = BlockParser(input, self.language, verify=self.verify)
         for block in self.block_parser:
             dsl_name = block.dsl_name
-            if dsl_name:
-                if dsl_name not in self.parsers:
-                    assert dsl_name in parsers, f"No parser to handle {dsl_name!r} block."
-                    self.parsers[dsl_name] = parsers[dsl_name](self)
-                parser = self.parsers[dsl_name]
-                parser.parse(block)
+            if not dsl_name:
+                self.print_text(block)
+                continue
+            # (A block on the first line of the file.)
+            self.insert_spec_blocks(
+                self.block_parser.block_start_line_number - 1)
+            self.get_parser(dsl_name).parse(block)
             printer.print_block(block)
+        for lineno in list(self.spec_inserts):
+            self.insert_spec_blocks(lineno, at_end=True)
 
         self.check_spec_blocks()
 
@@ -290,10 +305,59 @@ impl_definition block
                                     lineno=exc.lineno) from None
         return self._pyspec
 
+    def missing_spec_blocks(self, input: str
+                            ) -> dict[int, list[blocks.Missing]]:
+        """The one-line blocks that the C file lacks, by the line of
+        *input* they go before (see pyspec/blocks.py)."""
+        spec = self.pyspec
+        if spec is None:
+            return {}
+        parser = self.get_parser('clinic')
+        assert isinstance(parser, DSLParser)
+        return blocks.missing(spec, self.filename, input, parser.directives)
+
+    def print_text(self, block: Block) -> None:
+        """Print verbatim text, with the spec blocks that go in it."""
+        if not self.spec_inserts:
+            self.printer.print_block(block)
+            return
+        lines = block.input.splitlines(keepends=True)
+        first = self.block_parser.block_start_line_number + 1
+        for lineno, line in enumerate(lines, first):
+            self.insert_spec_blocks(lineno)
+            self.printer.write(line)
+        if self.block_parser.input:
+            # (Before the clinic block that follows.)
+            self.insert_spec_blocks(first + len(lines))
+
+    def insert_spec_blocks(self, lineno: int, at_end: bool = False
+                           ) -> None:
+        """Write the missing spec blocks that go before line *lineno* of
+        the input (*at_end*: after the end of the file), each with its
+        placeholder impl, and a blank line between blocks."""
+        for missing in self.spec_inserts.pop(lineno, ()):
+            parser = self.get_parser('clinic')
+            assert isinstance(parser, DSLParser)
+            block = Block(missing.input, dsl_name='clinic')
+            parser.parse(block)
+            func = parser.function
+            assert func is not None
+            if at_end:
+                self.printer.write('\n')
+            output_line = self.printer.f.getvalue().count('\n') + 1
+            self.printer.print_block(block)
+            self.printer.write(blocks.placeholder(func))
+            if not at_end:
+                self.printer.write('\n')
+            if missing.entry:
+                warn(blocks.entry_note(func), filename=self.filename,
+                     line_number=output_line)
+
     def check_spec_blocks(self) -> None:
         """Every clinic function of a spec class declared in the file
         (``class T`` directive) has a one-line block, ``T.meth``, above its
-        impl: clinic writes the impl head there."""
+        impl: clinic writes the impl head there.  Clinic inserted those
+        it could place (missing_spec_blocks())."""
         spec = self.pyspec
         if spec is None:
             return
@@ -302,14 +366,7 @@ impl_definition block
                 continue
             declared = {(f.name, ACCESSOR_KINDS.get(f.kind, ''))
                         for f in cls.functions}
-            wanted = [(meth, '', spec.functions[f'{cls.name}.{meth}'])
-                      for meth in spec.methods(cls.name)]
-            for name, accessors in spec.accessors.items():
-                cls_name, _, meth = name.rpartition('.')
-                if cls_name == cls.name:
-                    wanted += [(meth, kind, node)
-                               for kind, node in accessors.items()]
-            for meth, kind, node in wanted:
+            for meth, kind, node in blocks.block_functions(spec, cls.name):
                 if (meth, kind) in declared:
                     continue
                 decorator = f'@{kind}\n' if kind else ''

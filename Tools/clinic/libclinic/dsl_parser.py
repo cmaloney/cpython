@@ -278,7 +278,7 @@ class DSLParser:
     @classmethod
     def decorator_names(cls) -> list[str]:
         """The names of the clinic decorators: ``@name`` in a block (and on
-        a spec method, see libclinic.pyspec.runtime)."""
+        a spec method, see libclinic.pyspec.ac)."""
         return sorted(name.removeprefix('at_') for name in dir(cls)
                       if name.startswith('at_'))
 

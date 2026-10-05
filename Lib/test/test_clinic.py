@@ -40,6 +40,7 @@ with test_tools.imports_under_tool('clinic'):
     from libclinic.cli import parse_file, Clinic
     from libclinic.errors import SpecError, SpecErrorKind
     from libclinic.pyspec import runtime as pyspec_runtime
+    from libclinic.pyspec import ac as pyspec_ac
     from libclinic.pyspec import (builtin_types as pyspec_builtin_types,
                                   call_table as pyspec_call_table,
                                   context as pyspec_context,
@@ -5579,10 +5580,12 @@ class PyspecTest(PyspecTestBase):
         [clinic start generated code]*/
     """
 
-    SPEC = """
+    SPEC = """\
+        from libclinic.pyspec import ac, rt
         class bytes:
-            def __new__(cls, a: object, b: str = NULL, /,
-                        c: str = NULL):
+            @ac.generate
+            def __new__(cls, a: ac.object, b: ac.str = rt.NULL, /,
+                        c: ac.str = rt.NULL):
                 return a
     """
 
@@ -5611,7 +5614,8 @@ class PyspecTest(PyspecTestBase):
         self.assertFalse(os.path.exists(self.output_path))
 
     def test_stub_method(self):
-        spec = self.SPEC.replace("return a", "...")
+        spec = self.SPEC.replace("return a", "...").replace("@ac.generate",
+                                                            "@ac.stub")
         generated = self.generate(spec, self.BLOCK)
         self.assertNotIn("foo_vectorcall", generated)
         self.assertIn("static PyObject *\nfoo_new_impl(PyTypeObject *type, "
@@ -5668,20 +5672,24 @@ class PyspecTest(PyspecTestBase):
         self.assertNotIn("foo_new_nargs0", output)
 
     def test_top_level_function(self):
-        spec = dedent(self.SPEC) + dedent("""
-            def PyFoo_Get(x: object):
+        spec = dedent(self.SPEC) + dedent("""\
+            from libclinic.pyspec import ac
+            @ac.generate
+            def PyFoo_Get(x: ac.object):
                 return x
 
-            def PyFoo_Stub(x: object) -> Unknown[int]:
+            @ac.stub
+            def PyFoo_Stub(x: ac.object) -> ac.int:
                 ...
 
-            def PyFoo_Documented(x: object):
+            @ac.stub
+            def PyFoo_Documented(x: ac.object):
                 "Only a docstring: a stub too."
         """)
         output = self.generated_file(spec, self.BLOCK)
         # Each group of lines of the spec is named before its C.
         self.assertIn("\nPyObject *\nPyFoo_Get(PyObject *x)\n{\n"
-                      "    /* pyspec/foo.py:8 */\n"
+                      "    /* pyspec/foo.py:10 */\n"
                       "    return Py_NewRef(x);\n}\n", output)
         self.assertNotIn("PyFoo_Stub", output)
         self.assertNotIn("PyFoo_Documented", output)
@@ -5691,20 +5699,23 @@ class PyspecTest(PyspecTestBase):
         # the others are their defaults (NULL); the __new__ calling itself
         # for its class calls the arity function of the arguments given,
         # as the vectorcall would.
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac, rt
             class bytes:
-                def __new__(cls, a: object, b: str = NULL, /):
+                @ac.generate
+                def __new__(cls, a: ac.object, b: ac.str = rt.NULL, /):
                     if cls is not bytes:
                         value = bytes.__new__(bytes, a)
                         return bytes_subtype_new(cls, value)
                     return a
 
-            def PyFoo_New(x: object):
+            @ac.generate
+            def PyFoo_New(x: ac.object):
                 return bytes.__new__(bytes, x)
 
-            @native
-            def bytes_subtype_new(type: 'PyTypeObject *', tmp: object):
-                return unknown(tmp)
+            @ac.stub(optimizer_info=True)
+            def bytes_subtype_new(type: 'PyTypeObject *', tmp: ac.object):
+                return rt.unknown(tmp)
         """
         output = self.generated_file(spec, self.BLOCK)
         self.assertIn("    if (cls != &PyBytes_Type) {\n"
@@ -5720,31 +5731,34 @@ class PyspecTest(PyspecTestBase):
                       output)
         exc = self.expect_located_failure(
             spec.replace("bytes.__new__(bytes, x)",
-                         "bytes.__new__(bytes, x, NULL, NULL)"),
-            self.BLOCK, "bytes.__new__() takes 2 to 3 arguments, not 4", 10)
+                         "bytes.__new__(bytes, x, rt.NULL, rt.NULL)"),
+            self.BLOCK, "bytes.__new__() takes 2 to 3 arguments, not 4", 12)
         self.assertEqual(exc.kind, SpecErrorKind.INVALID)
 
     def test_except_tuple(self):
         # except (E1, E2): a handler for either, dropped when the call
         # raises neither.
-        spec = dedent(self.SPEC) + dedent("""
-            def PyFoo_Iter(x: object):
+        spec = dedent(self.SPEC) + dedent("""\
+            from libclinic.pyspec import ac, rt
+            @ac.generate
+            def PyFoo_Iter(x: ac.object):
                 try:
-                    it = iter(x)
+                    it = rt.iter(x)
                 except (TypeError, ValueError):
                     return x
                 return it
 
-            def PyFoo_Copy(x: object):
+            @ac.generate
+            def PyFoo_Copy(x: ac.object):
                 try:
                     y = foo_copy(x)
                 except (TypeError, ValueError):
                     return x
                 return y
 
-            @native
-            def foo_copy(x: object):
-                return exact(bytes, bytes(x))
+            @ac.stub(optimizer_info=True)
+            def foo_copy(x: ac.object):
+                return rt.exact(bytes, bytes(x))
         """)
         output = self.generated_file(spec, self.BLOCK)
         self.assertIn("    it = PyObject_GetIter(x);\n"
@@ -5772,30 +5786,33 @@ class PyspecTest(PyspecTestBase):
             bytes.fromhex
             [clinic start generated code]*/
         """
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac, rt
             class bytes:
+                @ac.generate
                 def __bytes__(self):
                     "Doc."
                     if type(self) is bytes:
                         return self
                     return bytes_copy(self)
 
+                @ac.generate
                 @classmethod
-                def fromhex(cls, string: object, /):
+                def fromhex(cls, string: ac.object, /):
                     "Doc."
                     result = _PyBytes_FromHex(string, False)
                     if cls is not bytes:
                         return cls(result)
                     return result
 
-            @native
-            def bytes_copy(b: object):
-                return exact(bytes, bytes(b))
+            @ac.stub(optimizer_info=True)
+            def bytes_copy(b: ac.object):
+                return rt.exact(bytes, bytes(b))
 
-            @native
-            def _PyBytes_FromHex(string: object, use_bytearray: int):
-                calls(string, "__buffer__")
-                return exact(bytes, bytes.fromhex(string))
+            @ac.stub(optimizer_info=True)
+            def _PyBytes_FromHex(string: ac.object, use_bytearray: ac.int):
+                rt.calls(string, "__buffer__")
+                return rt.exact(bytes, bytes.fromhex(string))
         """
         generated = self.generate(spec, block)
         self.assertIn("static PyObject *\n"
@@ -5810,7 +5827,7 @@ class PyspecTest(PyspecTestBase):
             output = f.read()
         self.assertIn("static PyObject *\n"
                       "bytes___bytes___impl(PyBytesObject *self)\n{\n"
-                      "    /* pyspec/foo.py:5 */\n"
+                      "    /* pyspec/foo.py:6 */\n"
                       "    if (PyBytes_CheckExact(self)) {\n"
                       "        return Py_NewRef(self);\n"
                       "    }\n", output)
@@ -5851,9 +5868,11 @@ class PyspecTest(PyspecTestBase):
             [clinic start generated code]*/
             #endif
         """
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                def meth(self, a: object, /):
+                @ac.generate
+                def meth(self, a: ac.object, /):
                     "Doc."
                     return a
         """
@@ -5871,43 +5890,45 @@ class PyspecTest(PyspecTestBase):
                       "static PyObject *\n"
                       "bytes_meth_impl(PyBytesObject *self, PyObject *a)\n"
                       "{\n"
-                      "    /* pyspec/foo.py:5 */\n"
+                      "    /* pyspec/foo.py:6 */\n"
                       "    return Py_NewRef(a);\n"
                       "}\n"
                       "#endif /* defined(CONDITION) */\n", output)
 
     def test_native(self):
-        # A @native function: C by hand, never generated.  Its
+        # @ac.stub(optimizer_info=True): C by hand, never generated.  Its
         # annotations are C types; the error check of a call comes from
         # what its Python reference can do.
-        spec = dedent("""
+        spec = dedent("""\
+            from libclinic.pyspec import ac, rt
             class bytes:
-                def __new__(cls, a: object, /):
-                    if a is NULL:
+                @ac.generate
+                def __new__(cls, a: ac.object, /):
+                    if a is rt.NULL:
                         raise PyErr_BadInternalCall()
                     n = size_of(a)
                     if at_most(n, 3):
                         return pair(a, "__name__")
                     return a
 
-            @native
+            @ac.stub(optimizer_info=True)
             def PyErr_BadInternalCall() -> None:
                 raise SystemError("bad argument")
 
-            @native
-            def size_of(x: object) -> Py_ssize_t:
-                calls(x, "__len__")
+            @ac.stub(optimizer_info=True)
+            def size_of(x: ac.object) -> ac.Py_ssize_t:
+                rt.calls(x, "__len__")
                 return len(x)
 
-            @native
-            def at_most(n: Py_ssize_t, m: 'long') -> int:
+            @ac.stub(optimizer_info=True)
+            def at_most(n: ac.Py_ssize_t, m: 'long') -> ac.int:
                 return n <= m
 
-            @native
-            def pair(x: object, name: object):
-                if x is NULL:
-                    return NULL
-                return unknown((x, name))
+            @ac.stub(optimizer_info=True)
+            def pair(x: ac.object, name: ac.object):
+                if x is rt.NULL:
+                    return rt.NULL
+                return rt.unknown((x, name))
         """)
         output = self.generated_file(spec, self.BLOCK)
         for name in ('size_of', 'at_most', 'pair', 'PyErr_BadInternalCall'):
@@ -5925,25 +5946,31 @@ class PyspecTest(PyspecTestBase):
         self.check_error_native()
 
     def check_error_native(self):
-        spec = dedent(self.SPEC) + dedent("""
-            @native
-            def f(x: object):
+        spec = dedent(self.SPEC) + dedent("""\
+            from libclinic.pyspec import ac
+            @ac.stub(optimizer_info=True)
+            def f(x: ac.object):
                 ...
         """)
-        self.expect_failure(spec, self.BLOCK, "f: the body of a "
-                            "@native function is its Python "
-                            "reference")
+        self.expect_failure(spec, self.BLOCK, "f: the body of "
+                            "@ac.stub(optimizer_info=True) is the Python "
+                            "reference of the C")
 
     def test_missing_block(self):
         # Every clinic function of a spec class declared in the C file has
         # a one-line block above its impl, where clinic writes the head.
+        # Clinic inserts a missing one after the class is declared: here
+        # the only block to follow is that of the class directive.
         block = self.BLOCK.replace("bytes.__new__ as foo_new",
                                    "bytes.__bytes__")
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                def __new__(cls, a: object):
+                @ac.generate
+                def __new__(cls, a: ac.object):
                     return a
 
+                @ac.stub
                 def __bytes__(self):
                     ...
         """
@@ -5955,10 +5982,182 @@ class PyspecTest(PyspecTestBase):
                          "/*[clinic input]\nbytes.__new__\n"
                          "[clinic start generated code]*/")
         self.assertEqual(cm.exception.filename, self.spec_path)
-        self.assertEqual(cm.exception.lineno, 3)
+        self.assertEqual(cm.exception.lineno, 4)
         # Classes the C file does not declare are not generated.
         self.generate(spec.replace("class bytes", "class bytearray")
-                      .replace("return a", "..."), block)
+                      .replace("return a", "...")
+                      .replace("@ac.generate", "@ac.stub"), block)
+
+    # -- blocks that clinic inserts (libclinic/pyspec/blocks.py) ---------
+
+    INSERT_SPEC = """\
+        from libclinic.pyspec import ac
+        class bytes:
+            @ac.stub
+            def a(self, /):
+                ...
+
+            @ac.stub
+            def b(self, /):
+                ...
+
+            @ac.stub
+            def c(self, /) -> ac.Py_ssize_t:
+                ...
+
+            @ac.generate
+            def d(self, /):
+                return self
+
+            @ac.stub
+            def e(self, /):
+                ...
+
+            @ac.stub
+            def __init__(self, /):
+                ...
+    """
+
+    INSERT_CLASS = """\
+        /*[clinic input]
+        class bytes "PyBytesObject *" "&PyBytes_Type"
+        [clinic start generated code]*/
+
+    """
+
+    INSERT_B = """\
+        /*[clinic input]
+        bytes.b
+        [clinic start generated code]*/
+        {
+            Py_RETURN_NONE;
+        }
+
+    """
+
+    INCLUDE = '#include "clinic/foo_pyspec.c.h"\n'
+
+    @staticmethod
+    def function_lines(generated):
+        """The last input line of each clinic block."""
+        return re.findall(r"(?m)^(.*)\n\[clinic start generated code\]",
+                          generated)
+
+    def insert(self, spec, block):
+        """(C file, warnings) of clinic run on *block*; a second run
+        changes nothing."""
+        with support.captured_stdout() as stdout:
+            generated = self.generate(spec, block)
+        with support.captured_stdout() as again:
+            self.assertEqual(self.generate(None, generated), generated)
+        self.assertEqual(again.getvalue(), "")
+        return generated, stdout.getvalue()
+
+    def test_insert_blocks(self):
+        # In the order of the class: after the block of the method before,
+        # else before that of the method after.
+        generated, warnings = self.insert(
+            self.INSERT_SPEC,
+            dedent(self.INSERT_CLASS) + dedent(self.INSERT_B)
+            + self.INCLUDE)
+        self.assertEqual(self.function_lines(generated),
+                         ['class bytes "PyBytesObject *" "&PyBytes_Type"',
+                          'bytes.a', 'bytes.b', 'bytes.c', 'bytes.d',
+                          'bytes.e', 'bytes.__init__'])
+        # The last ones go before the include of foo_pyspec.c.h.
+        self.assertEndsWith(generated, "    return -1;\n}\n\n"
+                            + self.INCLUDE)
+        # A method written in C gets a placeholder impl returning the
+        # error value of its return converter.
+        self.assertRegex(generated, re.escape(
+            "bytes.a\n[clinic start generated code]*/\n\n"
+            "static PyObject *\nbytes_a_impl(PyBytesObject *self)\n"
+            "/*[clinic end generated code: ") + r".*\*/\n" + re.escape(
+            "{\n"
+            "    /* TODO: write bytes_a_impl() */\n"
+            "    PyErr_SetString(PyExc_NotImplementedError,\n"
+            '                    "bytes.a");\n'
+            "    return NULL;\n"
+            "}\n\n/*[clinic input]\nbytes.b\n"))
+        self.assertIn("static Py_ssize_t\nbytes_c_impl(PyBytesObject *self)",
+                      generated)
+        self.assertIn("    return (Py_ssize_t)-1;\n}\n", generated)
+        self.assertIn("static int\nbytes___init___impl(PyBytesObject *self)",
+                      generated)
+        # A method with a spec body gets only its block.
+        self.assertRegex(generated, re.escape(
+            "bytes.d\n[clinic start generated code]*/\n\n"
+            "/* bytes_d_impl() is generated from pyspec/foo.py,\n"
+            "   in clinic/foo_pyspec.c.h. */\n"
+            "/*[clinic end generated code: ") + r".*\*/\n" + re.escape(
+            "\n/*[clinic input]\nbytes.e\n"))
+        # The method table of a class without slots, and tp_init, are C.
+        self.assertEqual(re.findall(r"(?m)^.*foo.c:\d+: warning: (.*)$",
+                                    warnings),
+                         [f"clinic inserted the block of bytes.{m}; add "
+                          f"BYTES_{m.upper()}_METHODDEF to the method table "
+                          "of bytes" for m in "acde"]
+                         + ["clinic inserted the block of bytes.__init__; "
+                            "set the tp_init of bytes to bytes___init__"])
+        # At the end of the file without the include.
+        generated, _ = self.insert(
+            self.INSERT_SPEC,
+            dedent(self.INSERT_CLASS) + dedent(self.INSERT_B))
+        self.assertEqual(self.function_lines(generated)[1:],
+                         ['bytes.a', 'bytes.b', 'bytes.c', 'bytes.d',
+                          'bytes.e', 'bytes.__init__'])
+
+    def test_insert_blocks_without_blocks(self):
+        # A class without a block: before the include, else an error.
+        generated, _ = self.insert(
+            self.INSERT_SPEC, dedent(self.INSERT_CLASS) + self.INCLUDE)
+        self.assertEqual(self.function_lines(generated)[1:],
+                         ['bytes.a', 'bytes.b', 'bytes.c', 'bytes.d',
+                          'bytes.e', 'bytes.__init__'])
+        self.assertEndsWith(generated, "}\n\n" + self.INCLUDE)
+        with self.assertRaises(ClinicError) as cm:
+            self.generate(self.INSERT_SPEC, dedent(self.INSERT_CLASS))
+        self.assertStartsWith(cm.exception.message,
+                              "bytes.a has no clinic block in ")
+        self.assertEqual(cm.exception.lineno, 4)
+
+    def test_insert_blocks_if(self):
+        # Never under an #if the class directive is not under.
+        block = (dedent(self.INSERT_CLASS) + "#ifdef MS_WINDOWS\n"
+                 + dedent(self.INSERT_B) + "#endif\n\n" + self.INCLUDE)
+        generated, _ = self.insert(self.INSERT_SPEC, block)
+        self.assertEqual(self.function_lines(generated)[1:],
+                         ['bytes.b', 'bytes.a', 'bytes.c', 'bytes.d',
+                          'bytes.e', 'bytes.__init__'])
+        self.assertIn("#endif\n\n/*[clinic input]\nbytes.a\n", generated)
+        # Nor before an include under an #if: at the end of the file.
+        block = (dedent(self.INSERT_CLASS) + dedent(self.INSERT_B)
+                 + "#ifdef MS_WINDOWS\n" + self.INCLUDE + "#endif\n")
+        generated, _ = self.insert(self.INSERT_SPEC, block)
+        self.assertEqual(self.function_lines(generated)[1:],
+                         ['bytes.a', 'bytes.b', 'bytes.c', 'bytes.d',
+                          'bytes.e', 'bytes.__init__'])
+        self.assertIn("#endif\n\n/*[clinic input]\nbytes.c\n", generated)
+        self.assertEndsWith(generated, "    return -1;\n}\n")
+
+    def test_insert_blocks_generated_table(self):
+        # The method table of an @ac.generate class is generated: no
+        # warning.  A slot has no block.
+        spec = self.INSERT_SPEC.replace(
+            "class bytes:", "@ac.generate\n        class bytes:").replace(
+            "@ac.stub\n            def e(self, /):",
+            "@ac.stub\n            def __repr__(self, /):\n"
+            "                ...\n\n"
+            "            @ac.stub\n            def e(self, /):")
+        generated, warnings = self.insert(
+            spec, dedent(self.INSERT_CLASS) + dedent(self.INSERT_B)
+            + self.INCLUDE)
+        self.assertEqual(self.function_lines(generated)[1:],
+                         ['bytes.a', 'bytes.b', 'bytes.c', 'bytes.d',
+                          'bytes.e', 'bytes.__init__'])
+        self.assertIn("warning: clinic inserted the block of bytes.__init__",
+                      warnings)
+        self.assertNotIn("METHODDEF", warnings)
 
     def test_nothing_written_on_error(self):
         # An error in the last stage (the emitter) leaves every generated
@@ -5980,7 +6179,7 @@ class PyspecTest(PyspecTestBase):
                               '"The lowered subset" in '
                               "Objects/pyspec/README.rst")
         self.assertEqual((cm.exception.filename, cm.exception.lineno),
-                         (self.spec_path, 5))
+                         (self.spec_path, 6))
         self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, 'clinic',
                                                      'foo.c.h')))
         self.assertFalse(os.path.exists(self.output_path))
@@ -5993,9 +6192,11 @@ class PyspecTest(PyspecTestBase):
     def test_not_new(self):
         block = self.BLOCK.replace("bytes.__new__ as foo_new",
                                    "bytes.__init__ as foo_init")
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                def __init__(self, a: object, /):
+                @ac.generate
+                def __init__(self, a: ac.object, /):
                     return a
         """
         self.expect_failure(spec, block, "bytes.__init__(): __init__ (an "
@@ -6026,13 +6227,14 @@ class PyspecTest(PyspecTestBase):
                             "'c' is expressible, but not lowered")
 
     def test_bad_annotation(self):
-        spec = self.SPEC.replace("a: object", "a: int")
+        spec = self.SPEC.replace("a: ac.object", "a: ac.int")
         self.expect_failure(spec, self.BLOCK, "parameter 'a' with "
                             "converter int (lowered: ['object', 'str']) is "
                             "expressible, but not lowered")
 
     def test_bad_default(self):
-        spec = self.SPEC.replace("c: str = NULL", "c: object = None")
+        spec = self.SPEC.replace("c: ac.str = rt.NULL",
+                                 "c: ac.object = None")
         self.expect_failure(spec, self.BLOCK, "default None of parameter "
                             "'c' (lowered: NULL) is expressible, but not "
                             "lowered")
@@ -6070,11 +6272,13 @@ class PyspecStubTest(PyspecTestBase):
         return actual
 
     def test_parameters_and_docstring(self):
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                @critical_section
-                def meth(self, a: object, /, b: int(c_param='bb') = 0, *,
-                         c: str(accept={str, NoneType}) = None):
+                @ac.stub
+                @ac.critical_section
+                def meth(self, a: ac.object, /, b: ac.int(c_param='bb') = 0, *,
+                         c: ac.str(accept={str, ac.NoneType}) = None):
                     '''Summary line.
 
                       a
@@ -6113,9 +6317,11 @@ class PyspecStubTest(PyspecTestBase):
                       'int bb, const char *c)', output)
 
     def test_parameter_docs_only(self):
-        self.check("""
+        self.check("""\
+            from libclinic.pyspec import ac
             class bytes:
-                def meth(self, a: object):
+                @ac.stub
+                def meth(self, a: ac.object):
                     '''Summary line.
 
                       a
@@ -6131,8 +6337,10 @@ class PyspecStubTest(PyspecTestBase):
         """)
 
     def test_no_parameters(self):
-        self.check("""
+        self.check("""\
+            from libclinic.pyspec import ac
             class bytes:
+                @ac.stub
                 def meth(self):
                     '''Summary line.'''
         """, "bytes.meth\n", """
@@ -6144,10 +6352,12 @@ class PyspecStubTest(PyspecTestBase):
     def test_class_and_static_methods(self):
         # Each spec has only the method under test: each spec method needs
         # a block.
-        self.check("""
+        self.check("""\
+            from libclinic.pyspec import ac
             class bytes:
+                @ac.stub
                 @classmethod
-                def cmeth(cls, a: object, /):
+                def cmeth(cls, a: ac.object, /):
                     ...
         """, "bytes.cmeth\n", """
             @classmethod
@@ -6155,10 +6365,12 @@ class PyspecStubTest(PyspecTestBase):
                 a: object
                 /
         """)
-        self.check("""
+        self.check("""\
+            from libclinic.pyspec import ac
             class bytes:
+                @ac.stub
                 @staticmethod
-                def smeth(a: object, b: object, /):
+                def smeth(a: ac.object, b: ac.object, /):
                     ...
         """, "bytes.smeth\n", """
             @staticmethod
@@ -6169,9 +6381,11 @@ class PyspecStubTest(PyspecTestBase):
         """)
 
     def test_new(self):
-        self.check("""
+        self.check("""\
+            from libclinic.pyspec import ac, rt
             class bytes:
-                def __new__(cls, a: object(c_param='x') = NULL):
+                @ac.stub
+                def __new__(cls, a: ac.object(c_param='x') = rt.NULL):
                     ...
         """, "bytes.__new__ as bytes_new\n", """
             @classmethod
@@ -6180,9 +6394,11 @@ class PyspecStubTest(PyspecTestBase):
         """)
 
     def test_explicit_self(self):
-        self.check("""
+        self.check("""\
+            from libclinic.pyspec import ac
             class bytes:
-                def meth(self: self(type="PyObject *"), a: object, /):
+                @ac.stub
+                def meth(self: ac.self(type="PyObject *"), a: ac.object, /):
                     ...
         """, "bytes.meth\n", """
             bytes.meth
@@ -6192,9 +6408,11 @@ class PyspecStubTest(PyspecTestBase):
         """)
 
     def test_return_converter(self):
-        self.check("""
+        self.check("""\
+            from libclinic.pyspec import ac
             class bytes:
-                def meth(self, /) -> Py_ssize_t:
+                @ac.stub
+                def meth(self, /) -> ac.Py_ssize_t:
                     ...
         """, "bytes.meth\n", """
             bytes.meth -> Py_ssize_t
@@ -6203,9 +6421,11 @@ class PyspecStubTest(PyspecTestBase):
     def test_same_signature_as_clone(self):
         # Python has no clones: a method with the signature of another is
         # a full def, and clinic generates what it does for a clone.
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                def meth(self, a: object = None, /):
+                @ac.stub
+                def meth(self, a: ac.object = None, /):
                     '''Summary.
 
                       a
@@ -6213,7 +6433,8 @@ class PyspecStubTest(PyspecTestBase):
                     '''
                     ...
 
-                def other(self, a: object = None, /):
+                @ac.stub
+                def other(self, a: ac.object = None, /):
                     '''Other summary.
 
                       a
@@ -6248,17 +6469,21 @@ class PyspecStubTest(PyspecTestBase):
 
     def test_class_not_in_spec(self):
         # The block is a complete clinic function without parameters.
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytearray:
-                def meth(self, a: object):
+                @ac.stub
+                def meth(self, a: ac.object):
                     ...
         """
         self.check(spec, "bytes.meth\n", "bytes.meth\n")
 
     def test_missing_method(self):
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                def meth(self, a: object):
+                @ac.stub
+                def meth(self, a: ac.object):
                     ...
         """
         self.expect_failure(spec, self.block("bytes.nope\n"),
@@ -6267,9 +6492,11 @@ class PyspecStubTest(PyspecTestBase):
                             "method 'nope' to take them from")
 
     def test_declared_twice(self):
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                def meth(self, a: object):
+                @ac.stub
+                def meth(self, a: ac.object):
                     ...
         """
         self.expect_failure(spec, self.block("bytes.meth\n    a: object\n"),
@@ -6297,9 +6524,11 @@ class PyspecStubTest(PyspecTestBase):
     """
 
     def test_stub_in_ifdef(self):
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                def meth(self, a: object, /):
+                @ac.stub
+                def meth(self, a: ac.object, /):
                     "Doc."
                     ...
         """
@@ -6322,11 +6551,14 @@ class PyspecStubTest(PyspecTestBase):
         # only ``def other(self): ...`` in the spec (its place in the
         # class), or not in the spec; the other methods are one-line
         # blocks.
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                def meth(self, a: object, /):
+                @ac.stub
+                def meth(self, a: ac.object, /):
                     ...
 
+                @ac.stub
                 def other(self):
                     ...
         """
@@ -6360,10 +6592,12 @@ class PyspecStubTest(PyspecTestBase):
         self.assertIn("bytes_other_impl(PyBytesObject *self)", generated)
 
     def test_python_decorator_in_block(self):
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
+                @ac.stub
                 @classmethod
-                def meth(cls, a: object):
+                def meth(cls, a: ac.object):
                     ...
         """
         self.expect_failure(spec, self.block("@classmethod\nbytes.meth\n"),
@@ -6371,9 +6605,11 @@ class PyspecStubTest(PyspecTestBase):
                             f"is written in {self.spec_path}")
 
     def test_clinic_decorator_in_block(self):
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                def meth(self, a: object):
+                @ac.stub
+                def meth(self, a: ac.object):
                     ...
         """
         self.expect_failure(spec, self.block("@critical_section\n"
@@ -6386,12 +6622,14 @@ class PyspecStubTest(PyspecTestBase):
 
     def test_clinic_decorators(self):
         long_summary = "Summary " + "x" * 80
-        spec = f"""
+        spec = f"""\
+            from libclinic.pyspec import ac, rt
             class bytes:
-                @permit_long_summary
-                @critical_section
-                @text_signature('($self, a[, b], /)')
-                def meth(self, a: object, b: object = NULL, /):
+                @ac.stub
+                @ac.permit_long_summary
+                @ac.critical_section
+                @ac.text_signature('($self, a[, b], /)')
+                def meth(self, a: ac.object, b: ac.object = rt.NULL, /):
                     '''{long_summary}'''
                     ...
         """
@@ -6408,10 +6646,12 @@ class PyspecStubTest(PyspecTestBase):
         """)
         self.assertIn('"meth($self, a[, b], /)\\n"', output)
         self.assertIn('Py_BEGIN_CRITICAL_SECTION(self);', output)
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                @vectorcall
-                def __init__(self, a: object, /):
+                @ac.stub
+                @ac.vectorcall
+                def __init__(self, a: ac.object, /):
                     ...
         """
         output = self.check(spec, "bytes.__init__\n", """
@@ -6424,11 +6664,13 @@ class PyspecStubTest(PyspecTestBase):
 
     def test_clinic_decorator_arguments(self):
         # Arguments are words of the clinic line, quoted as needed.
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                @critical_section('self', 'a')
-                @disable('fastcall')
-                def meth(self, a: object, /):
+                @ac.stub
+                @ac.critical_section('self', 'a')
+                @ac.disable('fastcall')
+                def meth(self, a: ac.object, /):
                     ...
         """
         self.check(spec, "bytes.meth\n", """
@@ -6440,10 +6682,13 @@ class PyspecStubTest(PyspecTestBase):
         """)
 
     def test_no_clones(self):
-        for clone in ("other = meth", "other = permit_long_summary(meth)"):
-            spec = f"""
+        for clone in ("other = meth",
+                      "other = ac.permit_long_summary(meth)"):
+            spec = f"""\
+                from libclinic.pyspec import ac
                 class bytes:
-                    def meth(self, a: object = None, /):
+                    @ac.stub
+                    def meth(self, a: ac.object = None, /):
                         '''Summary.'''
                         ...
 
@@ -6456,14 +6701,17 @@ class PyspecStubTest(PyspecTestBase):
 
     def test_unneeded_permit_long_summary(self):
         # The warning points at the decorator in the spec.
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                @permit_long_summary
+                @ac.stub
+                @ac.permit_long_summary
                 def meth(self, /):
                     '''Summary.'''
                     ...
 
-                @permit_long_summary
+                @ac.stub
+                @ac.permit_long_summary
                 def other(self, /):
                     '''Other.'''
                     ...
@@ -6474,31 +6722,35 @@ class PyspecStubTest(PyspecTestBase):
                 "[clinic start generated code]*/\n"
                 "/*[clinic input]\n"
                 "bytes.other\n"))
-        self.assertIn(f"{self.spec_path}:3: warning: Remove the "
+        self.assertIn(f"{self.spec_path}:4: warning: Remove the "
                       "@permit_long_summary decorator from 'bytes.meth'!",
                       stdout.getvalue())
-        self.assertIn(f"{self.spec_path}:8: warning: Remove the "
+        self.assertIn(f"{self.spec_path}:10: warning: Remove the "
                       "@permit_long_summary decorator from 'bytes.other'!",
                       stdout.getvalue())
 
     def test_unknown_clinic_decorator(self):
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                @nosuchdecorator
-                def meth(self, a: object):
+                @ac.stub
+                @ac.nosuchdecorator
+                def meth(self, a: ac.object):
                     ...
         """
         # Errors in the input taken from the spec are reported at the line
         # of the spec it comes from.
         self.expect_located_failure(spec, self.block("bytes.meth\n"),
                                     "'bytes.meth': unknown clinic decorator "
-                                    "@nosuchdecorator", 3)
+                                    "@nosuchdecorator", 4)
 
     def test_clinic_decorator_non_constant_argument(self):
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                @text_signature(SIGNATURE)
-                def meth(self, a: object):
+                @ac.stub
+                @ac.text_signature(SIGNATURE)
+                def meth(self, a: ac.object):
                     ...
         """
         self.expect_failure(spec, self.block("bytes.meth\n"),
@@ -6506,27 +6758,64 @@ class PyspecStubTest(PyspecTestBase):
                             "string or integer constants")
 
     def test_runtime_clinic_decorators(self):
-        # runtime.py has an identity decorator for each clinic decorator,
-        # so that the spec runs as Python.
+        # ac.py has an identity decorator for each clinic decorator, so
+        # that the spec runs as Python.
         clinic_decorators = {name.removeprefix('at_')
                              for name in dir(DSLParser)
                              if name.startswith('at_')}
         clinic_decorators -= {'classmethod', 'staticmethod'}
-        runtime = {name for name, value in vars(pyspec_runtime).items()
-                   if value is pyspec_runtime._clinic_decorator
-                   and not name.startswith('_')}
-        self.assertEqual(runtime, clinic_decorators)
+        identities = {name for name, value in vars(pyspec_ac).items()
+                      if value is pyspec_ac._identity
+                      and not name.startswith('_')}
+        self.assertEqual(identities, clinic_decorators)
         def f(): pass
-        self.assertIs(pyspec_runtime.permit_long_summary(f), f)
-        self.assertIs(pyspec_runtime.text_signature("($self)")(f), f)
-        self.assertIs(pyspec_runtime.critical_section("a", "b")(f), f)
+        self.assertIs(pyspec_ac.permit_long_summary(f), f)
+        self.assertIs(pyspec_ac.text_signature("($self)")(f), f)
+        self.assertIs(pyspec_ac.critical_section("a", "b")(f), f)
+        method = classmethod(f)
+        self.assertIs(pyspec_ac.permit_long_summary(method), method)
+        # The spec decorators too.
+        self.assertIs(pyspec_ac.stub(f), f)
+        self.assertIs(pyspec_ac.stub("c_f", optimizer_info=True)(f), f)
+        self.assertIs(pyspec_ac.stub(METH_O="c_f")(method), method)
+        self.assertIs(pyspec_ac.generate(method), method)
+        self.assertIs(pyspec_ac.generate(prefix="p", slots=False)(f), f)
+        self.assertIs(pyspec_ac.inline(f), f)
+        with self.assertRaises(AttributeError):
+            pyspec_ac.classmethod
+
+    def test_runtime_converters(self):
+        # ac.py has a Converter for each clinic converter and return
+        # converter, which checks the names of its options.
+        for name in (*converters, *return_converters):
+            with self.subTest(converter=name):
+                conv = getattr(pyspec_ac, name)
+                self.assertIsInstance(conv, pyspec_ac.Converter)
+                self.assertEqual(conv.name, name)
+        conv = pyspec_ac.slice_index(accept={int, pyspec_ac.NoneType},
+                                     c_default='0')
+        self.assertEqual(conv.options, {'accept': {int, types.NoneType},
+                                        'c_default': '0'})
+        self.assertEqual(repr(pyspec_ac.object(c_param='x')),
+                         "ac.object(c_param='x')")
+        self.assertIs(pyspec_ac.robuffer, libclinic.converters.robuffer)
+        with self.assertRaisesRegex(TypeError, "ac.slice_index[(][)]: "
+                                    "unknown option acept"):
+            pyspec_ac.slice_index(acept={int})
+        with self.assertRaisesRegex(TypeError, "takes only keyword"):
+            pyspec_ac.str("NULL")
+        # A converter of a C file ([python input]): clinic knows it.
+        self.assertEqual(pyspec_ac.bytesvalue(anything=1).options,
+                         {'anything': 1})
 
     def test_c_basename(self):
         # One rule: clinic's default C basename (T for T.__new__,
-        # T___init__ for T.__init__), or the one @c_name gives.
-        spec = """
+        # T___init__ for T.__init__), or the one @ac.stub("x") gives.
+        spec = """\
+            from libclinic.pyspec import ac, rt
             class bytes:
-                def __new__(cls, a: object = NULL):
+                @ac.stub
+                def __new__(cls, a: ac.object = rt.NULL):
                     ...
         """
         self.check(spec, "bytes.__new__\n", """
@@ -6534,19 +6823,22 @@ class PyspecStubTest(PyspecTestBase):
             bytes.__new__
                 a: object = NULL
         """)
-        self.check("""
+        self.check("""\
+            from libclinic.pyspec import ac, rt
             class bytes:
-                @c_name("bytes_new")
-                def __new__(cls, a: object = NULL):
+                @ac.stub("bytes_new")
+                def __new__(cls, a: ac.object = rt.NULL):
                     ...
         """, "bytes.__new__\n", """
             @classmethod
             bytes.__new__ as bytes_new
                 a: object = NULL
         """)
-        self.check("""
+        self.check("""\
+            from libclinic.pyspec import ac, rt
             class bytes:
-                def __init__(self, a: object = NULL):
+                @ac.stub
+                def __init__(self, a: ac.object = rt.NULL):
                     ...
         """, "bytes.__init__\n", """
             bytes.__init__
@@ -6559,9 +6851,11 @@ class PyspecStubTest(PyspecTestBase):
         """)
 
     def test_parameter_docs_out_of_order(self):
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                def meth(self, a: object, b: object):
+                @ac.stub
+                def meth(self, a: ac.object, b: ac.object):
                     '''Summary.
 
                       b
@@ -6576,8 +6870,10 @@ class PyspecStubTest(PyspecTestBase):
                             "section, got '  a'")
 
     def test_missing_converter(self):
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
+                @ac.stub
                 def meth(self, a):
                     ...
         """
@@ -6586,35 +6882,41 @@ class PyspecStubTest(PyspecTestBase):
                             "annotation")
 
     def test_clinic_error_names_spec(self):
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
+                @ac.stub
                 def meth(self,
-                         a: nosuchconverter):
+                         a: ac.nosuchconverter):
                     '''Doc.'''
                     ...
         """
         exc = self.expect_located_failure(
             spec, self.block("bytes.meth\n"),
-            "'nosuchconverter' is not a valid converter", 4)
+            "'nosuchconverter' is not a valid converter", 5)
         self.assertEqual(exc.report(),
-                         f"{self.spec_path}:4: error: 'nosuchconverter' is "
+                         f"{self.spec_path}:5: error: 'nosuchconverter' is "
                          "not a valid converter\n")
         # A check of the whole function is reported at its def.
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                def __new__(cls, a: object, /):
+                @ac.generate
+                def __new__(cls, a: ac.object, /):
                     return a
         """
         block = self.block("bytes.__new__\n").replace('"&PyBytes_Type"',
                                                        '""')
         self.expect_located_failure(
             spec, block, f"bytes.__new__() in {self.spec_path}: requires "
-            "the type object of 'bytes', which was declared without one", 3)
+            "the type object of 'bytes', which was declared without one", 4)
         # A construct outside the lowered subset, at its line.
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                @critical_section
-                def meth(self, a: object, /):
+                @ac.generate
+                @ac.critical_section
+                def meth(self, a: ac.object, /):
                     return a
         """
         exc = self.expect_located_failure(
@@ -6622,7 +6924,7 @@ class PyspecStubTest(PyspecTestBase):
             "@critical_section is expressible, but not lowered to C yet; "
             'see "The lowered subset" in Objects/pyspec/README.rst; a '
             "function implemented natively (in C) keeps this as its Python "
-            "reference with @native", 3)
+            "reference with @ac.stub(optimizer_info=True)", 4)
         self.assertEqual(exc.kind, SpecErrorKind.NOT_LOWERED)
         # So is a syntax error.
         self.expect_located_failure("class bytes:\n  def f(self):\n"
@@ -6652,54 +6954,68 @@ class PyspecTypeTest(PyspecTestBase):
         [clinic start generated code]*/
     """
 
-    SPEC = """
+    SPEC = """\
+        from libclinic.pyspec import ac
+        @ac.generate
         class bytes:
             '''Doc of
               bytes.'''
 
-            def __new__(cls, a: object, /):
+            @ac.generate
+            def __new__(cls, a: ac.object, /):
                 return a
 
-            def meth(self, a: object, /):
+            @ac.stub
+            def meth(self, a: ac.object, /):
                 '''Meth.'''
                 ...
 
-            @c_name(METH_NOARGS="bytes_getnewargs")
+            @ac.stub(METH_NOARGS="bytes_getnewargs")
             def __getnewargs__(self, /):
                 ...
 
-            @c_name(METH_O="bytes_other")
+            @ac.stub(METH_O="bytes_other")
             def other(self, x, /):
                 '''Other(x)'''
                 ...
 
+            @ac.stub
             def __repr__(self, /): ...
+            @ac.stub
             def __lt__(self, value, /): ...
+            @ac.stub
             def __le__(self, value, /): ...
+            @ac.stub
             def __eq__(self, value, /): ...
+            @ac.stub
             def __ne__(self, value, /): ...
+            @ac.stub
             def __gt__(self, value, /): ...
+            @ac.stub
             def __ge__(self, value, /): ...
 
-            @c_name(mp_length="bytes_length", sq_length="bytes_length")
+            @ac.stub(slots=["mp_length", "sq_length"])
             def __len__(self, /): ...
 
-            @c_name(sq_repeat="bytes_rep")
+            @ac.stub(sq_repeat="bytes_rep")
             def __mul__(self, value, /): ...
+            @ac.stub
             def __rmul__(self, value, /): ...
 
-            @c_name("bytes_mod")
+            @ac.stub("bytes_mod")
             def __mod__(self, value, /): ...
+            @ac.stub
             def __rmod__(self, value, /): ...
 
-        @c_name("myit")
+        @ac.generate(prefix="myit")
         class myiter:
-            @c_name("PyObject_SelfIter")
+            @ac.stub("PyObject_SelfIter")
             def __iter__(self, /): ...
 
+            @ac.stub
             def __next__(self, /): ...
 
-            @c_name(METH_NOARGS="myit_len")
+            @ac.stub(METH_NOARGS="myit_len")
             def __length_hint__(self, /):
                 '''Hint.'''
                 ...
@@ -6736,7 +7052,7 @@ class PyspecTypeTest(PyspecTestBase):
                 .mp_length = bytes_length,
             };
             """), header)
-        # @c_name on a class: the prefix of its tables.
+        # @ac.generate(prefix="x") on a class: the prefix of its tables.
         self.assertIn(dedent("""\
             static PyMethodDef myit_methods[] = {
                 {"__length_hint__", myit_len, METH_NOARGS, myit___length_hint____doc__},
@@ -6749,12 +7065,14 @@ class PyspecTypeTest(PyspecTestBase):
         self.assertNotIn('bytes_repr', header)
 
     def test_header_declares_no_type(self):
-        # The spec of a header (stringlib/transmogrify.h) declares methods
-        # that specs of C files share: no tables.
+        # The spec of a header (stringlib/transmogrify.h, the model of its
+        # C functions) generates no tables: a header declares no type.
         self.filename = os.path.join(self.tmp_dir, 'foo.h')
-        self.generate("""
+        self.generate("""\
+            from libclinic.pyspec import ac
             class bytes:
-                def meth(self, a: object, /):
+                @ac.stub
+                def meth(self, a: ac.object, /):
                     '''Meth.'''
                     ...
         """, self.CLASS + """
@@ -6771,9 +7089,11 @@ class PyspecTypeTest(PyspecTestBase):
     def test_methods_only_class(self):
         # A class that declares no slot declares its methods only: their
         # table stays in C, so a first migration is signatures only.
-        self.generate("""
+        self.generate("""\
+            from libclinic.pyspec import ac
             class bytes:
-                def meth(self, a: object, /):
+                @ac.stub
+                def meth(self, a: ac.object, /):
                     '''Meth.'''
                     ...
         """, self.CLASS + """
@@ -6783,17 +7103,189 @@ class PyspecTypeTest(PyspecTestBase):
         """)
         self.assertFalse(os.path.exists(self.output_path))
 
+    def test_partial_class(self):
+        # A class without @ac.generate gets no table, whatever it
+        # declares: the C keeps its PyTypeObject and tables.  Its decorated
+        # methods keep their own output (a generated __new__; the facts of
+        # a slot with a reference, in the call table), and the other
+        # methods of the type stay plain Argument Clinic.
+        spec = """\
+            from libclinic.pyspec import ac, rt
+            class bytes:
+                '''Doc of bytes.'''
+
+                @ac.generate
+                def __new__(cls, a: ac.object, /):
+                    return a
+
+                @ac.stub(optimizer_info=True, slots=["mp_length", "sq_length"])
+                def __len__(self, /):
+                    return rt.exact(int, 0)
+        """
+        blocks = self.CLASS + """
+        /*[clinic input]
+        output preset block
+        bytes.__new__
+        [clinic start generated code]*/
+        /*[clinic input]
+        bytes.other
+            x: object
+            /
+
+        Plain Argument Clinic.
+        [clinic start generated code]*/
+        """
+        generated = self.generate(spec, blocks)
+        self.assertIn('"other($self, x, /)\\n"', generated)
+        self.assertIn('bytes_other_impl(PyBytesObject *self, PyObject *x)\n'
+                      '/*[clinic end generated code:', generated)
+        with open(self.output_path, encoding='utf-8') as f:
+            header = f.read()
+        self.assertIn('bytes_impl(PyTypeObject *cls, PyObject *a)\n{',
+                      header)
+        self.assertIn('.slot = _PySpec_SLOT(as_mapping.mp_length),', header)
+        for table in ('bytes_doc', 'bytes_methods', 'bytes_as_mapping',
+                      'bytes_as_sequence'):
+            self.assertNotIn(table, header)
+
+    def test_class_options(self):
+        # @ac.generate(doc=..., methods=..., slots=...): the tables the
+        # class generates; bare, all of them.
+        full = self.types_header(self.SPEC, self.BLOCKS)
+        tables = {'doc': 'PyDoc_STRVAR(bytes_doc,',
+                  'methods': 'static PyMethodDef bytes_methods[]',
+                  'slots': 'static PyMappingMethods bytes_as_mapping'}
+        for text in tables.values():
+            self.assertIn(text, full)
+        for option in tables:
+            with self.subTest(option=option):
+                spec = self.SPEC.replace(
+                    "@ac.generate\n        class bytes:",
+                    f"@ac.generate({option}=False)\n        class bytes:")
+                self.assertNotEqual(spec, self.SPEC)
+                header = self.types_header(spec, self.BLOCKS)
+                for other, text in tables.items():
+                    if other == option:
+                        self.assertNotIn(text, header)
+                    else:
+                        self.assertIn(text, header)
+        # (The prefix is the option of myiter's.)
+        self.assertIn('static PyMethodDef myit_methods[]', full)
+
+    def test_undecorated_method(self):
+        # A def of a spec class says what clinic outputs for it: without
+        # @ac.stub or @ac.generate it is a mistake.
+        self.check_error("""\
+            from libclinic.pyspec import ac
+            class bytes:
+                def meth(self, a: ac.object, /):
+                    ...
+        """, "bytes.meth needs @ac.stub (C written by hand) or "
+             "@ac.generate (C generated from its body)")
+        # A top-level def without one is Python only: the model and the
+        # references may call it, generated C may not.
+        spec = """\
+            from libclinic.pyspec import ac, rt
+            def helper(x):
+                return x
+
+            @ac.stub(optimizer_info=True)
+            def ref(x: ac.object):
+                return rt.exact(bytes, helper(x))
+
+            @ac.generate
+            def Py_f(x: ac.object):
+                return HELPER(x)
+        """
+        self.generated_file(spec.replace("HELPER", "ref"), self.CLASS)
+        self.check_error(spec.replace("HELPER", "helper"),
+                         "call helper(x) of a Python helper")
+        self.check_error("""\
+            from libclinic.pyspec import ac
+            def f(x: ac.object):
+                ...
+        """, "f: a C function is declared with @ac.stub")
+
+    def test_group_names(self):
+        # The tooling is named by group: ac (clinic), rt (the primitives
+        # with a C meaning); the annotations of a method are converters,
+        # those of a top-level function C types.
+        for source, message in (
+                ("from libclinic.pyspec.rt import NULL\n",
+                 "a spec names the tooling by group"),
+                ("from libclinic.pyspec import ac, runtime\n",
+                 "libclinic.pyspec has the groups ac, rt, machine, not "
+                 "runtime"),
+                ("from libclinic.pyspec import ac\n"
+                 "@ac.generate\ndef f(x: ac.object):\n    return NULL\n",
+                 "write rt.NULL (from libclinic.pyspec import rt)"),
+                ("from libclinic.pyspec import ac, rt\n"
+                 "@ac.generate\ndef f(x: ac.object):\n    return ac.NULL\n",
+                 "write rt.NULL, not ac.NULL"),
+                ("from libclinic.pyspec import ac, rt\n"
+                 "@ac.generate\ndef f(x: ac.object):\n    return rt.x\n",
+                 "rt has no 'x'"),
+                ("from libclinic.pyspec import ac\n"
+                 "@ac.generate\ndef f(x: object):\n    return x\n",
+                 "f(): parameter 'x': an annotation is a C type: "
+                 "ac.<C type> (ac.object, ac.Py_ssize_t, ...), a string or "
+                 "None, not object"),
+                ("from libclinic.pyspec import ac\nclass bytes:\n"
+                 "    @ac.stub\n    def m(self, x: 'object', /): ...\n",
+                 "bytes.m(): parameter 'x': an annotation is a clinic "
+                 "converter, ac.<converter> or ac.<converter>(...), not "
+                 "'object'"),
+                ("from libclinic.pyspec import ac\nclass bytes:\n"
+                 "    @stub\n    def m(self, /): ...\n",
+                 "bytes.m: a spec decorator is @ac.<name>"),
+                ("from libclinic.pyspec import ac\nclass bytes:\n"
+                 "    @ac.stub(\"a\", \"b\")\n    def m(self, /): ...\n",
+                 "m: @ac.stub(\"f\") takes one argument, the C name"),
+                ("from libclinic.pyspec import ac\n"
+                 "@ac.stub(\"g\")\ndef f(x: ac.object):\n    ...\n",
+                 "f: the C name of a top-level function is its name"),
+                ("from libclinic.pyspec import ac\nclass bytes:\n"
+                 "    it_index: Py_ssize_t\n",
+                 "class bytes: a field is annotated with its C type")):
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(SpecError, re.escape(message)):
+                    pyspec_frontend.Spec(source, self.spec_path)
+
+    def test_qualifiers_are_not_clinic_input(self):
+        # The text of a converter or a default is the spec's less ac. and
+        # rt.: clinic reads it as written (py_default, the quotes).
+        spec = """\
+            from libclinic.pyspec import ac, rt
+            class bytes:
+                @ac.stub
+                def meth(self, a: ac.str(c_default="NULL") = "utf-8",
+                         b: ac.slice_index(accept={int, ac.NoneType}) = None,
+                         c: ac.object = rt.NULL):
+                    ...
+        """
+        stub = pyspec_frontend.Spec(dedent(spec), self.spec_path)
+        _, _, lines = stub.clinic_input('bytes.meth')
+        self.assertEqual([line for line, _ in lines[1:]], [
+            '    a: str(c_default="NULL") = "utf-8"',
+            '    b: slice_index(accept={int, NoneType}) = None',
+            '    c: object = NULL'])
+
     def test_method_table_with_ifdef(self):
         # The table lists every method unconditionally: clinic defines an
         # empty *_METHODDEF for a method not compiled in.  A signature
         # that depends on #if keeps its full blocks and is only placed in
         # the class by ``def other(self): ...``.
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __repr__(self, /): ...
-                def meth(self, a: object, /):
+                @ac.stub
+                def meth(self, a: ac.object, /):
                     ...
 
+                @ac.stub
                 def other(self):
                     ...
         """
@@ -6824,89 +7316,129 @@ class PyspecTypeTest(PyspecTestBase):
             """), header)
 
     def test_partial_group(self):
-        self.check_error("""
+        self.check_error("""\
+            from libclinic.pyspec import ac
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __lt__(self, value, /): ...
+                @ac.stub
                 def __gt__(self, value, /): ...
         """, "tp_richcompare also implements __le__, __eq__, __ne__, "
              "__ge__: declare them too")
-        self.check_error("""
+        self.check_error("""\
+            from libclinic.pyspec import ac
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __mod__(self, value, /): ...
         """, "nb_remainder also implements __rmod__: declare it too")
 
     def test_several_slots(self):
-        self.check_error("""
+        self.check_error("""\
+            from libclinic.pyspec import ac
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __len__(self, /): ...
         """, "several slots can implement __len__ (mp_length, sq_length); "
              "name them")
-        self.check_error("""
+        self.check_error("""\
+            from libclinic.pyspec import ac
+            @ac.generate
             class bytes:
-                @c_name(nb_add="bytes_add")
+                @ac.stub(slots=["nb_add"])
                 def __len__(self, /): ...
         """, "nb_add is not a slot of __len__")
 
     def test_slot_signature(self):
-        self.check_error("""
+        self.check_error("""\
+            from libclinic.pyspec import ac
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __repr__(self): ...
         """, "bytes.__repr__($self): the signature of tp_repr is "
              "__repr__($self, /)")
-        self.check_error("""
+        self.check_error("""\
+            from libclinic.pyspec import ac
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __contains__(self, value, /): ...
         """, "the signature of sq_contains is __contains__($self, key, /)")
-        self.check_error("""
+        self.check_error("""\
+            from libclinic.pyspec import ac
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __repr__(self, /):
                     '''Doc.'''
         """, "a slot has no docstring")
-        self.check_error("""
+        self.check_error("""\
+            from libclinic.pyspec import ac
+            @ac.generate
             class bytes:
+                @ac.generate
                 def __repr__(self, /):
                     return 'x'
-        """, "bytes.__repr__ is a slot implemented in C")
+        """, "bytes.__repr__: a slot is a C function written by hand: "
+             "@ac.stub, with its Python as the body")
 
     def test_pycfunction(self):
-        self.check_error("""
+        self.check_error("""\
+            from libclinic.pyspec import ac
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __repr__(self, /): ...
-                @c_name(METH_O="f")
+                @ac.stub(METH_O="f")
                 def meth(self, /): ...
         """, "bytes.meth: a METH_O function takes (self, arg, /)")
-        self.check_error("""
+        self.check_error("""\
+            from libclinic.pyspec import ac
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __repr__(self, /): ...
-                @c_name(METH_BOGUS="f")
+                @ac.stub(METH_BOGUS="f")
                 def meth(self, /): ...
-        """, "@c_name with a keyword names a slot")
+        """, "@ac.stub with a keyword names a slot")
 
     def test_decorators_of_c_methods(self):
-        # A slot or a hand-written PyCFunction takes only @c_name (and a
+        # A slot or a hand-written PyCFunction takes only @ac.stub (and a
         # PyCFunction @classmethod): nothing is silently ignored.
-        self.check_error("""
+        self.check_error("""\
+            from libclinic.pyspec import ac
+            @ac.generate
             class bytes:
-                @cname("bytes_r")
+                @ac.stub
+                @ac.cname("bytes_r")
                 def __repr__(self, /): ...
-        """, "bytes.__repr__: a slot takes only @c_name and "
-             "@coexist and @native and @text_signature, not "
-             "@cname('bytes_r')")
-        self.check_error("""
+        """, "bytes.__repr__: a slot takes only @ac.coexist and "
+             "@ac.stub and @ac.text_signature, not "
+             "@ac.cname('bytes_r')")
+        self.check_error("""\
+            from libclinic.pyspec import ac
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __repr__(self, /): ...
-                @permit_long_summary
-                @c_name(METH_NOARGS="f")
+                @ac.permit_long_summary
+                @ac.stub(METH_NOARGS="f")
                 def meth(self, /): ...
-        """, "bytes.meth: a PyCFunction takes only @c_name and "
-             "@classmethod and @coexist and @native and @staticmethod and "
-             "@text_signature, not @permit_long_summary")
+        """, "bytes.meth: a PyCFunction takes only @classmethod and "
+             "@ac.coexist and @staticmethod and @ac.stub and "
+             "@ac.text_signature, not @ac.permit_long_summary")
         # @classmethod is METH_CLASS.
-        header = self.types_header("""
+        header = self.types_header("""\
+            from libclinic.pyspec import ac
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __repr__(self, /): ...
                 @classmethod
-                @c_name(METH_O="Py_GenericAlias")
+                @ac.stub(METH_O="Py_GenericAlias")
                 def __class_getitem__(cls, item, /):
                     '''See PEP 585'''
                     ...
@@ -6921,22 +7453,31 @@ class PyspecTypeTest(PyspecTestBase):
         # which accessor they are.
         with self.assertRaisesRegex(ClinicError, re.escape(
                 "'bytes.nbytes' is an accessor in ")):
-            self.types_header("""
+            self.types_header("""\
+                from libclinic.pyspec import ac
+                @ac.generate
                 class bytes:
+                    @ac.stub
                     def __repr__(self, /): ...
-                    @getter
+                    @ac.stub
+                    @ac.getter
                     def nbytes(self): ...
             """, self.CLASS + """
         /*[clinic input]
         bytes.nbytes
         [clinic start generated code]*/
         """)
-        self.check_error("""
+        self.check_error("""\
+            from libclinic.pyspec import ac
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __repr__(self, /): ...
-                @getter
+                @ac.stub
+                @ac.getter
                 def nbytes(self): ...
-                @getter
+                @ac.stub
+                @ac.getter
                 def nbytes(self): ...
         """, "bytes.nbytes is defined twice")
 
@@ -6946,7 +7487,7 @@ class PyspecTypeTest(PyspecTestBase):
         # spec allocates them) and pass: anything else is an error, not
         # ignored.
         for stmt in ("x = 1", "if True: pass", "center: int = 1",
-                     "center = tm.B.center"):
+                     "center = tm.other.center"):
             with self.subTest(stmt=stmt):
                 self.check_error(f"""
                     class bytes:
@@ -6959,22 +7500,28 @@ class PyspecTypeTest(PyspecTestBase):
             import transmogrify as tm
         """, "import a spec as 'from Objects.stringlib.pyspec import "
              "transmogrify'")
-        self.check_error("""
+        self.check_error("""\
+            from libclinic.pyspec import ac
             class bytes:
+                @ac.generate
                 def meth(self, /):
                     pass
         """, "bytes.meth: use ... as the body of a function implemented "
              "in C, not pass")
-        self.check_error("""
+        self.check_error("""\
+            from libclinic.pyspec import ac
             class bytes:
+                @ac.stub
                 def meth(self, /): ...
+                @ac.stub
                 def meth(self, /): ...
         """, "bytes.meth is defined twice")
 
     def test_class_fields(self):
         # A field of the C struct is for the model of the spec only
         # (Objects/pyspec/README.rst, "Pure Python"): the same tables.
-        marker = "            def meth(self, a: object, /):\n"
+        marker = ("            @ac.stub\n"
+                  "            def meth(self, a: ac.object, /):\n")
         with_field = self.SPEC.replace(
             marker, "            ob_sval: 'char[]'\n\n" + marker)
         self.assertNotEqual(with_field, self.SPEC)
@@ -6982,25 +7529,20 @@ class PyspecTypeTest(PyspecTestBase):
                          self.types_header(self.SPEC, self.BLOCKS))
 
     def test_pure_python_body(self):
-        # @native(facts=False): the body is a pure-Python implementation
-        # that only the model runs; for clinic it is ``...``, on a slot, a
-        # PyCFunction and a clinic method alike.
+        # @ac.stub with a body: a pure-Python implementation that only the
+        # model runs; for clinic it is ``...``, on a slot, a PyCFunction
+        # and a clinic method alike.
         pure = self.SPEC
         for old, new in [
                 ("            def __repr__(self, /): ...\n",
-                 "            @native(facts=False)\n"
                  "            def __repr__(self, /):\n"
                  "                return 'b' + repr(str(self))\n"),
                 ("                '''Meth.'''\n"
                  "                ...\n",
                  "                '''Meth.'''\n"
                  "                return a\n"),
-                ("            def meth(self, a: object, /):\n",
-                 "            @native(facts=False)\n"
-                 "            def meth(self, a: object, /):\n"),
                 ("            def __getnewargs__(self, /):\n"
                  "                ...\n",
-                 "            @native(facts=False)\n"
                  "            def __getnewargs__(self, /):\n"
                  "                return (self,)\n")]:
             self.assertIn(old, pure)
@@ -7009,16 +7551,23 @@ class PyspecTypeTest(PyspecTestBase):
                          self.types_header(self.SPEC, self.BLOCKS))
 
     def test_class_decorators(self):
-        # The PyTypeObject is written in C: a class takes only the prefix
-        # of its tables.
-        for decorator in ('@static_type(tp_new="PyType_GenericNew")',
-                          '@final', '@c_name(tp_repr="x")'):
+        # The PyTypeObject is written in C: a class takes only
+        # @ac.generate, the tables it generates.
+        for decorator in ('@ac.static_type(tp_new="PyType_GenericNew")',
+                          '@final', '@ac.stub(tp_repr="x")',
+                          '@ac.generate\n@ac.generate'):
             with self.subTest(decorator=decorator):
-                self.check_error(f"""
-                    {decorator}
-                    class bytes:
-                        pass
-                """, 'class bytes: a spec class takes only @c_name("prefix")')
+                self.check_error("from libclinic.pyspec import ac\n"
+                                 f"{decorator}\nclass bytes:\n    pass\n",
+                                 "class bytes: a spec class takes only "
+                                 "@ac.generate(")
+        self.check_error("""\
+            from libclinic.pyspec import ac
+            @ac.generate(tp_repr="x")
+            class bytes:
+                pass
+        """, 'class bytes: the options of @ac.generate are prefix="x" and '
+             'doc, methods, slots=True or False')
 
     def test_slot_block_rejected(self):
         with self.assertRaisesRegex(ClinicError,
@@ -7029,10 +7578,11 @@ class PyspecTypeTest(PyspecTestBase):
                           "[clinic start generated code]*/\n")
 
     def test_c_name_is_clinic_as(self):
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                @c_name("bytes_m")
-                def meth(self, a: object, /):
+                @ac.stub("bytes_m")
+                def meth(self, a: ac.object, /):
                     ...
         """
         generated = self.generate(spec, dedent(self.CLASS)
@@ -7052,69 +7602,82 @@ class PyspecTypeTest(PyspecTestBase):
         os.mkdir(os.path.join(self.tmp_dir, 'shared'))
         with open(os.path.join(self.tmp_dir, 'shared', 'm.py'), 'w',
                   encoding='utf-8') as f:
-            f.write(dedent('''
-                class B:
-                    @c_name("stringlib_center")
-                    def center(self, width: Py_ssize_t, /):
+            f.write(dedent('''\
+                from libclinic.pyspec import ac
+                class other:
+                    @ac.stub("other_center")
+                    def center(self, width: ac.Py_ssize_t, /):
                         """Center."""
                         ...
 
-                    @c_name(METH_NOARGS="stringlib_lower")
+                    @ac.stub(METH_NOARGS="other_lower")
                     def lower(self, /):
-                        """B.lower() -> copy of B"""
+                        """other.lower() -> copy"""
                         ...
             '''))
         # Imports are relative to the directory of the C file.
-        header = self.types_header("""
+        header = self.types_header("""\
+            from libclinic.pyspec import ac
             from shared import m
 
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __repr__(self, /): ...
-                center = m.B.center
-                lower = m.B.lower
+                center = m.other.center
+                lower = m.other.lower
         """)
-        self.assertIn('    STRINGLIB_CENTER_METHODDEF\n'
-                      '    {"lower", stringlib_lower, METH_NOARGS, '
+        self.assertIn('    OTHER_CENTER_METHODDEF\n'
+                      '    {"lower", other_lower, METH_NOARGS, '
                       'bytes_lower__doc__},\n', header)
-        self.assertIn('"B.lower() -> copy of B"', header)
+        self.assertIn('"other.lower() -> copy"', header)
         # A typo names the method that is missing.
-        self.check_error("""
+        self.check_error("""\
+            from libclinic.pyspec import ac
             from shared import m
 
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __repr__(self, /): ...
-                center = m.B.centre
-        """, "m.B has no method 'centre'")
-        self.check_error("""
+                center = m.other.centre
+        """, "m.other has no method 'centre'")
+        self.check_error("""\
+            from libclinic.pyspec import ac
             from shared import m
 
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __repr__(self, /): ...
-                centre = m.B.center
+                centre = m.other.center
         """, "a shared method keeps its name: write "
-             "center = m.B.center")
+             "center = m.other.center")
         self.check_error("""
             from shared import nosuchmodule
         """, "nosuchmodule.py not found")
 
     def test_shared_declarations(self):
-        # A shared method with decorators: critical_section() and c_name().
+        # A shared method with decorators: ac.critical_section() and
+        # ac.stub(METH_...).
         os.mkdir(os.path.join(self.tmp_dir, 'shared'))
         with open(os.path.join(self.tmp_dir, 'shared', 'm.py'), 'w',
                   encoding='utf-8') as f:
-            f.write(dedent('''
-                class B:
-                    @c_name("stringlib_center")
-                    def center(self, width: Py_ssize_t, /):
+            f.write(dedent('''\
+                from libclinic.pyspec import ac
+                class other:
+                    @ac.stub("other_center")
+                    def center(self, width: ac.Py_ssize_t, /):
                         """Center."""
                         ...
 
-                    @c_name(METH_NOARGS="stringlib_lower")
+                    @ac.stub(METH_NOARGS="other_lower")
                     def lower(self, /):
-                        """B.lower() -> copy of B"""
+                        """other.lower() -> copy"""
                         ...
 
-                    def strip(self, chars: object = None, /):
+                    @ac.stub
+                    def strip(self, chars: ac.object = None, /):
                         """Strip."""
                         ...
             '''))
@@ -7122,30 +7685,36 @@ class PyspecTypeTest(PyspecTestBase):
         os.mkdir(os.path.join(self.tmp_dir, 'clinic'))
         with open(os.path.join(self.tmp_dir, 'clinic', 'm.h.h'), 'w',
                   encoding='utf-8') as f:
-            f.write('#define STRINGLIB_CENTER_METHODDEF    \\\n'
-                    '    {"center", _PyCFunction_CAST(stringlib_center), '
-                    'METH_FASTCALL, stringlib_center__doc__},\n')
-        spec = """
+            f.write('#define OTHER_CENTER_METHODDEF    \\\n'
+                    '    {"center", _PyCFunction_CAST(other_center), '
+                    'METH_FASTCALL, other_center__doc__},\n')
+        spec = """\
+            from libclinic.pyspec import ac
             from shared import m
 
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __repr__(self, /): ...
+                @ac.stub
                 def __reduce__(self):
                     '''Reduce.'''
                     ...
 
-                center = critical_section(m.B.center)
-                lower = critical_section(m.B.lower)
-                strip = critical_section(m.B.strip)
+                center = ac.critical_section(m.other.center)
+                lower = ac.critical_section(m.other.lower)
+                strip = ac.critical_section(m.other.strip)
 
+            @ac.generate
             class myiter:
+                @ac.stub
                 def __repr__(self, /): ...
-                lower = c_name(METH_NOARGS="myiter_lower")(m.B.lower)
-                __reduce__ = c_name(METH_NOARGS="myiter_reduce")(
+                lower = ac.stub(METH_NOARGS="myiter_lower")(m.other.lower)
+                __reduce__ = ac.stub(METH_NOARGS="myiter_reduce")(
                     bytes.__reduce__)
         """
         # With a block, strip is a clinic function of bytes with the
-        # parameters and docstring of m.B.strip, and @critical_section.
+        # parameters and docstring of m.other.strip, and @critical_section.
         blocks = self.CLASS + """
         /*[clinic input]
         bytes.__reduce__
@@ -7171,16 +7740,16 @@ class PyspecTypeTest(PyspecTestBase):
             {
                 PyObject *ret;
                 Py_BEGIN_CRITICAL_SECTION(self);
-                ret = stringlib_center(self, args, nargs);
+                ret = other_center(self, args, nargs);
                 Py_END_CRITICAL_SECTION();
                 return ret;
             }
             """), header)
-        self.assertIn('ret = stringlib_lower(self, NULL);', header)
+        self.assertIn('ret = other_lower(self, NULL);', header)
         self.assertIn(
             '    BYTES___REDUCE___METHODDEF\n'
             '    {"center", _PyCFunction_CAST(bytes_center), METH_FASTCALL, '
-            'stringlib_center__doc__},\n'
+            'other_center__doc__},\n'
             '    {"lower", bytes_lower, METH_NOARGS, bytes_lower__doc__},\n'
             '    BYTES_STRIP_METHODDEF\n', header)
         self.assertIn(
@@ -7188,27 +7757,199 @@ class PyspecTypeTest(PyspecTestBase):
             '    {"__reduce__", myiter_reduce, METH_NOARGS, '
             'bytes___reduce____doc__},\n', header)
         # Errors.
-        self.check_error("""
+        self.check_error("""\
+            from libclinic.pyspec import ac
             from shared import m
 
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __repr__(self, /): ...
-                strip = text_signature("()")(m.B.strip)
-        """, "a shared method takes only critical_section and c_name")
-        self.check_error("""
+                strip = ac.text_signature("()")(m.other.strip)
+        """, "a shared method takes only ac.critical_section() and "
+             "ac.stub(), not ac.text_signature('()')")
+        self.check_error("""\
+            from libclinic.pyspec import ac
             from shared import m
 
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __repr__(self, /): ...
-                lower = c_name(METH_O="f")(m.B.lower)
-        """, "bytes.lower: write c_name(METH_NOARGS=\"f\")(...)")
-        self.check_error("""
+                lower = ac.stub(METH_O="f")(m.other.lower)
+        """, "bytes.lower: write ac.stub(METH_NOARGS=\"f\")(...)")
+        self.check_error("""\
+            from libclinic.pyspec import ac
             from shared import m
 
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __repr__(self, /): ...
-                lower = critical_section(c_name(METH_NOARGS="f")(m.B.lower))
+                lower = ac.critical_section(ac.stub(METH_NOARGS="f")(m.other.lower))
         """, "critical_section() generates the C function")
+
+    # A header the C file includes (Objects/stringlib/transmogrify.h and
+    # ctype.h): a clinic function, and PyCFunctions written by hand.
+    HEADER = """\
+        /*[clinic input]
+        class B "PyObject *" "&PyType_Type"
+        [clinic start generated code]*/
+
+        /*[clinic input]
+        B.center as stringlib_center
+
+            width: Py_ssize_t
+            fillchar: char = b' '
+            /
+
+        Return a centered string of length width.
+        [clinic start generated code]*/
+
+        static PyObject *
+        stringlib_center_impl(PyObject *self, Py_ssize_t width, char fillchar)
+        {
+        }
+
+        static PyObject*
+        stringlib_lower(PyObject *self, PyObject *Py_UNUSED(ignored))
+        {
+        }
+
+        static PyObject *
+        stringlib_either(PyObject *self, PyObject *arg)
+        {
+        }
+    """
+
+    # Its model: the defs of its C functions, in the spec of the header.
+    HEADER_SPEC = """\
+        from libclinic.pyspec import ac
+
+        @ac.stub
+        def stringlib_center(self, width, fillchar=b' ', /):
+            ...
+
+        @ac.stub
+        def stringlib_lower(self, /):
+            '''B.lower() -> copy of B'''
+            ...
+    """
+
+    def c_function_header(self, spec, header_spec=None):
+        """The generated tables of *spec*, whose C file includes
+        HEADER."""
+        with open(os.path.join(self.tmp_dir, 'm.h'), 'w',
+                  encoding='utf-8') as f:
+            f.write(dedent(self.HEADER))
+        with open(os.path.join(self.tmp_dir, 'pyspec', 'm.py'), 'w',
+                  encoding='utf-8') as f:
+            f.write(dedent(header_spec or self.HEADER_SPEC))
+        return self.types_header(spec, '#include "m.h"\n'
+                                 + dedent(self.CLASS))
+
+    def test_c_functions(self):
+        # ``meth = ac.stub("f")``: the C function f of a header the C file
+        # includes; clinic reads its signature, calling convention and
+        # docstring from the C (libclinic/pyspec/cfunctions.py).
+        header = self.c_function_header("""\
+            from libclinic.pyspec import ac
+
+            @ac.generate
+            class bytes:
+                @ac.stub
+                def __repr__(self, /): ...
+                center = ac.stub("stringlib_center")
+                lower = ac.stub("stringlib_lower")
+                either = ac.stub(METH_O="stringlib_either")
+
+            @ac.generate
+            class myiter:
+                @ac.stub
+                def __repr__(self, /): ...
+                center = ac.stub("stringlib_center", critical_section=True)
+                lower = ac.stub("stringlib_lower", critical_section=True)
+        """)
+        # A clinic function: its METHODDEF; one written by hand: its
+        # calling convention from its parameters (or the spec), its
+        # docstring from its model.
+        self.assertIn(dedent("""\
+            static PyMethodDef bytes_methods[] = {
+                STRINGLIB_CENTER_METHODDEF
+                {"lower", stringlib_lower, METH_NOARGS, bytes_lower__doc__},
+                {"either", stringlib_either, METH_O, NULL},
+                {NULL, NULL}  /* sentinel */
+            };
+            """), header)
+        self.assertIn('PyDoc_STRVAR(bytes_lower__doc__,\n'
+                      '"B.lower() -> copy of B");', header)
+        # critical_section=True: a C function of the class calls it in a
+        # critical section on self.
+        self.assertIn(dedent("""\
+            static PyObject *
+            myiter_center(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+            {
+                PyObject *ret;
+                Py_BEGIN_CRITICAL_SECTION(self);
+                ret = stringlib_center(self, args, nargs);
+                Py_END_CRITICAL_SECTION();
+                return ret;
+            }
+            """), header)
+        self.assertIn('ret = stringlib_lower(self, NULL);', header)
+        self.assertIn(
+            '    {"center", _PyCFunction_CAST(myiter_center), METH_FASTCALL, '
+            'stringlib_center__doc__},\n'
+            '    {"lower", myiter_lower, METH_NOARGS, myiter_lower__doc__},\n',
+            header)
+
+    def test_c_function_errors(self):
+        def check(stmt, errmsg, header_spec=None):
+            spec = dedent(f"""\
+                from libclinic.pyspec import ac
+                @ac.generate
+                class bytes:
+                    @ac.stub
+                    def __repr__(self, /): ...
+                    {stmt}
+            """)
+            with self.subTest(stmt=stmt):
+                with self.assertRaises(ClinicError) as cm:
+                    self.c_function_header(spec, header_spec)
+                self.assertIn(errmsg, cm.exception.message)
+                self.assertEqual(cm.exception.lineno, 6
+                                 if header_spec is None else 4)
+        check('centre = ac.stub("stringlib_centre")',
+              "bytes.centre: no C function 'stringlib_centre' in the "
+              "headers")
+        check('either = ac.stub("stringlib_either")',
+              "does not say its calling convention: write "
+              'ac.stub(METH_O="stringlib_either")')
+        check('lower = ac.stub(METH_O="stringlib_lower")',
+              "bytes.lower: stringlib_lower is METH_NOARGS")
+        check('center = ac.stub(METH_FASTCALL="stringlib_center")',
+              "bytes.center: stringlib_center is a clinic function")
+        check('center = ac.stub("stringlib_center", text_signature="()")',
+              'a method that is a C function of a header is center = '
+              'ac.stub("f")')
+        # The model has the parameters of the C.
+        check('center = ac.stub("stringlib_center")',
+              "stringlib_center: the model of the C function "
+              "stringlib_center",
+              self.HEADER_SPEC.replace("width, fillchar=b' ', /",
+                                       "width, /"))
+        # It is not a clinic function of the class: no block.
+        with self.assertRaisesRegex(ClinicError, re.escape(
+                "'bytes.center' is the C function stringlib_center")):
+            self.generate("""\
+                from libclinic.pyspec import ac
+                class bytes:
+                    center = ac.stub("stringlib_center")
+            """, self.CLASS + """
+        /*[clinic input]
+        bytes.center
+        [clinic start generated code]*/
+        """)
 
 
 def spec_files():
@@ -7342,6 +8083,25 @@ class PyspecFilesTest(TestCase):
                         actual = self.outcome(spec[name], args, kwargs)
                         self.assertEqual(actual, expected, self.REBUILD)
 
+    def test_c_functions(self):
+        # ``center = ac.stub("stringlib_center")``: run as Python, the
+        # method is the model of the C function, the def of its name in
+        # the spec of its header (Objects/stringlib/pyspec/), with B the
+        # builtin and STRINGLIB_NEW that of the spec.
+        path = os.path.join(test_tools.basepath, 'Objects', 'pyspec',
+                            'bytesobject.py')
+        spec = pyspec_runtime.load(path)
+        for meth, args in [('center', (6, ord('*'))), ('zfill', (5,)),
+                           ('expandtabs', (4,)), ('isalnum', ()),
+                           ('swapcase', ())]:
+            for value in (b'-a\tB', b''):
+                with self.subTest(meth=meth, value=value):
+                    self.assertEqual(
+                        spec[f'bytes.{meth}'](value, *args),
+                        getattr(value, meth)(*(
+                            bytes([a]) if meth == 'center' and i else a
+                            for i, a in enumerate(args))))
+
     def test_types(self):
         for spec_path, c_file in spec_files():
             if c_file is None or not c_file.endswith('.c'):
@@ -7357,8 +8117,11 @@ class PyspecFilesTest(TestCase):
                                     skip)
 
     def check_type(self, spec, cls_name, tp, skip=()):
-        """The type generated from class *cls_name* is *tp*, but for the
-        methods *skip* (not compiled in)."""
+        """The type described by class *cls_name* is *tp*, but for the
+        methods *skip* (not compiled in): exactly for the tables the class
+        generates (@ac.generate), else in part (the methods and slots of
+        the class are of the type, whose tables stay in C)."""
+        tables = spec.class_output(cls_name)
         methods, slots, docs = [], set(), {}
         for meth in spec.entries(cls_name):
             name = f'{cls_name}.{meth}'
@@ -7371,7 +8134,18 @@ class PyspecFilesTest(TestCase):
             if meth == '__new__':
                 continue
             methods.append(meth)
-            if kind == pyspec_frontend.SHARED:
+            if kind == pyspec_frontend.SHARED and \
+                    spec.shared[name].c_function is not None:
+                # ``ac.stub("f")``: the C function f of a header; the
+                # docstring of a clinic function is the C's, that of one
+                # written by hand its model's.
+                method = spec.c_method(name)
+                if method.function is not None:
+                    docs[meth] = method.clinic_doc()[0]
+                else:
+                    other, other_name = spec.declaration(name)
+                    docs[meth] = other.docstring(other_name)
+            elif kind == pyspec_frontend.SHARED:
                 other, other_name = spec.declaration(name)
                 if other.method_kind(other_name) == pyspec_frontend.PYCFUNCTION:
                     docs[meth] = other.docstring(other_name)
@@ -7389,21 +8163,33 @@ class PyspecFilesTest(TestCase):
                   and not (name == '__hash__' and value is None)
                   and not isinstance(value, (types.GetSetDescriptorType,
                                              types.MemberDescriptorType))]
-        # The method table, hence __dict__, is in the order of the spec.
-        self.assertEqual(others, methods, self.REBUILD)
-        if not slots:
-            # The spec declares the methods only (e.g. mmap): the slots
-            # and tp_doc stay in C.
-            return
-        # The slots of the spec are the wrappers of the type: the slots
-        # its C PyTypeObject and the generated tables fill.
-        self.assertEqual(wrappers, slots,
-                         "the slots of the type (its PyTypeObject, in C) "
-                         "and the dunders of the spec class differ; "
-                         + self.REBUILD)
-        # Hand-written PyCFunctions: the docstring as is.
-        for meth, doc in docs.items():
-            self.assertEqual(getattr(tp, meth).__doc__, doc, self.REBUILD)
+        if tables is not None and tables.methods:
+            # The method table, hence __dict__, is in the order of the
+            # spec.
+            self.assertEqual(others, methods, self.REBUILD)
+            # Hand-written PyCFunctions and the C functions of headers:
+            # the docstring as is.
+            for meth, doc in docs.items():
+                self.assertEqual(getattr(tp, meth).__doc__, doc,
+                                 self.REBUILD)
+        else:
+            # The method table is C's (e.g. mmap): it has the methods of
+            # the class.
+            self.assertLessEqual(set(methods), set(others), self.REBUILD)
+        if tables is not None and tables.slots:
+            # The slots of the spec are the wrappers of the type: the
+            # slots its C PyTypeObject and the generated tables fill.
+            self.assertEqual(wrappers, slots,
+                             "the slots of the type (its PyTypeObject, in "
+                             "C) and the dunders of the spec class differ; "
+                             + self.REBUILD)
+        else:
+            self.assertLessEqual(slots, wrappers,
+                                 "a dunder of the spec class is not a slot "
+                                 "of the type (its PyTypeObject, in C); "
+                                 + self.REBUILD)
+        if tables is None or not tables.doc:
+            return      # tp_doc is C's
         # tp_doc is the class docstring, as is.
         node = spec.classes[cls_name]
         doc = ast.get_docstring(node, clean=False)
@@ -7415,14 +8201,15 @@ class PyspecFilesTest(TestCase):
         # The C of a type and the dunders of its spec class disagree: a
         # dunder of the type missing from the class, or one too many.  The
         # class is made up from the type (a stub per wrapper and method),
-        # for each type of a spec class that declares slots.
+        # for each type of a spec class that generates its slot tables.  A
+        # class that does not may leave out a dunder, not add one.
         checked = 0
         for spec_path, c_file in spec_files():
             if c_file is None or not c_file.endswith('.c'):
                 continue
             spec = pyspec_frontend.Spec.load(spec_path)
             for cls_name in spec.classes:
-                if not spec.declares_slots(cls_name):
+                if not spec.describes_type(cls_name):
                     continue
                 tp = load_cases(spec_path).TYPES[cls_name]
                 wrappers = [name for name, value in vars(tp).items()
@@ -7440,10 +8227,12 @@ class PyspecFilesTest(TestCase):
                              if s.name not in vars(tp)
                              and pyspec_slots.is_slot(s.name))
 
-                def made_up(dunders):
+                def made_up(dunders, generate=True):
                     return pyspec_frontend.Spec(
-                        f'class {cls_name}:\n' + ''.join(
-                            f'    def {name}(self, /): ...\n'
+                        'from libclinic.pyspec import ac\n'
+                        + ('@ac.generate\n' if generate else '')
+                        + f'class {cls_name}:\n' + ''.join(
+                            f'    @ac.stub\n    def {name}(self, /): ...\n'
                             for name in dunders + methods), spec_path)
 
                 # As is, the dunders agree (the docstrings do not).
@@ -7461,6 +8250,16 @@ class PyspecFilesTest(TestCase):
                         with self.assertRaisesRegex(
                                 AssertionError, 'and the dunders of the spec'):
                             self.check_type(made_up(dunders), cls_name, tp)
+                # Without its tables, the class may declare some slots.
+                partial = made_up(wrappers[1:], generate=False)
+                try:
+                    self.check_type(partial, cls_name, tp)
+                except AssertionError as exc:
+                    self.assertNotIn('dunder', str(exc))
+                with self.assertRaisesRegex(
+                        AssertionError, 'is not a slot of the type'):
+                    self.check_type(made_up(wrappers + [extra],
+                                            generate=False), cls_name, tp)
                 checked += 1
         self.assertGreater(checked, 0)
 
@@ -7742,11 +8541,14 @@ class PyspecFactsTest(TestCase):
     def test_unknown_is_worst(self):
         # A C function whose body is ... may do anything: a call of it may
         # run Python code, raise anything and return NULL.
-        spec = pyspec_frontend.Spec(dedent("""
-            def f(x: object):
+        spec = pyspec_frontend.Spec(dedent("""\
+            from libclinic.pyspec import ac
+            @ac.generate
+            def f(x: ac.object):
                 return g(x)
 
-            def g(x: object):
+            @ac.stub
+            def g(x: ac.object):
                 ...
         """))
         facts = pyspec_context.Context(spec).analyzer().function_facts('f')
@@ -7758,14 +8560,17 @@ class PyspecFactsTest(TestCase):
         # An object of a type not known exactly may have any special
         # method: iter(x) and len(x) may run Python code and raise
         # anything.
-        spec = pyspec_frontend.Spec(dedent("""
-            from libclinic.pyspec.runtime import iter
+        spec = pyspec_frontend.Spec(dedent("""\
+            from libclinic.pyspec import ac, rt
+            from libclinic.pyspec import ac, rt
 
-            def f(x: object):
-                it = iter(x)
+            @ac.generate
+            def f(x: ac.object):
+                it = rt.iter(x)
                 return it
 
-            def g(x: object):
+            @ac.generate
+            def g(x: ac.object):
                 n = len(x)
                 return x
         """))
@@ -7798,9 +8603,11 @@ class PyspecLanguageTest(PyspecTestBase):
 
     def test_new_with_constant_default(self):
         # tuple.__new__(iterable=()), list.__init__: any constant default.
-        self.check("""
+        self.check("""\
+            from libclinic.pyspec import ac
             class bytes:
-                def __new__(cls, iterable: object(c_default="NULL") = (),
+                @ac.stub
+                def __new__(cls, iterable: ac.object(c_default="NULL") = (),
                             /):
                     '''Built-in immutable sequence.'''
                     ...
@@ -7812,9 +8619,11 @@ class PyspecLanguageTest(PyspecTestBase):
 
             Built-in immutable sequence.
         """)
-        self.check("""
+        self.check("""\
+            from libclinic.pyspec import ac
             class bytes:
-                def __init__(self, iterable: object(c_default="NULL") = (),
+                @ac.stub
+                def __init__(self, iterable: ac.object(c_default="NULL") = (),
                              /):
                     '''Built-in mutable sequence.'''
                     ...
@@ -7828,10 +8637,12 @@ class PyspecLanguageTest(PyspecTestBase):
 
     def test_keyword_parameter(self):
         # int(x, base=10): a keyword parameter with its C name.
-        self.check("""
+        self.check("""\
+            from libclinic.pyspec import ac
             class bytes:
-                def __new__(cls, x: object(c_default="NULL") = 0, /,
-                            base: object(c_default="NULL",
+                @ac.stub
+                def __new__(cls, x: ac.object(c_default="NULL") = 0, /,
+                            base: ac.object(c_default="NULL",
                                          c_param='obase') = 10):
                     ...
         """, "bytes.__new__ as long_new\n", """
@@ -7843,11 +8654,13 @@ class PyspecLanguageTest(PyspecTestBase):
         """)
 
     def test_varargs_keyword_only_and_kwargs(self):
-        output = self.check("""
+        output = self.check("""\
+            from libclinic.pyspec import ac
             class bytes:
+                @ac.stub
                 @staticmethod
-                def meth(a: object, /, *args: tuple,
-                         flag: bool = False) -> Py_ssize_t:
+                def meth(a: ac.object, /, *args: ac.tuple,
+                         flag: ac.bool = False) -> ac.Py_ssize_t:
                     '''Summary.'''
                     ...
         """, "bytes.meth\n", """
@@ -7863,9 +8676,11 @@ class PyspecLanguageTest(PyspecTestBase):
         self.assertIn("bytes_meth_impl(PyObject *a, PyObject *args, "
                       "int flag)", output)
         # str.format: *args and **kwargs.
-        output = self.check("""
+        output = self.check("""\
+            from libclinic.pyspec import ac
             class bytes:
-                def format(self, /, *args: tuple, **kwargs: dict):
+                @ac.stub
+                def format(self, /, *args: ac.tuple, **kwargs: ac.dict):
                     '''Summary.'''
                     ...
         """, "bytes.format\n", """
@@ -7879,12 +8694,14 @@ class PyspecLanguageTest(PyspecTestBase):
                       "PyObject *args, PyObject *kwargs)", output)
 
     def test_self_and_defining_class_converters(self):
-        self.check("""
+        self.check("""\
+            from libclinic.pyspec import ac
             class bytes:
-                @coexist
-                @text_signature("($self, cls)")
-                def meth(self: self(type="PyObject *"),
-                         cls: defining_class, /):
+                @ac.stub
+                @ac.coexist
+                @ac.text_signature("($self, cls)")
+                def meth(self: ac.self(type="PyObject *"),
+                         cls: ac.defining_class, /):
                     '''Summary.'''
                     ...
         """, "bytes.meth\n", """
@@ -7901,17 +8718,20 @@ class PyspecLanguageTest(PyspecTestBase):
     def test_accessors(self):
         # A getter and a setter: their blocks name them with @getter and
         # @setter, the rest comes from the spec.
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac, rt
             class bytes:
-                @critical_section
-                @getter
-                def nbytes(self) -> Py_ssize_t:
+                @ac.stub
+                @ac.critical_section
+                @ac.getter
+                def nbytes(self) -> ac.Py_ssize_t:
                     '''The size in bytes.'''
                     ...
 
-                @setter
-                @deleter
-                def nbytes(self, value: object = NULL):
+                @ac.stub
+                @ac.setter
+                @ac.deleter
+                def nbytes(self, value: ac.object = rt.NULL):
                     ...
         """
         stubs = ("@getter\nbytes.nbytes\n", "@setter\nbytes.nbytes\n")
@@ -7931,16 +8751,49 @@ class PyspecLanguageTest(PyspecTestBase):
         self.assertIn("bytes_nbytes_get_impl(PyBytesObject *self)", actual)
         self.assertIn("bytes_nbytes_set_impl(PyBytesObject *self, "
                       "PyObject *value)", actual)
-        # Each accessor needs its block, with its decorator.
+        # Each accessor needs its block, with its decorator: clinic
+        # inserts a missing one after the one before it.
+        with support.captured_stdout() as stdout:
+            generated = self.generate(spec, self.blocks(stubs[0]))
+        self.assertIn("]*/\n\n/*[clinic input]\n@setter\nbytes.nbytes\n"
+                      "[clinic start generated code]*/\n", generated)
+        self.assertRegex(generated, re.escape(
+            "static int\nbytes_nbytes_set_impl(PyBytesObject *self, "
+            "PyObject *value)\n/*[clinic end generated code: ") + r".*\*/\n"
+            + re.escape("{\n"
+                        "    /* TODO: write bytes_nbytes_set_impl() */\n"
+                        "    PyErr_SetString(PyExc_NotImplementedError,\n"
+                        '                    "bytes.nbytes");\n'
+                        "    return -1;\n}\n"))
+        # (The entry of the attribute is already in tp_getset.)
+        self.assertNotIn("GETSETDEF", stdout.getvalue())
+        # A new attribute: its entry is added to tp_getset in C.
+        other = spec.replace("class bytes:\n", "class bytes:\n"
+                             "                @ac.stub\n"
+                             "                def other(self, /):\n"
+                             "                    ...\n\n")
+        with support.captured_stdout() as stdout:
+            generated = self.generate(other, self.blocks("bytes.other\n"))
+        self.assertIn("warning: clinic inserted the block of bytes.nbytes; "
+                      "add BYTES_NBYTES_GETSETDEF to the tp_getset of "
+                      "bytes\n", stdout.getvalue())
+        self.assertEqual(stdout.getvalue().count("GETSETDEF"), 1)
+        self.assertLess(generated.index("@getter\nbytes.nbytes\n"),
+                        generated.index("@setter\nbytes.nbytes\n"))
+        self.assertIn("bytes_nbytes_get_impl(PyBytesObject *self)\n"
+                      "/*[clinic end generated code: output=", generated)
+        # Without a block to follow, there is no place for it.
         with self.assertRaises(ClinicError) as cm:
-            self.generate(spec, self.blocks(stubs[0]))
+            self.generate(spec, self.blocks())
         self.assertIn("put this block above its impl:\n/*[clinic input]\n"
-                      "@setter\nbytes.nbytes\n", cm.exception.message)
+                      "@getter\nbytes.nbytes\n", cm.exception.message)
         self.expect_failure(spec, self.blocks("bytes.nbytes\n"),
                             "'bytes.nbytes' is an accessor in")
-        self.expect_failure("""
+        self.expect_failure("""\
+            from libclinic.pyspec import ac
             class bytes:
-                @getter
+                @ac.generate
+                @ac.getter
                 def nbytes(self):
                     return 1
         """, self.blocks(stubs[0]), "bytes.nbytes(): an accessor with a "
@@ -7949,10 +8802,11 @@ class PyspecLanguageTest(PyspecTestBase):
     def test_native_method(self):
         # A clinic method whose C is written by hand, with a Python
         # reference in any Python and any signature: plain clinic output.
-        self.check("""
+        self.check("""\
+            from libclinic.pyspec import ac
             class bytes:
-                @native
-                def meth(self, *args: tuple, sep: object = None):
+                @ac.stub(optimizer_info=True)
+                def meth(self, *args: ac.tuple, sep: ac.object = None):
                     '''Summary.'''
                     out = []
                     while args:
@@ -7974,26 +8828,28 @@ class PyspecLanguageTest(PyspecTestBase):
         return self.generated_file(spec, PyspecTypeTest.CLASS)
 
     def test_pycfunction_conventions(self):
-        header = self.types_header("""
+        header = self.types_header("""\
+            from libclinic.pyspec import ac
+            @ac.generate
             class bytes:
+                @ac.stub
                 def __repr__(self, /): ...
 
-                @c_name(METH_VARARGS="do_string_format")
+                @ac.stub(METH_VARARGS="do_string_format")
                 def format(self, /, *args, **kwargs):
                     '''S.format(*args, **kwargs) -> str'''
                     ...
 
-                @c_name(METH_FASTCALL="bytes_fast")
+                @ac.stub(METH_FASTCALL="bytes_fast")
                 def fast(self, /, *args): ...
 
                 @staticmethod
-                @c_name(METH_O="bytes_static")
+                @ac.stub(METH_O="bytes_static")
                 def static(x, /): ...
 
-                @c_name(mp_subscript="list_subscript", sq_item="list_item",
-                        METH_O="list_subscript")
-                @coexist
-                @text_signature("($self, index, /)")
+                @ac.stub(mp_subscript="list_subscript", sq_item="list_item", METH_O="list_subscript")
+                @ac.coexist
+                @ac.text_signature("($self, index, /)")
                 def __getitem__(self, key, /):
                     '''Return self[index].'''
                     ...
@@ -8025,10 +8881,13 @@ class PyspecLanguageTest(PyspecTestBase):
                 ('METH_FASTCALL', '(self, /, *, x)', '(self, /, *args'),
                 ('METH_O', '(self, x)', '(self, arg, /)')):
             with self.subTest(convention=convention, params=params):
-                spec = f"""
+                spec = f"""\
+                    from libclinic.pyspec import ac
+                    @ac.generate
                     class bytes:
+                        @ac.stub
                         def __repr__(self, /): ...
-                        @c_name({convention}="f")
+                        @ac.stub({convention}="f")
                         def meth{params}: ...
                 """
                 self.expect_failure(spec, PyspecTypeTest.CLASS,
@@ -8039,46 +8898,52 @@ class PyspecLanguageTest(PyspecTestBase):
 
     BODIES = [
         # (the def, what the error says is not lowered, its line)
-        ("def __new__(cls, a: object, /):\n"
-         "    while a is not NULL:\n        return a\n    return a",
-         "while loop 'while a is not NULL:\\n    return a'", 2),
-        ("def __new__(cls, *args: tuple):\n    return args",
-         "*args", 1),
-        ("def __new__(cls, a: object, /, **kw: dict):\n    return a",
-         "**kw", 1),
-        ("def __new__(cls, a: object = 0, /):\n    return a",
-         "default 0 of parameter 'a' (lowered: NULL)", 1),
-        ("def __new__(cls, a: object, /):\n"
+        ("@ac.generate\ndef __new__(cls, a: ac.object, /):\n"
+         "    while a is not rt.NULL:\n        return a\n    return a",
+         "while loop 'while a is not NULL:\\n    return a'", 3),
+        ("@ac.generate\ndef __new__(cls, *args: ac.tuple):\n    return args",
+         "*args", 2),
+        ("@ac.generate\ndef __new__(cls, a: ac.object, /, **kw: ac.dict):\n"
+         "    return a",
+         "**kw", 2),
+        ("@ac.generate\ndef __new__(cls, a: ac.object = 0, /):\n    return a",
+         "default 0 of parameter 'a' (lowered: NULL)", 2),
+        ("@ac.generate\ndef __new__(cls, a: ac.object, /):\n"
          "    for x in a:\n        pass\n    else:\n        pass\n"
          "    return a",
-         'this form of for loop (lowered: "for item in it:", no else)', 2),
-        ("def __new__(cls, a: object, /):\n    b = a.copy()\n    return b",
+         'this form of for loop (lowered: "for item in it:", no else)', 3),
+        ("@ac.generate\ndef __new__(cls, a: ac.object, /):\n"
+         "    b = a.copy()\n    return b",
          "call a.copy() (lowered: of C functions, spec functions, iter(), "
-         "len(), and of local objects with at most one argument)", 2),
-        ("def __new__(cls, a: object, /):\n    b = [x for x in a]\n"
-         "    return b",
-         "assignment of [x for x in a] (lowered: of a call)", 2),
-        ("def __new__(cls, a: object, /):\n"
+         "len(), and of local objects with at most one argument)", 3),
+        ("@ac.generate\ndef __new__(cls, a: ac.object, /):\n"
+         "    b = [x for x in a]\n    return b",
+         "assignment of [x for x in a] (lowered: of a call)", 3),
+        ("@ac.generate\ndef __new__(cls, a: ac.object, /):\n"
          "    raise TypeError('x') from None",
-         "raise statement \"raise TypeError('x') from None\"", 2),
-        ("def __new__(cls, a: object, /):\n    try:\n        b = iter(a)\n"
+         "raise statement \"raise TypeError('x') from None\"", 3),
+        ("@ac.generate\ndef __new__(cls, a: ac.object, /):\n    try:\n"
+         "        b = rt.iter(a)\n"
          "    except (TypeError, len):\n        return a\n"
          "    return b",
          "except clause (TypeError, len) (lowered: except E, except (E1, "
-         "E2), builtin exceptions)", 4),
-        ("def __new__(cls, a: object, /):\n    return",
-         "return of nothing", 2),
-        ("def __new__(cls, a: object, /):\n    a += 1\n    return a",
-         "augmented assignment 'a += 1'", 2),
-        ("def __new__(cls, a: object, /):\n    if a == 'x':\n"
-         "        return a\n    return a",
+         "E2), builtin exceptions)", 5),
+        ("@ac.generate\ndef __new__(cls, a: ac.object, /):\n    return",
+         "return of nothing", 3),
+        ("@ac.generate\ndef __new__(cls, a: ac.object, /):\n"
+         "    a += 1\n    return a",
+         "augmented assignment 'a += 1'", 3),
+        ("@ac.generate\ndef __new__(cls, a: ac.object, /):\n"
+         "    if a == 'x':\n        return a\n    return a",
          "value 'x' (lowered: names, NULL, types, exceptions, bool and int "
-         "constants)", 2),
-        ("def __new__(cls, a: object, /):\n    return exact(bytes, a)",
-         "exact() outside the Python reference of a @native "
-         "function", 2),
-        ("@staticmethod\ndef meth(a: object, /):\n    return a",
-         "@staticmethod", 1),
+         "constants)", 3),
+        ("@ac.generate\ndef __new__(cls, a: ac.object, /):\n"
+         "    return rt.exact(bytes, a)",
+         "exact() outside the Python reference of a function written in C "
+         "(@ac.stub(optimizer_info=True))", 3),
+        ("@ac.generate\n@staticmethod\ndef meth(a: ac.object, /):\n"
+         "    return a",
+         "@staticmethod", 2),
     ]
 
     def test_not_lowered(self):
@@ -8086,13 +8951,14 @@ class PyspecLanguageTest(PyspecTestBase):
         for body, what, line in self.BODIES:
             name = 'meth' if 'def meth' in body else '__new__'
             with self.subTest(body=body):
-                spec = "class bytes:\n" + "".join(
-                    f"    {line}\n" for line in body.splitlines())
+                spec = ("from libclinic.pyspec import ac, rt\n"
+                        "class bytes:\n" + "".join(
+                            f"    {line}\n" for line in body.splitlines()))
                 if name == 'meth':
                     spec = spec.replace("class bytes:",
-                                        "class bytes:\n    def __new__"
-                                        "(cls, /): ...", 1)
-                    line += 1
+                                        "class bytes:\n    @ac.stub\n"
+                                        "    def __new__(cls, /): ...", 1)
+                    line += 2
                     block = self.blocks("bytes.__new__ as foo_new\n",
                                         "bytes.meth\n")
                 exc = self.expect_located_failure(
@@ -8101,13 +8967,15 @@ class PyspecLanguageTest(PyspecTestBase):
                     'lowered to C yet; see "The lowered subset" in '
                     "Objects/pyspec/README.rst; a function implemented "
                     "natively (in C) keeps this as its Python reference "
-                    "with @native", line + 1)
+                    "with @ac.stub(optimizer_info=True)", line + 2)
                 self.assertEqual(exc.kind, SpecErrorKind.NOT_LOWERED)
 
     def test_all_not_lowered(self):
         # subset.lowered() lists every construct, in order.
-        spec = pyspec_frontend.Spec(dedent("""
-            def f(a: object, *, b: int = 1):
+        spec = pyspec_frontend.Spec(dedent("""\
+            from libclinic.pyspec import ac
+            @ac.generate
+            def f(a: ac.object, *, b: ac.int = 1):
                 while a:
                     pass
                 return a + b
@@ -8115,9 +8983,9 @@ class PyspecLanguageTest(PyspecTestBase):
         self.assertEqual(
             [(node.lineno, what)
              for node, what in pyspec_subset.lowered(spec, 'f')],
-            [(2, "keyword-only parameter 'b'"),
-             (3, "while loop 'while a:\\n    pass'"),
-             (5, "return of a + b")])
+            [(3, "keyword-only parameter 'b'"),
+             (4, "while loop 'while a:\\n    pass'"),
+             (6, "return of a + b")])
 
     def test_specs_in_subset(self):
         # Every body of the specs of the tree is in the lowered subset,
@@ -8135,28 +9003,31 @@ class PyspecLanguageTest(PyspecTestBase):
 
     # -- facts: the worst case outside the subset -------------------------------
 
-    REFERENCES = """
-        @native
-        def model(x: object):
+    REFERENCES = """\
+        from libclinic.pyspec import ac, rt
+        @ac.stub(optimizer_info=True)
+        def model(x: ac.object):
             n = 0
             while n < 3:
                 n += 1
-            return exact(bytes, bytes(n))
+            return rt.exact(bytes, bytes(n))
 
-        @native
-        def effect_in_loop(x: object):
+        @ac.stub(optimizer_info=True)
+        def effect_in_loop(x: ac.object):
             while x:
-                calls(x, "__len__")
-            return exact(bytes, x)
+                rt.calls(x, "__len__")
+            return rt.exact(bytes, x)
 
-        @native
-        def nested_effect(x: object):
-            return exact(bytes, unknown(x))
+        @ac.stub(optimizer_info=True)
+        def nested_effect(x: ac.object):
+            return rt.exact(bytes, rt.unknown(x))
     """
 
     def test_worst_case_facts(self):
-        spec = pyspec_frontend.Spec(dedent(self.REFERENCES) + dedent("""
-            def lowered_outside(x: object):
+        spec = pyspec_frontend.Spec(dedent(self.REFERENCES) + dedent("""\
+            from libclinic.pyspec import ac
+            @ac.generate
+            def lowered_outside(x: ac.object):
                 while x:
                     pass
                 return x
@@ -8185,11 +9056,13 @@ class PyspecLanguageTest(PyspecTestBase):
     def test_worst_case_facts_of_a_call(self):
         # A spec body calling such a reference checks for any error and
         # says it may run Python code.
-        spec = dedent("""
+        spec = dedent("""\
+            from libclinic.pyspec import ac, rt
             class bytes:
-                def __new__(cls, a: object, /):
+                @ac.generate
+                def __new__(cls, a: ac.object, /):
                     b = effect_in_loop(a)
-                    if b is NULL:
+                    if b is rt.NULL:
                         return a
                     return b
         """) + dedent(self.REFERENCES)
@@ -8200,29 +9073,32 @@ class PyspecLanguageTest(PyspecTestBase):
     # -- errors -------------------------------------------------------------
 
     def test_error_in_the_spec_it_is_written_in(self):
-        # An @inline function of another spec is reported there.
+        # An @ac.inline function of another spec is reported there.
         other = os.path.join(self.tmp_dir, 'pyspec', 'other.py')
         with open(other, 'w', encoding='utf-8') as f:
             f.write(dedent("""\
-                @inline
-                def helper(x: object):
+                from libclinic.pyspec import ac
+                @ac.inline
+                def helper(x: ac.object):
                     if type(x) is bytes:
                         return x.upper()
                     return x
             """))
-        spec = """
-            from pyspec.other import helper
+        spec = """\
+            from libclinic.pyspec import ac
+            from pyspec import other
 
             class bytes:
-                def __new__(cls, a: object, /):
+                @ac.generate
+                def __new__(cls, a: ac.object, /):
                     if type(a) is bytes:
-                        return helper(a)
+                        return other.helper(a)
                     return a
         """
         with self.assertRaises(SpecError) as cm:
             self.generate(spec, PyspecTest.BLOCK)
         exc = cm.exception
-        self.assertEqual((exc.filename, exc.lineno), (other, 4))
+        self.assertEqual((exc.filename, exc.lineno), (other, 5))
         self.assertStartsWith(exc.message, "helper(): call x.upper() ")
         self.assertEqual(exc.kind, SpecErrorKind.NOT_LOWERED)
 
@@ -8235,8 +9111,11 @@ class PyspecLanguageTest(PyspecTestBase):
                 (PyspecTest.SPEC,
                  PyspecTest.BLOCK.replace('"&PyBytes_Type"', '""'),
                  SpecErrorKind.BINDING),
-                ("class bytes:\n    def __new__(cls, a: object, /):\n"
-                 "        b = iter(a)\n        b = iter(a)\n        return b\n",
+                ("from libclinic.pyspec import ac, rt\nclass bytes:\n"
+                 "    @ac.generate\n"
+                 "    def __new__(cls, a: ac.object, /):\n"
+                 "        b = rt.iter(a)\n        b = rt.iter(a)\n"
+                 "        return b\n",
                  PyspecTest.BLOCK, SpecErrorKind.LOWERING)):
             with self.subTest(kind=kind):
                 with self.assertRaises(SpecError) as cm:
@@ -8273,12 +9152,13 @@ class PyspecLanguageTest(PyspecTestBase):
 
 
 class PyspecNativeTest(PyspecTestBase):
-    """Native implementations (@native) and generated fast paths
-    (@inline): one source for every piece of code that runs.  The Python
-    reference of a native function only describes it (facts, the
-    difftest) and is never compiled; a fast path is an @inline spec
-    function, generated from its one definition into each caller; and the
-    checks catch a reference that disagrees with its native code."""
+    """Native implementations (@ac.stub(optimizer_info=True)) and generated
+    fast paths (@ac.inline): one source for every piece of code that
+    runs.  The Python reference of a native function only describes it
+    (facts, the difftest) and is never compiled; a fast path is an
+    @ac.inline spec function, generated from its one definition into
+    each caller; and the checks catch a reference that disagrees with its
+    native code."""
 
     def generated(self, spec):
         return self.generated_file(spec, PyspecTest.BLOCK)
@@ -8291,64 +9171,71 @@ class PyspecNativeTest(PyspecTestBase):
 
     # -- a reference is never compiled ---------------------------------------
 
-    CALLER = """
+    CALLER = """\
+        from libclinic.pyspec import ac, rt
         class bytes:
-            def __new__(cls, a: object, /):
+            @ac.generate
+            def __new__(cls, a: ac.object, /):
                 if type(a) is bytes:
                     return helper(a)
                 return helper(a)
 
-        @native
-        def copy_exact(x: object):
-            return exact(bytes, bytes(x))
+        @ac.stub(optimizer_info=True)
+        def copy_exact(x: ac.object):
+            return rt.exact(bytes, bytes(x))
     """
 
     def test_reference_is_never_compiled(self):
         # A leading "if <test>: return <value>" of a reference is not a
         # fast path: where the caller knows the test holds, the generated
         # code still calls the native function.
-        with_if = self.generated(self.CALLER + """
-        @native
-        def helper(x: object):
+        with_if = self.generated(self.CALLER + """\
+        from libclinic.pyspec import ac, rt
+        @ac.stub(optimizer_info=True)
+        def helper(x: ac.object):
             if type(x) is bytes:
                 return copy_exact(x)
-            return exact(bytes, bytes(x))
+            return rt.exact(bytes, bytes(x))
         """)
         bytes_entry = self.function(with_if, "foo_new_nargs1_bytes")
         self.assertIn("return helper(a);", bytes_entry)
         self.assertNotIn("copy_exact", with_if)
         # Another reference with the same facts: the same C.
-        without_if = self.generated(self.CALLER + """
-        @native
-        def helper(x: object):
-            return exact(bytes, bytes(memoryview(x)))
+        without_if = self.generated(self.CALLER + """\
+        from libclinic.pyspec import ac, rt
+        @ac.stub(optimizer_info=True)
+        def helper(x: ac.object):
+            return rt.exact(bytes, bytes(memoryview(x)))
         """)
         self.assertEqual(with_if, without_if)
 
     # -- a fast path is generated from one definition -------------------------
 
-    INLINE = """
-        @native
-        def copy_exact(x: object):
-            return exact(bytes, bytes(x))
+    INLINE = """\
+        from libclinic.pyspec import ac, rt
+        @ac.stub(optimizer_info=True)
+        def copy_exact(x: ac.object):
+            return rt.exact(bytes, bytes(x))
 
-        @native
-        def slow(x: object):
-            runs_python()
-            return unknown(bytes(x))
+        @ac.stub(optimizer_info=True)
+        def slow(x: ac.object):
+            rt.runs_python()
+            return rt.unknown(bytes(x))
 
-        @inline
-        def fast(x: object):
+        @ac.inline
+        def fast(x: ac.object):
             if type(x) is bytes:
                 return copy_exact(x)
             return slow(x)
 
-        def other(x: object):
+        @ac.generate
+        def other(x: ac.object):
             y = fast(x)
             return y
 
         class bytes:
-            def __new__(cls, a: object, /):
+            @ac.generate
+            def __new__(cls, a: ac.object, /):
                 return fast(a)
     """
 
@@ -8379,25 +9266,26 @@ class PyspecNativeTest(PyspecTestBase):
 
     def test_inline_errors(self):
         cases = [
-            ("@native\n@inline\ndef f(x: object):\n    return x\n",
-             "f: @native (a native function, its body only describes it) "
-             "and @inline (a body generated into its callers) exclude "
-             "each other"),
-            ("@inline\ndef f(x: object):\n    ...\n",
-             "f: an @inline function needs a body"),
-            ("class bytes:\n    @inline\n    def f(self, /):\n"
+            ("@ac.stub(optimizer_info=True)\n@ac.inline\n"
+             "def f(x: ac.object):\n    return x\n",
+             "f: one of @ac.generate, @ac.stub and @ac.inline"),
+            ("@ac.inline\ndef f(x: ac.object):\n    ...\n",
+             "f: an @ac.inline function needs a body"),
+            ("class bytes:\n    @ac.inline\n    def f(self, /):\n"
              "        return self\n",
-             "bytes.f: only a top-level function can be @inline"),
+             "bytes.f: only a top-level function can be @ac.inline"),
         ]
         for spec, message in cases:
             with self.subTest(spec=spec):
                 with self.assertRaises(SpecError) as cm:
-                    pyspec_frontend.Spec(spec)
+                    pyspec_frontend.Spec("from libclinic.pyspec import ac\n"
+                                         + spec)
                 self.assertStartsWith(cm.exception.message, message)
         # A body that is not fast paths then a value: not lowered yet.
-        spec = pyspec_frontend.Spec(dedent("""
-            @inline
-            def f(x: object):
+        spec = pyspec_frontend.Spec(dedent("""\
+            from libclinic.pyspec import ac
+            @ac.inline
+            def f(x: ac.object):
                 y = g(x)
                 return y
         """))
@@ -8405,10 +9293,10 @@ class PyspecNativeTest(PyspecTestBase):
             pyspec_subset.check_inline(spec, 'f')
         self.assertEqual(cm.exception.kind, SpecErrorKind.NOT_LOWERED)
         self.assertStartsWith(cm.exception.message, "f(): 'y = g(x)' in an "
-                              "@inline function (lowered: fast paths")
+                              "@ac.inline function (lowered: fast paths")
 
     def test_tree_fast_paths(self):
-        # The fast paths of the tree are @inline, in the lowered subset;
+        # The fast paths of the tree are @ac.inline, in the lowered subset;
         # no native reference is read for code.
         inline = []
         for path, _ in spec_files():
@@ -8460,13 +9348,14 @@ class PyspecNativeTest(PyspecTestBase):
         return disconnects.c_calls(root)
 
     def test_drift_caught_by_the_c_checker(self):
-        spec = """
-            @native
-            def helper(x: object) -> int:
+        spec = """\
+            from libclinic.pyspec import ac
+            @ac.stub(optimizer_info=True)
+            def helper(x: ac.object) -> ac.int:
                 return 0
 
-            @native
-            def outer(x: object) -> int:
+            @ac.stub(optimizer_info=True)
+            def outer(x: ac.object) -> ac.int:
                 return helper(x)
         """
         agree = """
@@ -8480,7 +9369,7 @@ class PyspecNativeTest(PyspecTestBase):
                                 "return PyObject_IsTrue(x);")
         self.assertEqual(self.c_checker_disconnects(spec, drifted), [
             'Objects/pyspec/foo.py: outer: calls PyObject_IsTrue(), which '
-            'may run Python code: account for it with runs_python()',
+            'may run Python code: account for it with rt.runs_python()',
             'Objects/pyspec/foo.py: outer: its reference calls helper(), '
             'which its native code does not',
             'Objects/pyspec/foo.py: outer: its reference cannot fail, but '
@@ -8504,42 +9393,63 @@ class PyspecNativeTest(PyspecTestBase):
             self.assertTrue(is_compact(2**other - 1))
             self.assertFalse(is_compact(2**other))
 
-    # -- the builtins the runtime shadows -------------------------------------
+    # -- the builtins rt redefines --------------------------------------------
 
     def test_shadowed_builtin_must_be_imported(self):
-        # isinstance() and iter() have their C meaning only when imported
-        # from the runtime; a spec that forgets it fails to load, instead
-        # of running the builtins in the difftest.
+        # isinstance() and iter() have their C meaning as rt.isinstance()
+        # and rt.iter(); a spec that uses the builtins fails to load,
+        # instead of running them in the difftest, and clinic rejects it.
         for name, use in (('isinstance', 'isinstance(x, bytes)'),
                           ('iter', 'iter(x)')):
             with self.subTest(name):
+                source = ("from libclinic.pyspec import ac, rt\n"
+                          "@ac.generate\n"
+                          f"def f(x: ac.object):\n    return {use}\n")
                 with open(self.spec_path, 'w', encoding='utf-8') as f:
-                    f.write(f"def f(x: object):\n    return {use}\n")
+                    f.write(source)
+                message = (f"{name}() is Python's builtin here, not the "
+                           f"C's: write rt.{name}() (from libclinic.pyspec "
+                           "import rt)")
                 with self.assertRaises(SpecError) as cm:
                     pyspec_runtime.load(self.spec_path)
                 self.assertEqual((cm.exception.filename,
-                                  cm.exception.lineno),
-                                 (self.spec_path, 2))
-                self.assertEqual(
-                    cm.exception.message,
-                    f"{name}() is the builtin here, not the C's: import it "
-                    f"with 'from libclinic.pyspec.runtime import {name}'")
+                                  cm.exception.lineno, cm.exception.message),
+                                 (self.spec_path, 4, message))
+                with self.assertRaises(SpecError) as cm:
+                    pyspec_frontend.Spec(source)
+                self.assertEqual((cm.exception.lineno, cm.exception.message),
+                                 (4, message))
                 with open(self.spec_path, 'w', encoding='utf-8') as f:
-                    f.write(f"from libclinic.pyspec.runtime import {name}\n"
-                            f"def f(x: object):\n    return {use}\n")
+                    f.write(source.replace(f"return {name}",
+                                           f"return rt.{name}"))
                 self.assertIn('f', pyspec_runtime.load(self.spec_path))
-        # So does a spec that imports one that forgets it.
+        # So does a spec that imports one that uses them.
         other = os.path.join(self.tmp_dir, 'pyspec', 'other.py')
         with open(other, 'w', encoding='utf-8') as f:
-            f.write("def g(x: object):\n    return iter(x)\n")
+            f.write("from libclinic.pyspec import ac\n@ac.generate\n"
+                    "def g(x: ac.object):\n    return iter(x)\n")
         with open(self.spec_path, 'w', encoding='utf-8') as f:
-            f.write("from pyspec.other import g\n")
+            f.write("from pyspec import other\n")
         from test.support import import_helper
         with import_helper.isolated_modules():
             with self.assertRaises(SpecError) as cm:
                 pyspec_runtime.load(self.spec_path)
         self.assertEqual((cm.exception.filename, cm.exception.lineno),
-                         (other, 2))
+                         (other, 4))
+
+    def test_converter_options_checked(self):
+        # Run as Python, a converter checks its options, as clinic does.
+        with open(self.spec_path, 'w', encoding='utf-8') as f:
+            f.write("from libclinic.pyspec import ac\n"
+                    "class bytes:\n"
+                    "    @ac.stub\n"
+                    "    def meth(self, a: ac.str(c_defualt='NULL'), /):\n"
+                    "        return a\n")
+        with self.assertRaises(SpecError) as cm:
+            pyspec_runtime.load(self.spec_path)
+        self.assertEqual(cm.exception.lineno, 4)
+        self.assertIn("ac.str(): unknown option c_defualt",
+                      cm.exception.message)
 
 
 class PyspecNativeCheckTest(PyspecTestBase):
@@ -8547,15 +9457,18 @@ class PyspecNativeCheckTest(PyspecTestBase):
     the c_calls ratchet) counts as a call that may run Python code."""
 
     def check(self, c_code, reference='return x'):
-        """{C function: [what may run Python code]} of @native functions
-        f_<name>(x) -> object, each with *reference* as its body, one per
-        function of *c_code*."""
+        """{C function: [what may run Python code]} of the functions
+        f_<name>(x) -> object written in C, each with *reference* as the
+        body of its @ac.stub(optimizer_info=True), one per function of
+        *c_code*."""
         from libclinic.pyspec import disconnects
         c_code = dedent(c_code)
         names = sorted(set(re.findall(r'\b(f_\w+)\(PyObject \*x\)',
                                       c_code)))
-        spec = ''.join(f'@native\ndef {name}(x: object) -> object:\n'
-                       f'    {reference}\n\n' for name in names)
+        spec = 'from libclinic.pyspec import ac, rt\n' + ''.join(
+            f'@ac.stub(optimizer_info=True)\n'
+            f'def {name}(x: ac.object) -> ac.object:\n'
+            f'    {reference}\n\n' for name in names)
         root = os.path.join(self.tmp_dir, 'tree')
         os.makedirs(os.path.join(root, 'Objects', 'pyspec'), exist_ok=True)
         with open(os.path.join(root, 'Objects', 'pyspec', 'foo.py'), 'w',
@@ -8592,18 +9505,21 @@ class PyspecNativeCheckTest(PyspecTestBase):
             }
         """)
         self.assertEqual(found, {
-            'f_cast': ['((unaryfunc)fn): account for it with runs_python()'],
-            'f_member': ['st->tab[1]: account for it with runs_python()'],
+            'f_cast': ['((unaryfunc)fn): account for it with '
+                       'rt.runs_python()'],
+            'f_member': ['st->tab[1]: account for it with '
+                         'rt.runs_python()'],
             'f_not_a_call': [],
             'f_slot': ['tp_iternext: account for it with '
-                       'calls(x, "__next__") or runs_python()'],
-            'f_star': ['(*fn): account for it with runs_python()'],
-            'f_table': ['table[0]: account for it with runs_python()'],
+                       'rt.calls(x, "__next__") or rt.runs_python()'],
+            'f_star': ['(*fn): account for it with rt.runs_python()'],
+            'f_table': ['table[0]: account for it with '
+                        'rt.runs_python()'],
         })
         # Accounted for by runs_python().
         self.assertEqual(self.check("""
             static PyObject *f_star(PyObject *x) { return (*fn)(x); }
-        """, reference='runs_python(); return x'), {'f_star': []})
+        """, reference='rt.runs_python(); return x'), {'f_star': []})
 
     def test_macros(self):
         # A macro of the file is expanded; a release (Py_SETREF) is not a
@@ -8627,10 +9543,12 @@ class PyspecNativeCheckTest(PyspecTestBase):
             }
         """)
         self.assertEqual(found, {
-            'f_alias': ['PyObject_Repr: account for it with runs_python()'],
+            'f_alias': ['PyObject_Repr: account for it with '
+                        'rt.runs_python()'],
             'f_in_release': ['PyObject_Str: account for it with '
-                             'runs_python()'],
-            'f_macro': ['PyObject_Str: account for it with runs_python()'],
+                             'rt.runs_python()'],
+            'f_macro': ['PyObject_Str: account for it with '
+                        'rt.runs_python()'],
             'f_release': [],
         })
 
@@ -8644,14 +9562,14 @@ class PyspecNativeCheckTest(PyspecTestBase):
             }
         """)
         self.assertEqual(found, {'f_aslong': [
-            'PyLong_AsLong: account for it with calls(x, "__index__") or '
-            'runs_python()']})
+            'PyLong_AsLong: account for it with rt.calls(x, "__index__") '
+            'or rt.runs_python()']})
         self.assertEqual(self.check("""
             static PyObject *f_aslong(PyObject *x)
             {
                 return PyLong_AsLong(x);
             }
-        """, reference='calls(x, "__index__"); return x'), {'f_aslong': []})
+        """, reference='rt.calls(x, "__index__"); return x'), {'f_aslong': []})
 
     def test_every_definition(self):
         # Each #if variant is read, not only the first; a call in an
@@ -8675,10 +9593,11 @@ class PyspecNativeCheckTest(PyspecTestBase):
         """)
         self.assertEqual(found, {
             'f_assert': ['PyObject_IsTrue: account for it with '
-                         'runs_python()'],
+                         'rt.runs_python()'],
             'f_split': ['PyObject_CallMethod: account for it with '
-                        'runs_python()'],
-            'f_twice': ['PyObject_Str: account for it with runs_python()'],
+                        'rt.runs_python()'],
+            'f_twice': ['PyObject_Str: account for it with '
+                        'rt.runs_python()'],
         })
 
 
@@ -8700,17 +9619,19 @@ class PyspecSoundnessTest(PyspecTestBase):
     def test_facts_join_after_if(self):
         # r is exactly bytes on one path only: its type is not known after
         # the if (neither in the facts nor in the call table).
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac, rt
             class bytes:
-                def __new__(cls, a: object, /):
+                @ac.generate
+                def __new__(cls, a: ac.object, /):
                     return conv(a)
 
-            @native
-            def conv(x: object):
-                r = exact(bytes, b'')
+            @ac.stub(optimizer_info=True)
+            def conv(x: ac.object):
+                r = rt.exact(bytes, b'')
                 if len(r) == 0:
-                    calls(x, "__bytes__")
-                    r = unknown(x)
+                    rt.calls(x, "__bytes__")
+                    r = rt.unknown(x)
                 return r
         """
         self.assertIsNone(self.reference_facts(spec, 'conv').result_type)
@@ -8718,35 +9639,37 @@ class PyspecSoundnessTest(PyspecTestBase):
                       "Python code */", self.generated(spec))
 
     def test_facts_join_after_if_keeps_agreement(self):
-        spec = """
-            @native
-            def conv(x: object):
-                r = exact(bytes, b'')
+        spec = """\
+            from libclinic.pyspec import ac, rt
+            @ac.stub(optimizer_info=True)
+            def conv(x: ac.object):
+                r = rt.exact(bytes, b'')
                 if len(r) == 0:
-                    calls(x, "__bytes__")
-                    r = exact(bytes, x)
+                    rt.calls(x, "__bytes__")
+                    r = rt.exact(bytes, x)
                 return r
         """
         self.assertIs(self.reference_facts(spec, 'conv').result_type, bytes)
 
     def test_facts_join_after_try(self):
-        spec = """
-            @native
-            def index(x: object):
-                calls(x, "__index__")
-                return exact(bytes, b'')
+        spec = """\
+            from libclinic.pyspec import ac, rt
+            @ac.stub(optimizer_info=True)
+            def index(x: ac.object):
+                rt.calls(x, "__index__")
+                return rt.exact(bytes, b'')
 
-            @native
-            def conv(x: object):
+            @ac.stub(optimizer_info=True)
+            def conv(x: ac.object):
                 try:
                     r = index(x)
                 except TypeError:
-                    r = unknown(x)
+                    r = rt.unknown(x)
                 return r
 
-            @native
-            def in_handler(x: object):
-                r = unknown(x)
+            @ac.stub(optimizer_info=True)
+            def in_handler(x: ac.object):
+                r = rt.unknown(x)
                 try:
                     r = index(x)
                 except TypeError:
@@ -8759,24 +9682,25 @@ class PyspecSoundnessTest(PyspecTestBase):
                           .result_type)
 
     def test_facts_after_loop(self):
-        spec = """
-            from libclinic.pyspec.runtime import iter
-            @native
-            def conv(x: object):
-                r = exact(bytes, b'')
-                it = iter(x)
+        spec = """\
+            from libclinic.pyspec import ac, rt
+            from libclinic.pyspec import ac, rt
+            @ac.stub(optimizer_info=True)
+            def conv(x: ac.object):
+                r = rt.exact(bytes, b'')
+                it = rt.iter(x)
                 for item in it:
-                    r = unknown(item)
+                    r = rt.unknown(item)
                 return r
 
-            @native
-            def in_body(x: object):
-                r = exact(bytes, b'')
-                it = iter(x)
+            @ac.stub(optimizer_info=True)
+            def in_body(x: ac.object):
+                r = rt.exact(bytes, b'')
+                it = rt.iter(x)
                 for item in it:
-                    calls(r, "__index__")
-                    r = unknown(item)
-                return exact(bytes, b'')
+                    rt.calls(r, "__index__")
+                    r = rt.unknown(item)
+                return rt.exact(bytes, b'')
         """
         self.assertIsNone(self.reference_facts(spec, 'conv').result_type)
         # From the second iteration, r may be anything.
@@ -8785,19 +9709,20 @@ class PyspecSoundnessTest(PyspecTestBase):
     def test_alias_after_reassignment(self):
         # x no longer holds the argument: the result is not an alias of
         # it (the optimizer would drop the call).
-        spec = """
-            @native
-            def conv(x: object):
+        spec = """\
+            from libclinic.pyspec import ac, rt
+            @ac.stub(optimizer_info=True)
+            def conv(x: ac.object):
                 if type(x) is bytes:
-                    x = exact(bytes, x + b'!')
+                    x = rt.exact(bytes, x + b'!')
                     return x
-                runs_python()
-                return unknown(x)
+                rt.runs_python()
+                return rt.unknown(x)
 
-            @native
-            def joined(x: object):
+            @ac.stub(optimizer_info=True)
+            def joined(x: ac.object):
                 if type(x) is bytes:
-                    x = exact(bytes, x + b'!')
+                    x = rt.exact(bytes, x + b'!')
                 return x
         """
         facts = self.reference_facts(spec, 'conv', {'x': bytes})
@@ -8805,7 +9730,8 @@ class PyspecSoundnessTest(PyspecTestBase):
         facts = self.reference_facts(spec, 'joined', {'x': bytes})
         self.assertEqual((facts.result_type, facts.alias), (bytes, None))
         # Unassigned, it is an alias.
-        facts = self.reference_facts(spec.replace("x = exact", "y = exact"),
+        facts = self.reference_facts(spec.replace("x = rt.exact",
+                                                  "y = rt.exact"),
                                      'joined', {'x': bytes})
         self.assertEqual(facts.alias, 0)
 
@@ -8814,16 +9740,18 @@ class PyspecSoundnessTest(PyspecTestBase):
 
     def test_return_borrowed_loop_item(self):
         # An item borrowed from a tuple is returned as a new reference.
-        spec = """
-            from libclinic.pyspec.runtime import iter
+        spec = """\
+            from libclinic.pyspec import ac, rt
+            from libclinic.pyspec import ac, rt
 
-            @native
-            def check(x: object) -> int:
+            @ac.stub(optimizer_info=True)
+            def check(x: ac.object) -> ac.int:
                 return 1
 
-            def Py_find(x: object):
+            @ac.generate
+            def Py_find(x: ac.object):
                 if type(x) is tuple:
-                    it = iter(x)
+                    it = rt.iter(x)
                     for item in it:
                         if check(item):
                             return item
@@ -8840,41 +9768,45 @@ class PyspecSoundnessTest(PyspecTestBase):
         [clinic start generated code]*/
     """
 
-    MAYBE_NULL = """
-        @native
-        def lookup(x: object):
+    MAYBE_NULL = """\
+        from libclinic.pyspec import ac, rt
+        @ac.stub(optimizer_info=True)
+        def lookup(x: ac.object):
             if len(x) > 3:
-                return NULL
-            runs_python()
-            return unknown(x)
+                return rt.NULL
+            rt.runs_python()
+            return rt.unknown(x)
 
-        @native
-        def conv(x: object):
-            runs_python()
-            return unknown(x)
+        @ac.stub(optimizer_info=True)
+        def conv(x: ac.object):
+            rt.runs_python()
+            return rt.unknown(x)
     """
 
     def test_return_null_without_exception(self):
         # A local that is NULL, or may be NULL without an exception set,
         # is not a result.
         for body, lineno, errmsg in (
-            ("f = lookup(x)\nreturn f", 16,
+            ("f = lookup(x)\nreturn f", 17,
              "cannot return 'f': it may be NULL without an exception here"),
             ("try:\n    z = conv(x)\nexcept TypeError:\n    return z\n"
-             "return z", 18,
+             "return z", 19,
              "cannot return 'z': it holds no reference here"),
         ):
             with self.subTest(body):
-                spec = (dedent(self.MAYBE_NULL) + "\ndef Py_f(x: object):\n"
+                spec = (dedent(self.MAYBE_NULL)
+                        + "\n@ac.generate\ndef Py_f(x: ac.object):\n"
                         + "".join(f"    {line}\n"
                                   for line in body.splitlines()))
                 self.expect_located_failure(spec, self.NO_BLOCK, errmsg,
                                             lineno)
         # Tested, it is.
-        spec = dedent(self.MAYBE_NULL) + dedent("""
-            def Py_f(x: object):
+        spec = dedent(self.MAYBE_NULL) + dedent("""\
+            from libclinic.pyspec import ac, rt
+            @ac.generate
+            def Py_f(x: ac.object):
                 f = lookup(x)
-                if f is NULL:
+                if f is rt.NULL:
                     return conv(x)
                 return f
         """)
@@ -8883,16 +9815,17 @@ class PyspecSoundnessTest(PyspecTestBase):
     def test_reference_returning_null_local(self):
         # A native function returning a local that may be NULL may return
         # NULL without an exception: its callers check for it.
-        spec = dedent(self.MAYBE_NULL) + dedent("""
-            @native
-            def outer(x: object):
+        spec = dedent(self.MAYBE_NULL) + dedent("""\
+            from libclinic.pyspec import ac, rt
+            @ac.stub(optimizer_info=True)
+            def outer(x: ac.object):
                 f = lookup(x)
                 return f
 
-            @native
-            def tested(x: object):
+            @ac.stub(optimizer_info=True)
+            def tested(x: ac.object):
                 f = lookup(x)
-                if f is NULL:
+                if f is rt.NULL:
                     return conv(x)
                 return f
         """)
@@ -8903,13 +9836,15 @@ class PyspecSoundnessTest(PyspecTestBase):
     def test_str_constant_object_argument(self):
         # A str constant passed as an object is a _Py_ID(): an ASCII
         # identifier only.
-        spec = """
-            @native
-            def getattr_(x: object, name: object):
-                runs_python()
-                return unknown(x)
+        spec = """\
+            from libclinic.pyspec import ac, rt
+            @ac.stub(optimizer_info=True)
+            def getattr_(x: ac.object, name: ac.object):
+                rt.runs_python()
+                return rt.unknown(x)
 
-            def Py_f(x: object):
+            @ac.generate
+            def Py_f(x: ac.object):
                 return getattr_(x, %r)
         """
         self.assertIn("getattr_(x, &_Py_ID(__name__))",
@@ -8919,21 +9854,23 @@ class PyspecSoundnessTest(PyspecTestBase):
                 self.expect_located_failure(
                     spec % text, self.NO_BLOCK,
                     "a str constant passed as an object must be an ASCII "
-                    f"identifier (an interned _Py_ID()), not {text!r}", 8)
+                    f"identifier (an interned _Py_ID()), not {text!r}", 9)
 
 
     def test_residuals_do_not_share_marks(self):
         # The marks of a residual (the error check of a call, for the
         # facts it was evaluated with) are its own: evaluating the same
         # body with other facts does not change them.
-        spec = pyspec_frontend.Spec(dedent("""
-            @native
-            def g(x: object):
+        spec = pyspec_frontend.Spec(dedent("""\
+            from libclinic.pyspec import ac
+            @ac.stub(optimizer_info=True)
+            def g(x: ac.object):
                 if type(x) is int:
                     return x
                 raise TypeError("no")
 
-            def Py_f(x: object):
+            @ac.generate
+            def Py_f(x: ac.object):
                 y = g(x)
                 return y
         """))
@@ -8965,9 +9902,11 @@ class PyspecSoundnessTest(PyspecTestBase):
     """
 
     def test_docstring_error_in_the_spec(self):
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                def foo(self, a: object, /):
+                @ac.stub
+                def foo(self, a: ac.object, /):
                     \"\"\"%s
 
                     Body.
@@ -8979,42 +9918,62 @@ class PyspecSoundnessTest(PyspecTestBase):
             spec % ('A summary line far longer than the 68 characters that '
                     'clinic allows it'), self.METHOD_BLOCK,
             "Summary line for 'bytes.foo' is too long!\nThe summary line "
-            "must be no longer than 68 characters.", 4)
+            "must be no longer than 68 characters.", 5)
         self.expect_located_failure(
             spec % 'Summary.\n        Second line without a blank line.',
             self.METHOD_BLOCK,
             "Docstring for 'bytes.foo' does not have a summary line!\n"
             "Every non-blank function docstring must start with a single "
-            "line summary followed by an empty line.", 4)
+            "line summary followed by an empty line.", 5)
 
     def test_import_as(self):
         other = os.path.join(self.tmp_dir, 'pyspec', 'other.py')
         with open(other, 'w', encoding='utf-8') as f:
             f.write(dedent("""\
-                @native
-                def conv(x: object):
-                    runs_python()
-                    return unknown(x)
+                from libclinic.pyspec import ac, rt
+                @ac.stub(optimizer_info=True)
+                def conv(x: ac.object):
+                    rt.runs_python()
+                    return rt.unknown(x)
             """))
-        spec = """
-            from pyspec.other import conv as other_conv
+        spec = """\
+            from libclinic.pyspec import ac
+            from pyspec import other as o
 
-            def Py_f(x: object):
-                return other_conv(x)
+            @ac.generate
+            def Py_f(x: ac.object):
+                return o.conv(x)
         """
         self.assertIn("return conv(x);",
                       self.generated_file(spec, self.NO_BLOCK))
+        # A function of another spec is called by its module.
+        for source, message in (
+                ("from pyspec.other import conv\n",
+                 "import the spec, 'from pyspec import other', and call "
+                 "other.conv(...)"),
+                ("from pyspec import other\n@ac.generate\n"
+                 "def Py_f(x: ac.object):\n    return conv(x)\n",
+                 "conv is a function of the spec other: call it as "
+                 "other.conv"),
+                ("from pyspec import other\n@ac.generate\n"
+                 "def conv(x: ac.object):\n    return other.conv(x)\n",
+                 "other.conv: this spec defines conv too")):
+            with self.subTest(source=source):
+                self.expect_failure("from libclinic.pyspec import ac\n"
+                                    + source, self.NO_BLOCK, message)
 
     def test_slot_with_method_c_name(self):
-        # A METH_ flag of @c_name names the C of the method table entry:
+        # A METH_ flag of @ac.stub names the C of the method table entry:
         # the facts of the slot are keyed by the slot.
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
+            @ac.generate
             class bytes:
-                def __new__(cls, x: object, /):
+                @ac.generate
+                def __new__(cls, x: ac.object, /):
                     return x
 
-                @native
-                @c_name(METH_O="foo_contains")
+                @ac.stub(METH_O="foo_contains", optimizer_info=True)
                 def __contains__(self, key, /):
                     return False
         """
@@ -9022,17 +9981,20 @@ class PyspecSoundnessTest(PyspecTestBase):
                       self.generated_file(spec, PyspecTest.BLOCK))
 
     def test_class_defined_twice(self):
-        spec = """
+        spec = """\
+            from libclinic.pyspec import ac
             class bytes:
-                def foo(self, a: object, /):
+                @ac.stub
+                def foo(self, a: ac.object, /):
                     ...
 
             class bytes:
-                def bar(self, a: object, /):
+                @ac.stub
+                def bar(self, a: ac.object, /):
                     ...
         """
         self.expect_located_failure(spec, self.METHOD_BLOCK,
-                                    "class bytes is defined twice", 6)
+                                    "class bytes is defined twice", 7)
 
     def test_top_level_statements(self):
         spec = """
@@ -9057,29 +10019,32 @@ class PyspecSoundnessTest(PyspecTestBase):
     def test_snapshot_release_of_unknown_type(self):
         # Releasing an object of a type not known exactly may run Python
         # code (a __del__): not in a snapshot, where no Python code runs.
-        spec = """
-            from libclinic.pyspec.runtime import iter
+        spec = """\
+            from libclinic.pyspec import ac, rt
+            from libclinic.pyspec import ac, rt
 
-            @native
-            def check(x: object) -> int:
+            @ac.stub(optimizer_info=True)
+            def check(x: ac.object) -> ac.int:
                 return 1
 
-            @native
-            def conv(x: object):
-                return unknown(x)
+            @ac.stub(optimizer_info=True)
+            def conv(x: ac.object):
+                return rt.unknown(x)
 
-            @native
-            def conv_bytes(x: object):
-                return exact(bytes, b'')
+            @ac.stub(optimizer_info=True)
+            def conv_bytes(x: ac.object):
+                return rt.exact(bytes, b'')
 
             class bytes:
-                def __new__(cls, x: object, /):
+                @ac.generate
+                def __new__(cls, x: ac.object, /):
                     if type(x) is list:
                         return from_list(x)
                     return x
 
-            def from_list(x: object):
-                it = iter(x)
+            @ac.generate
+            def from_list(x: ac.object):
+                it = rt.iter(x)
                 for item in it:
                     if check(item):
                         v = CONV(item)
@@ -9108,8 +10073,10 @@ class PyspecSoundnessTest(PyspecTestBase):
     # -- small ones --------------------------------------------------------
 
     def test_try_else_every_branch_returns(self):
-        spec = dedent(self.MAYBE_NULL) + dedent("""
-            def Py_f(x: object):
+        spec = dedent(self.MAYBE_NULL) + dedent("""\
+            from libclinic.pyspec import ac
+            @ac.generate
+            def Py_f(x: ac.object):
                 try:
                     z = conv(x)
                 except TypeError:
@@ -9122,25 +10089,30 @@ class PyspecSoundnessTest(PyspecTestBase):
         self.assertIn("return z;", out)
 
     def test_condition_call_that_can_fail(self):
-        spec = dedent(self.MAYBE_NULL) + dedent("""
-            @native
-            def check(x: object) -> int:
-                runs_python()
+        spec = dedent(self.MAYBE_NULL) + dedent("""\
+            from libclinic.pyspec import ac, rt
+            @ac.stub(optimizer_info=True)
+            def check(x: ac.object) -> ac.int:
+                rt.runs_python()
                 return 1
 
-            def Py_f(x: object):
+            @ac.generate
+            def Py_f(x: ac.object):
                 if check(x):
                     return x
                 return x
         """)
         self.expect_located_failure(
             spec, self.NO_BLOCK, "a call in a condition must not be able "
-            "to fail: check(x)", 20)
+            "to fail: check(x)", 21)
 
     def test_mro_of_spec_class_with_base(self):
         # A spec class of a type whose base is not object (bool: int).
-        spec = pyspec_frontend.Spec(dedent("""
+        spec = pyspec_frontend.Spec(dedent("""\
+            from libclinic.pyspec import ac
+            @ac.generate
             class bool:
+                @ac.stub
                 def __len__(self, /):
                     ...
         """))

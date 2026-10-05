@@ -6,14 +6,14 @@ the exact type of the result and the argument it returns, if any
 may run Python code; which exceptions some path may raise.
 
 They come from the statements only.  A spec function called is analysed
-in turn, an @inline one through its body and a @native one through its
-Python reference, each partially evaluated for the facts of the call
-(partial_eval.py, through context.py).  In a reference, only the
-primitives (runtime.py) and the calls of C and spec functions have
-effects: the rest models the values the C computes.  ``calls(x,
-"__name__")``, ``len(x)`` and ``iter(x)`` run what the special method of
-type(x) runs (builtin_types.TypeFacts); a call of an object and a
-function about which nothing is known may do anything.
+in turn, an @ac.inline one through its body and one written in C with a
+Python reference (@ac.stub(optimizer_info=True)) through its reference, each
+partially evaluated for the facts of the call (partial_eval.py, through
+context.py).  In a reference, only the primitives (rt.py) and the calls
+of C and spec functions have effects: the rest models the values the C
+computes.  ``calls(x, "__name__")``, ``len(x)`` and ``iter(x)`` run what
+the special method of type(x) runs (builtin_types.TypeFacts); a call of
+an object and a function about which nothing is known may do anything.
 
 The release of a reference is not an effect here: releasing an object
 of a type not known exactly may run its __del__, which "runs no Python
@@ -229,9 +229,10 @@ class Analyzer(subset.Walker[Flow, None]):
 
     def reference_facts(self, name: str, env: Env,
                         inline: bool = False) -> Facts:
-        """Facts of a call of @native function *name* with the facts *env*
-        (of an @inline one, with *inline*): of its Python reference (its
-        body), partially evaluated for them."""
+        """Facts of a call of function *name*, written in C with a Python
+        reference, with the facts *env* (of an @ac.inline one, with
+        *inline*): of its Python reference (its body), partially evaluated
+        for them."""
         if (subset.inline if inline else subset.analysed)(self.spec, name):
             # Code facts.py cannot follow: the worst facts.
             return Facts(worst=True)
@@ -254,8 +255,9 @@ class Analyzer(subset.Walker[Flow, None]):
                           params)
 
     def call_facts(self, call: ast.Call, env: Env) -> Facts | None:
-        """Facts of *call* of a C function (@native, or ``...``: the worst)
-        or of an @inline function; None when it is neither."""
+        """Facts of *call* of a C function (@ac.stub: of its reference, or
+        the worst) or of an @ac.inline function; None when it is
+        neither."""
         inline = self.spec.inline_function(call)
         found = inline or self.spec.c_function(call)
         if found is None:

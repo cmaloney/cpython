@@ -145,7 +145,7 @@ class Spec(Protocol):
     @property
     def shared(self) -> Mapping[str, object]: ...
 
-    def declares_slots(self, cls_name: str) -> bool: ...
+    def describes_type(self, cls_name: str) -> bool: ...
 
     def declaration(self, name: str) -> tuple[Spec, str]: ...
 
@@ -180,7 +180,7 @@ class TypeFacts:
         if getattr(builtins, tp.__name__, None) is not tp:
             return None
         if (tp.__name__ in self.spec.classes
-                and self.spec.declares_slots(tp.__name__)):
+                and self.spec.describes_type(tp.__name__)):
             return self.spec
         return self.classes.get(tp)
 

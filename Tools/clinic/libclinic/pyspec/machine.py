@@ -42,7 +42,7 @@ A primitive picks its machine from the type or object it is given.
 
 import builtins
 
-from .runtime import NULL
+from .rt import NULL
 
 __all__ = [
     'ob_alloc', 'ob_items', 'ob_new', 'buffer_items', 'buffer_export',

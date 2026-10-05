@@ -7,14 +7,15 @@ after an ``if`` whose one branch exits, keeps the facts of the other.
 The residual is ast in the same subset (subset.Kind), with typed marks
 (marks.py) on the nodes for facts.py and emit.py.
 
-Calls.  A @native function is analysed through its Python reference
-(facts.py), never generated: a call whose result is NULL on every path
-is that NULL, and a ``try`` around a call that cannot raise what its
-handlers catch is its body (``iter(x)`` of a list).  An @inline body
-(``if <test>: return <value>`` paths, then ``return <value>``) is
-generated into every statement calling it (expand()): the statement with
-each value, under its test; a test the facts decide selects or drops
-its path, and what they decide of a test is dropped from it.
+Calls.  A function written in C with a Python reference
+(@ac.stub(optimizer_info=True)) is analysed through its reference (facts.py),
+never generated: a call whose result is NULL on every path is that NULL,
+and a ``try`` around a call that cannot raise what its handlers catch is
+its body (``iter(x)`` of a list).  An @ac.inline body (``if <test>:
+return <value>`` paths, then ``return <value>``) is generated into every
+statement calling it (expand()): the statement with each value, under
+its test; a test the facts decide selects or drops its path, and what
+they decide of a test is dropped from it.
 
 Loops.  ``for item in it:`` over ``it = iter(x)``, for x of a known
 exact type whose iteration runs no Python code: a list or tuple is
@@ -50,7 +51,7 @@ is one that may, unless the local is returned right after it.
 Capacity.  A buffer (a C struct local) initialized with the length of a
 sequence, ``w = init(len(x))``, has room for one unit per item of x: in
 a loop over x with a fixed number of iterations (a tuple, a snapshot)
-whose one use of w is one call of an @inline function writing w, the
+whose one use of w is one call of an @ac.inline function writing w, the
 first path of that call is taken without its test (presize()); the
 debug build checks it (bytes_appender_append_unchecked()).
 """
@@ -243,7 +244,7 @@ def inline_paths(spec: Spec, name: str
                  ) -> tuple[list[tuple[ast.expr, ast.expr]], ast.expr,
                             list[str]]:
     """([(test, value)] of its fast paths, last value, parameters) of
-    @inline function *name*."""
+    @ac.inline function *name*."""
     subset.check_inline(spec, name)
     *paths, last = spec.body(name)
     out = []
@@ -471,7 +472,7 @@ class Evaluator(subset.Walker[_Block, None]):
     def c_statement(self, stmt: ast.stmt, env: Env
                     ) -> tuple[list[ast.stmt], Env]:
         """(statements, env) of *stmt* (_top_call()): its call of a native
-        function marked with its facts, or of an @inline one expanded."""
+        function marked with its facts, or of an @ac.inline one expanded."""
         call = _top_call(stmt)
         if call is None:
             return [stmt], env
@@ -529,7 +530,7 @@ class Evaluator(subset.Walker[_Block, None]):
     def expand(self, stmt: ast.stmt, call: ast.Call,
                found: tuple[Spec, ast.FunctionDef],
                env: Env) -> list[ast.stmt]:
-        """*stmt*, which calls @inline function *found* as *call*, with
+        """*stmt*, which calls @ac.inline function *found* as *call*, with
         its body in place of the call; the ``if`` of the first path is
         marked (marks.FirstPath, see presize())."""
         spec, node = found
@@ -931,7 +932,7 @@ class _Snapshot(subset.Walker[_Path, list[ast.stmt] | None]):
 
 
 def presize(spec: Spec, stmts: list[ast.stmt]) -> None:
-    """Take the first path of the @inline calls writing a buffer that has
+    """Take the first path of the @ac.inline calls writing a buffer that has
     room for all of them ("Capacity" above), in the top level of *stmts*
     and of its try."""
     lengths = {}            # local -> the sequence it is the length of
@@ -986,7 +987,7 @@ def _presize_loops(stmts: list[ast.stmt], capacity: dict[str, str]) -> None:
 
 
 def _writes(node: ast.AST, buffer: str) -> bool:
-    """Whether *node* is the ``if`` of the first path of an @inline call
+    """Whether *node* is the ``if`` of the first path of an @ac.inline call
     (expand()) whose first argument is *buffer*."""
     mark = marks.get(node, marks.FirstPath)
     return isinstance(node, ast.If) and mark is not None \

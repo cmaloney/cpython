@@ -7,11 +7,12 @@ language" and "The lowered subset").  Only part of it is wired up:
   evaluated (partial_eval.py), then emitted (emit.py).  Its signature and
   statements must be in the lowered subset (Lowered; check_lowered()
   reports the first construct outside it, before any evaluation);
-* an ``@inline`` body is lowered into each caller: fast paths ``if
+* an ``@ac.inline`` body is lowered into each caller: fast paths ``if
   <condition>: return <value>``, then ``return <value>`` (Inline);
-* the Python reference of a ``@native`` function is never lowered, but
-  read for facts: its effects must be where facts.py follows them
-  (Analysed); else facts.py gives it the worst facts;
+* the Python reference of a function written in C
+  (``@ac.stub(optimizer_info=True)``) is never lowered, but read for facts:
+  its effects must be where facts.py follows them (Analysed); else
+  facts.py gives it the worst facts;
 * anything else (``...``) is C about which nothing is known.
 
 The checks are syntactic; the emitter still reports the uses it cannot
@@ -42,8 +43,9 @@ LOWERED_CTYPES = {
     'str': 'const char *',
 }
 
-# The C types of the annotations of a @native or @inline function: these,
-# and a string, which is the C type itself ('PyTypeObject *').
+# The C types of the annotations of a top-level function (written in C, or
+# @ac.inline), ac.<name>: these, and a string, which is the C type itself
+# ('PyTypeObject *').
 C_CTYPES = LOWERED_CTYPES | {'Py_ssize_t': 'Py_ssize_t', 'int': 'int',
                              'None': 'void'}
 
@@ -78,9 +80,10 @@ def is_struct(ctype: str) -> bool:
 
 
 def c_signature(node: ast.FunctionDef) -> tuple[list[tuple[str, str]], str]:
-    """([(parameter, C type)], C return type) of a @native or @inline
-    function: annotations of C_CTYPES or strings; no return annotation is
-    ``PyObject *``; a struct result is initialized in place (emit.py)."""
+    """([(parameter, C type)], C return type) of a top-level function
+    written in C or @ac.inline: annotations of C_CTYPES or strings; no
+    return annotation is ``PyObject *``; a struct result is initialized in
+    place (emit.py)."""
     def ctype(annotation: ast.expr | None, default: str | None) -> str:
         match annotation:
             case None if default is not None:
@@ -91,9 +94,10 @@ def c_signature(node: ast.FunctionDef) -> tuple[list[tuple[str, str]], str]:
                 return C_CTYPES[name]
             case ast.Constant(None):
                 return 'void'
-        raise SpecError(f"{node.name}(): the annotations of a "
-                        f"@native or @inline function are C types: "
-                        f"{sorted(C_CTYPES)} or a string",
+        raise SpecError(f"{node.name}(): the annotations of a function "
+                        "written in C or @ac.inline are C types: "
+                        f"{', '.join('ac.' + t for t in sorted(C_CTYPES))} "
+                        "or a string",
                         lineno=getattr(annotation, 'lineno', node.lineno))
     args = node.args.posonlyargs + node.args.args
     return ([(a.arg, ctype(a.annotation, None)) for a in args],
@@ -109,6 +113,8 @@ class Spec(Protocol):
     def c_function(self, call: ast.Call) -> object | None: ...
 
     def inline_function(self, call: ast.Call) -> object | None: ...
+
+    def helper_function(self, call: ast.Call) -> object | None: ...
 
     def call_target(self, func: ast.expr) -> str | None: ...
 
@@ -538,7 +544,7 @@ class Lowered(Walker[None, None]):
 
     def call(self, call: ast.Call) -> None:
         """A call whose result is used: of a hand-written C function, of
-        an @inline function, of another spec function (``f(...)``,
+        an @ac.inline function, of another spec function (``f(...)``,
         ``T.meth(...)``), iter() or len(), or of a local object or type
         (``f()``, ``cls(x)``)."""
         func = call.func
@@ -556,7 +562,13 @@ class Lowered(Walker[None, None]):
             self.arguments(call, strings=False)
         elif (isinstance(func, ast.Name) and func.id in PRIMITIVES):
             self.unsupported(call, f'{func.id}() outside the Python '
-                             'reference of a @native function')
+                             'reference of a function written in C '
+                             '(@ac.stub(optimizer_info=True))')
+        elif self.spec.helper_function(call) is not None:
+            self.unsupported(call, f'call {_text(call)} of a Python helper '
+                             '(a def without @ac.stub, @ac.generate or '
+                             '@ac.inline: the model and the references '
+                             'call it, generated C cannot)')
         else:
             self.unsupported(call, f'call {_text(call)} (lowered: of C '
                              'functions, spec functions, iter(), len(), '
@@ -565,7 +577,7 @@ class Lowered(Walker[None, None]):
 
 
 class Inline(Lowered):
-    """The body of an @inline function: fast paths ``if <condition>:
+    """The body of an @ac.inline function: fast paths ``if <condition>:
     return <value>``, then ``return <value>`` (a value is a call or an
     operand); its signature: positional parameters of any C types
     (c_signature()), no defaults."""
@@ -574,7 +586,7 @@ class Inline(Lowered):
         self.positional_only()
         for default in self.node.args.defaults:
             self.unsupported(default, f'default {_text(default)} (an '
-                             '@inline function has none)')
+                             '@ac.inline function has none)')
         c_signature(self.node)      # a SpecError if not C types
 
     def statements(self, stmts: list[ast.stmt]) -> None:
@@ -588,10 +600,10 @@ class Inline(Lowered):
                 case ast.Return(value=value) if last and value is not None:
                     self.result(value)
                 case _:
-                    self.unsupported(stmt, f'{_text(stmt)!r} in an @inline '
-                                     'function (lowered: fast paths "if '
-                                     '<condition>: return <value>", then '
-                                     '"return <value>")')
+                    self.unsupported(stmt, f'{_text(stmt)!r} in an '
+                                     '@ac.inline function (lowered: fast '
+                                     'paths "if <condition>: return '
+                                     '<value>", then "return <value>")')
 
     def result(self, value: ast.expr) -> None:
         if isinstance(value, ast.Call):
@@ -621,8 +633,8 @@ def _kind(stmt: ast.stmt) -> str:
 # -- the Python reference of a C function ---------------------------------------
 
 class Analysed:
-    """What facts.py follows in the Python reference of a @native
-    function: the control flow of the lowered subset, with every effect
+    """What facts.py follows in the Python reference of a C function: the
+    control flow of the lowered subset, with every effect
     (``return``, ``raise``, ``assert``, a call of a primitive, of a C or
     spec function) where facts.py accounts for it; the rest models
     values and must have no effect."""
@@ -728,12 +740,12 @@ def lowered(spec: Spec, name: str) -> list[Unsupported]:
 
 
 def inline(spec: Spec, name: str) -> list[Unsupported]:
-    """What of @inline function *name* is outside the lowered subset."""
+    """What of @ac.inline function *name* is outside the lowered subset."""
     return Inline(spec, name).check()
 
 
 def analysed(spec: Spec, name: str) -> list[Unsupported]:
-    """What of the Python reference of @native function *name* facts.py
+    """What of the Python reference of C function *name* facts.py
     cannot follow: if anything, its facts are the worst."""
     return Analysed(spec, name).check()
 

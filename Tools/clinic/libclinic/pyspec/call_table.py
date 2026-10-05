@@ -13,10 +13,11 @@ same generated file.  For each class of table_classes():
   the same facts for the other methods the spec implements, per exact
   type of their first argument, keyed by ml_meth (the generic entry of a
   class method holds for a subclass, which shares the ml_meth); and per
-  slot with a Python reference (a @native dunder), for self of exactly
-  the class, keyed by the slot the dunder's wrapper calls
-  (slot_member()), which a uop that does what the slot does reads
-  (_BINARY_OP_SUBSCR_BYTES_INT and _PySpec_FindSlot()).
+  slot with a Python reference (a dunder with
+  @ac.stub(optimizer_info=True)), for self of exactly the class, keyed by the
+  slot the dunder's wrapper calls (slot_member()), which a uop that does
+  what the slot does reads (_BINARY_OP_SUBSCR_BYTES_INT and
+  _PySpec_FindSlot()).
 
 The facts (facts.py) hold only for the exact argument types of their
 entry: a constant result, a result that is argument k, the exact type
@@ -123,8 +124,8 @@ def _entry(comment: str, nargs: int, facts: Facts, const: str | None,
 
 def table_classes(spec: Spec) -> list[str]:
     """The classes of *spec* that get a call table: with an implemented
-    method or a @native slot.  Only the syntax decides, so that the
-    registry lists the tables without generating them."""
+    method or a slot with a Python reference.  Only the syntax decides,
+    so that the registry lists the tables without generating them."""
     if not spec.implemented_functions():
         return []           # Argument Clinic generates no call table
     out = []

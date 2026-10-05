@@ -1,7 +1,7 @@
 """Spec of Objects/bytes_methods.c: what bytes and bytearray share.
 
-Each function is ``@native(facts=False)``: C written by hand, the body
-its pure-Python implementation, which only the model runs
+Each function is ``@ac.stub``: C written by hand, the body its
+pure-Python implementation, which only the model runs
 (Tools/clinic/libclinic/pyspec/model.py; Objects/pyspec/README.rst,
 "Pure Python"); for clinic and the facts it is ``...``.  Some are a
 macro or a static function of the file, or of the stringlib templates it
@@ -11,11 +11,9 @@ includes (``stringlib_find``).  ``str`` is the bytes, a tuple of ints
 a list of ints.
 """
 
-from libclinic.pyspec.runtime import (
-    NULL, PY_SSIZE_T_MAX, isinstance, native, tp_name)
-from libclinic.pyspec.machine import buffer_items
+from libclinic.pyspec import ac, rt, machine
 
-from Objects.pyspec.abstract import PyNumber_AsSsize_t
+from Objects.pyspec import abstract
 
 
 # Py_ISSPACE(), Py_ISLOWER()... of Include/pyctype.h: ASCII only.
@@ -27,55 +25,55 @@ ALPHA = LOWER | UPPER
 ALNUM = ALPHA | DIGIT
 
 
-@native(facts=False)
+@ac.stub
 def Py_TOLOWER(c: 'unsigned char') -> 'unsigned char':
     return c + 32 if c in UPPER else c
 
 
-@native(facts=False)
+@ac.stub
 def Py_TOUPPER(c: 'unsigned char') -> 'unsigned char':
     return c - 32 if c in LOWER else c
 
 
-@native(facts=False)
-def _Py_bytes_isspace(str: 'const char *', len: Py_ssize_t):
+@ac.stub
+def _Py_bytes_isspace(str: 'const char *', len: ac.Py_ssize_t):
     return len > 0 and all(c in SPACE for c in str)
 
 
-@native(facts=False)
-def _Py_bytes_isalpha(str: 'const char *', len: Py_ssize_t):
+@ac.stub
+def _Py_bytes_isalpha(str: 'const char *', len: ac.Py_ssize_t):
     return len > 0 and all(c in ALPHA for c in str)
 
 
-@native(facts=False)
-def _Py_bytes_isalnum(str: 'const char *', len: Py_ssize_t):
+@ac.stub
+def _Py_bytes_isalnum(str: 'const char *', len: ac.Py_ssize_t):
     return len > 0 and all(c in ALNUM for c in str)
 
 
-@native(facts=False)
-def _Py_bytes_isascii(str: 'const char *', len: Py_ssize_t):
+@ac.stub
+def _Py_bytes_isascii(str: 'const char *', len: ac.Py_ssize_t):
     return all(c < 128 for c in str)
 
 
-@native(facts=False)
-def _Py_bytes_isdigit(str: 'const char *', len: Py_ssize_t):
+@ac.stub
+def _Py_bytes_isdigit(str: 'const char *', len: ac.Py_ssize_t):
     return len > 0 and all(c in DIGIT for c in str)
 
 
-@native(facts=False)
-def _Py_bytes_islower(str: 'const char *', len: Py_ssize_t):
+@ac.stub
+def _Py_bytes_islower(str: 'const char *', len: ac.Py_ssize_t):
     return (any(c in LOWER for c in str)
             and not any(c in UPPER for c in str))
 
 
-@native(facts=False)
-def _Py_bytes_isupper(str: 'const char *', len: Py_ssize_t):
+@ac.stub
+def _Py_bytes_isupper(str: 'const char *', len: ac.Py_ssize_t):
     return (any(c in UPPER for c in str)
             and not any(c in LOWER for c in str))
 
 
-@native(facts=False)
-def _Py_bytes_istitle(str: 'const char *', len: Py_ssize_t):
+@ac.stub
+def _Py_bytes_istitle(str: 'const char *', len: ac.Py_ssize_t):
     cased = False
     previous_is_cased = False
     for c in str:
@@ -92,18 +90,18 @@ def _Py_bytes_istitle(str: 'const char *', len: Py_ssize_t):
     return cased
 
 
-@native(facts=False)
-def _Py_bytes_lower(str: 'const char *', len: Py_ssize_t):
+@ac.stub
+def _Py_bytes_lower(str: 'const char *', len: ac.Py_ssize_t):
     return [Py_TOLOWER(c) for c in str]
 
 
-@native(facts=False)
-def _Py_bytes_upper(str: 'const char *', len: Py_ssize_t):
+@ac.stub
+def _Py_bytes_upper(str: 'const char *', len: ac.Py_ssize_t):
     return [Py_TOUPPER(c) for c in str]
 
 
-@native(facts=False)
-def _Py_bytes_title(str: 'const char *', len: Py_ssize_t):
+@ac.stub
+def _Py_bytes_title(str: 'const char *', len: ac.Py_ssize_t):
     result = []
     previous_is_cased = False
     for c in str:
@@ -121,18 +119,18 @@ def _Py_bytes_title(str: 'const char *', len: Py_ssize_t):
     return result
 
 
-@native(facts=False)
-def _Py_bytes_capitalize(str: 'const char *', len: Py_ssize_t):
+@ac.stub
+def _Py_bytes_capitalize(str: 'const char *', len: ac.Py_ssize_t):
     return [Py_TOUPPER(c) if i == 0 else Py_TOLOWER(c)
             for i, c in enumerate(str)]
 
 
-@native(facts=False)
-def _Py_bytes_swapcase(str: 'const char *', len: Py_ssize_t):
+@ac.stub
+def _Py_bytes_swapcase(str: 'const char *', len: ac.Py_ssize_t):
     return [Py_TOLOWER(c) if c in UPPER else Py_TOUPPER(c) for c in str]
 
 
-@native(facts=False)
+@ac.stub
 def _Py_bytes_maketrans(frm: 'Py_buffer *', to: 'Py_buffer *'):
     """The 256 bytes of the table (the caller makes the object)."""
     if len(frm) != len(to):
@@ -143,8 +141,9 @@ def _Py_bytes_maketrans(frm: 'Py_buffer *', to: 'Py_buffer *'):
     return table
 
 
-@native(facts=False)
-def ADJUST_INDICES(start: Py_ssize_t, end: Py_ssize_t, len: Py_ssize_t):
+@ac.stub
+def ADJUST_INDICES(start: ac.Py_ssize_t, end: ac.Py_ssize_t,
+                   len: ac.Py_ssize_t):
     """start and end made bounds of a slice of len items: (start, end)."""
     if end > len:
         end = len
@@ -159,34 +158,34 @@ def ADJUST_INDICES(start: Py_ssize_t, end: Py_ssize_t, len: Py_ssize_t):
     return start, end
 
 
-@native(facts=False)
-def getbuffer(obj: object):
+@ac.stub
+def getbuffer(obj: ac.object):
     """PyObject_GetBuffer(obj, PyBUF_SIMPLE): the bytes of its buffer."""
-    items = buffer_items(obj)
-    if items is NULL:
+    items = machine.buffer_items(obj)
+    if items is rt.NULL:
         raise TypeError("a bytes-like object is required, not "
-                        f"'{tp_name(type(obj))}'")
+                        f"'{rt.tp_name(type(obj))}'")
     return items
 
 
-@native(facts=False)
-def parse_args_finds_byte(function_name: 'const char *', subobj: object):
+@ac.stub
+def parse_args_finds_byte(function_name: 'const char *', subobj: ac.object):
     """The bytes to look for: of the buffer of subobj, or the one byte
     subobj is (an int in range(256))."""
     if hasattr(type(subobj), '__buffer__'):
         return getbuffer(subobj)
     if not hasattr(type(subobj), '__index__'):
         raise TypeError("argument should be integer or bytes-like object, "
-                        f"not '{tp_name(type(subobj))}'")
-    ival = PyNumber_AsSsize_t(subobj, NULL)
+                        f"not '{rt.tp_name(type(subobj))}'")
+    ival = abstract.PyNumber_AsSsize_t(subobj, rt.NULL)
     if ival < 0 or ival > 255:
         raise ValueError("byte must be in range(0, 256)")
     return (ival,)
 
 
-@native(facts=False)
+@ac.stub
 def stringlib_find(str: 'const char *', sub: 'const char *',
-                   start: Py_ssize_t, end: Py_ssize_t):
+                   start: ac.Py_ssize_t, end: ac.Py_ssize_t):
     """The first index of sub in str[start:end], or -1."""
     for i in range(start, end - len(sub) + 1):
         if str[i:i + len(sub)] == sub:
@@ -194,9 +193,9 @@ def stringlib_find(str: 'const char *', sub: 'const char *',
     return -1
 
 
-@native(facts=False)
+@ac.stub
 def stringlib_rfind(str: 'const char *', sub: 'const char *',
-                    start: Py_ssize_t, end: Py_ssize_t):
+                    start: ac.Py_ssize_t, end: ac.Py_ssize_t):
     """The last index of sub in str[start:end], or -1."""
     for i in range(end - len(sub), start - 1, -1):
         if str[i:i + len(sub)] == sub:
@@ -204,9 +203,9 @@ def stringlib_rfind(str: 'const char *', sub: 'const char *',
     return -1
 
 
-@native(facts=False)
+@ac.stub
 def stringlib_count(str: 'const char *', sub: 'const char *',
-                    maxcount: Py_ssize_t):
+                    maxcount: ac.Py_ssize_t):
     """The non-overlapping occurrences of sub in str, at most
     maxcount."""
     if not sub:
@@ -221,10 +220,10 @@ def stringlib_count(str: 'const char *', sub: 'const char *',
     return n
 
 
-@native(facts=False)
-def find_internal(str: 'const char *', len: Py_ssize_t,
-                  function_name: 'const char *', subobj: object,
-                  start: Py_ssize_t, end: Py_ssize_t, dir: int):
+@ac.stub
+def find_internal(str: 'const char *', len: ac.Py_ssize_t,
+                  function_name: 'const char *', subobj: ac.object,
+                  start: ac.Py_ssize_t, end: ac.Py_ssize_t, dir: ac.int):
     sub = parse_args_finds_byte(function_name, subobj)
     start, end = ADJUST_INDICES(start, end, len)
     if end - start < builtin_len(sub):
@@ -237,51 +236,52 @@ def find_internal(str: 'const char *', len: Py_ssize_t,
 builtin_len = len
 
 
-@native(facts=False)
-def _Py_bytes_find(str: 'const char *', len: Py_ssize_t, sub: object,
-                   start: Py_ssize_t, end: Py_ssize_t):
+@ac.stub
+def _Py_bytes_find(str: 'const char *', len: ac.Py_ssize_t, sub: ac.object,
+                   start: ac.Py_ssize_t, end: ac.Py_ssize_t):
     return find_internal(str, len, "find", sub, start, end, +1)
 
 
-@native(facts=False)
-def _Py_bytes_index(str: 'const char *', len: Py_ssize_t, sub: object,
-                    start: Py_ssize_t, end: Py_ssize_t):
+@ac.stub
+def _Py_bytes_index(str: 'const char *', len: ac.Py_ssize_t, sub: ac.object,
+                    start: ac.Py_ssize_t, end: ac.Py_ssize_t):
     result = find_internal(str, len, "index", sub, start, end, +1)
     if result == -1:
         raise ValueError("subsection not found")
     return result
 
 
-@native(facts=False)
-def _Py_bytes_rfind(str: 'const char *', len: Py_ssize_t, sub: object,
-                    start: Py_ssize_t, end: Py_ssize_t):
+@ac.stub
+def _Py_bytes_rfind(str: 'const char *', len: ac.Py_ssize_t, sub: ac.object,
+                    start: ac.Py_ssize_t, end: ac.Py_ssize_t):
     return find_internal(str, len, "rfind", sub, start, end, -1)
 
 
-@native(facts=False)
-def _Py_bytes_rindex(str: 'const char *', len: Py_ssize_t, sub: object,
-                     start: Py_ssize_t, end: Py_ssize_t):
+@ac.stub
+def _Py_bytes_rindex(str: 'const char *', len: ac.Py_ssize_t, sub: ac.object,
+                     start: ac.Py_ssize_t, end: ac.Py_ssize_t):
     result = find_internal(str, len, "rindex", sub, start, end, -1)
     if result == -1:
         raise ValueError("subsection not found")
     return result
 
 
-@native(facts=False)
-def _Py_bytes_count(str: 'const char *', len: Py_ssize_t, sub_obj: object,
-                    start: Py_ssize_t, end: Py_ssize_t):
+@ac.stub
+def _Py_bytes_count(str: 'const char *', len: ac.Py_ssize_t,
+                    sub_obj: ac.object, start: ac.Py_ssize_t,
+                    end: ac.Py_ssize_t):
     sub = parse_args_finds_byte("count", sub_obj)
     start, end = ADJUST_INDICES(start, end, len)
     if end - start < 0:
         return 0
-    return stringlib_count(str[start:end], sub, PY_SSIZE_T_MAX)
+    return stringlib_count(str[start:end], sub, rt.PY_SSIZE_T_MAX)
 
 
-@native(facts=False)
-def _Py_bytes_contains(str: 'const char *', len: Py_ssize_t,
-                       arg: object) -> int:
+@ac.stub
+def _Py_bytes_contains(str: 'const char *', len: ac.Py_ssize_t,
+                       arg: ac.object) -> ac.int:
     try:
-        ival = PyNumber_AsSsize_t(arg, NULL)
+        ival = abstract.PyNumber_AsSsize_t(arg, rt.NULL)
     except Exception:
         # (C clears any error and tries the buffer.)
         return stringlib_find(str, getbuffer(arg), 0, len) >= 0
@@ -290,9 +290,10 @@ def _Py_bytes_contains(str: 'const char *', len: Py_ssize_t,
     return ival in str
 
 
-@native(facts=False)
-def tailmatch(str: 'const char *', len: Py_ssize_t, substr: object,
-              start: Py_ssize_t, end: Py_ssize_t, direction: int) -> int:
+@ac.stub
+def tailmatch(str: 'const char *', len: ac.Py_ssize_t, substr: ac.object,
+              start: ac.Py_ssize_t, end: ac.Py_ssize_t,
+              direction: ac.int) -> ac.int:
     sub = getbuffer(substr)
     slen = builtin_len(sub)
     start, end = ADJUST_INDICES(start, end, len)
@@ -311,11 +312,12 @@ def tailmatch(str: 'const char *', len: Py_ssize_t, substr: object,
     return str[start:start + slen] == sub
 
 
-@native(facts=False)
-def _Py_bytes_tailmatch(str: 'const char *', len: Py_ssize_t,
-                        function_name: 'const char *', subobj: object,
-                        start: Py_ssize_t, end: Py_ssize_t, direction: int):
-    if isinstance(subobj, tuple):
+@ac.stub
+def _Py_bytes_tailmatch(str: 'const char *', len: ac.Py_ssize_t,
+                        function_name: 'const char *', subobj: ac.object,
+                        start: ac.Py_ssize_t, end: ac.Py_ssize_t,
+                        direction: ac.int):
+    if rt.isinstance(subobj, tuple):
         return any(tailmatch(str, len, item, start, end, direction)
                    for item in subobj)
     try:
@@ -323,26 +325,27 @@ def _Py_bytes_tailmatch(str: 'const char *', len: Py_ssize_t,
     except TypeError:
         raise TypeError(f"{function_name} first arg must be bytes or a "
                         "tuple of bytes, not "
-                        f"{tp_name(type(subobj))}") from None
+                        f"{rt.tp_name(type(subobj))}") from None
 
 
-@native(facts=False)
-def _Py_bytes_startswith(str: 'const char *', len: Py_ssize_t,
-                         subobj: object, start: Py_ssize_t,
-                         end: Py_ssize_t):
+@ac.stub
+def _Py_bytes_startswith(str: 'const char *', len: ac.Py_ssize_t,
+                         subobj: ac.object, start: ac.Py_ssize_t,
+                         end: ac.Py_ssize_t):
     return _Py_bytes_tailmatch(str, len, "startswith", subobj, start, end,
                                -1)
 
 
-@native(facts=False)
-def _Py_bytes_endswith(str: 'const char *', len: Py_ssize_t, subobj: object,
-                       start: Py_ssize_t, end: Py_ssize_t):
+@ac.stub
+def _Py_bytes_endswith(str: 'const char *', len: ac.Py_ssize_t,
+                       subobj: ac.object, start: ac.Py_ssize_t,
+                       end: ac.Py_ssize_t):
     return _Py_bytes_tailmatch(str, len, "endswith", subobj, start, end, +1)
 
 
-@native(facts=False)
-def _Py_bytes_repr(data: 'const char *', length: Py_ssize_t,
-                   smartquotes: int, classname: 'const char *'):
+@ac.stub
+def _Py_bytes_repr(data: 'const char *', length: ac.Py_ssize_t,
+                   smartquotes: ac.int, classname: 'const char *'):
     squotes = data.count(ord("'"))
     dquotes = data.count(ord('"'))
     quote = '"' if smartquotes and squotes and not dquotes else "'"
