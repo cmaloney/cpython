@@ -988,6 +988,35 @@ buffered_raw_getattr(buffered *self, PyObject *name)
     return PyObject_GetAttr(self->raw, name);
 }
 
+/* What flush() does, with the lock held: BufferedReader passes it on to
+   the raw stream, the others write out pending data or hand back
+   read-ahead. */
+static int
+buffered_flush_locked(buffered *self)
+{
+    if (self->writable) {
+        return buffered_sync(self);
+    }
+    PyObject *res = PyObject_CallMethodNoArgs(self->raw, &_Py_ID(flush));
+    Py_XDECREF(res);
+    return res == NULL ? -1 : 0;
+}
+
+/* Is self.flush() ours: an exact class of ours, not shadowed in the
+   instance dict?  Returns 1, 0, or -1 on error. */
+static int
+buffered_flush_is_ours(buffered *self)
+{
+    if (!_PyIO_is_nibbler_buffered_type(Py_TYPE(self))) {
+        return 0;
+    }
+    if (self->dict == NULL) {
+        return 1;
+    }
+    int r = PyDict_Contains(self->dict, &_Py_ID(flush));
+    return r < 0 ? -1 : !r;
+}
+
 /*[clinic input]
 @critical_section
 _io._Buffered.flush as _io__Buffered_simple_flush
@@ -1039,13 +1068,27 @@ _io__Buffered_close_impl(buffered *self)
         else
             PyErr_Clear();
     }
-    /* flush() takes the lock itself. */
-    buffered_unlock(self);
-    r = _PyFile_Flush((PyObject *)self);
-    PyObject *exc = r < 0 ? PyErr_GetRaisedException() : NULL;
-    if (buffered_lock(self) < 0) {
-        _PyErr_ChainExceptions1(exc);
-        return NULL;
+    PyObject *exc = NULL;
+    r = buffered_flush_is_ours(self);
+    if (r < 0) {
+        goto end;
+    }
+    if (r) {
+        /* Do what flush() does, without the method call. */
+        if (buffered_flush_locked(self) < 0) {
+            exc = PyErr_GetRaisedException();
+        }
+    }
+    else {
+        /* flush() was overridden; it takes the lock itself. */
+        buffered_unlock(self);
+        if (_PyFile_Flush((PyObject *)self) < 0) {
+            exc = PyErr_GetRaisedException();
+        }
+        if (buffered_lock(self) < 0) {
+            _PyErr_ChainExceptions1(exc);
+            return NULL;
+        }
     }
 
     res = PyObject_CallMethodNoArgs(self->raw, &_Py_ID(close));
