@@ -1298,7 +1298,8 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
 
     if (Py_IS_TYPE(buffer, state->PyBufferedReader_Type) ||
         Py_IS_TYPE(buffer, state->PyBufferedWriter_Type) ||
-        Py_IS_TYPE(buffer, state->PyBufferedRandom_Type))
+        Py_IS_TYPE(buffer, state->PyBufferedRandom_Type) ||
+        _PyIO_is_nibbler_buffered_type(Py_TYPE(buffer)))
     {
         if (PyObject_GetOptionalAttr(buffer, &_Py_ID(raw), &raw) < 0)
             goto error;
