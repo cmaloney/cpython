@@ -285,6 +285,7 @@ _PyStaticObjects_CheckAll(PyInterpreterState *interp) {
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(_type_), "_type_", 6);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(_uninitialized_submodules), "_uninitialized_submodules", 25);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(_warn_unawaited_coroutine), "_warn_unawaited_coroutine", 25);
+    _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(_writev), "_writev", 7);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(_xoptions), "_xoptions", 9);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(abs_tol), "abs_tol", 7);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(access), "access", 6);

@@ -1045,6 +1045,86 @@ exit:
     return return_value;
 }
 
+PyDoc_STRVAR(_io_BufferedRandom___init____doc__,
+"BufferedRandom(raw, buffer_size=DEFAULT_BUFFER_SIZE)\n"
+"--\n"
+"\n"
+"A buffered interface to random access streams.\n"
+"\n"
+"The constructor creates a reader and writer for a seekable stream,\n"
+"raw, given in the first argument. If the buffer_size is omitted it\n"
+"defaults to DEFAULT_BUFFER_SIZE.");
+
+static int
+_io_BufferedRandom___init___impl(buffered *self, PyObject *raw,
+                                 Py_ssize_t buffer_size);
+
+static int
+_io_BufferedRandom___init__(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    int return_value = -1;
+    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
+
+    #define NUM_KEYWORDS 2
+    static struct {
+        PyGC_Head _this_is_not_used;
+        PyObject_VAR_HEAD
+        Py_hash_t ob_hash;
+        PyObject *ob_item[NUM_KEYWORDS];
+    } _kwtuple = {
+        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
+        .ob_hash = -1,
+        .ob_item = { &_Py_ID(raw), &_Py_ID(buffer_size), },
+    };
+    #undef NUM_KEYWORDS
+    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
+
+    #else  // !Py_BUILD_CORE
+    #  define KWTUPLE NULL
+    #endif  // !Py_BUILD_CORE
+
+    static const char * const _keywords[] = {"raw", "buffer_size", NULL};
+    static _PyArg_Parser _parser = {
+        .keywords = _keywords,
+        .fname = "BufferedRandom",
+        .kwtuple = KWTUPLE,
+    };
+    #undef KWTUPLE
+    PyObject *argsbuf[2];
+    PyObject * const *fastargs;
+    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
+    Py_ssize_t noptargs = nargs + (kwargs ? PyDict_GET_SIZE(kwargs) : 0) - 1;
+    PyObject *raw;
+    Py_ssize_t buffer_size = DEFAULT_BUFFER_SIZE;
+
+    fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser,
+            /*minpos*/ 1, /*maxpos*/ 2, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
+    if (!fastargs) {
+        goto exit;
+    }
+    raw = fastargs[0];
+    if (!noptargs) {
+        goto skip_optional_pos;
+    }
+    {
+        Py_ssize_t ival = -1;
+        PyObject *iobj = _PyNumber_Index(fastargs[1]);
+        if (iobj != NULL) {
+            ival = PyLong_AsSsize_t(iobj);
+            Py_DECREF(iobj);
+        }
+        if (ival == -1 && PyErr_Occurred()) {
+            goto exit;
+        }
+        buffer_size = ival;
+    }
+skip_optional_pos:
+    return_value = _io_BufferedRandom___init___impl((buffered *)self, raw, buffer_size);
+
+exit:
+    return return_value;
+}
+
 PyDoc_STRVAR(_io_BufferedRWPair___init____doc__,
 "BufferedRWPair(reader, writer, buffer_size=DEFAULT_BUFFER_SIZE, /)\n"
 "--\n"
@@ -1353,86 +1433,6 @@ _io_BufferedRWPair_closed_get(PyObject *self, void *Py_UNUSED(context))
 {
     return _io_BufferedRWPair_closed_get_impl((rwpair *)self);
 }
-
-PyDoc_STRVAR(_io_BufferedRandom___init____doc__,
-"BufferedRandom(raw, buffer_size=DEFAULT_BUFFER_SIZE)\n"
-"--\n"
-"\n"
-"A buffered interface to random access streams.\n"
-"\n"
-"The constructor creates a reader and writer for a seekable stream,\n"
-"raw, given in the first argument. If the buffer_size is omitted it\n"
-"defaults to DEFAULT_BUFFER_SIZE.");
-
-static int
-_io_BufferedRandom___init___impl(buffered *self, PyObject *raw,
-                                 Py_ssize_t buffer_size);
-
-static int
-_io_BufferedRandom___init__(PyObject *self, PyObject *args, PyObject *kwargs)
-{
-    int return_value = -1;
-    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
-
-    #define NUM_KEYWORDS 2
-    static struct {
-        PyGC_Head _this_is_not_used;
-        PyObject_VAR_HEAD
-        Py_hash_t ob_hash;
-        PyObject *ob_item[NUM_KEYWORDS];
-    } _kwtuple = {
-        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
-        .ob_hash = -1,
-        .ob_item = { &_Py_ID(raw), &_Py_ID(buffer_size), },
-    };
-    #undef NUM_KEYWORDS
-    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
-
-    #else  // !Py_BUILD_CORE
-    #  define KWTUPLE NULL
-    #endif  // !Py_BUILD_CORE
-
-    static const char * const _keywords[] = {"raw", "buffer_size", NULL};
-    static _PyArg_Parser _parser = {
-        .keywords = _keywords,
-        .fname = "BufferedRandom",
-        .kwtuple = KWTUPLE,
-    };
-    #undef KWTUPLE
-    PyObject *argsbuf[2];
-    PyObject * const *fastargs;
-    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
-    Py_ssize_t noptargs = nargs + (kwargs ? PyDict_GET_SIZE(kwargs) : 0) - 1;
-    PyObject *raw;
-    Py_ssize_t buffer_size = DEFAULT_BUFFER_SIZE;
-
-    fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser,
-            /*minpos*/ 1, /*maxpos*/ 2, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
-    if (!fastargs) {
-        goto exit;
-    }
-    raw = fastargs[0];
-    if (!noptargs) {
-        goto skip_optional_pos;
-    }
-    {
-        Py_ssize_t ival = -1;
-        PyObject *iobj = _PyNumber_Index(fastargs[1]);
-        if (iobj != NULL) {
-            ival = PyLong_AsSsize_t(iobj);
-            Py_DECREF(iobj);
-        }
-        if (ival == -1 && PyErr_Occurred()) {
-            goto exit;
-        }
-        buffer_size = ival;
-    }
-skip_optional_pos:
-    return_value = _io_BufferedRandom___init___impl((buffered *)self, raw, buffer_size);
-
-exit:
-    return return_value;
-}
 #define _IO__BUFFERED_CLOSED_GETSETDEF {"closed", (getter)_io__Buffered_closed_get, (setter)NULL, NULL},
 
 #define _IO__BUFFERED_NAME_GETSETDEF {"name", (getter)_io__Buffered_name_get, (setter)NULL, NULL},
@@ -1441,4 +1441,4 @@ exit:
 
 #define _IO_BUFFEREDRWPAIR_CLOSED_GETSETDEF {"closed", (getter)_io_BufferedRWPair_closed_get, (setter)NULL, NULL},
 
-/*[clinic end generated code: output=d9e1eb0efa4a2431 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=86fc99a7534fcb74 input=a9049054013a1b77]*/
