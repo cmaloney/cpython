@@ -7728,6 +7728,7 @@ SRCDIRS="\
   Modules/_decimal \
   Modules/_hacl \
   Modules/_io \
+  Modules/_io/_nibbler \
   Modules/_multiprocessing \
   Modules/_remote_debugging \
   Modules/_sqlite \
