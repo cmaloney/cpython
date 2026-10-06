@@ -287,6 +287,11 @@ class PyMockNonBlockWriterIO(MockNonBlockWriterIO, pyio.RawIOBase):
 class CTestCase(unittest.TestCase):
     io = io
     is_C = True
+    # Does the buffered layer accept buffer_size=0 ("no internal buffer,
+    # but still retry partial reads/writes")?
+    supports_buffer_size_zero = False
+    # Is InterruptedError raised by the raw stream retried (PEP 475 style)?
+    retries_raw_eintr = True
 
     MockRawIO = CMockRawIO
     MisbehavedRawIO = CMisbehavedRawIO
@@ -306,6 +311,8 @@ class CTestCase(unittest.TestCase):
 class PyTestCase(unittest.TestCase):
     io = pyio
     is_C = False
+    supports_buffer_size_zero = False
+    retries_raw_eintr = False
 
     MockRawIO = PyMockRawIO
     MisbehavedRawIO = PyMisbehavedRawIO
@@ -335,6 +342,8 @@ _NIBBLER_BUFFERED = {
 class NibblerMixin:
     """Route the buffered layer (self.* types and open()) to _io._nibbler."""
     is_nibbler = True
+    # Flip once _io._nibbler implements buffer_size=0.
+    supports_buffer_size_zero = False
 
     def setUp(self):
         super().setUp()
