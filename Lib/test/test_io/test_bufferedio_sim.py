@@ -514,6 +514,24 @@ class SlowDeviceTest:
                          b"".join(bytes([65 + i]) * 600 + b"small"
                                   for i in range(10)))
 
+    def test_raw_instance_overrides_are_called(self):
+        # flush() and close() set on a FileIO instance are used by the
+        # buffered object's close().
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(b"data")
+        calls = []
+        raw = self.FileIO(os_helper.TESTFN)
+        real_close = raw.close
+        raw.flush = lambda: calls.append("flush")
+        raw.close = lambda: (calls.append("close"), real_close())[1]
+        f = self.BufferedReader(raw)
+        self.assertEqual(f.read(), b"data")
+        f.close()
+        # The real close() flushes once more, through the override.
+        self.assertEqual(calls, ["flush", "close", "flush"])
+        self.assertTrue(raw.closed)
+
     def test_write_eintr_is_retried(self):
         if not self.retries_raw_eintr:
             self.skipTest("buffered layer does not retry raw EINTR")

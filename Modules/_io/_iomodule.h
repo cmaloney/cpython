@@ -71,6 +71,10 @@ typedef struct {
 extern Py_ssize_t _PyFileIO_writev(PyObject *self, const _PyIO_Span *spans,
                                    Py_ssize_t cnt);
 extern PyObject *_PyFileIO_readall(PyObject *self);
+/* flush() and close() of an exact FileIO; instance attribute overrides
+   are still called.  _PyFileIO_flush() returns 0 or -1. */
+extern int _PyFileIO_flush(PyObject *self);
+extern PyObject *_PyFileIO_close(PyObject *self);
 /* Raise like _PyIOBase_check_readable()/_writable() unless the FileIO is
    open and allows the requested access. */
 extern int _PyFileIO_check_access(PyObject *self, int reading, int writing);
