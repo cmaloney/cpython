@@ -71,6 +71,9 @@ typedef struct {
 extern Py_ssize_t _PyFileIO_writev(PyObject *self, const _PyIO_Span *spans,
                                    Py_ssize_t cnt);
 extern PyObject *_PyFileIO_readall(PyObject *self);
+/* Raise like _PyIOBase_check_readable()/_writable() unless the FileIO is
+   open and allows the requested access. */
+extern int _PyFileIO_check_access(PyObject *self, int reading, int writing);
 
 /* Shortcut to the core of the IncrementalNewlineDecoder.decode method */
 extern PyObject *_PyIncrementalNewlineDecoder_decode(

@@ -1062,6 +1062,31 @@ _PyFileIO_writev(PyObject *op, const _PyIO_Span *spans, Py_ssize_t cnt)
 #endif
 }
 
+/* What _PyIOBase_check_readable() and _PyIOBase_check_writable() do for
+   an exact FileIO, without calling readable() and writable(). */
+int
+_PyFileIO_check_access(PyObject *op, int reading, int writing)
+{
+    fileio *self = PyFileIO_CAST(op);
+    if (self->fd < 0) {
+        err_closed();
+        return -1;
+    }
+    const char *msg = NULL;
+    if (reading && !self->readable) {
+        msg = "File or stream is not readable.";
+    }
+    else if (writing && !self->writable) {
+        msg = "File or stream is not writable.";
+    }
+    if (msg != NULL) {
+        _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
+        PyErr_SetString(state->unsupported_operation, msg);
+        return -1;
+    }
+    return 0;
+}
+
 PyObject *
 _PyFileIO_readall(PyObject *op)
 {

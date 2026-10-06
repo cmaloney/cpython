@@ -1540,10 +1540,22 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
 {
     self->state = BUFFERED_UNINITIALIZED;
     _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
-    if ((readable && writable
-         && _PyIOBase_check_seekable(state, raw, Py_True) == NULL)
-        || (readable && _PyIOBase_check_readable(state, raw, Py_True) == NULL)
-        || (writable && _PyIOBase_check_writable(state, raw, Py_True) == NULL))
+    int raw_fileio = Py_IS_TYPE(raw, state->PyFileIO_Type);
+    if (readable && writable
+        && _PyIOBase_check_seekable(state, raw, Py_True) == NULL)
+    {
+        return -1;
+    }
+    if (raw_fileio) {
+        /* Its flags answer readable() and writable() directly. */
+        if (_PyFileIO_check_access(raw, readable, writable) < 0) {
+            return -1;
+        }
+    }
+    else if ((readable
+              && _PyIOBase_check_readable(state, raw, Py_True) == NULL)
+             || (writable
+                 && _PyIOBase_check_writable(state, raw, Py_True) == NULL))
     {
         return -1;
     }
@@ -1554,7 +1566,7 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
     }
     buffered_free(self);
     Py_XSETREF(self->raw, Py_NewRef(raw));
-    self->raw_fileio = Py_IS_TYPE(raw, state->PyFileIO_Type);
+    self->raw_fileio = (char)raw_fileio;
     /* Use _writev() only where it can't bypass an overridden write(): on
        FileIO itself, or on raw types not derived from it. */
     self->raw_vectored = (
