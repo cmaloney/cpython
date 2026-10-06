@@ -52,6 +52,26 @@ extern int _PyIOBase_finalize(PyObject *self);
    Doesn't check the argument type, so be careful! */
 extern int _PyFileIO_closed(PyObject *self);
 
+/* Direct calls into an exact FileIO for the buffered layer.  The
+   Py_ssize_t ones return the byte count, -2 if a non-blocking file would
+   block, or -1 with an exception set. */
+extern Py_ssize_t _PyFileIO_readinto(PyObject *self, char *buf,
+                                     Py_ssize_t len);
+extern Py_ssize_t _PyFileIO_write(PyObject *self, const char *buf,
+                                  Py_ssize_t len);
+/* Most buffers passed to one vectored write. */
+enum { _PyIO_WRITEV_MAX = 64 };
+
+/* A run of bytes for a vectored write. */
+typedef struct {
+    const char *ptr;
+    Py_ssize_t len;
+} _PyIO_Span;
+/* Write spans[0:cnt] with one call; only called when FileIO has _writev(). */
+extern Py_ssize_t _PyFileIO_writev(PyObject *self, const _PyIO_Span *spans,
+                                   Py_ssize_t cnt);
+extern PyObject *_PyFileIO_readall(PyObject *self);
+
 /* Shortcut to the core of the IncrementalNewlineDecoder.decode method */
 extern PyObject *_PyIncrementalNewlineDecoder_decode(
     PyObject *self, PyObject *input, int final);

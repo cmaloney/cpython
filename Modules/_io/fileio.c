@@ -1016,6 +1016,112 @@ _io_FileIO_write_impl(fileio *self, PyTypeObject *cls, Py_buffer *b)
     return PyLong_FromSsize_t(n);
 }
 
+/* C entry points for the buffered layer when its raw stream is exactly
+   FileIO.  Same behavior as the readinto(), write(), _writev() and readall()
+   methods without the method call and argument conversion.  The Py_ssize_t
+   variants return the byte count, -2 when a non-blocking file descriptor
+   would block, or -1 with an exception set. */
+
+static int
+fileio_check_io(fileio *self, int writing)
+{
+    if (self->fd < 0) {
+        err_closed();
+        return -1;
+    }
+    if (writing ? !self->writable : !self->readable) {
+        _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
+        err_mode(state, writing ? "writing" : "reading");
+        return -1;
+    }
+    return 0;
+}
+
+static Py_ssize_t
+fileio_io_result(Py_ssize_t n)
+{
+    if (n < 0) {
+        if (errno == EAGAIN) {
+            PyErr_Clear();
+            return -2;
+        }
+        return -1;
+    }
+    return n;
+}
+
+Py_ssize_t
+_PyFileIO_readinto(PyObject *op, char *buf, Py_ssize_t len)
+{
+    fileio *self = PyFileIO_CAST(op);
+    if (fileio_check_io(self, 0) < 0) {
+        return -1;
+    }
+    return fileio_io_result(_Py_read(self->fd, buf, len));
+}
+
+Py_ssize_t
+_PyFileIO_write(PyObject *op, const char *buf, Py_ssize_t len)
+{
+    fileio *self = PyFileIO_CAST(op);
+    if (fileio_check_io(self, 1) < 0) {
+        return -1;
+    }
+    return fileio_io_result(_Py_write(self->fd, buf, len));
+}
+
+Py_ssize_t
+_PyFileIO_writev(PyObject *op, const _PyIO_Span *spans, Py_ssize_t cnt)
+{
+#ifdef HAVE_WRITEV
+    fileio *self = PyFileIO_CAST(op);
+    if (fileio_check_io(self, 1) < 0) {
+        return -1;
+    }
+    /* Writing fewer spans is a valid partial write. */
+    struct iovec iov[_PyIO_WRITEV_MAX];
+    cnt = Py_MIN(cnt, _PyIO_WRITEV_MAX);
+#ifdef IOV_MAX
+    cnt = Py_MIN(cnt, IOV_MAX);
+#endif
+    for (Py_ssize_t i = 0; i < cnt; i++) {
+        iov[i].iov_base = (void *)spans[i].ptr;
+        iov[i].iov_len = (size_t)spans[i].len;
+    }
+    Py_ssize_t n;
+    int err, async_err = 0;
+    do {
+        Py_BEGIN_ALLOW_THREADS
+        errno = 0;
+        n = writev(self->fd, iov, (int)cnt);
+        err = errno;
+        Py_END_ALLOW_THREADS
+    } while (n < 0 && err == EINTR && !(async_err = PyErr_CheckSignals()));
+    if (n < 0) {
+        if (async_err) {
+            return -1;
+        }
+        errno = err;
+        if (err == EAGAIN) {
+            return -2;
+        }
+        PyErr_SetFromErrno(PyExc_OSError);
+        return -1;
+    }
+    return n;
+#else
+    /* FileIO has no _writev() here, so the buffered layer never calls this;
+       a plain write of the first span is still a correct partial write. */
+    return _PyFileIO_write(op, spans[0].ptr, spans[0].len);
+#endif
+}
+
+PyObject *
+_PyFileIO_readall(PyObject *op)
+{
+    return _io_FileIO_readall_impl(PyFileIO_CAST(op), Py_TYPE(op));
+}
+
 #ifdef HAVE_WRITEV
 /*[clinic input]
 _io.FileIO._writev
@@ -1039,34 +1145,19 @@ static PyObject *
 _io_FileIO__writev_impl(fileio *self, PyTypeObject *cls, PyObject *buffers)
 /*[clinic end generated code: output=ecd5e35ee9ad4052 input=9690299ab052988e]*/
 {
-    if (self->fd < 0) {
-        return err_closed();
+    if (fileio_check_io(self, 1) < 0) {
+        return NULL;
     }
-    if (!self->writable) {
-        _PyIO_State *state = get_io_state_by_cls(cls);
-        return err_mode(state, "writing");
-    }
-
     PyObject *seq = PySequence_Fast(buffers,
                                     "_writev() argument must be a sequence");
     if (seq == NULL) {
         return NULL;
     }
-    Py_ssize_t cnt = PySequence_Fast_GET_SIZE(seq);
-    if (cnt == 0) {
-        Py_DECREF(seq);
-        return PyLong_FromLong(0);
-    }
-
-    struct iovec *iov = PyMem_New(struct iovec, cnt);
-    Py_buffer *views = PyMem_New(Py_buffer, cnt);
-    if (iov == NULL || views == NULL) {
-        PyMem_Free(iov);
-        PyMem_Free(views);
-        Py_DECREF(seq);
-        return PyErr_NoMemory();
-    }
-
+    /* Only the first _PyIO_WRITEV_MAX buffers are written, as a partial
+       write, which also keeps the count within IOV_MAX. */
+    Py_ssize_t cnt = Py_MIN(PySequence_Fast_GET_SIZE(seq), _PyIO_WRITEV_MAX);
+    Py_buffer views[_PyIO_WRITEV_MAX];
+    _PyIO_Span spans[_PyIO_WRITEV_MAX];
     Py_ssize_t nviews = 0;
     PyObject *res = NULL;
     for (; nviews < cnt; nviews++) {
@@ -1074,39 +1165,20 @@ _io_FileIO__writev_impl(fileio *self, PyTypeObject *cls, PyObject *buffers)
         if (PyObject_GetBuffer(item, &views[nviews], PyBUF_SIMPLE) < 0) {
             goto done;
         }
-        iov[nviews].iov_base = views[nviews].buf;
-        iov[nviews].iov_len = views[nviews].len;
+        spans[nviews] = (_PyIO_Span){views[nviews].buf, views[nviews].len};
     }
-
-    Py_ssize_t n;
-    int err, async_err = 0;
-    do {
-        Py_BEGIN_ALLOW_THREADS
-        errno = 0;
-        n = writev(self->fd, iov, (int)cnt);
-        err = errno;
-        Py_END_ALLOW_THREADS
-    } while (n < 0 && err == EINTR && !(async_err = PyErr_CheckSignals()));
-
+    Py_ssize_t n = _PyFileIO_writev((PyObject *)self, spans, cnt);
     if (n >= 0) {
         res = PyLong_FromSsize_t(n);
     }
-    else if (!async_err) {
-        if (err == EAGAIN) {
-            res = Py_NewRef(Py_None);
-        }
-        else {
-            errno = err;
-            PyErr_SetFromErrno(PyExc_OSError);
-        }
+    else if (n == -2) {
+        res = Py_NewRef(Py_None);
     }
 
 done:
     for (Py_ssize_t i = 0; i < nviews; i++) {
         PyBuffer_Release(&views[i]);
     }
-    PyMem_Free(iov);
-    PyMem_Free(views);
     Py_DECREF(seq);
     return res;
 }
