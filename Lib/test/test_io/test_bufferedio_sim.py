@@ -469,6 +469,51 @@ class SlowDeviceTest:
                 pass
         self.assertEqual(bytes(raw.received), data)
 
+    def test_empty_writes_between_large_writes(self):
+        # Empty writes mixed with writes large enough to be kept by
+        # reference must not stall flushing.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with self.open(os_helper.TESTFN, "wb") as f:
+            for size in (2000, 0, 3000, 0, 0, 10, 0, 9000, 0):
+                f.write(b"x" * size)
+            f.write(b"")
+        with open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(), b"x" * 14010)
+
+    def test_write_after_raw_closed_with_readahead(self):
+        # Leftover read-ahead must not let writes through once the raw
+        # stream is closed.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        raw = self.FileIO(os_helper.TESTFN, "w+b")
+        raw.write(b"x" * 100)
+        raw.seek(0)
+        f = self.BufferedRandom(raw, 16)
+        self.assertEqual(f.read(1), b"x")
+        raw.close()
+        # (_pyio reports the raw stream's error message.)
+        msg = "write to closed file" if self.is_C else "closed file"
+        with self.assertRaisesRegex(ValueError, msg):
+            f.write(b"y")
+
+    def test_fileio_subclass_write_is_used(self):
+        # Vectored writes must not bypass a write() override.
+        written = []
+
+        class RecordingFileIO(self.FileIO):
+            def write(self, b):
+                written.append(bytes(b))
+                return super().write(b)
+
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with self.BufferedWriter(RecordingFileIO(os_helper.TESTFN, "w"),
+                                 64) as f:
+            for i in range(10):
+                f.write(bytes([65 + i]) * 600)
+                f.write(b"small")
+        self.assertEqual(b"".join(written),
+                         b"".join(bytes([65 + i]) * 600 + b"small"
+                                  for i in range(10)))
+
     def test_write_eintr_is_retried(self):
         if not self.retries_raw_eintr:
             self.skipTest("buffered layer does not retry raw EINTR")
@@ -687,7 +732,7 @@ class RandomOpsTest:
                 f.flush()
             check("tell", f.tell(), model.tell())
 
-        f.flush()
+        f.detach()  # Flushes; the caller owns raw.
         return raw, model.getvalue(), check
 
     def test_file(self):
