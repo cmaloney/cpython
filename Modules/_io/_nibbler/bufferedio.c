@@ -137,7 +137,7 @@ typedef struct {
     /* Held across raw I/O.  owner detects reentrant calls (a signal handler
        or finalizer running mid-I/O), which raise instead of deadlocking. */
     PyMutex lock;
-    unsigned long owner;
+    PyThreadState *owner;
 
     PyObject *dict;
     PyObject *weakreflist;
@@ -149,41 +149,49 @@ buffered_cast(PyObject *op)
     return (buffered *)op;
 }
 
+/* buffered_lock() when the lock is taken. */
 static int
+buffered_lock_wait(buffered *self, PyThreadState *tstate)
+{
+    if (_Py_atomic_load_ptr_relaxed(&self->owner) == tstate) {
+        PyErr_Format(PyExc_RuntimeError, "reentrant call inside %R", self);
+        return -1;
+    }
+    if (!_Py_IsInterpreterFinalizing(tstate->interp)) {
+        PyMutex_LockFlags(&self->lock, _PY_LOCK_DETACH);
+    }
+    /* When finalizing, a daemon thread may have been shut down while
+       holding the lock.  Only wait for a grace period of 1 s; non-daemon
+       threads have already exited, so careful threaded I/O code is
+       unaffected. */
+    else if (_PyMutex_LockTimed(&self->lock, (PyTime_t)1000000000,
+                                _PY_LOCK_DETACH) != PY_LOCK_ACQUIRED) {
+        PyObject *ascii = PyObject_ASCII((PyObject *)self);
+        _Py_FatalErrorFormat(__func__,
+            "could not acquire lock for %s at interpreter "
+            "shutdown, possibly due to daemon threads",
+            ascii ? PyUnicode_AsUTF8(ascii) : "<ascii(self) failed>");
+    }
+    return 0;
+}
+
+static inline int
 buffered_lock(buffered *self)
 {
-    unsigned long me = PyThread_get_thread_ident();
-    if (!PyMutex_LockFast(&self->lock)) {
-        if (_Py_atomic_load_ulong_relaxed(&self->owner) == me) {
-            PyErr_Format(PyExc_RuntimeError,
-                         "reentrant call inside %R", self);
-            return -1;
-        }
-        PyInterpreterState *interp = _PyInterpreterState_GET();
-        if (!_Py_IsInterpreterFinalizing(interp)) {
-            PyMutex_LockFlags(&self->lock, _PY_LOCK_DETACH);
-        }
-        /* When finalizing, a daemon thread may have been shut down while
-           holding the lock.  Only wait for a grace period of 1 s; non-daemon
-           threads have already exited, so careful threaded I/O code is
-           unaffected. */
-        else if (_PyMutex_LockTimed(&self->lock, (PyTime_t)1000000000,
-                                    _PY_LOCK_DETACH) != PY_LOCK_ACQUIRED) {
-            PyObject *ascii = PyObject_ASCII((PyObject *)self);
-            _Py_FatalErrorFormat(__func__,
-                "could not acquire lock for %s at interpreter "
-                "shutdown, possibly due to daemon threads",
-                ascii ? PyUnicode_AsUTF8(ascii) : "<ascii(self) failed>");
-        }
+    PyThreadState *tstate = _PyThreadState_GET();
+    if (!PyMutex_LockFast(&self->lock)
+        && buffered_lock_wait(self, tstate) < 0)
+    {
+        return -1;
     }
-    _Py_atomic_store_ulong_relaxed(&self->owner, me);
+    _Py_atomic_store_ptr_relaxed(&self->owner, tstate);
     return 0;
 }
 
 static inline void
 buffered_unlock(buffered *self)
 {
-    _Py_atomic_store_ulong_relaxed(&self->owner, 0);
+    _Py_atomic_store_ptr_relaxed(&self->owner, NULL);
     PyMutex_Unlock(&self->lock);
 }
 
@@ -228,21 +236,15 @@ buffered_is_closed(buffered *self)
     return closed;
 }
 
-/* Raise ValueError(closed_msg) if closed, unless read-ahead is left and
-   that is allowed. */
+/* Raise ValueError(closed_msg) if closed. */
 static int
-buffered_check_open(buffered *self, const char *closed_msg,
-                    int allow_readahead)
+buffered_check_closed(buffered *self, const char *closed_msg)
 {
     int closed = buffered_is_closed(self);
-    if (closed < 0) {
-        return -1;
-    }
-    if (closed && !(allow_readahead && buffered_readahead(self) > 0)) {
+    if (closed > 0) {
         PyErr_SetString(PyExc_ValueError, closed_msg);
-        return -1;
     }
-    return 0;
+    return closed == 0 ? 0 : -1;
 }
 
 static void
@@ -632,16 +634,14 @@ buffered_sync(buffered *self)
     return self->writing ? buffered_flush_writes(self) : buffered_rewind(self);
 }
 
-/* Make the buffer hold read-ahead (reading) or pending writes. */
+/* Switch between holding read-ahead and pending writes. */
 static int
-buffered_set_direction(buffered *self, int writing)
+buffered_switch_direction(buffered *self)
 {
-    if (self->writing != writing) {
-        if (buffered_sync(self) < 0) {
-            return -1;
-        }
-        self->writing = (char)writing;
+    if (buffered_sync(self) < 0) {
+        return -1;
     }
+    self->writing = !self->writing;
     return 0;
 }
 
@@ -1187,15 +1187,16 @@ enum {
    holding it while closing the file (issue #31976); leftover read-ahead
    can still be used except by writes.  On success the caller must
    unlock. */
-static int
+static inline int
 buffered_enter(buffered *self, const char *closed_msg, int direction)
 {
     if (buffered_check_ready(self) < 0 || buffered_lock(self) < 0) {
         return -1;
     }
-    if (buffered_check_open(self, closed_msg, direction != WRITING) < 0
-        || (direction != KEEP_DIRECTION
-            && buffered_set_direction(self, direction) < 0))
+    if (((direction == WRITING || buffered_readahead(self) == 0)
+         && buffered_check_closed(self, closed_msg) < 0)
+        || (direction != KEEP_DIRECTION && self->writing != direction
+            && buffered_switch_direction(self) < 0))
     {
         buffered_unlock(self);
         return -1;
