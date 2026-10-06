@@ -347,9 +347,8 @@ class NibblerMixin:
 
     def setUp(self):
         super().setUp()
-        prev = _io._default_impl
-        _io._default_impl = '_nibbler'
-        self.addCleanup(setattr, _io, '_default_impl', prev)
+        prev = _io._set_open_impl('_nibbler')
+        self.addCleanup(_io._set_open_impl, prev)
 
     def __getattr__(self, name):
         try:

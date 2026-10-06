@@ -1,8 +1,8 @@
 /*
     An implementation of Buffered I/O as defined by PEP 3116 - "New I/O"
 
-    Classes defined here: BufferedIOBase, BufferedReader, BufferedWriter,
-    BufferedRandom, BufferedRWPair.
+    Classes defined here: BufferedReader, BufferedWriter, BufferedRandom,
+    BufferedRWPair, all derived from _io._BufferedIOBase.
 
     Originally written by Amaury Forgeot d'Arc and Antoine Pitrou; reworked
     around the "nibbler" model (see the notes before the buffered struct).
@@ -22,14 +22,13 @@
 
 /*[clinic input]
 module _io
-class _io._BufferedIOBase "PyObject *" "clinic_state()->PyBufferedIOBase_Type"
 class _io._Buffered "buffered *" "clinic_state()->PyBufferedIOBase_Type"
 class _io.BufferedReader "buffered *" "clinic_state()->PyBufferedReader_Type"
 class _io.BufferedWriter "buffered *" "clinic_state()->PyBufferedWriter_Type"
 class _io.BufferedRWPair "rwpair *" "clinic_state()->PyBufferedRWPair_Type"
 class _io.BufferedRandom "buffered *" "clinic_state()->PyBufferedRandom_Type"
 [clinic start generated code]*/
-/*[clinic end generated code: output=da39a3ee5e6b4b0d input=3b3ef9cbbbad4590]*/
+/*[clinic end generated code: output=da39a3ee5e6b4b0d input=c293ae41e3973d1f]*/
 
 /* Per-module state: the five buffered types. */
 typedef struct {
@@ -58,197 +57,12 @@ find_nibbler_state_by_def(PyTypeObject *type)
     return get_nibbler_state(mod);
 }
 
-/*
- * BufferedIOBase class, inherits from IOBase.
- */
-PyDoc_STRVAR(bufferediobase_doc,
-    "Base class for buffered IO objects.\n"
-    "\n"
-    "The main difference with RawIOBase is that the read() method\n"
-    "supports omitting the size argument, and does not have a default\n"
-    "implementation that defers to readinto().\n"
-    "\n"
-    "In addition, read(), readinto() and write() may raise\n"
-    "BlockingIOError if the underlying raw stream is in non-blocking\n"
-    "mode and not ready; unlike their raw counterparts, they will never\n"
-    "return None.\n"
-    "\n"
-    "A typical implementation should not inherit from a RawIOBase\n"
-    "implementation, but wrap one.\n"
-    );
-
-static PyObject *
-_bufferediobase_readinto_generic(PyObject *self, Py_buffer *buffer, char readinto1)
-{
-    Py_ssize_t len;
-    PyObject *data;
-
-    PyObject *attr = readinto1
-        ? &_Py_ID(read1)
-        : &_Py_ID(read);
-    data = _PyObject_CallMethod(self, attr, "n", buffer->len);
-    if (data == NULL)
-        return NULL;
-
-    if (!PyBytes_Check(data)) {
-        Py_DECREF(data);
-        PyErr_SetString(PyExc_TypeError, "read() should return bytes");
-        return NULL;
-    }
-
-    len = PyBytes_GET_SIZE(data);
-    if (len > buffer->len) {
-        PyErr_Format(PyExc_ValueError,
-                     "read() returned too much data: "
-                     "%zd bytes requested, %zd returned",
-                     buffer->len, len);
-        Py_DECREF(data);
-        return NULL;
-    }
-    memcpy(buffer->buf, PyBytes_AS_STRING(data), len);
-
-    Py_DECREF(data);
-
-    return PyLong_FromSsize_t(len);
-}
-
-/*[clinic input]
-@critical_section
-_io._BufferedIOBase.readinto
-    buffer: Py_buffer(accept={rwbuffer})
-    /
-[clinic start generated code]*/
-
-static PyObject *
-_io__BufferedIOBase_readinto_impl(PyObject *self, Py_buffer *buffer)
-/*[clinic end generated code: output=8c8cda6684af8038 input=5273d20db7f56e1a]*/
-{
-    return _bufferediobase_readinto_generic(self, buffer, 0);
-}
-
-/*[clinic input]
-@critical_section
-_io._BufferedIOBase.readinto1
-    buffer: Py_buffer(accept={rwbuffer})
-    /
-[clinic start generated code]*/
-
-static PyObject *
-_io__BufferedIOBase_readinto1_impl(PyObject *self, Py_buffer *buffer)
-/*[clinic end generated code: output=358623e4fd2b69d3 input=d6eb723dedcee654]*/
-{
-    return _bufferediobase_readinto_generic(self, buffer, 1);
-}
-
 static PyObject *
 bufferediobase_unsupported(_PyIO_State *state, const char *message)
 {
     PyErr_SetString(state->unsupported_operation, message);
     return NULL;
 }
-
-/*[clinic input]
-_io._BufferedIOBase.detach
-
-    cls: defining_class
-    /
-
-Disconnect this buffer from its underlying raw stream and return it.
-
-After the raw stream has been detached, the buffer is in an unusable
-state.
-[clinic start generated code]*/
-
-static PyObject *
-_io__BufferedIOBase_detach_impl(PyObject *self, PyTypeObject *cls)
-/*[clinic end generated code: output=b87b135d67cd4448 input=0b61a7b4357c1ea7]*/
-{
-    _PyIO_State *state = find_io_state_by_def(cls);
-    return bufferediobase_unsupported(state, "detach");
-}
-
-/*[clinic input]
-_io._BufferedIOBase.read
-
-    cls: defining_class
-    size: int(unused=True) = -1
-    /
-
-Read and return up to n bytes.
-
-If the size argument is omitted, None, or negative, read and
-return all data until EOF.
-
-If the size argument is positive, and the underlying raw stream is
-not 'interactive', multiple raw reads may be issued to satisfy
-the byte count (unless EOF is reached first).
-However, for interactive raw streams (as well as sockets and pipes),
-at most one raw read will be issued, and a short result does not
-imply that EOF is imminent.
-
-Return an empty bytes object on EOF.
-
-Return None if the underlying raw stream was open in non-blocking
-mode and no data is available at the moment.
-[clinic start generated code]*/
-
-static PyObject *
-_io__BufferedIOBase_read_impl(PyObject *self, PyTypeObject *cls,
-                              int Py_UNUSED(size))
-/*[clinic end generated code: output=aceb2765587b0a29 input=824f6f910465e61a]*/
-{
-    _PyIO_State *state = find_io_state_by_def(cls);
-    return bufferediobase_unsupported(state, "read");
-}
-
-/*[clinic input]
-@permit_long_summary
-_io._BufferedIOBase.read1
-
-    cls: defining_class
-    size: int(unused=True) = -1
-    /
-
-Read and return up to size bytes, with at most one read() call to the underlying raw stream.
-
-Return an empty bytes object on EOF.
-A short result does not imply that EOF is imminent.
-[clinic start generated code]*/
-
-static PyObject *
-_io__BufferedIOBase_read1_impl(PyObject *self, PyTypeObject *cls,
-                               int Py_UNUSED(size))
-/*[clinic end generated code: output=2e7fc62972487eaa input=1e76df255063afd6]*/
-{
-    _PyIO_State *state = find_io_state_by_def(cls);
-    return bufferediobase_unsupported(state, "read1");
-}
-
-/*[clinic input]
-_io._BufferedIOBase.write
-
-    cls: defining_class
-    b: object(unused=True)
-    /
-
-Write buffer b to the IO stream.
-
-Return the number of bytes written, which is always
-the length of b in bytes.
-
-Raise BlockingIOError if the buffer is full and the
-underlying raw stream cannot accept more data at the moment.
-[clinic start generated code]*/
-
-static PyObject *
-_io__BufferedIOBase_write_impl(PyObject *self, PyTypeObject *cls,
-                               PyObject *Py_UNUSED(b))
-/*[clinic end generated code: output=712c635246bf2306 input=9793f5c8f71029ad]*/
-{
-    _PyIO_State *state = find_io_state_by_def(cls);
-    return bufferediobase_unsupported(state, "write");
-}
-
 
 /*
  * BufferedReader, BufferedWriter and BufferedRandom share one object layout
@@ -2170,29 +1984,9 @@ _io_BufferedRWPair_closed_get_impl(rwpair *self)
 #include "clinic/bufferedio.c.h"
 #undef clinic_state
 
-static PyMethodDef bufferediobase_methods[] = {
-    _IO__BUFFEREDIOBASE_DETACH_METHODDEF
-    _IO__BUFFEREDIOBASE_READ_METHODDEF
-    _IO__BUFFEREDIOBASE_READ1_METHODDEF
-    _IO__BUFFEREDIOBASE_READINTO_METHODDEF
-    _IO__BUFFEREDIOBASE_READINTO1_METHODDEF
-    _IO__BUFFEREDIOBASE_WRITE_METHODDEF
-    {NULL, NULL}
-};
-
-static PyType_Slot bufferediobase_slots[] = {
-    {Py_tp_doc, (void *)bufferediobase_doc},
-    {Py_tp_methods, bufferediobase_methods},
-    {0, NULL},
-};
-
-/* Do not set Py_TPFLAGS_HAVE_GC so that tp_traverse and tp_clear are inherited */
-static PyType_Spec nibbler_bufferediobase_spec = {
-    .name = "_io._nibbler._BufferedIOBase",
-    .flags = (Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE |
-              Py_TPFLAGS_IMMUTABLETYPE),
-    .slots = bufferediobase_slots,
-};
+static PyType_Spec nibbler_bufferedreader_spec;
+static PyType_Spec nibbler_bufferedwriter_spec;
+static PyType_Spec nibbler_bufferedrandom_spec;
 
 static PyMethodDef bufferedreader_methods[] = {
     /* BufferedIOMixin methods */
@@ -2247,7 +2041,7 @@ static PyType_Slot bufferedreader_slots[] = {
     {Py_tp_members, bufferedreader_members},
     {Py_tp_getset, bufferedreader_getset},
     {Py_tp_init, _io_BufferedReader___init__},
-    {Py_tp_token, Py_TP_USE_SPEC},
+    {Py_tp_token, &nibbler_bufferedreader_spec},
     {0, NULL},
 };
 
@@ -2306,7 +2100,7 @@ static PyType_Slot bufferedwriter_slots[] = {
     {Py_tp_members, bufferedwriter_members},
     {Py_tp_getset, bufferedwriter_getset},
     {Py_tp_init, _io_BufferedWriter___init__},
-    {Py_tp_token, Py_TP_USE_SPEC},
+    {Py_tp_token, &nibbler_bufferedwriter_spec},
     {0, NULL},
 };
 
@@ -2425,7 +2219,7 @@ static PyType_Slot bufferedrandom_slots[] = {
     {Py_tp_members, bufferedrandom_members},
     {Py_tp_getset, bufferedrandom_getset},
     {Py_tp_init, _io_BufferedRandom___init__},
-    {Py_tp_token, Py_TP_USE_SPEC},
+    {Py_tp_token, &nibbler_bufferedrandom_spec},
     {0, NULL},
 };
 
@@ -2496,13 +2290,19 @@ static struct PyModuleDef _PyIO_nibbler_Module = {
     .m_free = nibbler_free,
 };
 
-/* Create a type from spec with base and add it to mod.  Returns a new
-   reference, or NULL on error. */
+/* Create a type from spec with base, named prefix + its class name, and
+   add it to mod.  Returns a new reference, or NULL on error. */
 static PyTypeObject *
-nibbler_add_type(PyObject *mod, PyType_Spec *spec, PyTypeObject *base)
+nibbler_add_type(PyObject *mod, const PyType_Spec *spec, PyTypeObject *base,
+                 const char *prefix)
 {
+    char name[64];
+    PyType_Spec named = *spec;
+    PyOS_snprintf(name, sizeof(name), "%s%s", prefix,
+                  strrchr(spec->name, '.') + 1);
+    named.name = name;  /* copied by PyType_FromModuleAndSpec() */
     PyTypeObject *type = (PyTypeObject *)PyType_FromModuleAndSpec(
-        mod, spec, (PyObject *)base);
+        mod, &named, (PyObject *)base);
     if (type == NULL) {
         return NULL;
     }
@@ -2514,9 +2314,11 @@ nibbler_add_type(PyObject *mod, PyType_Spec *spec, PyTypeObject *base)
 }
 
 /* Create _io._nibbler, register its types, add it to sys.modules and to _io.
-   Returns a borrowed reference, or NULL on error. */
+   With as_io, the types are named like _io's own ("_io.BufferedReader"),
+   for when they replace them.  Returns a borrowed reference, or NULL on
+   error. */
 PyObject *
-_PyIO_create_nibbler_submodule(PyObject *io_module)
+_PyIO_create_nibbler_submodule(PyObject *io_module, int as_io)
 {
     _PyIO_State *io_state = get_io_state(io_module);
 
@@ -2526,17 +2328,17 @@ _PyIO_create_nibbler_submodule(PyObject *io_module)
     }
     nibbler_state *state = get_nibbler_state(mod);
 
-    PyTypeObject *base;
-    if ((base = state->PyBufferedIOBase_Type = nibbler_add_type(
-             mod, &nibbler_bufferediobase_spec, io_state->PyIOBase_Type)) == NULL
-        || (state->PyBufferedReader_Type = nibbler_add_type(
-             mod, &nibbler_bufferedreader_spec, base)) == NULL
+    const char *prefix = as_io ? "_io." : "_io._nibbler.";
+    PyTypeObject *base = io_state->PyBufferedIOBase_Type;
+    state->PyBufferedIOBase_Type = (PyTypeObject *)Py_NewRef(base);
+    if ((state->PyBufferedReader_Type = nibbler_add_type(
+             mod, &nibbler_bufferedreader_spec, base, prefix)) == NULL
         || (state->PyBufferedWriter_Type = nibbler_add_type(
-             mod, &nibbler_bufferedwriter_spec, base)) == NULL
+             mod, &nibbler_bufferedwriter_spec, base, prefix)) == NULL
         || (state->PyBufferedRWPair_Type = nibbler_add_type(
-             mod, &nibbler_bufferedrwpair_spec, base)) == NULL
+             mod, &nibbler_bufferedrwpair_spec, base, prefix)) == NULL
         || (state->PyBufferedRandom_Type = nibbler_add_type(
-             mod, &nibbler_bufferedrandom_spec, base)) == NULL)
+             mod, &nibbler_bufferedrandom_spec, base, prefix)) == NULL)
     {
         Py_DECREF(mod);
         return NULL;

@@ -182,6 +182,11 @@ struct _io_state {
 #ifdef HAVE_WINDOWS_CONSOLE_IO
     PyTypeObject *PyWindowsConsoleIO_Type;
 #endif
+
+    /* The buffered classes open() uses: _io's own, or _io._nibbler's. */
+    PyTypeObject *open_reader_type;
+    PyTypeObject *open_writer_type;
+    PyTypeObject *open_random_type;
 };
 
 static inline _PyIO_State *
@@ -211,7 +216,8 @@ find_io_state_by_def(PyTypeObject *type)
 extern PyObject *_PyIOBase_cannot_pickle(PyObject *self, PyObject *args);
 
 /* Create and register the _io._nibbler submodule. */
-extern PyObject *_PyIO_create_nibbler_submodule(PyObject *io_module);
+extern PyObject *_PyIO_create_nibbler_submodule(PyObject *io_module,
+                                                int as_io);
 /* Is the type exactly one of the _io._nibbler buffered classes? */
 extern int _PyIO_is_nibbler_buffered_type(PyTypeObject *tp);
 

@@ -393,21 +393,15 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
 
     /* wraps into a buffered file */
     {
-        /* _io._default_impl may name a provider (e.g. "_nibbler") to take the
-           buffered class from instead of _io. */
-        const char *clsname;
-        PyObject *Buffered_class;       /* borrowed (the _io default) */
+        PyObject *Buffered_class;
         if (updating) {
-            clsname = "BufferedRandom";
-            Buffered_class = (PyObject *)state->PyBufferedRandom_Type;
+            Buffered_class = (PyObject *)state->open_random_type;
         }
         else if (creating || writing || appending) {
-            clsname = "BufferedWriter";
-            Buffered_class = (PyObject *)state->PyBufferedWriter_Type;
+            Buffered_class = (PyObject *)state->open_writer_type;
         }
         else if (reading) {
-            clsname = "BufferedReader";
-            Buffered_class = (PyObject *)state->PyBufferedReader_Type;
+            Buffered_class = (PyObject *)state->open_reader_type;
         }
         else {
             PyErr_Format(PyExc_ValueError,
@@ -415,34 +409,7 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
             goto error;
         }
 
-        PyObject *cls = NULL;       /* owned, if from a provider */
-        PyObject *impl = PyObject_GetAttrString(module, "_default_impl");
-        if (impl == NULL) {
-            PyErr_Clear();
-        }
-        else {
-            int is_io = (!PyUnicode_Check(impl) ||
-                PyUnicode_CompareWithASCIIString(impl, "_io") == 0);
-            if (!is_io) {
-                PyObject *provider = PyObject_GetAttr(module, impl);
-                if (provider != NULL) {
-                    cls = PyObject_GetAttrString(provider, clsname);
-                    Py_DECREF(provider);
-                }
-            }
-            Py_DECREF(impl);
-            if (!is_io && cls == NULL) {
-                goto error;
-            }
-        }
-
-        if (cls != NULL) {
-            buffer = PyObject_CallFunction(cls, "Oi", raw, buffering);
-            Py_DECREF(cls);
-        }
-        else {
-            buffer = PyObject_CallFunction(Buffered_class, "Oi", raw, buffering);
-        }
+        buffer = PyObject_CallFunction(Buffered_class, "Oi", raw, buffering);
     }
     if (buffer == NULL)
         goto error;
@@ -594,6 +561,66 @@ PyNumber_AsOff_t(PyObject *item, PyObject *err)
     return result;
 }
 
+/* Point open() at _io's buffered classes, or with nibbler set, at
+   _io._nibbler's. */
+static int
+iomodule_set_open_impl(PyObject *module, int nibbler)
+{
+    _PyIO_State *state = get_io_state(module);
+    PyTypeObject *types[3] = {state->PyBufferedReader_Type,
+                              state->PyBufferedWriter_Type,
+                              state->PyBufferedRandom_Type};
+    if (nibbler) {
+        PyObject *sub = PyObject_GetAttrString(module, "_nibbler");
+        if (sub == NULL) {
+            return -1;
+        }
+        static const char *const names[] = {
+            "BufferedReader", "BufferedWriter", "BufferedRandom",
+        };
+        for (int i = 0; i < 3; i++) {
+            PyObject *cls = PyObject_GetAttrString(sub, names[i]);
+            if (cls == NULL) {
+                Py_DECREF(sub);
+                return -1;
+            }
+            types[i] = (PyTypeObject *)cls;
+            Py_DECREF(cls);  /* kept alive by the _nibbler module */
+        }
+        Py_DECREF(sub);
+    }
+    Py_XSETREF(state->open_reader_type, (PyTypeObject *)Py_NewRef(types[0]));
+    Py_XSETREF(state->open_writer_type, (PyTypeObject *)Py_NewRef(types[1]));
+    Py_XSETREF(state->open_random_type, (PyTypeObject *)Py_NewRef(types[2]));
+    return 0;
+}
+
+/* _io._set_open_impl(name): make open() use the "_io" or "_nibbler"
+   buffered classes; returns the previous name.  For tests. */
+static PyObject *
+iomodule__set_open_impl(PyObject *module, PyObject *name)
+{
+    _PyIO_State *state = get_io_state(module);
+    int was_nibbler = state->open_reader_type != state->PyBufferedReader_Type;
+    int nibbler;
+    if (PyUnicode_Check(name)
+        && PyUnicode_CompareWithASCIIString(name, "_nibbler") == 0) {
+        nibbler = 1;
+    }
+    else if (PyUnicode_Check(name)
+             && PyUnicode_CompareWithASCIIString(name, "_io") == 0) {
+        nibbler = 0;
+    }
+    else {
+        PyErr_Format(PyExc_ValueError, "unknown implementation %R", name);
+        return NULL;
+    }
+    if (iomodule_set_open_impl(module, nibbler) < 0) {
+        return NULL;
+    }
+    return PyUnicode_FromString(was_nibbler ? "_nibbler" : "_io");
+}
+
 static int
 iomodule_traverse(PyObject *mod, visitproc visit, void *arg) {
     _PyIO_State *state = get_io_state(mod);
@@ -613,6 +640,9 @@ iomodule_traverse(PyObject *mod, visitproc visit, void *arg) {
     Py_VISIT(state->PyStringIO_Type);
     Py_VISIT(state->PyTextIOBase_Type);
     Py_VISIT(state->PyTextIOWrapper_Type);
+    Py_VISIT(state->open_reader_type);
+    Py_VISIT(state->open_writer_type);
+    Py_VISIT(state->open_random_type);
 #ifdef HAVE_WINDOWS_CONSOLE_IO
     Py_VISIT(state->PyWindowsConsoleIO_Type);
 #endif
@@ -639,6 +669,9 @@ iomodule_clear(PyObject *mod) {
     Py_CLEAR(state->PyStringIO_Type);
     Py_CLEAR(state->PyTextIOBase_Type);
     Py_CLEAR(state->PyTextIOWrapper_Type);
+    Py_CLEAR(state->open_reader_type);
+    Py_CLEAR(state->open_writer_type);
+    Py_CLEAR(state->open_random_type);
 #ifdef HAVE_WINDOWS_CONSOLE_IO
     Py_CLEAR(state->PyWindowsConsoleIO_Type);
 #endif
@@ -664,6 +697,7 @@ static PyMethodDef module_methods[] = {
     _IO_OPEN_METHODDEF
     _IO_TEXT_ENCODING_METHODDEF
     _IO_OPEN_CODE_METHODDEF
+    {"_set_open_impl", iomodule__set_open_impl, METH_O, NULL},
     {NULL, NULL}
 };
 
@@ -750,21 +784,41 @@ iomodule_exec(PyObject *m)
 
 #undef ADD_TYPE
 
-    // Create the _io._nibbler submodule (after IOBase/FileIO are registered).
-    if (_PyIO_create_nibbler_submodule(m) == NULL) {
-        return -1;
-    }
-
-    // open()'s buffered-class provider ("_io" or a submodule like "_nibbler"),
-    // seeded from _PYTHON_IO_DEFAULT_IMPL (honours -E / -I).
+    // _PYTHON_IO_DEFAULT_IMPL=_nibbler (honours -E / -I) makes the
+    // _io._nibbler classes _io's buffered classes, so io.BufferedReader,
+    // isinstance() checks and open() all use them.
     PyInterpreterState *interp = _PyInterpreterState_GET();
     const PyConfig *config = _PyInterpreterState_GetConfig(interp);
     const char *env = config->use_environment
         ? getenv("_PYTHON_IO_DEFAULT_IMPL") : NULL;
-    const char *impl = (env != NULL && strcmp(env, "_nibbler") == 0)
-        ? "_nibbler" : "_io";
-    if (PyModule_AddStringConstant(m, "_default_impl", impl) < 0) {
+    int nibbler = env != NULL && strcmp(env, "_nibbler") == 0;
+
+    // Create the _io._nibbler submodule (after IOBase/FileIO are registered).
+    if (_PyIO_create_nibbler_submodule(m, nibbler) == NULL) {
         return -1;
+    }
+    if (iomodule_set_open_impl(m, nibbler) < 0) {
+        return -1;
+    }
+    if (nibbler) {
+        PyObject *sub = PyObject_GetAttrString(m, "_nibbler");
+        if (sub == NULL) {
+            return -1;
+        }
+        static const char *const names[] = {
+            "BufferedReader", "BufferedWriter", "BufferedRandom",
+            "BufferedRWPair",
+        };
+        for (size_t i = 0; i < Py_ARRAY_LENGTH(names); i++) {
+            PyObject *cls = PyObject_GetAttrString(sub, names[i]);
+            if (cls == NULL || PyObject_SetAttrString(m, names[i], cls) < 0) {
+                Py_XDECREF(cls);
+                Py_DECREF(sub);
+                return -1;
+            }
+            Py_DECREF(cls);
+        }
+        Py_DECREF(sub);
     }
 
     return 0;
