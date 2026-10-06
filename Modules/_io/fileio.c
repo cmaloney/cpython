@@ -1141,6 +1141,46 @@ _PyFileIO_check_access(PyObject *op, int reading, int writing)
     return 0;
 }
 
+/* Is the method `name` shadowed by an instance attribute?  1, 0, or -1. */
+static int
+fileio_overridden(fileio *self, PyObject *name)
+{
+    return self->dict == NULL ? 0 : PyDict_Contains(self->dict, name);
+}
+
+/* flush(): what IOBase.flush() does for an exact FileIO (fail if closed),
+   unless an instance attribute overrides it.  Returns 0 or -1. */
+int
+_PyFileIO_flush(PyObject *op)
+{
+    fileio *self = PyFileIO_CAST(op);
+    int r = fileio_overridden(self, &_Py_ID(flush));
+    if (r != 0) {
+        PyObject *res = r < 0 ? NULL
+                              : PyObject_CallMethodNoArgs(op, &_Py_ID(flush));
+        Py_XDECREF(res);
+        return res == NULL ? -1 : 0;
+    }
+    if (self->fd < 0) {
+        PyErr_SetString(PyExc_ValueError, "I/O operation on closed file.");
+        return -1;
+    }
+    return 0;
+}
+
+/* close() of an exact FileIO without the method call, unless an instance
+   attribute overrides it. */
+PyObject *
+_PyFileIO_close(PyObject *op)
+{
+    fileio *self = PyFileIO_CAST(op);
+    int r = fileio_overridden(self, &_Py_ID(close));
+    if (r != 0) {
+        return r < 0 ? NULL : PyObject_CallMethodNoArgs(op, &_Py_ID(close));
+    }
+    return _io_FileIO_close_impl(self, Py_TYPE(op));
+}
+
 PyObject *
 _PyFileIO_readall(PyObject *op)
 {

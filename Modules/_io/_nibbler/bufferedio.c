@@ -992,14 +992,20 @@ buffered_raw_getattr(buffered *self, PyObject *name)
    the raw stream, the others write out pending data or hand back
    read-ahead. */
 static int
-buffered_flush_locked(buffered *self)
+buffered_raw_flush(buffered *self)
 {
-    if (self->writable) {
-        return buffered_sync(self);
+    if (self->raw_fileio) {
+        return _PyFileIO_flush(self->raw);
     }
     PyObject *res = PyObject_CallMethodNoArgs(self->raw, &_Py_ID(flush));
     Py_XDECREF(res);
     return res == NULL ? -1 : 0;
+}
+
+static int
+buffered_flush_locked(buffered *self)
+{
+    return self->writable ? buffered_sync(self) : buffered_raw_flush(self);
 }
 
 /* Is self.flush() ours: an exact class of ours, not shadowed in the
@@ -1026,7 +1032,10 @@ static PyObject *
 _io__Buffered_simple_flush_impl(buffered *self)
 /*[clinic end generated code: output=29ebb3820db1bdfd input=5248cb84a65f80bd]*/
 {
-    return buffered_raw_call(self, &_Py_ID(flush));
+    if (buffered_check_ready(self) < 0 || buffered_raw_flush(self) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
 }
 
 /*[clinic input]
@@ -1091,7 +1100,8 @@ _io__Buffered_close_impl(buffered *self)
         }
     }
 
-    res = PyObject_CallMethodNoArgs(self->raw, &_Py_ID(close));
+    res = self->raw_fileio ? _PyFileIO_close(self->raw)
+                           : PyObject_CallMethodNoArgs(self->raw, &_Py_ID(close));
     buffered_free(self);
     self->released = 1;
 
