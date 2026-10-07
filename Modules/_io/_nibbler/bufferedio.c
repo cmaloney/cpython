@@ -982,6 +982,16 @@ buffered_read_all(buffered *self)
 static PyObject *
 buffered_readline(buffered *self, Py_ssize_t limit)
 {
+    /* Usually the whole line is in the read-ahead. */
+    morsel *m = buffered_ahead(self);
+    if (m != NULL) {
+        Py_ssize_t n = limit >= 0 && limit < m->len ? limit : m->len;
+        const char *s = memchr(m->ptr, '\n', n);
+        if (s != NULL || n == limit) {
+            return buffered_take_bytes(self, s ? s - m->ptr + 1 : n);
+        }
+    }
+
     PyBytesWriter *writer = NULL;
     for (;;) {
         if (buffered_readahead(self) == 0 && limit != 0) {
@@ -993,7 +1003,7 @@ buffered_readline(buffered *self, Py_ssize_t limit)
                 break;
             }
         }
-        morsel *m = buffered_ahead(self);
+        m = buffered_ahead(self);
         Py_ssize_t n = m == NULL ? 0 : m->len;
         if (limit >= 0 && n > limit) {
             n = limit;
@@ -1403,17 +1413,13 @@ enum {
     WRITING = 1,
 };
 
-/* Common start of the I/O methods: check the object is initialized, lock
-   it, check it is open, and make it buffer in the given direction.
-   Closed is checked with the lock held since another thread could be
-   holding it while closing the file (issue #31976); leftover read-ahead
-   can still be used except by writes.  On success the caller must
-   unlock. */
-static inline int
-buffered_enter(buffered *self, const char *closed_msg, int direction)
+/* The rest of buffered_enter(), with the lock held. */
+static int
+buffered_enter_locked(buffered *self, const char *closed_msg, int direction)
 {
-    if (buffered_lock_ready(self) < 0) {
-        return -1;
+    if (!buffered_raw_usable(self->raw)) {
+        buffered_unlock(self);
+        return buffered_not_ready(self);
     }
     /* Reading what is already buffered works after close(). */
     int check_closed = direction == WRITING || buffered_readahead(self) == 0;
@@ -1430,6 +1436,27 @@ buffered_enter(buffered *self, const char *closed_msg, int direction)
 error:
     buffered_unlock(self);
     return -1;
+}
+
+/* Common start of the I/O methods: lock the object, check it is
+   initialized and open, and make it buffer in the given direction.
+   Closed is checked with the lock held since another thread could be
+   holding it while closing the file (issue #31976); leftover read-ahead
+   can still be used except by writes.  Reading from the read-ahead, the
+   common case, needs none of the checks.  On success the caller must
+   unlock. */
+static inline int
+buffered_enter(buffered *self, const char *closed_msg, int direction)
+{
+    if (buffered_lock(self) < 0) {
+        return -1;
+    }
+    if (direction == READING && buffered_readahead(self) > 0
+        && buffered_raw_usable(self->raw))
+    {
+        return 0;
+    }
+    return buffered_enter_locked(self, closed_msg, direction);
 }
 
 /*[clinic input]
