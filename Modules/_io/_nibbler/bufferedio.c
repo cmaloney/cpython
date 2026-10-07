@@ -628,10 +628,8 @@ buffered_add_write(buffered *self, PyObject *obj, const char *data,
     if (len == 0) {
         return 0;
     }
-    /* Not the block itself (handed out by a read): data is copied into
-       it after the last morsel in it. */
     if (self->raw_vectored && len >= WREF_MIN && obj != NULL
-        && obj != self->block && PyBytes_CheckExact(obj))
+        && PyBytes_CheckExact(obj))
     {
         return morsels_push(&self->buf, obj, data, len);
     }
@@ -742,6 +740,18 @@ buffered_switch_direction(buffered *self)
  * Reading
  */
 
+/* Return the bytes object of a morsel that covers all of it.  Handing out
+   the block gives it away: copied writes go into self->block in place, so
+   it must never be visible outside. */
+static PyObject *
+buffered_hand_out(buffered *self, const morsel *m)
+{
+    if (m->obj == self->block) {
+        Py_CLEAR(self->block);
+    }
+    return Py_NewRef(m->obj);
+}
+
 /* Return n bytes of read-ahead as a bytes object: the block itself, without
    a copy, when that is all of it. */
 static PyObject *
@@ -756,7 +766,7 @@ buffered_take_bytes(buffered *self, Py_ssize_t n)
     if (m->ptr == PyBytes_AS_STRING(m->obj)
         && n == PyBytes_GET_SIZE(m->obj))
     {
-        res = Py_NewRef(m->obj);
+        res = buffered_hand_out(self, m);
     }
     else {
         res = PyBytes_FromStringAndSize(m->ptr, n);
@@ -1467,7 +1477,7 @@ _io__Buffered_peek_impl(buffered *self, Py_ssize_t size)
                  && m->len == PyBytes_GET_SIZE(m->obj))
         {
             /* All of the block: no copy. */
-            res = Py_NewRef(m->obj);
+            res = buffered_hand_out(self, m);
         }
         else {
             res = PyBytes_FromStringAndSize(m->ptr, m->len);
