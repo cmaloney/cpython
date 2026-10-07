@@ -263,6 +263,17 @@ nibbler_lock(nibbler *n, PyObject *obj)
     return 0;
 }
 
+/* Lock if no thread holds the lock (else use nibbler_lock()). */
+static inline int
+nibbler_try_lock(nibbler *n)
+{
+    if (!PyMutex_LockFast(&n->lock)) {
+        return 0;
+    }
+    _Py_atomic_store_uint64_relaxed(&n->owner, _PyThreadState_GET()->id);
+    return 1;
+}
+
 /* Lock again after a raw call made without the lock: a signal must not
    interrupt this (its handler runs later). */
 static void
@@ -509,16 +520,12 @@ nibbler_take(nibbler *n, char *dst, Py_ssize_t len)
     return k;
 }
 
-/* Take k bytes from the first morsel as a bytes object: the bytes object
-   of the morsel itself, without a copy, when that is all of it. */
-static PyObject *
-nibbler_take_bytes(nibbler *n, Py_ssize_t k)
+/* Take k bytes (up to m->len) from m, the first morsel, as a bytes object:
+   the bytes object of m itself, without a copy, when that is all of it. */
+static inline PyObject *
+nibbler_take_from(nibbler *n, morsel *m, Py_ssize_t k)
 {
-    morsel *m = nibbler_front(n);
-    if (k == 0 || m == NULL) {
-        return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
-    }
-    assert(k <= m->len);
+    assert(m == nibbler_front(n) && 0 <= k && k <= m->len);
     PyObject *res;
     if (m->ptr == PyBytes_AS_STRING(m->obj) && k == PyBytes_GET_SIZE(m->obj)) {
         /* Handing out the block gives it away: it is only written into
@@ -534,8 +541,21 @@ nibbler_take_bytes(nibbler *n, Py_ssize_t k)
             return NULL;
         }
     }
-    nibbler_advance(n, k);
+    m->ptr += k;
+    m->len -= k;
+    n->list.nbytes -= k;
     return res;
+}
+
+/* Take k bytes from the first morsel, like nibbler_take_from(). */
+static PyObject *
+nibbler_take_bytes(nibbler *n, Py_ssize_t k)
+{
+    morsel *m = nibbler_front(n);
+    if (k == 0 || m == NULL) {
+        return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
+    }
+    return nibbler_take_from(n, m, k);
 }
 
 /* Like nibbler_take_bytes(), but leaving the bytes queued. */
