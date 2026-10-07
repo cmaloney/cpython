@@ -2006,6 +2006,32 @@ Py_fclose(FILE *file)
 
    Release the GIL to call read(). The caller must hold the GIL. */
 Py_ssize_t
+_Py_read_noraise(int fd, void *buf, size_t count)
+{
+    Py_ssize_t n;
+    if (count > _PY_READ_MAX) {
+        count = _PY_READ_MAX;
+    }
+    _Py_BEGIN_SUPPRESS_IPH
+    errno = 0;
+#ifdef MS_WINDOWS
+    _doserrno = 0;
+    n = read(fd, buf, (int)count);
+    // read() on a non-blocking empty pipe fails with EINVAL, which is
+    // mapped from the Windows error code ERROR_NO_DATA.
+    if (n < 0 && errno == EINVAL) {
+        if (_doserrno == ERROR_NO_DATA) {
+            errno = EAGAIN;
+        }
+    }
+#else
+    n = read(fd, buf, count);
+#endif
+    _Py_END_SUPPRESS_IPH
+    return n;
+}
+
+Py_ssize_t
 _Py_read(int fd, void *buf, size_t count)
 {
     Py_ssize_t n;
@@ -2019,34 +2045,15 @@ _Py_read(int fd, void *buf, size_t count)
      * handler raised an exception. */
     assert(!PyErr_Occurred());
 
-    if (count > _PY_READ_MAX) {
-        count = _PY_READ_MAX;
-    }
-
-    _Py_BEGIN_SUPPRESS_IPH
     do {
         Py_BEGIN_ALLOW_THREADS
-        errno = 0;
-#ifdef MS_WINDOWS
-        _doserrno = 0;
-        n = read(fd, buf, (int)count);
-        // read() on a non-blocking empty pipe fails with EINVAL, which is
-        // mapped from the Windows error code ERROR_NO_DATA.
-        if (n < 0 && errno == EINVAL) {
-            if (_doserrno == ERROR_NO_DATA) {
-                errno = EAGAIN;
-            }
-        }
-#else
-        n = read(fd, buf, count);
-#endif
+        n = _Py_read_noraise(fd, buf, count);
         /* save/restore errno because PyErr_CheckSignals()
          * and PyErr_SetFromErrno() can modify it */
         err = errno;
         Py_END_ALLOW_THREADS
     } while (n < 0 && err == EINTR &&
             !(async_err = PyErr_CheckSignals()));
-    _Py_END_SUPPRESS_IPH
 
     if (async_err) {
         /* read() was interrupted by a signal (failed with EINTR)
