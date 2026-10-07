@@ -3,7 +3,7 @@ import io
 import _pyio as pyio
 import threading
 from unittest import TestCase
-from test.support import threading_helper
+from test.support import os_helper, threading_helper
 from test.support.threading_helper import run_concurrently
 from random import randint
 from sys import getsizeof
@@ -252,3 +252,39 @@ class TextIOWrapperTest(TestCase):
                 slot[0].detach()
 
         run_concurrently([reader, detacher])
+
+
+class BufferedWriterTest(TestCase):
+    def test_write_detach_race(self):
+        # write() waiting for the buffered lock while detach() ran used to
+        # use the cleared raw stream: a segfault.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        for _ in range(200):
+            buffered = io.BufferedWriter(io.FileIO(os_helper.TESTFN, "w"), 64)
+            go = threading.Event()
+
+            def writer():
+                go.wait()
+                for i in range(500):
+                    try:
+                        buffered.write(b"x" * (i % 100))
+                    except ValueError:  # detached
+                        return
+
+            def reader():
+                go.wait()
+                for _ in range(500):
+                    try:
+                        (buffered.closed, buffered.name, buffered.fileno(),
+                         buffered.writable())
+                    except ValueError:  # detached
+                        return
+
+            def detacher():
+                go.wait()
+                buffered.detach().close()
+
+            threads = [threading.Thread(target=func)
+                       for func in [writer] * 3 + [reader] * 3 + [detacher]]
+            with threading_helper.start_threads(threads):
+                go.set()
