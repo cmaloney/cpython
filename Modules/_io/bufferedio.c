@@ -326,10 +326,28 @@ _enter_buffered_busy(buffered *self)
     return 1;
 }
 
+/* Called with the lock just acquired.  Waiting for it may have released
+   the GIL (or suspended the critical section), letting detach() run, so
+   check the object is still initialized before it is used. */
+static int
+_enter_buffered_check_initialized(buffered *self)
+{
+    if (self->ok > 0) {
+        return 1;
+    }
+    self->owner = 0;
+    PyThread_release_lock(self->lock);
+    PyErr_SetString(PyExc_ValueError,
+                    self->detached ? "raw stream has been detached"
+                                   : "I/O operation on uninitialized object");
+    return 0;
+}
+
 #define ENTER_BUFFERED(self) \
     ( (PyThread_acquire_lock(self->lock, 0) ? \
        1 : _enter_buffered_busy(self)) \
-     && (self->owner = PyThread_get_thread_ident(), 1) )
+     && (self->owner = PyThread_get_thread_ident(), 1) \
+     && _enter_buffered_check_initialized(self) )
 
 #define LEAVE_BUFFERED(self) \
     do { \
@@ -622,10 +640,16 @@ _io__Buffered_detach_impl(buffered *self)
     if (_PyFile_Flush((PyObject *)self) < 0) {
         return NULL;
     }
+    /* Take the lock so no other thread is using raw (it may have released
+       the GIL in a raw call) when it is cleared. */
+    if (!ENTER_BUFFERED(self)) {
+        return NULL;
+    }
     raw = self->raw;
     self->raw = NULL;
     self->detached = 1;
     self->ok = 0;
+    LEAVE_BUFFERED(self)
     return raw;
 }
 
