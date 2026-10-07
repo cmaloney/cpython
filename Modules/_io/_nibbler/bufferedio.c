@@ -13,7 +13,7 @@
 #include "pycore_import.h"              // _PyImport_SetModuleString()
 #include "pycore_lock.h"                // PyMutex_LockFast()
 #include "pycore_object.h"              // _PyObject_GC_UNTRACK()
-#include "pycore_pyerrors.h"            // _Py_FatalErrorFormat()
+#include "pycore_pyerrors.h"            // _PyErr_ChainExceptions1()
 #include "pycore_pylifecycle.h"         // _Py_IsInterpreterFinalizing()
 #include "pycore_weakref.h"             // FT_CLEAR_WEAKREFS()
 
@@ -194,6 +194,8 @@ typedef struct {
     uint8_t writing;
     /* close() has run (also read without the lock, by __sizeof__()). */
     uint8_t released;
+    /* A raw write of the pending writes is in progress. */
+    uint8_t raw_writing;
 
     Py_ssize_t buffer_size;
     morsel_list buf;
@@ -229,19 +231,19 @@ buffered_lock_wait(buffered *self, PyThreadState *tstate)
         PyMutex_LockFlags(&self->lock, _PY_LOCK_DETACH);
         return 0;
     }
-    /* When finalizing, a daemon thread may have been shut down while
-       holding the lock.  Only wait for a grace period; non-daemon threads
-       have already exited, so careful threaded I/O code is unaffected. */
-    PyTime_t timeout = 1000 * 1000 * 1000;  /* 1 second */
-    if (_PyMutex_LockTimed(&self->lock, timeout, _PY_LOCK_DETACH)
-        != PY_LOCK_ACQUIRED)
-    {
-        PyObject *ascii = PyObject_ASCII((PyObject *)self);
-        _Py_FatalErrorFormat(__func__,
-            "could not acquire lock for %s at interpreter "
-            "shutdown, possibly due to daemon threads",
-            ascii ? PyUnicode_AsUTF8(ascii) : "<ascii(self) failed>");
+    /* Finalizing: every other thread hangs as soon as it attaches again,
+       and the lock is only released by an attached thread, so its holder
+       (a daemon thread) never will.  It holds it across a raw call or has
+       just taken it, when the buffered state is consistent: take over.
+       The lock stays locked; the caller unlocks it as if it had taken it.
+       Give up on that raw call: what it writes may or may not reach the
+       stream, and a system call may still be using the memory it was
+       given, so drop its writes and the block without freeing them. */
+    if (self->raw_writing) {
+        self->buf = (morsel_list){0};  /* leaked */
+        self->raw_writing = 0;
     }
+    self->block = NULL;  /* leaked */
     return 0;
 }
 
@@ -666,7 +668,9 @@ buffered_write_out(buffered *self, const char *data, Py_ssize_t len,
     morsel extra = {NULL, data, len};
     *blocked = 0;
     while (self->buf.count > 0 || extra.len > 0) {
+        self->raw_writing = 1;
         Py_ssize_t n = buffered_raw_write(self, &extra);
+        self->raw_writing = 0;
         if (n == -1) {
             return -1;
         }
