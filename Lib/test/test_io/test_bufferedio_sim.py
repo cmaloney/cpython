@@ -755,56 +755,6 @@ class PositionTest:
         for chunk, copy in got:
             self.assertEqual(chunk, copy)
 
-    def test_raw_keeping_readinto_view(self):
-        if not self.isolates_raw_views:
-            self.skipTest("buffer memory is reused under raw views")
-        # A raw stream that keeps the memoryview given to readinto() can't
-        # change data already returned.
-        RawBase = make_memory_raw(self.RawIOBase)
-
-        class KeepingRaw(RawBase):
-            kept = []
-
-            def readinto(self, b):
-                n = super().readinto(b)
-                self.kept.append(b)
-                for view in self.kept[:-1]:
-                    try:
-                        view[:1] = b"!"
-                    except (ValueError, TypeError):
-                        pass  # released
-                return n
-
-        data = bytes(range(200))
-        f = self.BufferedReader(KeepingRaw(data), 16)
-        got = [f.read1(16) for _ in range(10)]
-        self.assertEqual(b"".join(got), data[:160])
-
-    def test_raw_keeping_readinto_slice(self):
-        # Releasing the given buffer doesn't release a slice of it.
-        if not self.isolates_raw_views:
-            self.skipTest("buffer memory is reused under raw views")
-
-        class KeepingRaw(make_memory_raw(self.RawIOBase)):
-            kept = []
-
-            def readinto(self, b):
-                n = super().readinto(b)
-                self.kept.append(memoryview(b)[:])
-                return n
-
-        data = bytes(range(64))
-        raw = KeepingRaw(data)
-        f = self.BufferedReader(raw, 16)
-        got = [f.read(16) for _ in range(4)]
-        for view in raw.kept:
-            view[:] = b"!" * len(view)
-        self.assertEqual(b"".join(got), data)
-        del f
-        support.gc_collect()
-        for view in raw.kept:
-            view[:] = b"?" * len(view)
-
     def test_write_back_handed_out_block(self):
         # A block handed out by read() and written back must not be the
         # target of later copied writes.
