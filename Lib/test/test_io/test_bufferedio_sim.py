@@ -733,6 +733,147 @@ class PositionTest:
         self.assertEqual(bytes(raw.buf), b"abc")
 
 
+    def test_returned_bytes_never_change(self):
+        # Data handed out (possibly without a copy) stays as returned
+        # while the buffer is refilled.
+        data = bytes(range(256)) * 16
+        f = self.BufferedReader(self.counting_raw(data), 64)
+        got = []
+        while True:
+            for chunk in (f.peek(), f.read1(64), f.read1(10), f.read(70)):
+                if chunk:
+                    got.append((chunk, bytes(chunk)))
+            if not f.peek():
+                break
+        for chunk, copy in got:
+            self.assertEqual(chunk, copy)
+
+    def test_raw_keeping_readinto_view(self):
+        if not self.isolates_raw_views:
+            self.skipTest("buffer memory is reused under raw views")
+        # A raw stream that keeps the memoryview given to readinto() can't
+        # change data already returned.
+        RawBase = make_memory_raw(self.RawIOBase)
+
+        class KeepingRaw(RawBase):
+            kept = []
+
+            def readinto(self, b):
+                n = super().readinto(b)
+                self.kept.append(b)
+                for view in self.kept[:-1]:
+                    try:
+                        view[:1] = b"!"
+                    except (ValueError, TypeError):
+                        pass  # released
+                return n
+
+        data = bytes(range(200))
+        f = self.BufferedReader(KeepingRaw(data), 16)
+        got = [f.read1(16) for _ in range(10)]
+        self.assertEqual(b"".join(got), data[:160])
+
+    def test_raw_keeping_readinto_slice(self):
+        # Releasing the given buffer doesn't release a slice of it.
+        if not self.isolates_raw_views:
+            self.skipTest("buffer memory is reused under raw views")
+
+        class KeepingRaw(make_memory_raw(self.RawIOBase)):
+            kept = []
+
+            def readinto(self, b):
+                n = super().readinto(b)
+                self.kept.append(memoryview(b)[:])
+                return n
+
+        data = bytes(range(64))
+        raw = KeepingRaw(data)
+        f = self.BufferedReader(raw, 16)
+        got = [f.read(16) for _ in range(4)]
+        for view in raw.kept:
+            view[:] = b"!" * len(view)
+        self.assertEqual(b"".join(got), data)
+        del f
+        support.gc_collect()
+        for view in raw.kept:
+            view[:] = b"?" * len(view)
+
+    def test_write_back_handed_out_block(self):
+        # A block handed out by read() and written back must not be the
+        # target of later copied writes.
+        data = bytes(range(256)) * 8
+        with self.open(os_helper.TESTFN, "wb") as f:
+            f.write(data)
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with self.open(os_helper.TESTFN, "r+b", buffering=1024) as f:
+            block = f.read(1024)
+            expected = bytes(block)
+            f.write(block[:600])
+            f.write(block)
+            f.write(b"x")
+            self.assertEqual(block, expected)
+            f.write(b"y" * 100)
+            self.assertEqual(block, expected)
+
+    def test_raw_keeping_write_view(self):
+        if not self.isolates_raw_views:
+            self.skipTest("buffer memory is reused under raw views")
+        # A raw stream that keeps the views given to write() sees data that
+        # stays as written.
+        class KeepingRaw(make_memory_raw(self.RawIOBase)):
+            kept = []
+
+            def write(self, b):
+                self.kept.append((b, bytes(b)))
+                return super().write(b)
+
+        raw = KeepingRaw()
+        f = self.BufferedWriter(raw, 16)
+        for i in range(50):
+            f.write(bytes([i]) * 7)
+        f.flush()
+        for view, copy in raw.kept:
+            self.assertEqual(bytes(view), copy)
+
+    def test_overflow_keeps_small_write_buffered(self):
+        # Without vectored writes, a small write that doesn't fit after
+        # the pending data writes out the pending data and buffers itself.
+        raw = self.counting_raw(b"")
+        f = self.BufferedWriter(raw, 8)
+        f.write(b"abcde")
+        f.write(b"fghij")
+        if self.is_C:
+            # _pyio writes both at once.
+            self.assertEqual(bytes(raw.buf), b"abcde")
+        f.flush()
+        self.assertEqual(bytes(raw.buf), b"abcdefghij")
+
+
+    @property
+    def detached_errors(self):
+        # _pyio reaches into the missing raw stream instead.
+        return ValueError if self.is_C else (ValueError, AttributeError)
+
+    def test_detach_writes_pending(self):
+        raw = self.counting_raw(b"")
+        f = self.BufferedWriter(raw, 64)
+        f.write(b"pending")
+        self.assertIs(f.detach(), raw)
+        self.assertEqual(bytes(raw.buf), b"pending")
+        self.assertIsNone(f.raw)
+        self.assertRaises(self.detached_errors, f.write, b"x")
+        self.assertRaises(self.detached_errors, f.flush)
+
+    def test_detach_reader(self):
+        raw = self.counting_raw(b"abcdef")
+        f = self.BufferedReader(raw, 4)
+        self.assertEqual(f.read(1), b"a")
+        self.assertIs(f.detach(), raw)
+        self.assertIsNone(f.raw)
+        self.assertRaises(self.detached_errors, f.read)
+        self.assertRaises(self.detached_errors, f.peek)
+
+
 class CPositionTest(PositionTest, CTestCase):
     pass
 
