@@ -455,29 +455,18 @@ buffered_raw_read(buffered *self, char *dst, Py_ssize_t len)
     if (self->raw_fileio) {
         return _PyFileIO_readinto(self->raw, dst, len);
     }
-    /* Python code may keep the buffer it is given (or a slice of it), so
-       give it memory it owns rather than dst, which ends up in bytes
-       objects. */
-    PyObject *buf = PyByteArray_FromStringAndSize(NULL, len);
-    if (buf == NULL) {
+    PyObject *view = PyMemoryView_FromMemory(dst, len, PyBUF_WRITE);
+    if (view == NULL) {
         return -1;
     }
     /* PyErr_SetFromErrno() runs signal handlers on EINTR; retry if none
        raised (see issue #10956). */
     PyObject *res;
     do {
-        res = PyObject_CallMethodOneArg(self->raw, &_Py_ID(readinto), buf);
+        res = PyObject_CallMethodOneArg(self->raw, &_Py_ID(readinto), view);
     } while (res == NULL && _PyIO_trap_eintr());
-    Py_ssize_t n = buffered_raw_result(res, len, "readinto");
-    if (n > PyByteArray_GET_SIZE(buf)) {
-        PyErr_SetString(PyExc_OSError, "raw readinto() resized its buffer");
-        n = -1;
-    }
-    else if (n > 0) {
-        memcpy(dst, PyByteArray_AS_STRING(buf), n);
-    }
-    Py_DECREF(buf);
-    return n;
+    Py_DECREF(view);
+    return buffered_raw_result(res, len, "readinto");
 }
 
 /* A read-only memoryview of the morsel, which keeps its bytes alive; or,
