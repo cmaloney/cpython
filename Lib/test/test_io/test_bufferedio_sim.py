@@ -664,6 +664,87 @@ class NibblerSlowDeviceTest(NibblerMixin, SlowDeviceTest, CTestCase):
     pass
 
 
+# --- Positioning within the buffer ---------------------------------------------
+
+class PositionTest:
+    """seek() within buffered data, and what it costs in raw calls."""
+
+    def counting_raw(self, data):
+        class CountingRaw(make_memory_raw(self.RawIOBase)):
+            reads = seeks = writes = 0
+
+            def readinto(self, b):
+                self.reads += 1
+                return super().readinto(b)
+
+            def seek(self, pos, whence=0):
+                self.seeks += 1
+                return super().seek(pos, whence)
+
+            def write(self, b):
+                self.writes += 1
+                return super().write(b)
+
+        return CountingRaw(data)
+
+    def test_seek_back_after_direct_read(self):
+        # A read too large for the buffer bypasses it; seeking back must
+        # not return the bytes the buffer held before.
+        data = bytes(range(256)) * 4
+        f = self.BufferedReader(self.counting_raw(data), 8)
+        self.assertEqual(f.read(3), data[:3])
+        self.assertEqual(f.read(20), data[3:23])
+        self.assertEqual(f.seek(-2, 1), 21)
+        self.assertEqual(f.read(2), data[21:23])
+
+        f = self.BufferedReader(self.counting_raw(data), 8)
+        self.assertEqual(f.read(3), data[:3])
+        self.assertEqual(f.read(), data[3:])
+        self.assertEqual(f.seek(-2, 1), len(data) - 2)
+        self.assertEqual(f.read(), data[-2:])
+
+    def test_seek_within_buffer(self):
+        data = bytes(range(64))
+        raw = self.counting_raw(data)
+        f = self.BufferedReader(raw, 16)
+        self.assertEqual(f.read(1), data[:1])
+        self.assertEqual(f.seek(10), 10)
+        self.assertEqual(f.read(1), data[10:11])
+        self.assertEqual(f.seek(-8, 1), 3)
+        self.assertEqual(f.read(2), data[3:5])
+        self.assertEqual(f.seek(0), 0)
+        self.assertEqual(f.read(16), data[:16])
+        if self.is_C:
+            # Served from the first fill (_pyio always seeks the raw).
+            self.assertEqual(raw.reads, 1)
+            self.assertEqual(raw.seeks, 0)
+
+    def test_read0_keeps_pending_writes(self):
+        raw = self.counting_raw(b"")
+        f = self.BufferedRandom(raw, 16)
+        f.write(b"abc")
+        self.assertEqual(f.read(0), b"")
+        self.assertEqual(f.read1(0), b"")
+        self.assertEqual(f.readline(0), b"")
+        if self.is_C:
+            # _pyio's read() always flushes first.
+            self.assertEqual(raw.writes, 0)
+        f.flush()
+        self.assertEqual(bytes(raw.buf), b"abc")
+
+
+class CPositionTest(PositionTest, CTestCase):
+    pass
+
+
+class PyPositionTest(PositionTest, PyTestCase):
+    pass
+
+
+class NibblerPositionTest(NibblerMixin, PositionTest, CTestCase):
+    pass
+
+
 # --- Differential test against an io.BytesIO model ---------------------------
 
 class RandomOpsTest:
@@ -730,7 +811,11 @@ class RandomOpsTest:
                 whence = rng.choice((0, 1, 2))
                 end = len(model.getvalue())
                 cur = model.tell()
-                target = rng.randint(0, end + 100)
+                if rng.random() < 0.5:
+                    # Nearby, often within the buffer.
+                    target = max(0, cur + rng.randint(-2 * size, 2 * size))
+                else:
+                    target = rng.randint(0, end + 100)
                 off = target - (0, cur, end)[whence]
                 log.append((op, off, whence))
                 check(op, f.seek(off, whence), model.seek(off, whence))
