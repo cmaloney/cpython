@@ -24,6 +24,7 @@ import unittest
 
 from test import support
 from test.support import os_helper, threading_helper
+from test.support.script_helper import run_python_until_end
 from .utils import CTestCase, PyTestCase, NibblerMixin
 
 
@@ -985,6 +986,76 @@ class PyRandomOpsTest(RandomOpsTest, PyTestCase):
 
 
 class NibblerRandomOpsTest(NibblerMixin, RandomOpsTest, CTestCase):
+    pass
+
+
+# --- Interpreter shutdown ------------------------------------------------------
+
+class ShutdownTest:
+    """A daemon thread hung in raw I/O at shutdown, holding the lock."""
+
+    @threading_helper.requires_working_threading()
+    def test_daemon_thread_holding_lock(self):
+        # The daemon thread blocks in its raw write, holding the buffered
+        # lock, and can never run again once the interpreter finalizes.
+        # The main thread's write is then flushed while finalizing.
+        import _io
+        # Only _io._nibbler takes the lock over; _io gives a fatal error.
+        takes_over = self.BufferedWriter is _io._nibbler.BufferedWriter
+        cls = ("_io._nibbler.BufferedWriter" if takes_over
+               else "_io.BufferedWriter")
+        code = f"""if 1:
+            import _io, atexit, io, os, sys
+            from threading import current_thread, Event, main_thread, Thread
+
+            go = Event()
+            entered = Event()
+
+            @atexit.register
+            def write_while_daemon_thread_blocks():
+                go.set()
+                entered.wait()
+                file.write('!')
+
+            class GatedRaw(io.RawIOBase):
+                name = '<stdout>'
+
+                def writable(self):
+                    return True
+
+                def write(self, b):
+                    if current_thread() is not main_thread():
+                        entered.set()
+                        Event().wait()
+                    return os.write(1, b)
+
+            file = io.TextIOWrapper({cls}(GatedRaw()), encoding='ascii')
+            sys.stdout = file
+
+            def run():
+                go.wait()
+                file.write('.')
+                file.flush()
+
+            Thread(target=run, daemon=True).start()
+            """
+        res, _ = run_python_until_end("-c", code)
+        err = res.err.decode()
+        if takes_over:
+            # The daemon thread's write is abandoned; the main thread's
+            # still gets written.
+            self.assertEqual((res.rc, res.out, err), (0, b"!", ""))
+        else:
+            self.assertNotEqual(res.rc, 0)
+            self.assertIn("could not acquire lock for <_io.BufferedWriter "
+                          "name='<stdout>'> at interpreter shutdown", err)
+
+
+class CShutdownTest(ShutdownTest, CTestCase):
+    pass
+
+
+class NibblerShutdownTest(NibblerMixin, ShutdownTest, CTestCase):
     pass
 
 
