@@ -15,6 +15,7 @@
 #include "pycore_object.h"              // _PyObject_GC_UNTRACK()
 #include "pycore_pyerrors.h"            // _PyErr_ChainExceptions1()
 #include "pycore_pylifecycle.h"         // _Py_IsInterpreterFinalizing()
+#include "pycore_pystate.h"             // _Py_FOR_EACH_TSTATE_BEGIN()
 #include "pycore_weakref.h"             // FT_CLEAR_WEAKREFS()
 
 #include "_iomodule.h"
@@ -203,10 +204,13 @@ typedef struct {
        writes are copied into; NULL until needed. */
     PyObject *block;
 
-    /* Held across raw I/O.  owner detects reentrant calls (a signal handler
-       or finalizer running mid-I/O), which raise instead of deadlocking. */
+    /* Held across raw I/O.  owner, the id of the thread state holding
+       it (0 for none, or just after taking it), detects reentrant calls
+       (a signal handler or finalizer running mid-I/O), which raise instead
+       of deadlocking, and holders that are gone (see buffered_lock_wait()).
+       */
     PyMutex lock;
-    PyThreadState *owner;
+    uint64_t owner;
 
     PyObject *dict;
     PyObject *weakreflist;
@@ -218,33 +222,68 @@ buffered_cast(PyObject *op)
     return (buffered *)op;
 }
 
+/* Is there no thread state with this id in the interpreter any more?  Its
+   thread exited, or was removed by a fork or by finalization. */
+static int
+buffered_thread_gone(PyInterpreterState *interp, uint64_t id)
+{
+    int found = 0;
+    _Py_FOR_EACH_TSTATE_BEGIN(interp, t) {
+        if (t->id == id) {
+            found = 1;
+            break;
+        }
+    }
+    _Py_FOR_EACH_TSTATE_END(interp);
+    return !found;
+}
+
 /* Slow path of buffered_lock(): another thread, or this one reentering,
-   holds the lock. */
+   holds the lock.
+
+   A holder that can never release the lock is taken over instead of
+   waited for: after a fork, a thread that held it doesn't exist in the
+   child; while finalizing, every other thread hangs as soon as it attaches
+   again (before it can release the lock, perhaps having just taken it).
+   Such a holder is in a raw call or has just taken the lock, when the
+   buffered state is consistent, and its raw call keeps references to the
+   memory it uses.  It may or may not have written the pending writes it
+   was given (the parent process still will, after a fork), so they are
+   dropped.  A thread exits only after releasing the lock, so a gone thread
+   still recorded as owner never released it. */
 static int
 buffered_lock_wait(buffered *self, PyThreadState *tstate)
 {
-    if (_Py_atomic_load_ptr_relaxed(&self->owner) == tstate) {
-        PyErr_Format(PyExc_RuntimeError, "reentrant call inside %R", self);
-        return -1;
+    for (;;) {
+        uint64_t owner = _Py_atomic_load_uint64_relaxed(&self->owner);
+        if (owner == tstate->id) {
+            PyErr_Format(PyExc_RuntimeError, "reentrant call inside %R",
+                         self);
+            return -1;
+        }
+        if (!_Py_IsInterpreterFinalizing(tstate->interp)
+            && (owner == 0 || !buffered_thread_gone(tstate->interp, owner)))
+        {
+            PyLockStatus st = _PyMutex_LockTimed(
+                &self->lock, -1, _PY_LOCK_DETACH | _PY_LOCK_HANDLE_SIGNALS);
+            return st == PY_LOCK_INTR ? -1 : 0;
+        }
+        /* Unlocked after all (PyMutex_LockFast() also fails while
+           threads are parked)? */
+        if (_PyMutex_LockTimed(&self->lock, 0, 0) == PY_LOCK_ACQUIRED) {
+            return 0;
+        }
+        /* Take over, unless another thread just did. */
+        if (_Py_atomic_compare_exchange_uint64(&self->owner, &owner,
+                                               tstate->id))
+        {
+            if (self->raw_writing) {
+                morsels_clear(&self->buf);
+                self->raw_writing = 0;
+            }
+            return 0;
+        }
     }
-    if (!_Py_IsInterpreterFinalizing(tstate->interp)) {
-        PyMutex_LockFlags(&self->lock, _PY_LOCK_DETACH);
-        return 0;
-    }
-    /* Finalizing: every other thread hangs as soon as it attaches again,
-       and the lock is only released by an attached thread, so its holder
-       (a daemon thread) never will.  It holds it across a raw call or has
-       just taken it, when the buffered state is consistent: take over.
-       The lock stays locked; the caller unlocks it as if it had taken it.
-       Give up on that raw call: what it writes may or may not reach the
-       stream, and a system call may still be using the memory it was
-       given, so drop its writes and the block without freeing them. */
-    if (self->raw_writing) {
-        self->buf = (morsel_list){0};  /* leaked */
-        self->raw_writing = 0;
-    }
-    self->block = NULL;  /* leaked */
-    return 0;
 }
 
 static inline int
@@ -256,14 +295,14 @@ buffered_lock(buffered *self)
     {
         return -1;
     }
-    _Py_atomic_store_ptr_relaxed(&self->owner, tstate);
+    _Py_atomic_store_uint64_relaxed(&self->owner, tstate->id);
     return 0;
 }
 
 static inline void
 buffered_unlock(buffered *self)
 {
-    _Py_atomic_store_ptr_relaxed(&self->owner, NULL);
+    _Py_atomic_store_uint64_relaxed(&self->owner, 0);
     PyMutex_Unlock(&self->lock);
 }
 
@@ -511,11 +550,18 @@ buffered_raw_write(buffered *self, const morsel *extra)
     assert(cnt > 0);
 
     if (self->raw_fileio) {
+        /* The raw call holds its own references, see buffered_lock_wait()
+           (Python-level calls get views, which do). */
         _PyIO_Span spans[_PyIO_WRITEV_MAX];
         for (Py_ssize_t i = 0; i < cnt; i++) {
             spans[i] = (_PyIO_Span){pieces[i].ptr, pieces[i].len};
+            Py_XINCREF(pieces[i].obj);
         }
-        return _PyFileIO_writev(self->raw, spans, cnt);
+        Py_ssize_t n = _PyFileIO_writev(self->raw, spans, cnt);
+        for (Py_ssize_t i = 0; i < cnt; i++) {
+            Py_XDECREF(pieces[i].obj);
+        }
+        return n;
     }
 
     /* Python code may keep the views (and reach the block through them): it
@@ -811,11 +857,14 @@ buffered_fill(buffered *self)
     if (block == NULL) {
         return -1;
     }
+    /* The raw call holds its own reference, see buffered_lock_wait(). */
+    Py_INCREF(block);
     char *start = PyBytes_AS_STRING(block);
     Py_ssize_t n = buffered_raw_read(self, start, self->buffer_size);
     if (n > 0 && morsels_push(&self->buf, block, start, n) < 0) {
-        return -1;
+        n = -1;
     }
+    Py_DECREF(block);
     return n;
 }
 
