@@ -5,6 +5,7 @@
 #include "pycore_fileutils.h"     // _Py_BEGIN_SUPPRESS_IPH
 #include "pycore_object.h"        // _PyObject_GC_UNTRACK()
 #include "pycore_pyerrors.h"      // _PyErr_ChainExceptions1()
+#include "pycore_pystate.h"       // _PyInterpreterState_GET()
 #include "pycore_weakref.h"       // FT_CLEAR_WEAKREFS()
 
 #include <stdbool.h>              // bool
@@ -329,10 +330,23 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
         if (widename == NULL)
             return -1;
 #else
-        if (!PyUnicode_FSConverter(nameobj, &stringobj)) {
-            return -1;
+        if (PyUnicode_CheckExact(nameobj) && PyUnicode_IS_ASCII(nameobj)
+            && _PyInterpreterState_GET()->unicode.fs_codec.utf8)
+        {
+            /* An ASCII str is already its own UTF-8 filesystem encoding:
+               use its NUL-terminated data instead of an encoded copy. */
+            name = (const char *)PyUnicode_DATA(nameobj);
+            if (strlen(name) != (size_t)PyUnicode_GET_LENGTH(nameobj)) {
+                PyErr_SetString(PyExc_ValueError, "embedded null byte");
+                return -1;
+            }
         }
-        name = PyBytes_AS_STRING(stringobj);
+        else {
+            if (!PyUnicode_FSConverter(nameobj, &stringobj)) {
+                return -1;
+            }
+            name = PyBytes_AS_STRING(stringobj);
+        }
 #endif
     }
 
