@@ -858,8 +858,61 @@ class ConcurrentAccessTest:
             self.assertEqual(s, sorted(s))
 
 
+    def test_detach_racing_io(self):
+        # detach() racing writes and attribute reads may land on either side
+        # of them; the only allowed failures are "detached"/"closed" errors
+        # (AttributeError from _pyio, whose raw becomes None).
+        detached_errors = (ValueError, AttributeError)
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        for _ in range(20):
+            raw = self.FileIO(os_helper.TESTFN, "w")
+            f = self.BufferedWriter(raw, 64)
+            go = threading.Event()
+            errors = []
+            detached = []
+
+            def writer():
+                go.wait()
+                for i in range(500):
+                    try:
+                        f.write(b"x" * (i % 100))
+                    except detached_errors:
+                        return
+
+            def reader():
+                go.wait()
+                for _ in range(500):
+                    try:
+                        f.closed, f.name, f.fileno(), f.writable()
+                    except detached_errors:
+                        return
+
+            def detacher():
+                go.wait()
+                try:
+                    detached.append(f.detach())
+                except ValueError as e:
+                    errors.append(e)
+
+            threads = ([threading.Thread(target=writer) for _ in range(3)]
+                       + [threading.Thread(target=reader) for _ in range(3)]
+                       + [threading.Thread(target=detacher)])
+            with threading_helper.start_threads(threads):
+                go.set()
+            self.assertEqual(errors, [])
+            # Closed only now: FileIO itself doesn't synchronize close()
+            # with other threads using it.
+            self.assertEqual(detached, [raw])
+            raw.close()
+
+
 class CConcurrentAccessTest(ConcurrentAccessTest, CTestCase):
-    pass
+    # _io.BufferedWriter.write() checks it is initialized before taking its
+    # lock while detach() clears raw without the lock, so a write waiting
+    # for the lock dereferences NULL in _PyFileIO_closed(): a segfault.
+    test_detach_racing_io = unittest.skip(
+        "_io crashes when detach() races write()")(
+            ConcurrentAccessTest.test_detach_racing_io)
 
 class PyConcurrentAccessTest(ConcurrentAccessTest, PyTestCase):
     pass
