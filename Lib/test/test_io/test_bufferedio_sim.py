@@ -18,13 +18,15 @@ import glob
 import os
 import random
 import select
+import signal
+import subprocess
 import sys
+import textwrap
 import threading
 import unittest
 
 from test import support
 from test.support import os_helper, threading_helper
-from test.support.script_helper import run_python_until_end
 from .utils import CTestCase, PyTestCase, NibblerMixin
 
 
@@ -989,73 +991,188 @@ class NibblerRandomOpsTest(NibblerMixin, RandomOpsTest, CTestCase):
     pass
 
 
-# --- Interpreter shutdown ------------------------------------------------------
+# --- Locks that can never be released --------------------------------------
 
-class ShutdownTest:
-    """A daemon thread hung in raw I/O at shutdown, holding the lock."""
+# A raw stream whose calls named in GATED block forever when made from a
+# thread other than the main one, after setting `entered`.  Writes go to
+# stdout.
+GATED_RAW = """if 1:
+    import io, os
+    from threading import current_thread, Event, main_thread
 
-    @threading_helper.requires_working_threading()
-    def test_daemon_thread_holding_lock(self):
-        # The daemon thread blocks in its raw write, holding the buffered
-        # lock, and can never run again once the interpreter finalizes.
-        # The main thread's write is then flushed while finalizing.
+    entered = Event()
+
+    class GatedRaw(io.RawIOBase):
+        name = '<gated>'
+
+        def readable(self):
+            return True
+
+        def writable(self):
+            return True
+
+        def seekable(self):
+            return True
+
+        def _gate(self, method):
+            if method in GATED and current_thread() is not main_thread():
+                entered.set()
+                Event().wait()
+
+        def write(self, b):
+            self._gate('write')
+            return os.write(1, b)
+
+        def readinto(self, b):
+            self._gate('readinto')
+            return 0
+
+        def seek(self, pos, whence=0):
+            self._gate('seek')
+            return 0
+"""
+
+
+class LockReleaseTest:
+    """No buffered call waits forever for a holder that can never release
+    the lock: a daemon thread at shutdown, or a thread gone in a fork."""
+
+    def run_child(self, code):
         import _io
-        # Only _io._nibbler takes the lock over; _io gives a fatal error.
-        takes_over = self.BufferedWriter is _io._nibbler.BufferedWriter
-        cls = ("_io._nibbler.BufferedWriter" if takes_over
-               else "_io.BufferedWriter")
-        code = f"""if 1:
-            import _io, atexit, io, os, sys
-            from threading import current_thread, Event, main_thread, Thread
+        nibbler = self.BufferedRandom is _io._nibbler.BufferedRandom
+        if not nibbler:
+            self.skipTest("only _io._nibbler takes over such locks")
+        code = ("from _io._nibbler import BufferedRandom\n"
+                + GATED_RAW + textwrap.dedent(code))
+        # The timeout only stops a hang from blocking the test run.
+        proc = subprocess.run([sys.executable, "-I", "-c", code],
+                              capture_output=True,
+                              timeout=support.SHORT_TIMEOUT)
+        return proc.returncode, proc.stdout, proc.stderr.decode()
 
-            go = Event()
-            entered = Event()
+    def check_shutdown(self, daemon_op, waiters=0):
+        # A daemon thread blocks in a raw call holding the lock (others
+        # wait for it), so at shutdown it can never release it.  The main
+        # thread's write is flushed while finalizing.
+        code = f"""
+            import atexit, sys
+            from threading import Thread
+
+            GATED = {{'write', 'readinto', 'seek'}}
+            f = io.TextIOWrapper(BufferedRandom(GatedRaw()), encoding='ascii')
+            sys.stdout = f
+
+            def holder():
+                {daemon_op}
+
+            def waiter():
+                f.buffer.flush()
 
             @atexit.register
-            def write_while_daemon_thread_blocks():
-                go.set()
+            def write_while_blocked():
+                Thread(target=holder, daemon=True).start()
                 entered.wait()
-                file.write('!')
-
-            class GatedRaw(io.RawIOBase):
-                name = '<stdout>'
-
-                def writable(self):
-                    return True
-
-                def write(self, b):
-                    if current_thread() is not main_thread():
-                        entered.set()
-                        Event().wait()
-                    return os.write(1, b)
-
-            file = io.TextIOWrapper({cls}(GatedRaw()), encoding='ascii')
-            sys.stdout = file
-
-            def run():
-                go.wait()
-                file.write('.')
-                file.flush()
-
-            Thread(target=run, daemon=True).start()
+                for _ in range({waiters}):
+                    Thread(target=waiter, daemon=True).start()
+                f.write('!')
             """
-        res, _ = run_python_until_end("-c", code)
-        err = res.err.decode()
-        if takes_over:
-            # The daemon thread's write is abandoned; the main thread's
-            # still gets written.
-            self.assertEqual((res.rc, res.out, err), (0, b"!", ""))
-        else:
-            self.assertNotEqual(res.rc, 0)
-            self.assertIn("could not acquire lock for <_io.BufferedWriter "
-                          "name='<stdout>'> at interpreter shutdown", err)
+        self.assertEqual(self.run_child(code), (0, b"!", ""))
+
+    @threading_helper.requires_working_threading()
+    def test_shutdown_holder_in_raw_write(self):
+        self.check_shutdown("f.write('.'); f.flush()")
+
+    @threading_helper.requires_working_threading()
+    def test_shutdown_holder_in_raw_readinto(self):
+        self.check_shutdown("f.buffer.read(1)")
+
+    @threading_helper.requires_working_threading()
+    def test_shutdown_holder_in_raw_seek(self):
+        self.check_shutdown("f.buffer.seek(1)")
+
+    @threading_helper.requires_working_threading()
+    def test_shutdown_with_threads_waiting(self):
+        self.check_shutdown("f.write('.'); f.flush()", waiters=3)
+
+    @threading_helper.requires_working_threading()
+    @support.requires_fork()
+    def test_fork_while_other_thread_holds_lock(self):
+        code = """
+            import warnings
+            from threading import Thread
+            warnings.simplefilter('ignore', DeprecationWarning)
+
+            GATED = {'write'}
+            f = BufferedRandom(GatedRaw())
+
+            def holder():
+                f.write(b'.')
+                f.flush()
+
+            Thread(target=holder, daemon=True).start()
+            entered.wait()
+            pid = os.fork()
+            if pid == 0:
+                f.write(b'child ')
+                f.flush()
+                os._exit(0)
+            status = os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])
+            os.write(1, b'exit %d' % status)
+            """
+        self.assertEqual(self.run_child(code), (0, b"child exit 0", ""))
+
+    @threading_helper.requires_working_threading()
+    @unittest.skipUnless(hasattr(signal, "pthread_kill"),
+                         "requires signal.pthread_kill")
+    def test_signal_interrupts_lock_wait(self):
+        code = """
+            import signal
+            from threading import Event, Thread, main_thread
+
+            GATED = {'write'}
+            f = BufferedRandom(GatedRaw())
+            waiting = False
+
+            class Interrupted(Exception):
+                pass
+
+            def handler(signum, frame):
+                if waiting:
+                    raise Interrupted
+
+            signal.signal(signal.SIGUSR1, handler)
+
+            def holder():
+                f.write(b'.')
+                f.flush()
+
+            Thread(target=holder, daemon=True).start()
+            entered.wait()
+            done = Event()
+
+            def interrupt_main():
+                # Until the main thread gets interrupted.
+                while not done.wait(0.01):
+                    signal.pthread_kill(main_thread().ident, signal.SIGUSR1)
+
+            Thread(target=interrupt_main, daemon=True).start()
+            try:
+                waiting = True
+                f.flush()
+            except Interrupted:
+                os.write(1, b'interrupted')
+            finally:
+                waiting = False
+                done.set()
+            """
+        self.assertEqual(self.run_child(code), (0, b"interrupted", ""))
 
 
-class CShutdownTest(ShutdownTest, CTestCase):
+class CLockReleaseTest(LockReleaseTest, CTestCase):
     pass
 
 
-class NibblerShutdownTest(NibblerMixin, ShutdownTest, CTestCase):
+class NibblerLockReleaseTest(NibblerMixin, LockReleaseTest, CTestCase):
     pass
 
 
