@@ -57,8 +57,6 @@ extern int _PyFileIO_closed(PyObject *self);
    block, or -1 with an exception set. */
 extern Py_ssize_t _PyFileIO_readinto(PyObject *self, char *buf,
                                      Py_ssize_t len);
-extern Py_ssize_t _PyFileIO_write(PyObject *self, const char *buf,
-                                  Py_ssize_t len);
 /* Most buffers passed to one vectored write. */
 enum { _PyIO_WRITEV_MAX = 64 };
 
@@ -67,7 +65,8 @@ typedef struct {
     const char *ptr;
     Py_ssize_t len;
 } _PyIO_Span;
-/* Write spans[0:cnt] with one call; only called when FileIO has _writev(). */
+/* Write spans[0:cnt] with one writev() (or, without it, write() the first
+   span); fewer bytes may be written. */
 extern Py_ssize_t _PyFileIO_writev(PyObject *self, const _PyIO_Span *spans,
                                    Py_ssize_t cnt);
 extern PyObject *_PyFileIO_readall(PyObject *self);

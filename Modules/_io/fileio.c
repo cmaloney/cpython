@@ -1017,10 +1017,12 @@ _io_FileIO_write_impl(fileio *self, PyTypeObject *cls, Py_buffer *b)
 }
 
 /* C entry points for the buffered layer when its raw stream is exactly
-   FileIO.  Same behavior as the readinto(), write(), _writev() and readall()
+   FileIO.  Same behavior as the readinto(), _writev() and readall()
    methods without the method call and argument conversion.  The Py_ssize_t
    variants return the byte count, -2 when a non-blocking file descriptor
    would block, or -1 with an exception set. */
+
+/* Raise like the methods do unless the file is open for the access. */
 
 static int
 fileio_check_io(fileio *self, int writing)
@@ -1061,33 +1063,30 @@ _PyFileIO_readinto(PyObject *op, char *buf, Py_ssize_t len)
 }
 
 Py_ssize_t
-_PyFileIO_write(PyObject *op, const char *buf, Py_ssize_t len)
-{
-    fileio *self = PyFileIO_CAST(op);
-    if (fileio_check_io(self, 1) < 0) {
-        return -1;
-    }
-    return fileio_io_result(_Py_write(self->fd, buf, len));
-}
-
-Py_ssize_t
 _PyFileIO_writev(PyObject *op, const _PyIO_Span *spans, Py_ssize_t cnt)
 {
-#ifdef HAVE_WRITEV
     fileio *self = PyFileIO_CAST(op);
     if (fileio_check_io(self, 1) < 0) {
         return -1;
     }
-    /* Writing fewer spans is a valid partial write. */
+#ifdef HAVE_WRITEV
+    /* Writing less than everything is a valid partial write: at most
+       _PyIO_WRITEV_MAX (and IOV_MAX) spans, and like _Py_write() at most
+       _PY_WRITE_MAX bytes in total (macOS fails larger writes). */
     struct iovec iov[_PyIO_WRITEV_MAX];
     cnt = Py_MIN(cnt, _PyIO_WRITEV_MAX);
 #ifdef IOV_MAX
     cnt = Py_MIN(cnt, IOV_MAX);
 #endif
-    for (Py_ssize_t i = 0; i < cnt; i++) {
+    size_t room = _PY_WRITE_MAX;
+    Py_ssize_t i = 0;
+    for (; i < cnt && room > 0; i++) {
+        size_t len = Py_MIN((size_t)spans[i].len, room);
         iov[i].iov_base = (void *)spans[i].ptr;
-        iov[i].iov_len = (size_t)spans[i].len;
+        iov[i].iov_len = len;
+        room -= len;
     }
+    cnt = i;
     Py_ssize_t n;
     int err, async_err = 0;
     do {
@@ -1110,9 +1109,8 @@ _PyFileIO_writev(PyObject *op, const _PyIO_Span *spans, Py_ssize_t cnt)
     }
     return n;
 #else
-    /* FileIO has no _writev() here, so the buffered layer never calls this;
-       a plain write of the first span is still a correct partial write. */
-    return _PyFileIO_write(op, spans[0].ptr, spans[0].len);
+    /* No writev(): writing only the first span is a valid partial write. */
+    return fileio_io_result(_Py_write(self->fd, spans[0].ptr, spans[0].len));
 #endif
 }
 
@@ -1190,7 +1188,6 @@ _PyFileIO_readall(PyObject *op)
 #ifdef HAVE_WRITEV
 /*[clinic input]
 _io.FileIO._writev
-    cls: defining_class
     buffers: object
     /
 
@@ -1207,26 +1204,26 @@ vectored write API is not yet settled.
 [clinic start generated code]*/
 
 static PyObject *
-_io_FileIO__writev_impl(fileio *self, PyTypeObject *cls, PyObject *buffers)
-/*[clinic end generated code: output=ecd5e35ee9ad4052 input=9690299ab052988e]*/
+_io_FileIO__writev_impl(fileio *self, PyObject *buffers)
+/*[clinic end generated code: output=7473168dfb1a9f6a input=9fde7a6149feba4b]*/
 {
     if (fileio_check_io(self, 1) < 0) {
         return NULL;
     }
-    PyObject *seq = PySequence_Fast(buffers,
-                                    "_writev() argument must be a sequence");
+    /* A tuple snapshot: getting a buffer can run code that changes a list. */
+    PyObject *seq = PySequence_Tuple(buffers);
     if (seq == NULL) {
         return NULL;
     }
     /* Only the first _PyIO_WRITEV_MAX buffers are written, as a partial
        write, which also keeps the count within IOV_MAX. */
-    Py_ssize_t cnt = Py_MIN(PySequence_Fast_GET_SIZE(seq), _PyIO_WRITEV_MAX);
+    Py_ssize_t cnt = Py_MIN(PyTuple_GET_SIZE(seq), _PyIO_WRITEV_MAX);
     Py_buffer views[_PyIO_WRITEV_MAX];
     _PyIO_Span spans[_PyIO_WRITEV_MAX];
     Py_ssize_t nviews = 0;
     PyObject *res = NULL;
     for (; nviews < cnt; nviews++) {
-        PyObject *item = PySequence_Fast_GET_ITEM(seq, nviews);
+        PyObject *item = PyTuple_GET_ITEM(seq, nviews);
         if (PyObject_GetBuffer(item, &views[nviews], PyBUF_SIMPLE) < 0) {
             goto done;
         }
