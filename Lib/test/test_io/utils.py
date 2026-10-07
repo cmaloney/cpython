@@ -298,10 +298,8 @@ class CTestCase(unittest.TestCase):
     # Can writes be queued while another thread is in a raw write?
     queues_writes_during_io = False
     # Does each readline() and readinto() take whole lines or records when
-    # threads read concurrently?  _io's readline() fast path reads the
-    # buffer without its lock while another thread's readline() or
-    # readinto() is between raw reads, splitting their data.
-    reads_are_atomic = False
+    # threads read concurrently?  (_pyio's readline() and readinto() don't.)
+    reads_are_atomic = True
 
     MockRawIO = CMockRawIO
     MisbehavedRawIO = CMisbehavedRawIO

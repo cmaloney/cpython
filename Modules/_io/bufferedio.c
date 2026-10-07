@@ -1126,20 +1126,30 @@ _buffered_readinto_generic(buffered *self, Py_buffer *buffer, char readinto1)
     CHECK_INITIALIZED(self)
     CHECK_CLOSED(self, "readinto of closed file")
 
+    /* Unlocked only when the buffer has all of it: a partial copy taken
+       before waiting for the lock would let another thread take the rest. */
+    n = Py_SAFE_DOWNCAST(READAHEAD(self), Py_off_t, Py_ssize_t);
+    if (n > 0 && n >= buffer->len) {
+        memcpy(buffer->buf, self->buffer + self->pos, buffer->len);
+        self->pos += buffer->len;
+        return PyLong_FromSsize_t(buffer->len);
+    }
+
+    if (!ENTER_BUFFERED(self))
+        return NULL;
+
     n = Py_SAFE_DOWNCAST(READAHEAD(self), Py_off_t, Py_ssize_t);
     if (n > 0) {
         if (n >= buffer->len) {
             memcpy(buffer->buf, self->buffer + self->pos, buffer->len);
             self->pos += buffer->len;
-            return PyLong_FromSsize_t(buffer->len);
+            res = PyLong_FromSsize_t(buffer->len);
+            goto end;
         }
         memcpy(buffer->buf, self->buffer + self->pos, n);
         self->pos += n;
         written = n;
     }
-
-    if (!ENTER_BUFFERED(self))
-        return NULL;
 
     if (self->writable) {
         res = buffered_flush_and_rewind_unlocked(self);
@@ -1269,6 +1279,27 @@ _buffered_readline(buffered *self, Py_ssize_t limit)
         goto error;
     }
     locked = 1;
+
+    /* Another thread may have used the buffer while this one waited for the
+       lock: look again, so the line is taken whole. */
+    n = Py_SAFE_DOWNCAST(READAHEAD(self), Py_off_t, Py_ssize_t);
+    if (limit >= 0 && n > limit) {
+        n = limit;
+    }
+    start = self->buffer + self->pos;
+    s = memchr(start, '\n', n);
+    if (s != NULL || n == limit) {
+        if (s != NULL) {
+            n = s - start + 1;
+        }
+        PyObject *res = PyBytes_FromStringAndSize(start, n);
+        if (res == NULL) {
+            goto error;
+        }
+        self->pos += n;
+        LEAVE_BUFFERED(self)
+        return res;
+    }
 
     /* Now we try to get some more from the raw stream */
     writer = PyBytesWriter_Create(0);
