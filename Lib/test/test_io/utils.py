@@ -345,9 +345,6 @@ _NIBBLER_BUFFERED = {
 
 class NibblerMixin:
     """Route the buffered layer (self.* types and open()) to _io._nibbler."""
-    is_nibbler = True
-    # Flip once _io._nibbler implements buffer_size=0.
-    supports_buffer_size_zero = False
     isolates_raw_views = True
 
     def setUp(self):
@@ -359,4 +356,4 @@ class NibblerMixin:
         try:
             return _NIBBLER_BUFFERED[name]
         except KeyError:
-            return getattr(io, name)
+            return super().__getattr__(name)

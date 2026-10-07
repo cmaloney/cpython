@@ -10,13 +10,15 @@
 
 Each test class runs against the C (_io), Python (_pyio) and C nibbler
 (_io._nibbler) implementations.  Behavior differences are gated on
-capability attributes (see utils.py), never on implementation identity.
+capability attributes (see utils.py); is_C only picks error messages and
+known _pyio quirks.
 """
 import errno
 import glob
 import os
 import random
 import select
+import sys
 import threading
 import unittest
 
@@ -263,8 +265,10 @@ class ReadAllDocsTest:
 class CReadAllDocsTest(ReadAllDocsTest, CTestCase):
     pass
 
+
 class PyReadAllDocsTest(ReadAllDocsTest, PyTestCase):
     pass
+
 
 class NibblerReadAllDocsTest(NibblerMixin, ReadAllDocsTest, CTestCase):
     pass
@@ -589,6 +593,7 @@ class SlowDeviceTest:
 
     @threading_helper.requires_working_threading()
     @unittest.skipUnless(hasattr(os, "set_blocking"), "requires set_blocking")
+    @unittest.skipIf(sys.platform == "win32", "select() needs sockets")
     def test_pipe_slow_consumer_nonblocking(self):
         data = sample_data(500_000)
         r, w = os.pipe()
@@ -652,6 +657,7 @@ class SlowDeviceTest:
 class CSlowDeviceTest(SlowDeviceTest, CTestCase):
     pass
 
+
 class PySlowDeviceTest(SlowDeviceTest, PyTestCase):
     # _pyio BufferedReader._readinto() sizes the copy from its buffer with
     # len(buf) instead of len(buf) - written, so a readinto() that needs
@@ -659,6 +665,7 @@ class PySlowDeviceTest(SlowDeviceTest, PyTestCase):
     @unittest.expectedFailure
     def test_trickle_readinto_is_exact(self):
         super().test_trickle_readinto_is_exact()
+
 
 class NibblerSlowDeviceTest(NibblerMixin, SlowDeviceTest, CTestCase):
     pass
@@ -1008,6 +1015,7 @@ class RandomOpsTest:
 class CRandomOpsTest(RandomOpsTest, CTestCase):
     pass
 
+
 class PyRandomOpsTest(RandomOpsTest, PyTestCase):
     # Known _pyio bugs these sequences hit (C gets them right):
     # * readline(size) can return more than size bytes: IOBase.readline's
@@ -1024,6 +1032,7 @@ class PyRandomOpsTest(RandomOpsTest, PyTestCase):
     @unittest.expectedFailure
     def test_short_transfer_device(self):
         super().test_short_transfer_device()
+
 
 class NibblerRandomOpsTest(NibblerMixin, RandomOpsTest, CTestCase):
     pass
@@ -1058,7 +1067,7 @@ class ConcurrentAccessTest:
         # Per-thread order is preserved.
         for t in range(self.nthreads):
             prefix = b"%02d:" % t
-            mine = [l for l in lines if l.startswith(prefix)]
+            mine = [line for line in lines if line.startswith(prefix)]
             self.assertEqual(mine, sorted(mine))
 
     def test_concurrent_readers_get_each_record_once(self):
@@ -1133,15 +1142,12 @@ class ConcurrentAccessTest:
 
 
 class CConcurrentAccessTest(ConcurrentAccessTest, CTestCase):
-    # _io.BufferedWriter.write() checks it is initialized before taking its
-    # lock while detach() clears raw without the lock, so a write waiting
-    # for the lock dereferences NULL in _PyFileIO_closed(): a segfault.
-    test_detach_racing_io = unittest.skip(
-        "_io crashes when detach() races write()")(
-            ConcurrentAccessTest.test_detach_racing_io)
+    pass
+
 
 class PyConcurrentAccessTest(ConcurrentAccessTest, PyTestCase):
     pass
+
 
 class NibblerConcurrentAccessTest(NibblerMixin, ConcurrentAccessTest,
                                   CTestCase):
