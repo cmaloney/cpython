@@ -118,8 +118,10 @@ typedef struct {
 
     Py_ssize_t buffer_size;
 
-    /* Reading: the unread read-ahead is rbuf[read_pos:read_end].  rbuf has
-       buffer_size bytes and is allocated on first use. */
+    /* Reading: rbuf[0:read_end] are the bytes just before the raw position
+       (so seek() can move within them) and rbuf[read_pos:read_end] is the
+       unread read-ahead.  rbuf has buffer_size bytes and is allocated on
+       first use. */
     char *rbuf;
     Py_ssize_t read_pos;
     Py_ssize_t read_end;
@@ -743,6 +745,8 @@ buffered_read_into(buffered *self, char *dst, Py_ssize_t len, int read1)
         }
         Py_ssize_t n;
         if (remaining >= self->buffer_size) {
+            /* Bypasses rbuf, which no longer precedes the raw position. */
+            self->read_pos = self->read_end = 0;
             n = buffered_raw_read(self, dst + written, remaining);
             written += Py_MAX(n, 0);
         }
@@ -852,19 +856,25 @@ static PyObject *
 buffered_read_all(buffered *self)
 {
     PyObject *rest = buffered_raw_read_all(self);
+    if (rest == NULL) {
+        /* The read-ahead is kept for the next read. */
+        return NULL;
+    }
     Py_ssize_t avail = buffered_readahead(self);
-    if (rest == NULL || avail == 0) {
+    const char *readahead = self->rbuf + self->read_pos;
+    /* The raw stream moved past rbuf. */
+    self->read_pos = self->read_end = 0;
+    if (avail == 0) {
         return rest;
     }
     Py_ssize_t restlen = rest == Py_None ? 0 : PyBytes_GET_SIZE(rest);
     PyObject *res = PyBytes_FromStringAndSize(NULL, avail + restlen);
     if (res != NULL) {
-        memcpy(PyBytes_AS_STRING(res), self->rbuf + self->read_pos, avail);
+        memcpy(PyBytes_AS_STRING(res), readahead, avail);
         if (restlen > 0) {
             memcpy(PyBytes_AS_STRING(res) + avail, PyBytes_AS_STRING(rest),
                    restlen);
         }
-        self->read_pos += avail;
     }
     Py_DECREF(rest);
     return res;
@@ -1361,7 +1371,11 @@ _io__Buffered_read_impl(buffered *self, Py_ssize_t n)
                         "read length must be non-negative or -1");
         return NULL;
     }
-    if (buffered_enter(self, "read of closed file", READING) < 0) {
+    /* read(0) needs no read-ahead: don't make BufferedRandom write out
+       pending data for it. */
+    if (buffered_enter(self, "read of closed file",
+                       n == 0 ? KEEP_DIRECTION : READING) < 0)
+    {
         return NULL;
     }
     PyObject *res = n == -1 ? buffered_read_all(self)
@@ -1380,7 +1394,9 @@ static PyObject *
 _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
 /*[clinic end generated code: output=bcc4fb4e54d103a3 input=7d22de9630b61774]*/
 {
-    if (buffered_enter(self, "read of closed file", READING) < 0) {
+    if (buffered_enter(self, "read of closed file",
+                       n == 0 ? KEEP_DIRECTION : READING) < 0)
+    {
         return NULL;
     }
     PyObject *res = buffered_read_bytes(self, n < 0 ? self->buffer_size : n,
@@ -1440,7 +1456,9 @@ static PyObject *
 _io__Buffered_readline_impl(buffered *self, Py_ssize_t size)
 /*[clinic end generated code: output=24dd2aa6e33be83c input=673b6240e315ef8a]*/
 {
-    if (buffered_enter(self, "readline of closed file", READING) < 0) {
+    if (buffered_enter(self, "readline of closed file",
+                       size == 0 ? KEEP_DIRECTION : READING) < 0)
+    {
         return NULL;
     }
     PyObject *res = buffered_readline(self, size);
@@ -1504,14 +1522,32 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
         goto end;
     }
     Py_ssize_t avail = buffered_readahead(self);
-    if (whence == SEEK_CUR && !self->writing
-        && target >= -self->read_pos && target <= avail)
+    if (!self->writing && self->read_end > 0
+        && (whence == SEEK_SET || whence == SEEK_CUR))
     {
-        /* Stays inside the read-ahead. */
-        self->read_pos += (Py_ssize_t)target;
-        res = buffered_position(self);
+        /* Move within rbuf if the target is in it: rbuf[0:read_end] are
+           the bytes before the raw position. */
+        Py_off_t raw_pos = -1;
+        Py_off_t offset = target;   /* from the current position */
+        if (whence == SEEK_SET) {
+            raw_pos = buffered_raw_tell(self);
+            if (raw_pos == -1) {
+                goto end;
+            }
+            offset = target - (raw_pos - avail);
+        }
+        if (offset >= -self->read_pos && offset <= avail) {
+            if (raw_pos == -1 && (raw_pos = buffered_raw_tell(self)) == -1) {
+                goto end;
+            }
+            self->read_pos += (Py_ssize_t)offset;
+            Py_off_t pos = raw_pos - buffered_readahead(self);
+            // GH-95782
+            res = PyLong_FromOff_t(pos < 0 ? 0 : pos);
+            goto end;
+        }
     }
-    else if (buffered_flush_writes(self) == 0) {
+    if (buffered_flush_writes(self) == 0) {
         if (whence == SEEK_CUR) {
             target -= avail;
         }
