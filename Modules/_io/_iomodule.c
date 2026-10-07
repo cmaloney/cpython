@@ -9,11 +9,11 @@
 
 #include "Python.h"
 #include "pycore_abstract.h"      // _PyNumber_Index()
+#include "pycore_global_strings.h" // _Py_LATIN1_CHR()
 #include "pycore_interp.h"        // _PyInterpreterState_GetConfig()
 #include "pycore_long.h"          // _PyLong_IsNegative()
 #include "pycore_pyerrors.h"      // _PyErr_ChainExceptions1()
 #include "pycore_pystate.h"       // _PyInterpreterState_GET()
-#include "pycore_runtime.h"       // _Py_LATIN1_CHR()
 
 #include "_iomodule.h"
 
@@ -582,48 +582,61 @@ static int
 iomodule_set_open_impl(PyObject *module, int nibbler)
 {
     _PyIO_State *state = get_io_state(module);
-    PyTypeObject *types[3] = {state->PyBufferedReader_Type,
-                              state->PyBufferedWriter_Type,
-                              state->PyBufferedRandom_Type};
+    PyObject *types[3] = {
+        Py_NewRef(state->PyBufferedReader_Type),
+        Py_NewRef(state->PyBufferedWriter_Type),
+        Py_NewRef(state->PyBufferedRandom_Type),
+    };
     if (nibbler) {
         PyObject *sub = PyObject_GetAttrString(module, "_nibbler");
         if (sub == NULL) {
-            return -1;
+            goto error;
         }
         static const char *const names[] = {
             "BufferedReader", "BufferedWriter", "BufferedRandom",
         };
         for (int i = 0; i < 3; i++) {
-            PyObject *cls = PyObject_GetAttrString(sub, names[i]);
-            if (cls == NULL) {
+            Py_SETREF(types[i], PyObject_GetAttrString(sub, names[i]));
+            if (types[i] == NULL) {
                 Py_DECREF(sub);
-                return -1;
+                goto error;
             }
-            types[i] = (PyTypeObject *)cls;
-            Py_DECREF(cls);  /* kept alive by the _nibbler module */
         }
         Py_DECREF(sub);
     }
-    Py_XSETREF(state->open_reader_type, (PyTypeObject *)Py_NewRef(types[0]));
-    Py_XSETREF(state->open_writer_type, (PyTypeObject *)Py_NewRef(types[1]));
-    Py_XSETREF(state->open_random_type, (PyTypeObject *)Py_NewRef(types[2]));
+    Py_XSETREF(state->open_reader_type, (PyTypeObject *)types[0]);
+    Py_XSETREF(state->open_writer_type, (PyTypeObject *)types[1]);
+    Py_XSETREF(state->open_random_type, (PyTypeObject *)types[2]);
     return 0;
+
+error:
+    for (int i = 0; i < 3; i++) {
+        Py_XDECREF(types[i]);
+    }
+    return -1;
 }
 
-/* _io._set_open_impl(name): make open() use the "_io" or "_nibbler"
-   buffered classes; returns the previous name.  For tests. */
+/*[clinic input]
+_io._set_open_impl
+    name: unicode
+    /
+
+Make open() use the "_io" or "_nibbler" buffered classes.
+
+Returns the previous name.  For tests.
+[clinic start generated code]*/
+
 static PyObject *
-iomodule__set_open_impl(PyObject *module, PyObject *name)
+_io__set_open_impl_impl(PyObject *module, PyObject *name)
+/*[clinic end generated code: output=da5db966fe58f749 input=7720ca0e2bd32bba]*/
 {
     _PyIO_State *state = get_io_state(module);
     int was_nibbler = state->open_reader_type != state->PyBufferedReader_Type;
     int nibbler;
-    if (PyUnicode_Check(name)
-        && PyUnicode_CompareWithASCIIString(name, "_nibbler") == 0) {
+    if (PyUnicode_EqualToUTF8(name, "_nibbler")) {
         nibbler = 1;
     }
-    else if (PyUnicode_Check(name)
-             && PyUnicode_CompareWithASCIIString(name, "_io") == 0) {
+    else if (PyUnicode_EqualToUTF8(name, "_io")) {
         nibbler = 0;
     }
     else {
@@ -712,7 +725,7 @@ static PyMethodDef module_methods[] = {
     _IO_OPEN_METHODDEF
     _IO_TEXT_ENCODING_METHODDEF
     _IO_OPEN_CODE_METHODDEF
-    {"_set_open_impl", iomodule__set_open_impl, METH_O, NULL},
+    _IO__SET_OPEN_IMPL_METHODDEF
     {NULL, NULL}
 };
 
@@ -799,7 +812,7 @@ iomodule_exec(PyObject *m)
 
 #undef ADD_TYPE
 
-    // _PYTHON_IO_DEFAULT_IMPL=_nibbler (honours -E / -I) makes the
+    // _PYTHON_IO_DEFAULT_IMPL=_nibbler (honors -E / -I) makes the
     // _io._nibbler classes _io's buffered classes, so io.BufferedReader,
     // isinstance() checks and open() all use them.
     PyInterpreterState *interp = _PyInterpreterState_GET();

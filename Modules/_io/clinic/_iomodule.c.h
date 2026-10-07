@@ -392,4 +392,35 @@ _io_open_code(PyObject *module, PyObject *const *args, Py_ssize_t nargs, PyObjec
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=4570f4466d711d60 input=a9049054013a1b77]*/
+
+PyDoc_STRVAR(_io__set_open_impl__doc__,
+"_set_open_impl($module, name, /)\n"
+"--\n"
+"\n"
+"Make open() use the \"_io\" or \"_nibbler\" buffered classes.\n"
+"\n"
+"Returns the previous name.  For tests.");
+
+#define _IO__SET_OPEN_IMPL_METHODDEF    \
+    {"_set_open_impl", (PyCFunction)_io__set_open_impl, METH_O, _io__set_open_impl__doc__},
+
+static PyObject *
+_io__set_open_impl_impl(PyObject *module, PyObject *name);
+
+static PyObject *
+_io__set_open_impl(PyObject *module, PyObject *arg)
+{
+    PyObject *return_value = NULL;
+    PyObject *name;
+
+    if (!PyUnicode_Check(arg)) {
+        _PyArg_BadArgument("_set_open_impl", "argument", "str", arg);
+        goto exit;
+    }
+    name = arg;
+    return_value = _io__set_open_impl_impl(module, name);
+
+exit:
+    return return_value;
+}
+/*[clinic end generated code: output=5c80820fd3f685ca input=a9049054013a1b77]*/
