@@ -537,6 +537,24 @@ class CAutoFileTests(AutoFileTests, unittest.TestCase):
 
     @unittest.skipUnless(hasattr(_io.FileIO, "_writev"),
                          "requires FileIO._writev")
+    def testWritevListMutatedByBuffer(self):
+        # Getting a buffer may run code that changes the list being
+        # written; the buffers present when called are written.
+        buffers = []
+
+        class Clearing:
+            def __buffer__(self, flags):
+                buffers.clear()
+                return memoryview(b"ab")
+
+        buffers.extend([Clearing(), b"cd", b"ef"])
+        self.assertEqual(self.f._writev(buffers), 6)
+        self.f.close()
+        with self.FileIO(TESTFN, 'r') as f:
+            self.assertEqual(f.read(), b"abcdef")
+
+    @unittest.skipUnless(hasattr(_io.FileIO, "_writev"),
+                         "requires FileIO._writev")
     def testWritevErrors(self):
         self.assertRaises(TypeError, self.f._writev, 42)
         self.assertRaises(TypeError, self.f._writev, [b"abc", "str"])

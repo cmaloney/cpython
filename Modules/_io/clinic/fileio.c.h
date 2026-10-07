@@ -407,27 +407,18 @@ PyDoc_STRVAR(_io_FileIO__writev__doc__,
 "vectored write API is not yet settled.");
 
 #define _IO_FILEIO__WRITEV_METHODDEF    \
-    {"_writev", _PyCFunction_CAST(_io_FileIO__writev), METH_METHOD|METH_FASTCALL|METH_KEYWORDS, _io_FileIO__writev__doc__},
+    {"_writev", (PyCFunction)_io_FileIO__writev, METH_O, _io_FileIO__writev__doc__},
 
 static PyObject *
-_io_FileIO__writev_impl(fileio *self, PyTypeObject *cls, PyObject *buffers);
+_io_FileIO__writev_impl(fileio *self, PyObject *buffers);
 
 static PyObject *
-_io_FileIO__writev(PyObject *self, PyTypeObject *cls, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
+_io_FileIO__writev(PyObject *self, PyObject *buffers)
 {
     PyObject *return_value = NULL;
-    PyObject *buffers;
 
-    if (!_PyArg_NoKwnames("_writev", kwnames)) {
-        goto exit;
-    }
-    if (!_PyArg_CheckPositional("_writev", nargs, 1, 1)) {
-        goto exit;
-    }
-    buffers = args[0];
-    return_value = _io_FileIO__writev_impl((fileio *)self, cls, buffers);
+    return_value = _io_FileIO__writev_impl((fileio *)self, buffers);
 
-exit:
     return return_value;
 }
 
@@ -669,4 +660,4 @@ exit:
 
 #define _IO_FILEIO__BLKSIZE_GETSETDEF {"_blksize", (getter)_io_FileIO__blksize_get, (setter)NULL, _io_FileIO__blksize__doc__},
 
-/*[clinic end generated code: output=784089ca9208690c input=a9049054013a1b77]*/
+/*[clinic end generated code: output=7780347ce1c6c99c input=a9049054013a1b77]*/

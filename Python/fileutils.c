@@ -2004,19 +2004,9 @@ Py_fclose(FILE *file)
 }
 
 
-/* Read count bytes from fd into buf.
-
-   On success, return the number of read bytes, it can be lower than count.
-   If the current file offset is at or past the end of file, no bytes are read,
-   and read() returns zero.
-
-   On error, raise an exception, set errno and return -1.
-
-   When interrupted by a signal (read() fails with EINTR), retry the syscall.
-   If the Python signal handler raises an exception, the function returns -1
-   (the syscall is not retried).
-
-   Release the GIL to call read(). The caller must hold the GIL. */
+/* One read() of at most _PY_READ_MAX bytes, for callers that release the GIL
+   themselves.  Return the number of bytes read, or -1 with errno set (EINTR
+   included); no exception is raised. */
 Py_ssize_t
 _Py_read_noraise(int fd, void *buf, size_t count)
 {
@@ -2042,6 +2032,20 @@ _Py_read_noraise(int fd, void *buf, size_t count)
     _Py_END_SUPPRESS_IPH
     return n;
 }
+
+/* Read count bytes from fd into buf.
+
+   On success, return the number of read bytes, it can be lower than count.
+   If the current file offset is at or past the end of file, no bytes are read,
+   and read() returns zero.
+
+   On error, raise an exception, set errno and return -1.
+
+   When interrupted by a signal (read() fails with EINTR), retry the syscall.
+   If the Python signal handler raises an exception, the function returns -1
+   (the syscall is not retried).
+
+   Release the GIL to call read(). The caller must hold the GIL. */
 
 Py_ssize_t
 _Py_read(int fd, void *buf, size_t count)
