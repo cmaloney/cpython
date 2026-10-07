@@ -87,12 +87,6 @@ enum {
     WREF_MIN = 512,
 };
 
-typedef enum {
-    BUFFERED_UNINITIALIZED = 0,
-    BUFFERED_READY,
-    BUFFERED_DETACHED,
-} buffered_state;
-
 /* A chunk of pending write data, inside the bytes object obj. */
 typedef struct {
     PyObject *obj;
@@ -103,18 +97,24 @@ typedef struct {
 typedef struct {
     PyObject_HEAD
 
+    /* NULL until initialized and after detach().  Only replaced with the
+       lock held (and from GC clear and dealloc): code holding the lock uses
+       it directly, code without takes a reference with buffered_get_raw().
+       Everything below is set by __init__() and, unless noted, changed only
+       with the lock held. */
     PyObject *raw;
-    char state;             /* buffered_state */
+    /* raw is NULL because of detach() (picks the error message). */
+    uint8_t detached;
     char finalizing;
+    /* Fixed by __init__(): writable, raw exactly FileIO (call its C
+       implementation directly), raw has a vectored _writev() method. */
     char writable;
+    char raw_fileio;
+    char raw_vectored;
     /* Pending writes rather than read-ahead may be buffered. */
     char writing;
-    /* raw is exactly FileIO: call its C implementation directly. */
-    char raw_fileio;
-    /* raw has a _writev() method for vectored writes. */
-    char raw_vectored;
     /* close() has run. */
-    char released;
+    uint8_t released;
 
     Py_ssize_t buffer_size;
 
@@ -199,16 +199,56 @@ static int
 buffered_not_ready(buffered *self)
 {
     PyErr_SetString(PyExc_ValueError,
-                    self->state == BUFFERED_DETACHED
+                    FT_ATOMIC_LOAD_UINT8_RELAXED(self->detached)
                     ? "raw stream has been detached"
                     : "I/O operation on uninitialized object");
     return -1;
 }
 
-static inline int
-buffered_check_ready(buffered *self)
+/* A new reference to raw, or NULL with ValueError if the object is
+   uninitialized or detached.  Needs no lock: a concurrent detach() leaves
+   this call using the stream it took. */
+static PyObject *
+buffered_get_raw(buffered *self)
 {
-    return self->state == BUFFERED_READY ? 0 : buffered_not_ready(self);
+#ifdef Py_GIL_DISABLED
+    PyObject *raw = _Py_XGetRef(&self->raw);
+#else
+    PyObject *raw = Py_XNewRef(self->raw);
+#endif
+    if (raw == NULL) {
+        buffered_not_ready(self);
+    }
+    return raw;
+}
+
+/* Replace raw (with the lock held, or with no other users) and return the
+   old one. */
+static PyObject *
+buffered_swap_raw(buffered *self, PyObject *raw)
+{
+#ifdef Py_GIL_DISABLED
+    if (raw != NULL) {
+        /* Lets buffered_get_raw() take references without the lock. */
+        _PyObject_SetMaybeWeakref(raw);
+    }
+#endif
+    return _Py_atomic_exchange_ptr(&self->raw, raw);
+}
+
+/* Lock the object and check it is initialized and attached.  On success
+   the caller must unlock. */
+static int
+buffered_lock_ready(buffered *self)
+{
+    if (buffered_lock(self) < 0) {
+        return -1;
+    }
+    if (self->raw == NULL) {
+        buffered_unlock(self);
+        return buffered_not_ready(self);
+    }
+    return 0;
 }
 
 static inline Py_ssize_t
@@ -893,8 +933,7 @@ static int
 buffered_clear(PyObject *op)
 {
     buffered *self = buffered_cast(op);
-    self->state = BUFFERED_UNINITIALIZED;
-    Py_CLEAR(self->raw);
+    Py_XDECREF(buffered_swap_raw(self, NULL));
     Py_CLEAR(self->dict);
     return 0;
 }
@@ -909,7 +948,6 @@ buffered_dealloc(PyObject *op)
         return;
     }
     _PyObject_GC_UNTRACK(self);
-    self->state = BUFFERED_UNINITIALIZED;
     FT_CLEAR_WEAKREFS(op, self->weakreflist);
     buffered_free(self);
     (void)buffered_clear(op);
@@ -918,16 +956,15 @@ buffered_dealloc(PyObject *op)
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.__sizeof__
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered___sizeof___impl(buffered *self)
-/*[clinic end generated code: output=0231ef7f5053134e input=07a32d578073ea64]*/
+/*[clinic end generated code: output=0231ef7f5053134e input=753c782d808d34df]*/
 {
     size_t res = _PyObject_SIZE(Py_TYPE(self));
-    if (!self->released) {
+    if (!FT_ATOMIC_LOAD_UINT8_RELAXED(self->released)) {
         res += (size_t)self->buffer_size;
     }
     return PyLong_FromSize_t(res);
@@ -958,54 +995,64 @@ static PyObject *
 _io__Buffered__dealloc_warn_impl(buffered *self, PyObject *source)
 /*[clinic end generated code: output=d8db21c6dec0e614 input=8f845f2a4786391c]*/
 {
-    if (self->state == BUFFERED_READY && self->raw) {
+    PyObject *raw = buffered_get_raw(self);
+    if (raw != NULL) {
         PyObject *r;
-        r = PyObject_CallMethodOneArg(self->raw, &_Py_ID(_dealloc_warn), source);
+        r = PyObject_CallMethodOneArg(raw, &_Py_ID(_dealloc_warn), source);
+        Py_DECREF(raw);
         if (r)
             Py_DECREF(r);
-        else
-            PyErr_Clear();
     }
+    PyErr_Clear();
     Py_RETURN_NONE;
 }
 
-/* Methods passed straight on to the raw stream. */
+/* Methods and attributes passed straight on to the raw stream; no lock,
+   so they never wait for I/O in another thread. */
 static PyObject *
 buffered_raw_call(buffered *self, PyObject *name)
 {
-    if (buffered_check_ready(self) < 0) {
+    PyObject *raw = buffered_get_raw(self);
+    if (raw == NULL) {
         return NULL;
     }
-    return PyObject_CallMethodNoArgs(self->raw, name);
+    PyObject *res = PyObject_CallMethodNoArgs(raw, name);
+    Py_DECREF(raw);
+    return res;
 }
 
 static PyObject *
 buffered_raw_getattr(buffered *self, PyObject *name)
 {
-    if (buffered_check_ready(self) < 0) {
+    PyObject *raw = buffered_get_raw(self);
+    if (raw == NULL) {
         return NULL;
     }
-    return PyObject_GetAttr(self->raw, name);
+    PyObject *res = PyObject_GetAttr(raw, name);
+    Py_DECREF(raw);
+    return res;
+}
+
+/* raw.flush(), directly for an exact FileIO. */
+static int
+buffered_raw_flush(buffered *self, PyObject *raw)
+{
+    if (self->raw_fileio) {
+        return _PyFileIO_flush(raw);
+    }
+    PyObject *res = PyObject_CallMethodNoArgs(raw, &_Py_ID(flush));
+    Py_XDECREF(res);
+    return res == NULL ? -1 : 0;
 }
 
 /* What flush() does, with the lock held: BufferedReader passes it on to
    the raw stream, the others write out pending data or hand back
    read-ahead. */
 static int
-buffered_raw_flush(buffered *self)
-{
-    if (self->raw_fileio) {
-        return _PyFileIO_flush(self->raw);
-    }
-    PyObject *res = PyObject_CallMethodNoArgs(self->raw, &_Py_ID(flush));
-    Py_XDECREF(res);
-    return res == NULL ? -1 : 0;
-}
-
-static int
 buffered_flush_locked(buffered *self)
 {
-    return self->writable ? buffered_sync(self) : buffered_raw_flush(self);
+    return self->writable ? buffered_sync(self)
+                          : buffered_raw_flush(self, self->raw);
 }
 
 /* Is self.flush() ours: an exact class of ours, not shadowed in the
@@ -1024,43 +1071,46 @@ buffered_flush_is_ours(buffered *self)
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.flush as _io__Buffered_simple_flush
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_simple_flush_impl(buffered *self)
-/*[clinic end generated code: output=29ebb3820db1bdfd input=5248cb84a65f80bd]*/
+/*[clinic end generated code: output=29ebb3820db1bdfd input=f33ef045e7250767]*/
 {
-    if (buffered_check_ready(self) < 0 || buffered_raw_flush(self) < 0) {
+    PyObject *raw = buffered_get_raw(self);
+    if (raw == NULL) {
+        return NULL;
+    }
+    int r = buffered_raw_flush(self, raw);
+    Py_DECREF(raw);
+    if (r < 0) {
         return NULL;
     }
     Py_RETURN_NONE;
 }
 
 /*[clinic input]
-@critical_section
 @getter
 _io._Buffered.closed
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_closed_get_impl(buffered *self)
-/*[clinic end generated code: output=f08ce57290703a1a input=18eddefdfe4a3d2f]*/
+/*[clinic end generated code: output=f08ce57290703a1a input=00b707b2517eaf8c]*/
 {
     return buffered_raw_getattr(self, &_Py_ID(closed));
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.close
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_close_impl(buffered *self)
-/*[clinic end generated code: output=7280b7b42033be0c input=56d95935b03fd326]*/
+/*[clinic end generated code: output=7280b7b42033be0c input=d20b83d1ddd7d805]*/
 {
-    if (buffered_check_ready(self) < 0 || buffered_lock(self) < 0) {
+    if (buffered_lock_ready(self) < 0) {
         return NULL;
     }
     PyObject *res = NULL;
@@ -1094,7 +1144,8 @@ _io__Buffered_close_impl(buffered *self)
         if (_PyFile_Flush((PyObject *)self) < 0) {
             exc = PyErr_GetRaisedException();
         }
-        if (buffered_lock(self) < 0) {
+        /* Another thread may have detached it meanwhile. */
+        if (buffered_lock_ready(self) < 0) {
             _PyErr_ChainExceptions1(exc);
             return NULL;
         }
@@ -1103,7 +1154,7 @@ _io__Buffered_close_impl(buffered *self)
     res = self->raw_fileio ? _PyFileIO_close(self->raw)
                            : PyObject_CallMethodNoArgs(self->raw, &_Py_ID(close));
     buffered_free(self);
-    self->released = 1;
+    FT_ATOMIC_STORE_UINT8_RELAXED(self->released, 1);
 
     if (exc != NULL) {
         _PyErr_ChainExceptions1(exc);
@@ -1115,23 +1166,24 @@ end:
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.detach
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_detach_impl(buffered *self)
-/*[clinic end generated code: output=dd0fc057b8b779f7 input=d4ef1828a678be37]*/
+/*[clinic end generated code: output=dd0fc057b8b779f7 input=482762a345cc9f44]*/
 {
-    if (buffered_check_ready(self) < 0
-        || _PyFile_Flush((PyObject *)self) < 0
-        || buffered_lock(self) < 0)
-    {
+    /* flush() takes the lock itself.  Calls racing with detach() may run
+       on either side of it; the lock keeps the buffers consistent. */
+    if (FT_ATOMIC_LOAD_PTR(self->raw) == NULL) {
+        buffered_not_ready(self);
         return NULL;
     }
-    PyObject *raw = self->raw;
-    self->raw = NULL;
-    self->state = BUFFERED_DETACHED;
+    if (_PyFile_Flush((PyObject *)self) < 0 || buffered_lock_ready(self) < 0) {
+        return NULL;
+    }
+    FT_ATOMIC_STORE_UINT8_RELAXED(self->detached, 1);
+    PyObject *raw = buffered_swap_raw(self, NULL);
     buffered_free(self);
     buffered_unlock(self);
     return raw;
@@ -1140,64 +1192,59 @@ _io__Buffered_detach_impl(buffered *self)
 /* Inquiries */
 
 /*[clinic input]
-@critical_section
 _io._Buffered.seekable
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_seekable_impl(buffered *self)
-/*[clinic end generated code: output=90172abb5ceb6e8f input=e3a4fc1d297b2fd3]*/
+/*[clinic end generated code: output=90172abb5ceb6e8f input=7d35764f5fb5262b]*/
 {
     return buffered_raw_call(self, &_Py_ID(seekable));
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.readable
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_readable_impl(buffered *self)
-/*[clinic end generated code: output=92afa07661ecb698 input=abe54107d59bca9a]*/
+/*[clinic end generated code: output=92afa07661ecb698 input=640619addb513b8b]*/
 {
     return buffered_raw_call(self, &_Py_ID(readable));
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.writable
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_writable_impl(buffered *self)
-/*[clinic end generated code: output=4e3eee8d6f9d8552 input=45eb76bf6a10e6f7]*/
+/*[clinic end generated code: output=4e3eee8d6f9d8552 input=b35ea396b2201554]*/
 {
     return buffered_raw_call(self, &_Py_ID(writable));
 }
 
 
 /*[clinic input]
-@critical_section
 @getter
 _io._Buffered.name
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_name_get_impl(buffered *self)
-/*[clinic end generated code: output=d2adf384051d3d10 input=6b84a0e6126f545e]*/
+/*[clinic end generated code: output=d2adf384051d3d10 input=5a60eb8d33149f6e]*/
 {
     return buffered_raw_getattr(self, &_Py_ID(name));
 }
 
 /*[clinic input]
-@critical_section
 @getter
 _io._Buffered.mode
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_mode_get_impl(buffered *self)
-/*[clinic end generated code: output=0feb205748892fa4 input=0762d5e28542fd8c]*/
+/*[clinic end generated code: output=0feb205748892fa4 input=8d5e4c1fed38e6f0]*/
 {
     return buffered_raw_getattr(self, &_Py_ID(mode));
 }
@@ -1205,25 +1252,23 @@ _io__Buffered_mode_get_impl(buffered *self)
 /* Lower-level APIs */
 
 /*[clinic input]
-@critical_section
 _io._Buffered.fileno
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_fileno_impl(buffered *self)
-/*[clinic end generated code: output=b717648d58a95ee3 input=1c4fead777bae20a]*/
+/*[clinic end generated code: output=b717648d58a95ee3 input=768ea30b3f6314a7]*/
 {
     return buffered_raw_call(self, &_Py_ID(fileno));
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.isatty
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_isatty_impl(buffered *self)
-/*[clinic end generated code: output=c20e55caae67baea input=e53d182d7e490e3a]*/
+/*[clinic end generated code: output=c20e55caae67baea input=9ea007b11559bee4]*/
 {
     return buffered_raw_call(self, &_Py_ID(isatty));
 }
@@ -1243,7 +1288,7 @@ enum {
 static inline int
 buffered_enter(buffered *self, const char *closed_msg, int direction)
 {
-    if (buffered_check_ready(self) < 0 || buffered_lock(self) < 0) {
+    if (buffered_lock_ready(self) < 0) {
         return -1;
     }
     if (((direction == WRITING || buffered_readahead(self) == 0)
@@ -1258,13 +1303,12 @@ buffered_enter(buffered *self, const char *closed_msg, int direction)
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.flush
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_flush_impl(buffered *self)
-/*[clinic end generated code: output=da2674ef1ce71f3a input=6b30de9f083419c2]*/
+/*[clinic end generated code: output=da2674ef1ce71f3a input=fda63444697c6bf4]*/
 {
     if (buffered_enter(self, "flush of closed file", KEEP_DIRECTION) < 0) {
         return NULL;
@@ -1278,7 +1322,6 @@ _io__Buffered_flush_impl(buffered *self)
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.peek
     size: Py_ssize_t = 0
     /
@@ -1287,7 +1330,7 @@ _io._Buffered.peek
 
 static PyObject *
 _io__Buffered_peek_impl(buffered *self, Py_ssize_t size)
-/*[clinic end generated code: output=ba7a097ca230102b input=56733376f926d982]*/
+/*[clinic end generated code: output=ba7a097ca230102b input=37ffb97d06ff4adb]*/
 {
     if (buffered_enter(self, "peek of closed file", READING) < 0) {
         return NULL;
@@ -1304,7 +1347,6 @@ _io__Buffered_peek_impl(buffered *self, Py_ssize_t size)
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.read
     size as n: Py_ssize_t(accept={int, NoneType}) = -1
     /
@@ -1312,7 +1354,7 @@ _io._Buffered.read
 
 static PyObject *
 _io__Buffered_read_impl(buffered *self, Py_ssize_t n)
-/*[clinic end generated code: output=f41c78bb15b9bbe9 input=bdb4b0425b295472]*/
+/*[clinic end generated code: output=f41c78bb15b9bbe9 input=7df81e82e08a68a2]*/
 {
     if (n < -1) {
         PyErr_SetString(PyExc_ValueError,
@@ -1329,7 +1371,6 @@ _io__Buffered_read_impl(buffered *self, Py_ssize_t n)
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.read1
     size as n: Py_ssize_t = -1
     /
@@ -1337,7 +1378,7 @@ _io._Buffered.read1
 
 static PyObject *
 _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
-/*[clinic end generated code: output=bcc4fb4e54d103a3 input=3d0ad241aa52b36c]*/
+/*[clinic end generated code: output=bcc4fb4e54d103a3 input=7d22de9630b61774]*/
 {
     if (buffered_enter(self, "read of closed file", READING) < 0) {
         return NULL;
@@ -1364,7 +1405,6 @@ buffered_readinto_common(buffered *self, Py_buffer *buffer, int readinto1)
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.readinto
     buffer: Py_buffer(accept={rwbuffer})
     /
@@ -1372,13 +1412,12 @@ _io._Buffered.readinto
 
 static PyObject *
 _io__Buffered_readinto_impl(buffered *self, Py_buffer *buffer)
-/*[clinic end generated code: output=bcb376580b1d8170 input=777c33e7adaa2bcd]*/
+/*[clinic end generated code: output=bcb376580b1d8170 input=ed6b98b7a20a3008]*/
 {
     return buffered_readinto_common(self, buffer, 0);
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.readinto1
     buffer: Py_buffer(accept={rwbuffer})
     /
@@ -1386,13 +1425,12 @@ _io._Buffered.readinto1
 
 static PyObject *
 _io__Buffered_readinto1_impl(buffered *self, Py_buffer *buffer)
-/*[clinic end generated code: output=6e5c6ac5868205d6 input=ef03cc5fc92a6895]*/
+/*[clinic end generated code: output=6e5c6ac5868205d6 input=4455c5d55fdf1687]*/
 {
     return buffered_readinto_common(self, buffer, 1);
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.readline
     size: Py_ssize_t(accept={int, NoneType}) = -1
     /
@@ -1400,7 +1438,7 @@ _io._Buffered.readline
 
 static PyObject *
 _io__Buffered_readline_impl(buffered *self, Py_ssize_t size)
-/*[clinic end generated code: output=24dd2aa6e33be83c input=e81ca5abd4280776]*/
+/*[clinic end generated code: output=24dd2aa6e33be83c input=673b6240e315ef8a]*/
 {
     if (buffered_enter(self, "readline of closed file", READING) < 0) {
         return NULL;
@@ -1412,22 +1450,22 @@ _io__Buffered_readline_impl(buffered *self, Py_ssize_t size)
 
 
 /*[clinic input]
-@critical_section
 _io._Buffered.tell
 [clinic start generated code]*/
 
 static PyObject *
 _io__Buffered_tell_impl(buffered *self)
-/*[clinic end generated code: output=386972ae84716c1e input=ab12e67d8abcb42f]*/
+/*[clinic end generated code: output=386972ae84716c1e input=ad61e04a6b349573]*/
 {
-    if (buffered_check_ready(self) < 0) {
+    if (buffered_lock_ready(self) < 0) {
         return NULL;
     }
-    return buffered_position(self);
+    PyObject *res = buffered_position(self);
+    buffered_unlock(self);
+    return res;
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.seek
     target as targetobj: object
     whence: int = 0
@@ -1436,7 +1474,7 @@ _io._Buffered.seek
 
 static PyObject *
 _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
-/*[clinic end generated code: output=7ae0e8dc46efdefb input=b5a12be70e0ad07b]*/
+/*[clinic end generated code: output=7ae0e8dc46efdefb input=a9c4920bfcba6163]*/
 {
     /* Do some error checking instead of trusting OS 'seek()'
     ** error detection, just in case.
@@ -1490,7 +1528,6 @@ end:
 }
 
 /*[clinic input]
-@critical_section
 _io._Buffered.truncate
     cls: defining_class
     pos: object = None
@@ -1499,7 +1536,7 @@ _io._Buffered.truncate
 
 static PyObject *
 _io__Buffered_truncate_impl(buffered *self, PyTypeObject *cls, PyObject *pos)
-/*[clinic end generated code: output=fe3882fbffe79f1a input=e3cbf794575bd794]*/
+/*[clinic end generated code: output=fe3882fbffe79f1a input=f5b737d97d76303f]*/
 {
     if (buffered_enter(self, "truncate of closed file", KEEP_DIRECTION) < 0) {
         return NULL;
@@ -1523,9 +1560,7 @@ buffered_iternext(PyObject *op)
     PyObject *line;
     if (_PyIO_is_nibbler_buffered_type(Py_TYPE(self))) {
         /* Skip method call overhead for speed */
-        Py_BEGIN_CRITICAL_SECTION(self);
         line = _io__Buffered_readline_impl(self, -1);
-        Py_END_CRITICAL_SECTION();
     }
     else {
         line = PyObject_CallMethodNoArgs((PyObject *)self,
@@ -1587,13 +1622,11 @@ buffered_repr(PyObject *op)
 
 /* Shared constructor: check raw supports the needed operations, then set
    the object up for it. */
+/* Check raw supports what the class needs (BufferedRandom: seeking too). */
 static int
-buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
-              int readable, int writable)
+buffered_check_raw(_PyIO_State *state, PyObject *raw, int raw_fileio,
+                   int readable, int writable)
 {
-    self->state = BUFFERED_UNINITIALIZED;
-    _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
-    int raw_fileio = Py_IS_TYPE(raw, state->PyFileIO_Type);
     if (readable && writable
         && _PyIOBase_check_seekable(state, raw, Py_True) == NULL)
     {
@@ -1601,38 +1634,53 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
     }
     if (raw_fileio) {
         /* Its flags answer readable() and writable() directly. */
-        if (_PyFileIO_check_access(raw, readable, writable) < 0) {
-            return -1;
-        }
+        return _PyFileIO_check_access(raw, readable, writable);
     }
-    else if ((readable
-              && _PyIOBase_check_readable(state, raw, Py_True) == NULL)
-             || (writable
-                 && _PyIOBase_check_writable(state, raw, Py_True) == NULL))
+    if ((readable && _PyIOBase_check_readable(state, raw, Py_True) == NULL)
+        || (writable && _PyIOBase_check_writable(state, raw, Py_True) == NULL))
     {
         return -1;
     }
-    if (buffer_size <= 0) {
+    return 0;
+}
+
+static int
+buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
+              int readable, int writable)
+{
+    _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
+    int raw_fileio = Py_IS_TYPE(raw, state->PyFileIO_Type);
+    int err = buffered_check_raw(state, raw, raw_fileio, readable, writable);
+    if (err == 0 && buffer_size <= 0) {
         PyErr_SetString(PyExc_ValueError,
             "buffer size must be strictly positive");
+        err = -1;
+    }
+
+    /* (Re)initialize; a failed __init__() leaves the object uninitialized. */
+    if (buffered_lock(self) < 0) {
         return -1;
     }
     buffered_free(self);
-    Py_XSETREF(self->raw, Py_NewRef(raw));
-    self->raw_fileio = (char)raw_fileio;
-    /* Use _writev() only where it can't bypass an overridden write(): on
-       FileIO itself, or on raw types not derived from it. */
-    self->raw_vectored = (
-        writable
-        && (self->raw_fileio
-            || !PyObject_TypeCheck(raw, state->PyFileIO_Type))
-        && _PyType_Lookup(Py_TYPE(raw), &_Py_ID(_writev)) != NULL);
-    self->buffer_size = buffer_size;
-    self->writable = (char)writable;
-    self->writing = (char)(writable && !readable);
-    self->released = 0;
-    self->state = BUFFERED_READY;
-    return 0;
+    FT_ATOMIC_STORE_UINT8_RELAXED(self->detached, 0);
+    if (err == 0) {
+        self->raw_fileio = (char)raw_fileio;
+        /* Use _writev() only where it can't bypass an overridden write():
+           on FileIO itself, or on raw types not derived from it. */
+        self->raw_vectored = (
+            writable
+            && (raw_fileio || !PyObject_TypeCheck(raw, state->PyFileIO_Type))
+            && _PyType_Lookup(Py_TYPE(raw), &_Py_ID(_writev)) != NULL);
+        self->buffer_size = buffer_size;
+        self->writable = (char)writable;
+        self->writing = (char)(writable && !readable);
+        FT_ATOMIC_STORE_UINT8_RELAXED(self->released, 0);
+    }
+    PyObject *old = buffered_swap_raw(self, err == 0 ? Py_NewRef(raw) : NULL);
+    buffered_unlock(self);
+    /* Releasing the old raw stream can run arbitrary code. */
+    Py_XDECREF(old);
+    return err;
 }
 
 /*
@@ -1680,7 +1728,6 @@ _io_BufferedWriter___init___impl(buffered *self, PyObject *raw,
 }
 
 /*[clinic input]
-@critical_section
 _io.BufferedWriter.write
     buffer: Py_buffer
     /
@@ -1688,7 +1735,7 @@ _io.BufferedWriter.write
 
 static PyObject *
 _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
-/*[clinic end generated code: output=7f8d1365759bfc6b input=6a9c041de0c337be]*/
+/*[clinic end generated code: output=7f8d1365759bfc6b input=dd87dd85fc7f8850]*/
 {
     if (buffered_enter(self, "write to closed file", WRITING) < 0) {
         return NULL;
