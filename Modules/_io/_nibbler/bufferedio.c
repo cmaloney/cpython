@@ -68,17 +68,28 @@ bufferediobase_unsupported(_PyIO_State *state, const char *message)
  * BufferedReader, BufferedWriter and BufferedRandom share one object layout
  * and most methods.
  *
- * Data flows in one direction at a time.  While reading, `rbuf` holds
- * read-ahead: bytes read from the raw stream but not yet returned.  While
- * writing, the pending writes are a list of chunks: large exact bytes
- * objects are kept by reference, everything else is copied into a bytes
- * "block" that is filled in order and replaced when full.  The chunks are
- * written together, in one call when the raw stream has a vectored _writev()
- * method.  BufferedRandom switches direction as needed: before writing it
- * hands unread read-ahead back to the raw stream (by seeking), and before
- * reading it writes out everything pending.  So the logical position is
- * always the raw position plus pending writes, or minus unread read-ahead;
- * nothing else is tracked.
+ * Buffered data is a list of morsels: runs of bytes inside bytes objects.
+ * Data flows in one direction at a time:
+ *
+ * - Writing: the morsels are pending writes, oldest first.  Large exact
+ *   bytes objects are kept by reference; everything else is copied into
+ *   `block`, a bytes object of buffer_size bytes filled in order.  The
+ *   morsels are written together, in one call when the raw stream has a
+ *   vectored _writev() method.
+ *
+ * - Reading: there is at most one morsel, the bytes the last fill read into
+ *   `block`.  Its pointer is the read position: the bytes before it were
+ *   returned already (seek() can move back over them), the rest are
+ *   read-ahead.  Reading a whole fill hands out the block itself.
+ *
+ * BufferedRandom switches direction as needed: before writing it hands
+ * unread read-ahead back to the raw stream (by seeking), and before reading
+ * it writes out everything pending.  So the logical position is always the
+ * raw position plus pending writes, or minus unread read-ahead.
+ *
+ * A block is only filled or copied into while nothing else references it,
+ * so a bytes object never changes once a morsel was handed out or written
+ * through a Python-level raw stream.
  */
 
 enum {
@@ -87,54 +98,116 @@ enum {
     WREF_MIN = 512,
 };
 
-/* A chunk of pending write data, inside the bytes object obj. */
+/* A run of bytes inside the bytes object obj, which keeps them alive. */
 typedef struct {
     PyObject *obj;
     const char *ptr;
     Py_ssize_t len;
-} wchunk;
+} morsel;
+
+/* Morsels in order, with their total length. */
+typedef struct {
+    morsel *items;
+    Py_ssize_t count;
+    Py_ssize_t capacity;
+    Py_ssize_t nbytes;
+} morsel_list;
+
+static void
+morsels_clear(morsel_list *list)
+{
+    for (Py_ssize_t i = 0; i < list->count; i++) {
+        Py_DECREF(list->items[i].obj);
+    }
+    list->count = 0;
+    list->nbytes = 0;
+}
+
+static void
+morsels_free(morsel_list *list)
+{
+    morsels_clear(list);
+    PyMem_Free(list->items);
+    list->items = NULL;
+    list->capacity = 0;
+}
+
+/* Append ptr[0:len], inside obj; extends the last morsel when contiguous. */
+static int
+morsels_push(morsel_list *list, PyObject *obj, const char *ptr,
+             Py_ssize_t len)
+{
+    morsel *last = list->count > 0 ? &list->items[list->count - 1] : NULL;
+    if (last != NULL && last->obj == obj && last->ptr + last->len == ptr) {
+        last->len += len;
+    }
+    else {
+        if (list->count == list->capacity) {
+            Py_ssize_t capacity = list->capacity ? 2 * list->capacity : 8;
+            morsel *items = PyMem_Realloc(list->items,
+                                          capacity * sizeof(morsel));
+            if (items == NULL) {
+                PyErr_NoMemory();
+                return -1;
+            }
+            list->items = items;
+            list->capacity = capacity;
+        }
+        list->items[list->count++] = (morsel){Py_NewRef(obj), ptr, len};
+    }
+    list->nbytes += len;
+    return 0;
+}
+
+/* Drop n bytes from the front.  Returns how many there were (up to n). */
+static Py_ssize_t
+morsels_consume(morsel_list *list, Py_ssize_t n)
+{
+    Py_ssize_t taken = 0;
+    Py_ssize_t done = 0;
+    for (; done < list->count; done++) {
+        morsel *m = &list->items[done];
+        Py_ssize_t k = Py_MIN(m->len, n - taken);
+        m->ptr += k;
+        m->len -= k;
+        taken += k;
+        if (m->len > 0) {
+            break;
+        }
+        Py_DECREF(m->obj);
+    }
+    list->count -= done;
+    memmove(list->items, list->items + done,
+            (size_t)list->count * sizeof(morsel));
+    list->nbytes -= taken;
+    return taken;
+}
 
 typedef struct {
     PyObject_HEAD
 
-    /* NULL until initialized and after detach().  Only replaced with the
+    /* NULL until initialized, None after detach().  Only replaced with the
        lock held (and from GC clear and dealloc): code holding the lock uses
        it directly, code without takes a reference with buffered_get_raw().
        Everything below is set by __init__() and, unless noted, changed only
        with the lock held. */
     PyObject *raw;
-    /* raw is NULL because of detach() (picks the error message). */
-    uint8_t detached;
     char finalizing;
     /* Fixed by __init__(): writable, raw exactly FileIO (call its C
        implementation directly), raw has a vectored _writev() method. */
-    char writable;
-    char raw_fileio;
-    char raw_vectored;
-    /* Pending writes rather than read-ahead may be buffered. */
-    char writing;
-    /* close() has run. */
+    uint8_t writable;
+    uint8_t raw_fileio;
+    uint8_t raw_vectored;
+    /* buf holds pending writes rather than read-ahead. */
+    uint8_t writing;
+    /* close() has run (also read without the lock, by __sizeof__()). */
     uint8_t released;
 
     Py_ssize_t buffer_size;
-
-    /* Reading: rbuf[0:read_end] are the bytes just before the raw position
-       (so seek() can move within them) and rbuf[read_pos:read_end] is the
-       unread read-ahead.  rbuf has buffer_size bytes and is allocated on
-       first use. */
-    char *rbuf;
-    Py_ssize_t read_pos;
-    Py_ssize_t read_end;
-
-    /* Writing: write_pending bytes in wchunks[0:nwchunks], oldest first. */
-    wchunk *wchunks;
-    Py_ssize_t nwchunks;
-    Py_ssize_t wchunks_size;
-    Py_ssize_t write_pending;
-    /* Bytes object of buffer_size bytes that small writes are copied into;
-       the first wblock_used bytes are taken. */
-    PyObject *wblock;
-    Py_ssize_t wblock_used;
+    morsel_list buf;
+    /* Bytes object of buffer_size bytes that fills read into and small
+       writes are copied into; NULL until needed. */
+    PyObject *block;
 
     /* Held across raw I/O.  owner detects reentrant calls (a signal handler
        or finalizer running mid-I/O), which raise instead of deadlocking. */
@@ -151,7 +224,8 @@ buffered_cast(PyObject *op)
     return (buffered *)op;
 }
 
-/* buffered_lock() when the lock is taken. */
+/* Slow path of buffered_lock(): another thread, or this one reentering,
+   holds the lock. */
 static int
 buffered_lock_wait(buffered *self, PyThreadState *tstate)
 {
@@ -161,13 +235,15 @@ buffered_lock_wait(buffered *self, PyThreadState *tstate)
     }
     if (!_Py_IsInterpreterFinalizing(tstate->interp)) {
         PyMutex_LockFlags(&self->lock, _PY_LOCK_DETACH);
+        return 0;
     }
     /* When finalizing, a daemon thread may have been shut down while
-       holding the lock.  Only wait for a grace period of 1 s; non-daemon
-       threads have already exited, so careful threaded I/O code is
-       unaffected. */
-    else if (_PyMutex_LockTimed(&self->lock, (PyTime_t)1000000000,
-                                _PY_LOCK_DETACH) != PY_LOCK_ACQUIRED) {
+       holding the lock.  Only wait for a grace period; non-daemon threads
+       have already exited, so careful threaded I/O code is unaffected. */
+    PyTime_t timeout = 1000 * 1000 * 1000;  /* 1 second */
+    if (_PyMutex_LockTimed(&self->lock, timeout, _PY_LOCK_DETACH)
+        != PY_LOCK_ACQUIRED)
+    {
         PyObject *ascii = PyObject_ASCII((PyObject *)self);
         _Py_FatalErrorFormat(__func__,
             "could not acquire lock for %s at interpreter "
@@ -197,29 +273,45 @@ buffered_unlock(buffered *self)
     PyMutex_Unlock(&self->lock);
 }
 
+/* raw is set and not detached. */
+static inline int
+buffered_raw_usable(PyObject *raw)
+{
+    return raw != NULL && raw != Py_None;
+}
+
 static int
 buffered_not_ready(buffered *self)
 {
     PyErr_SetString(PyExc_ValueError,
-                    FT_ATOMIC_LOAD_UINT8_RELAXED(self->detached)
+                    FT_ATOMIC_LOAD_PTR(self->raw) == Py_None
                     ? "raw stream has been detached"
                     : "I/O operation on uninitialized object");
     return -1;
 }
 
-/* A new reference to raw, or NULL with ValueError if the object is
-   uninitialized or detached.  Needs no lock: a concurrent detach() leaves
-   this call using the stream it took. */
+/* A new reference to raw (NULL or None when uninitialized or detached).
+   Needs no lock: a concurrent detach() leaves the caller using the stream
+   it took. */
+static inline PyObject *
+buffered_ref_raw(buffered *self)
+{
+#ifdef Py_GIL_DISABLED
+    return _Py_XGetRef(&self->raw);
+#else
+    return Py_XNewRef(self->raw);
+#endif
+}
+
+/* A new reference to a usable raw, or NULL with ValueError. */
 static PyObject *
 buffered_get_raw(buffered *self)
 {
-#ifdef Py_GIL_DISABLED
-    PyObject *raw = _Py_XGetRef(&self->raw);
-#else
-    PyObject *raw = Py_XNewRef(self->raw);
-#endif
-    if (raw == NULL) {
+    PyObject *raw = buffered_ref_raw(self);
+    if (!buffered_raw_usable(raw)) {
+        Py_XDECREF(raw);
         buffered_not_ready(self);
+        return NULL;
     }
     return raw;
 }
@@ -231,7 +323,7 @@ buffered_swap_raw(buffered *self, PyObject *raw)
 {
 #ifdef Py_GIL_DISABLED
     if (raw != NULL) {
-        /* Lets buffered_get_raw() take references without the lock. */
+        /* Lets buffered_ref_raw() take references without the lock. */
         _PyObject_SetMaybeWeakref(raw);
     }
 #endif
@@ -246,17 +338,24 @@ buffered_lock_ready(buffered *self)
     if (buffered_lock(self) < 0) {
         return -1;
     }
-    if (self->raw == NULL) {
+    if (!buffered_raw_usable(self->raw)) {
         buffered_unlock(self);
         return buffered_not_ready(self);
     }
     return 0;
 }
 
+/* The read-ahead morsel, or NULL when there is none. */
+static inline morsel *
+buffered_ahead(buffered *self)
+{
+    return self->writing || self->buf.count == 0 ? NULL : &self->buf.items[0];
+}
+
 static inline Py_ssize_t
 buffered_readahead(buffered *self)
 {
-    return self->read_end - self->read_pos;
+    return self->writing ? 0 : self->buf.nbytes;
 }
 
 /* Returns 1 if closed, 0 if open, -1 on error. */
@@ -304,22 +403,25 @@ buffered_set_blocking_error(Py_ssize_t written)
 
 /* Discard all buffered data and release the memory holding it. */
 static void
-buffered_free(buffered *self)
+buffered_drop_buffers(buffered *self)
 {
-    for (Py_ssize_t i = 0; i < self->nwchunks; i++) {
-        Py_DECREF(self->wchunks[i].obj);
+    morsels_free(&self->buf);
+    Py_CLEAR(self->block);
+}
+
+/* The block, when nothing but this object references it (then all of it
+   can be overwritten); else a new one. */
+static PyObject *
+buffered_fresh_block(buffered *self)
+{
+    if (self->block == NULL || !_PyObject_IsUniquelyReferenced(self->block)) {
+        PyObject *block = PyBytes_FromStringAndSize(NULL, self->buffer_size);
+        if (block == NULL) {
+            return NULL;
+        }
+        Py_XSETREF(self->block, block);
     }
-    self->nwchunks = 0;
-    self->write_pending = 0;
-    PyMem_Free(self->wchunks);
-    self->wchunks = NULL;
-    self->wchunks_size = 0;
-    Py_CLEAR(self->wblock);
-    self->wblock_used = 0;
-    PyMem_Free(self->rbuf);
-    self->rbuf = NULL;
-    self->read_pos = 0;
-    self->read_end = 0;
+    return self->block;
 }
 
 /*
@@ -361,76 +463,88 @@ buffered_raw_read(buffered *self, char *dst, Py_ssize_t len)
     if (self->raw_fileio) {
         return _PyFileIO_readinto(self->raw, dst, len);
     }
-    PyObject *view = PyMemoryView_FromMemory(dst, len, PyBUF_WRITE);
-    if (view == NULL) {
+    /* Python code may keep the buffer it is given (or a slice of it), so
+       give it memory it owns rather than dst, which ends up in bytes
+       objects. */
+    PyObject *buf = PyByteArray_FromStringAndSize(NULL, len);
+    if (buf == NULL) {
         return -1;
     }
     /* PyErr_SetFromErrno() runs signal handlers on EINTR; retry if none
        raised (see issue #10956). */
     PyObject *res;
     do {
-        res = PyObject_CallMethodOneArg(self->raw, &_Py_ID(readinto), view);
+        res = PyObject_CallMethodOneArg(self->raw, &_Py_ID(readinto), buf);
     } while (res == NULL && _PyIO_trap_eintr());
-    Py_DECREF(view);
-    return buffered_raw_result(res, len, "readinto");
+    Py_ssize_t n = buffered_raw_result(res, len, "readinto");
+    if (n > PyByteArray_GET_SIZE(buf)) {
+        PyErr_SetString(PyExc_OSError, "raw readinto() resized its buffer");
+        n = -1;
+    }
+    else if (n > 0) {
+        memcpy(dst, PyByteArray_AS_STRING(buf), n);
+    }
+    Py_DECREF(buf);
+    return n;
 }
 
-/* A read-only memoryview of ptr[0:len], inside the bytes object obj which
-   the view keeps alive; or, without obj, of memory only valid during the
-   call. */
+/* A read-only memoryview of the morsel, which keeps its bytes alive; or,
+   without obj (data of the current write() call), of memory only valid
+   during the call. */
 static PyObject *
-buffered_view(PyObject *obj, const char *ptr, Py_ssize_t len)
+buffered_view(const morsel *m)
 {
-    if (obj == NULL) {
-        return PyMemoryView_FromMemory((char *)ptr, len, PyBUF_READ);
+    if (m->obj == NULL) {
+        return PyMemoryView_FromMemory((char *)m->ptr, m->len, PyBUF_READ);
     }
-    PyObject *whole = PyMemoryView_FromObject(obj);
+    PyObject *whole = PyMemoryView_FromObject(m->obj);
     if (whole == NULL) {
         return NULL;
     }
-    Py_ssize_t start = ptr - PyBytes_AS_STRING(obj);
-    PyObject *view = PySequence_GetSlice(whole, start, start + len);
+    Py_ssize_t start = m->ptr - PyBytes_AS_STRING(m->obj);
+    PyObject *view = PySequence_GetSlice(whole, start, start + m->len);
     Py_DECREF(whole);
     return view;
 }
 
-/* One raw write of the pending writes followed by extra[0:extra_len]: as
-   much of it as one vectored write takes when the raw stream has
-   _writev(), else the first chunk.  Returns the count, -2 if the raw
-   stream would block (errno set for the BlockingIOError), or -1 on
-   error. */
+/* One raw write of the pending writes followed by extra (a morsel of data
+   not yet in buf, or with len 0): as much as one vectored write takes when
+   the raw stream has _writev(), else the first morsel.  Returns the count,
+   -2 if the raw stream would block (errno set for the BlockingIOError), or
+   -1 on error. */
 static Py_ssize_t
-buffered_raw_write(buffered *self, const char *extra, Py_ssize_t extra_len)
+buffered_raw_write(buffered *self, const morsel *extra)
 {
-    _PyIO_Span spans[_PyIO_WRITEV_MAX];
-    PyObject *owners[_PyIO_WRITEV_MAX];
+    morsel pieces[_PyIO_WRITEV_MAX];
     Py_ssize_t limit = self->raw_vectored ? _PyIO_WRITEV_MAX : 1;
-    Py_ssize_t cnt = 0;
+    Py_ssize_t cnt = Py_MIN(self->buf.count, limit);
     Py_ssize_t total = 0;
-    for (; cnt < self->nwchunks && cnt < limit; cnt++) {
-        wchunk *chunk = &self->wchunks[cnt];
-        spans[cnt] = (_PyIO_Span){chunk->ptr, chunk->len};
-        owners[cnt] = chunk->obj;
-        total += chunk->len;
+    if (cnt > 0) {
+        memcpy(pieces, self->buf.items, (size_t)cnt * sizeof(morsel));
     }
-    if (extra_len > 0 && cnt < limit) {
-        spans[cnt] = (_PyIO_Span){extra, extra_len};
-        owners[cnt++] = NULL;
-        total += extra_len;
+    if (extra->len > 0 && cnt < limit) {
+        pieces[cnt++] = *extra;
     }
     assert(cnt > 0);
+
     if (self->raw_fileio) {
+        _PyIO_Span spans[_PyIO_WRITEV_MAX];
+        for (Py_ssize_t i = 0; i < cnt; i++) {
+            spans[i] = (_PyIO_Span){pieces[i].ptr, pieces[i].len};
+        }
         return _PyFileIO_writev(self->raw, spans, cnt);
     }
 
+    /* Python code may keep the views (and reach the block through them): it
+       must not be written to again. */
+    Py_CLEAR(self->block);
     PyObject *arg = NULL;
     if (cnt == 1) {
-        arg = buffered_view(owners[0], spans[0].ptr, spans[0].len);
+        arg = buffered_view(&pieces[0]);
     }
     else if ((arg = PyList_New(cnt)) != NULL) {
         for (Py_ssize_t i = 0; i < cnt; i++) {
-            PyObject *view = buffered_view(owners[i], spans[i].ptr,
-                                           spans[i].len);
+            PyObject *view = buffered_view(&pieces[i]);
             if (view == NULL) {
                 Py_CLEAR(arg);
                 break;
@@ -440,6 +554,9 @@ buffered_raw_write(buffered *self, const char *extra, Py_ssize_t extra_len)
     }
     if (arg == NULL) {
         return -1;
+    }
+    for (Py_ssize_t i = 0; i < cnt; i++) {
+        total += pieces[i].len;
     }
     const char *method = cnt == 1 ? "write" : "_writev";
     PyObject *name = cnt == 1 ? &_Py_ID(write) : &_Py_ID(_writev);
@@ -510,7 +627,7 @@ buffered_position(buffered *self)
     if (pos == -1) {
         return NULL;
     }
-    pos += self->write_pending - buffered_readahead(self);
+    pos += self->writing ? self->buf.nbytes : -self->buf.nbytes;
     // GH-95782
     return PyLong_FromOff_t(pos < 0 ? 0 : pos);
 }
@@ -519,93 +636,44 @@ buffered_position(buffered *self)
  * Writing
  */
 
-static int
-buffered_push_chunk(buffered *self, PyObject *obj, const char *ptr,
-                    Py_ssize_t len)
-{
-    if (self->nwchunks == self->wchunks_size) {
-        Py_ssize_t size = self->wchunks_size ? 2 * self->wchunks_size : 8;
-        wchunk *chunks = PyMem_Realloc(self->wchunks, size * sizeof(wchunk));
-        if (chunks == NULL) {
-            PyErr_NoMemory();
-            return -1;
-        }
-        self->wchunks = chunks;
-        self->wchunks_size = size;
-    }
-    self->wchunks[self->nwchunks++] = (wchunk){Py_NewRef(obj), ptr, len};
-    self->write_pending += len;
-    return 0;
-}
-
 /* Add data[0:len], owned by obj, to the pending writes, which must have
    room for it. */
 static int
 buffered_add_write(buffered *self, PyObject *obj, const char *data,
                    Py_ssize_t len)
 {
-    assert(self->write_pending + len <= self->buffer_size);
+    assert(self->writing);
+    assert(self->buf.nbytes + len <= self->buffer_size);
     if (len == 0) {
         return 0;
     }
+    /* Not the block itself (handed out by a read): data is copied into
+       it after the last morsel in it. */
     if (self->raw_vectored && len >= WREF_MIN && obj != NULL
-        && PyBytes_CheckExact(obj))
+        && obj != self->block && PyBytes_CheckExact(obj))
     {
-        return buffered_push_chunk(self, obj, data, len);
+        return morsels_push(&self->buf, obj, data, len);
     }
 
-    /* Copy into the block.  Once no chunk references it, everything copied
-       into it was written and it can be refilled from the start. */
-    if (self->wblock != NULL && _PyObject_IsUniquelyReferenced(self->wblock)) {
-        self->wblock_used = 0;
-    }
-    if (self->wblock == NULL || self->buffer_size - self->wblock_used < len) {
-        PyObject *block = PyBytes_FromStringAndSize(NULL, self->buffer_size);
-        if (block == NULL) {
-            return -1;
-        }
-        Py_XSETREF(self->wblock, block);
-        self->wblock_used = 0;
-    }
-    char *dst = PyBytes_AS_STRING(self->wblock) + self->wblock_used;
-    memcpy(dst, data, len);
-    self->wblock_used += len;
-
-    wchunk *last = self->nwchunks > 0 ? &self->wchunks[self->nwchunks - 1]
-                                      : NULL;
-    if (last != NULL && last->obj == self->wblock
-        && last->ptr + last->len == dst)
-    {
-        last->len += len;
-        self->write_pending += len;
-        return 0;
-    }
-    return buffered_push_chunk(self, self->wblock, dst, len);
-}
-
-/* Drop n written bytes from the front of the pending writes.  Returns how
-   many of them were pending; the rest were written after them. */
-static Py_ssize_t
-buffered_consume_writes(buffered *self, Py_ssize_t n)
-{
-    Py_ssize_t taken = 0;
-    Py_ssize_t done = 0;
-    for (; done < self->nwchunks; done++) {
-        wchunk *chunk = &self->wchunks[done];
-        Py_ssize_t k = Py_MIN(chunk->len, n - taken);
-        chunk->ptr += k;
-        chunk->len -= k;
-        taken += k;
-        if (chunk->len > 0) {
+    /* Copy into the block after the last pending copy in it, or into a
+       fresh block. */
+    Py_ssize_t used = -1;
+    for (Py_ssize_t i = self->buf.count - 1; i >= 0; i--) {
+        morsel *m = &self->buf.items[i];
+        if (m->obj == self->block) {
+            used = m->ptr + m->len - PyBytes_AS_STRING(self->block);
             break;
         }
-        Py_DECREF(chunk->obj);
     }
-    self->nwchunks -= done;
-    memmove(self->wchunks, self->wchunks + done,
-            (size_t)self->nwchunks * sizeof(wchunk));
-    self->write_pending -= taken;
-    return taken;
+    if (used < 0 || self->buffer_size - used < len) {
+        if (buffered_fresh_block(self) == NULL) {
+            return -1;
+        }
+        used = 0;
+    }
+    char *dst = PyBytes_AS_STRING(self->block) + used;
+    memcpy(dst, data, len);
+    return morsels_push(&self->buf, self->block, dst, len);
 }
 
 /* Write the pending writes followed by data[0:len] until all of it is
@@ -616,10 +684,10 @@ static Py_ssize_t
 buffered_write_out(buffered *self, const char *data, Py_ssize_t len,
                    int *blocked)
 {
-    Py_ssize_t done = 0;
+    morsel extra = {NULL, data, len};
     *blocked = 0;
-    while (self->nwchunks > 0 || done < len) {
-        Py_ssize_t n = buffered_raw_write(self, data + done, len - done);
+    while (self->buf.count > 0 || extra.len > 0) {
+        Py_ssize_t n = buffered_raw_write(self, &extra);
         if (n == -1) {
             return -1;
         }
@@ -627,7 +695,9 @@ buffered_write_out(buffered *self, const char *data, Py_ssize_t len,
             *blocked = 1;
             break;
         }
-        done += n - buffered_consume_writes(self, n);
+        n -= morsels_consume(&self->buf, n);
+        extra.ptr += n;
+        extra.len -= n;
         /* Partial writes can return successfully when interrupted by a
            signal (see write(2)).  Run signal handlers before blocking
            another time, possibly indefinitely. */
@@ -635,7 +705,7 @@ buffered_write_out(buffered *self, const char *data, Py_ssize_t len,
             return -1;
         }
     }
-    return done;
+    return len - extra.len;
 }
 
 /* Write out everything pending; BlockingIOError if the raw stream would
@@ -643,6 +713,7 @@ buffered_write_out(buffered *self, const char *data, Py_ssize_t len,
 static int
 buffered_flush_writes(buffered *self)
 {
+    assert(self->writing);
     int blocked;
     if (buffered_write_out(self, NULL, 0, &blocked) < 0) {
         return -1;
@@ -663,8 +734,7 @@ buffered_rewind(buffered *self)
     if (avail > 0 && buffered_raw_seek(self, -avail, SEEK_CUR) < 0) {
         return -1;
     }
-    self->read_pos = 0;
-    self->read_end = 0;
+    morsels_clear(&self->buf);
     return 0;
 }
 
@@ -691,34 +761,66 @@ buffered_switch_direction(buffered *self)
  * Reading
  */
 
-/* Return n bytes of read-ahead as a bytes object. */
+/* Return n bytes of read-ahead as a bytes object: the block itself, without
+   a copy, when that is all of it. */
 static PyObject *
 buffered_take_bytes(buffered *self, Py_ssize_t n)
 {
-    assert(n <= buffered_readahead(self));
-    PyObject *res = PyBytes_FromStringAndSize(self->rbuf + self->read_pos, n);
-    if (res != NULL) {
-        self->read_pos += n;
+    morsel *m = buffered_ahead(self);
+    if (n == 0 || m == NULL) {
+        return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     }
+    assert(n <= m->len);
+    PyObject *res;
+    if (m->ptr == PyBytes_AS_STRING(m->obj)
+        && n == PyBytes_GET_SIZE(m->obj))
+    {
+        res = Py_NewRef(m->obj);
+    }
+    else {
+        res = PyBytes_FromStringAndSize(m->ptr, n);
+        if (res == NULL) {
+            return NULL;
+        }
+    }
+    m->ptr += n;
+    m->len -= n;
+    self->buf.nbytes -= n;
     return res;
 }
 
-/* Refill the empty read-ahead with one raw read.  Returns the count (0 at
-   EOF), -2 if the raw stream would block, or -1 on error. */
+/* Copy up to len bytes of read-ahead to dst.  Returns the count. */
+static Py_ssize_t
+buffered_take(buffered *self, char *dst, Py_ssize_t len)
+{
+    morsel *m = buffered_ahead(self);
+    Py_ssize_t n = m == NULL ? 0 : Py_MIN(len, m->len);
+    if (n > 0) {
+        memcpy(dst, m->ptr, n);
+        m->ptr += n;
+        m->len -= n;
+        self->buf.nbytes -= n;
+    }
+    return n;
+}
+
+/* Replace the (used up) read-ahead with one raw read into a fresh block.
+   Returns the count (0 at EOF), -2 if the raw stream would block, or -1 on
+   error. */
 static Py_ssize_t
 buffered_fill(buffered *self)
 {
     assert(buffered_readahead(self) == 0);
-    if (self->rbuf == NULL) {
-        self->rbuf = PyMem_Malloc(self->buffer_size);
-        if (self->rbuf == NULL) {
-            PyErr_NoMemory();
-            return -1;
-        }
+    morsels_clear(&self->buf);
+    PyObject *block = buffered_fresh_block(self);
+    if (block == NULL) {
+        return -1;
     }
-    Py_ssize_t n = buffered_raw_read(self, self->rbuf, self->buffer_size);
-    self->read_pos = 0;
-    self->read_end = Py_MAX(n, 0);
+    char *start = PyBytes_AS_STRING(block);
+    Py_ssize_t n = buffered_raw_read(self, start, self->buffer_size);
+    if (n > 0 && morsels_push(&self->buf, block, start, n) < 0) {
+        return -1;
+    }
     return n;
 }
 
@@ -733,20 +835,16 @@ buffered_read_into(buffered *self, char *dst, Py_ssize_t len, int read1)
 {
     Py_ssize_t written = 0;
     for (int reads = 0; ; reads++) {
-        Py_ssize_t k = Py_MIN(len - written, buffered_readahead(self));
-        if (k > 0) {
-            memcpy(dst + written, self->rbuf + self->read_pos, k);
-            self->read_pos += k;
-            written += k;
-        }
+        written += buffered_take(self, dst + written, len - written);
         Py_ssize_t remaining = len - written;
         if (remaining == 0 || (read1 && reads > 0)) {
             break;
         }
         Py_ssize_t n;
         if (remaining >= self->buffer_size) {
-            /* Bypasses rbuf, which no longer precedes the raw position. */
-            self->read_pos = self->read_end = 0;
+            /* Bypasses the read-ahead, which no longer precedes the raw
+               position. */
+            morsels_clear(&self->buf);
             n = buffered_raw_read(self, dst + written, remaining);
             written += Py_MAX(n, 0);
         }
@@ -772,6 +870,16 @@ static PyObject *
 buffered_read_bytes(buffered *self, Py_ssize_t n, int read1)
 {
     Py_ssize_t avail = buffered_readahead(self);
+    if (read1 && avail == 0 && n > 0 && n < self->buffer_size) {
+        /* One raw read into the read-ahead: then all of it may be handed
+           out without a copy. */
+        Py_ssize_t r = buffered_fill(self);
+        if (r <= 0) {
+            /* EOF, or would block. */
+            return r == -1 ? NULL : Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
+        }
+        avail = buffered_readahead(self);
+    }
     if (n <= avail || (read1 && avail > 0)) {
         return buffered_take_bytes(self, Py_MIN(n, avail));
     }
@@ -814,7 +922,7 @@ buffered_read_chunks(buffered *self)
         if (data == Py_None || PyBytes_GET_SIZE(data) == 0) {
             if (PyList_GET_SIZE(chunks) > 0) {
                 Py_SETREF(data, PyBytes_Join(
-                    (PyObject *)&_Py_SINGLETON(bytes_empty), chunks));
+                    Py_GetConstant(Py_CONSTANT_EMPTY_BYTES), chunks));
             }
             break;
         }
@@ -843,7 +951,7 @@ buffered_raw_read_all(buffered *self)
     if (readall == NULL) {
         return buffered_read_chunks(self);
     }
-    PyObject *res = _PyObject_CallNoArgs(readall);
+    PyObject *res = PyObject_CallNoArgs(readall);
     Py_DECREF(readall);
     if (res != NULL && res != Py_None && !PyBytes_Check(res)) {
         PyErr_SetString(PyExc_TypeError, "readall() should return bytes");
@@ -860,23 +968,23 @@ buffered_read_all(buffered *self)
         /* The read-ahead is kept for the next read. */
         return NULL;
     }
-    Py_ssize_t avail = buffered_readahead(self);
-    const char *readahead = self->rbuf + self->read_pos;
-    /* The raw stream moved past rbuf. */
-    self->read_pos = self->read_end = 0;
-    if (avail == 0) {
-        return rest;
-    }
     Py_ssize_t restlen = rest == Py_None ? 0 : PyBytes_GET_SIZE(rest);
-    PyObject *res = PyBytes_FromStringAndSize(NULL, avail + restlen);
-    if (res != NULL) {
-        memcpy(PyBytes_AS_STRING(res), readahead, avail);
-        if (restlen > 0) {
-            memcpy(PyBytes_AS_STRING(res) + avail, PyBytes_AS_STRING(rest),
-                   restlen);
+    PyObject *res = rest;
+    if (buffered_readahead(self) > 0) {
+        res = PyBytes_FromStringAndSize(NULL, buffered_readahead(self)
+                                              + restlen);
+        if (res != NULL) {
+            Py_ssize_t n = buffered_take(self, PyBytes_AS_STRING(res),
+                                         PyBytes_GET_SIZE(res));
+            if (restlen > 0) {
+                memcpy(PyBytes_AS_STRING(res) + n, PyBytes_AS_STRING(rest),
+                       restlen);
+            }
         }
+        Py_DECREF(rest);
     }
-    Py_DECREF(rest);
+    /* The raw stream moved past the read-ahead. */
+    morsels_clear(&self->buf);
     return res;
 }
 
@@ -894,14 +1002,14 @@ buffered_readline(buffered *self, Py_ssize_t limit)
                 break;
             }
         }
-        Py_ssize_t n = buffered_readahead(self);
+        morsel *m = buffered_ahead(self);
+        Py_ssize_t n = m == NULL ? 0 : m->len;
         if (limit >= 0 && n > limit) {
             n = limit;
         }
-        const char *start = self->rbuf + self->read_pos;
-        const char *s = n > 0 ? memchr(start, '\n', n) : NULL;
+        const char *s = n > 0 ? memchr(m->ptr, '\n', n) : NULL;
         if (s != NULL) {
-            n = s - start + 1;
+            n = s - m->ptr + 1;
         }
         int done = s != NULL || n == limit;
         if (done && writer == NULL) {
@@ -914,10 +1022,14 @@ buffered_readline(buffered *self, Py_ssize_t limit)
                 return NULL;
             }
         }
-        if (PyBytesWriter_WriteBytes(writer, start, n) < 0) {
-            goto error;
+        if (n > 0) {
+            if (PyBytesWriter_WriteBytes(writer, m->ptr, n) < 0) {
+                goto error;
+            }
+            m->ptr += n;
+            m->len -= n;
+            self->buf.nbytes -= n;
         }
-        self->read_pos += n;
         if (limit >= 0) {
             limit -= n;
         }
@@ -959,7 +1071,7 @@ buffered_dealloc(PyObject *op)
     }
     _PyObject_GC_UNTRACK(self);
     FT_CLEAR_WEAKREFS(op, self->weakreflist);
-    buffered_free(self);
+    buffered_drop_buffers(self);
     (void)buffered_clear(op);
     tp->tp_free(self);
     Py_DECREF(tp);
@@ -1017,6 +1129,14 @@ _io__Buffered__dealloc_warn_impl(buffered *self, PyObject *source)
     Py_RETURN_NONE;
 }
 
+/* .raw: None while uninitialized or detached. */
+static PyObject *
+buffered_raw_get(PyObject *op, void *Py_UNUSED(closure))
+{
+    PyObject *raw = buffered_ref_raw(buffered_cast(op));
+    return raw != NULL ? raw : Py_None;
+}
+
 /* Methods and attributes passed straight on to the raw stream; no lock,
    so they never wait for I/O in another thread. */
 static PyObject *
@@ -1043,14 +1163,14 @@ buffered_raw_getattr(buffered *self, PyObject *name)
     return res;
 }
 
-/* raw.flush(), directly for an exact FileIO. */
+/* raw.flush() with the lock held, directly for an exact FileIO. */
 static int
-buffered_raw_flush(buffered *self, PyObject *raw)
+buffered_raw_flush(buffered *self)
 {
     if (self->raw_fileio) {
-        return _PyFileIO_flush(raw);
+        return _PyFileIO_flush(self->raw);
     }
-    PyObject *res = PyObject_CallMethodNoArgs(raw, &_Py_ID(flush));
+    PyObject *res = PyObject_CallMethodNoArgs(self->raw, &_Py_ID(flush));
     Py_XDECREF(res);
     return res == NULL ? -1 : 0;
 }
@@ -1061,8 +1181,7 @@ buffered_raw_flush(buffered *self, PyObject *raw)
 static int
 buffered_flush_locked(buffered *self)
 {
-    return self->writable ? buffered_sync(self)
-                          : buffered_raw_flush(self, self->raw);
+    return self->writable ? buffered_sync(self) : buffered_raw_flush(self);
 }
 
 /* Is self.flush() ours: an exact class of ours, not shadowed in the
@@ -1088,16 +1207,14 @@ static PyObject *
 _io__Buffered_simple_flush_impl(buffered *self)
 /*[clinic end generated code: output=29ebb3820db1bdfd input=f33ef045e7250767]*/
 {
+    /* Without the lock: call the method on the stream taken. */
     PyObject *raw = buffered_get_raw(self);
     if (raw == NULL) {
         return NULL;
     }
-    int r = buffered_raw_flush(self, raw);
+    PyObject *res = PyObject_CallMethodNoArgs(raw, &_Py_ID(flush));
     Py_DECREF(raw);
-    if (r < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
+    return res;
 }
 
 /*[clinic input]
@@ -1163,7 +1280,7 @@ _io__Buffered_close_impl(buffered *self)
 
     res = self->raw_fileio ? _PyFileIO_close(self->raw)
                            : PyObject_CallMethodNoArgs(self->raw, &_Py_ID(close));
-    buffered_free(self);
+    buffered_drop_buffers(self);
     FT_ATOMIC_STORE_UINT8_RELAXED(self->released, 1);
 
     if (exc != NULL) {
@@ -1185,16 +1302,20 @@ _io__Buffered_detach_impl(buffered *self)
 {
     /* flush() takes the lock itself.  Calls racing with detach() may run
        on either side of it; the lock keeps the buffers consistent. */
-    if (FT_ATOMIC_LOAD_PTR(self->raw) == NULL) {
+    if (!buffered_raw_usable(FT_ATOMIC_LOAD_PTR(self->raw))) {
         buffered_not_ready(self);
         return NULL;
     }
     if (_PyFile_Flush((PyObject *)self) < 0 || buffered_lock_ready(self) < 0) {
         return NULL;
     }
-    FT_ATOMIC_STORE_UINT8_RELAXED(self->detached, 1);
-    PyObject *raw = buffered_swap_raw(self, NULL);
-    buffered_free(self);
+    /* Also write out what other threads wrote since flush(). */
+    if (self->writable && buffered_sync(self) < 0) {
+        buffered_unlock(self);
+        return NULL;
+    }
+    PyObject *raw = buffered_swap_raw(self, Py_None);
+    buffered_drop_buffers(self);
     buffered_unlock(self);
     return raw;
 }
@@ -1349,8 +1470,19 @@ _io__Buffered_peek_impl(buffered *self, Py_ssize_t size)
     /* Either return the read-ahead or refill it, never both: refilling a
        partly consumed buffer would lose block alignment. */
     if (buffered_readahead(self) > 0 || buffered_fill(self) != -1) {
-        res = PyBytes_FromStringAndSize(self->rbuf + self->read_pos,
-                                        buffered_readahead(self));
+        morsel *m = buffered_ahead(self);
+        if (m == NULL || m->len == 0) {
+            res = Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
+        }
+        else if (m->ptr == PyBytes_AS_STRING(m->obj)
+                 && m->len == PyBytes_GET_SIZE(m->obj))
+        {
+            /* All of the block: no copy. */
+            res = Py_NewRef(m->obj);
+        }
+        else {
+            res = PyBytes_FromStringAndSize(m->ptr, m->len);
+        }
     }
     buffered_unlock(self);
     return res;
@@ -1522,11 +1654,11 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
         goto end;
     }
     Py_ssize_t avail = buffered_readahead(self);
-    if (!self->writing && self->read_end > 0
-        && (whence == SEEK_SET || whence == SEEK_CUR))
-    {
-        /* Move within rbuf if the target is in it: rbuf[0:read_end] are
-           the bytes before the raw position. */
+    morsel *m = buffered_ahead(self);
+    if (m != NULL && (whence == SEEK_SET || whence == SEEK_CUR)) {
+        /* Move within the last fill if the target is in it: its bytes are
+           the ones before the raw position, read up to m->ptr. */
+        Py_ssize_t done = m->ptr - PyBytes_AS_STRING(m->obj);
         Py_off_t raw_pos = -1;
         Py_off_t offset = target;   /* from the current position */
         if (whence == SEEK_SET) {
@@ -1536,25 +1668,28 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
             }
             offset = target - (raw_pos - avail);
         }
-        if (offset >= -self->read_pos && offset <= avail) {
+        if (offset >= -done && offset <= avail) {
             if (raw_pos == -1 && (raw_pos = buffered_raw_tell(self)) == -1) {
                 goto end;
             }
-            self->read_pos += (Py_ssize_t)offset;
-            Py_off_t pos = raw_pos - buffered_readahead(self);
+            m->ptr += offset;
+            m->len -= offset;
+            self->buf.nbytes -= offset;
+            Py_off_t pos = raw_pos - m->len;
             // GH-95782
             res = PyLong_FromOff_t(pos < 0 ? 0 : pos);
             goto end;
         }
     }
-    if (buffered_flush_writes(self) == 0) {
+    if (!self->writing || buffered_flush_writes(self) == 0) {
         if (whence == SEEK_CUR) {
             target -= avail;
         }
         Py_off_t pos = buffered_raw_seek(self, target, whence);
         if (pos != -1) {
-            self->read_pos = 0;
-            self->read_end = 0;
+            if (!self->writing) {
+                morsels_clear(&self->buf);
+            }
             res = PyLong_FromOff_t(pos);
         }
     }
@@ -1697,8 +1832,7 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
     if (buffered_lock(self) < 0) {
         return -1;
     }
-    buffered_free(self);
-    FT_ATOMIC_STORE_UINT8_RELAXED(self->detached, 0);
+    buffered_drop_buffers(self);
     if (err == 0) {
         self->raw_fileio = (char)raw_fileio;
         /* Use _writev() only where it can't bypass an overridden write():
@@ -1781,15 +1915,19 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
     Py_ssize_t len = buffer->len;
     Py_ssize_t done = 0;
     if (len >= self->buffer_size
-        || self->write_pending + len > self->buffer_size)
+        || self->buf.nbytes + len > self->buffer_size)
     {
-        /* Doesn't fit: write out the pending writes together with data. */
+        /* Doesn't fit: write out the pending writes, and data with them
+           when one vectored write takes both or it is too large to
+           buffer. */
         int blocked;
-        done = buffered_write_out(self, data, len, &blocked);
+        Py_ssize_t direct = (self->raw_vectored || len >= self->buffer_size
+                             ? len : 0);
+        done = buffered_write_out(self, data, direct, &blocked);
         if (done < 0) {
             goto end;
         }
-        Py_ssize_t room = self->buffer_size - self->write_pending;
+        Py_ssize_t room = self->buffer_size - self->buf.nbytes;
         if (blocked && len - done > room) {
             /* Keep as much of the rest as fits, and report the rest. */
             int errnum = errno;
@@ -2164,7 +2302,6 @@ static PyMethodDef bufferedreader_methods[] = {
 };
 
 static PyMemberDef bufferedreader_members[] = {
-    {"raw", _Py_T_OBJECT, offsetof(buffered, raw), Py_READONLY},
     {"_finalizing", Py_T_BOOL, offsetof(buffered, finalizing), 0},
     {"__weaklistoffset__", Py_T_PYSSIZET, offsetof(buffered, weakreflist), Py_READONLY},
     {"__dictoffset__", Py_T_PYSSIZET, offsetof(buffered, dict), Py_READONLY},
@@ -2172,6 +2309,7 @@ static PyMemberDef bufferedreader_members[] = {
 };
 
 static PyGetSetDef bufferedreader_getset[] = {
+    {"raw", buffered_raw_get, NULL, NULL, NULL},
     _IO__BUFFERED_CLOSED_GETSETDEF
     _IO__BUFFERED_NAME_GETSETDEF
     _IO__BUFFERED_MODE_GETSETDEF
@@ -2224,7 +2362,6 @@ static PyMethodDef bufferedwriter_methods[] = {
 };
 
 static PyMemberDef bufferedwriter_members[] = {
-    {"raw", _Py_T_OBJECT, offsetof(buffered, raw), Py_READONLY},
     {"_finalizing", Py_T_BOOL, offsetof(buffered, finalizing), 0},
     {"__weaklistoffset__", Py_T_PYSSIZET, offsetof(buffered, weakreflist), Py_READONLY},
     {"__dictoffset__", Py_T_PYSSIZET, offsetof(buffered, dict), Py_READONLY},
@@ -2232,6 +2369,7 @@ static PyMemberDef bufferedwriter_members[] = {
 };
 
 static PyGetSetDef bufferedwriter_getset[] = {
+    {"raw", buffered_raw_get, NULL, NULL, NULL},
     _IO__BUFFERED_CLOSED_GETSETDEF
     _IO__BUFFERED_NAME_GETSETDEF
     _IO__BUFFERED_MODE_GETSETDEF
@@ -2342,7 +2480,6 @@ static PyMethodDef bufferedrandom_methods[] = {
 };
 
 static PyMemberDef bufferedrandom_members[] = {
-    {"raw", _Py_T_OBJECT, offsetof(buffered, raw), Py_READONLY},
     {"_finalizing", Py_T_BOOL, offsetof(buffered, finalizing), 0},
     {"__weaklistoffset__", Py_T_PYSSIZET, offsetof(buffered, weakreflist), Py_READONLY},
     {"__dictoffset__", Py_T_PYSSIZET, offsetof(buffered, dict), Py_READONLY},
@@ -2350,6 +2487,7 @@ static PyMemberDef bufferedrandom_members[] = {
 };
 
 static PyGetSetDef bufferedrandom_getset[] = {
+    {"raw", buffered_raw_get, NULL, NULL, NULL},
     _IO__BUFFERED_CLOSED_GETSETDEF
     _IO__BUFFERED_NAME_GETSETDEF
     _IO__BUFFERED_MODE_GETSETDEF

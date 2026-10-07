@@ -292,6 +292,9 @@ class CTestCase(unittest.TestCase):
     supports_buffer_size_zero = False
     # Is InterruptedError raised by the raw stream retried (PEP 475 style)?
     retries_raw_eintr = True
+    # Do views passed to the raw stream never alias data the buffered layer
+    # later reuses?
+    isolates_raw_views = False
 
     MockRawIO = CMockRawIO
     MisbehavedRawIO = CMisbehavedRawIO
@@ -313,6 +316,7 @@ class PyTestCase(unittest.TestCase):
     is_C = False
     supports_buffer_size_zero = False
     retries_raw_eintr = False
+    isolates_raw_views = False
 
     MockRawIO = PyMockRawIO
     MisbehavedRawIO = PyMisbehavedRawIO
@@ -344,6 +348,7 @@ class NibblerMixin:
     is_nibbler = True
     # Flip once _io._nibbler implements buffer_size=0.
     supports_buffer_size_zero = False
+    isolates_raw_views = True
 
     def setUp(self):
         super().setUp()
