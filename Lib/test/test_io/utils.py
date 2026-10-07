@@ -297,6 +297,11 @@ class CTestCase(unittest.TestCase):
     isolates_raw_views = False
     # Can writes be queued while another thread is in a raw write?
     queues_writes_during_io = False
+    # Does each readline() and readinto() take whole lines or records when
+    # threads read concurrently?  _io's readline() fast path reads the
+    # buffer without its lock while another thread's readline() or
+    # readinto() is between raw reads, splitting their data.
+    reads_are_atomic = False
 
     MockRawIO = CMockRawIO
     MisbehavedRawIO = CMisbehavedRawIO
@@ -320,6 +325,7 @@ class PyTestCase(unittest.TestCase):
     retries_raw_eintr = False
     isolates_raw_views = False
     queues_writes_during_io = False
+    reads_are_atomic = False
 
     MockRawIO = PyMockRawIO
     MisbehavedRawIO = PyMisbehavedRawIO
@@ -350,6 +356,7 @@ class NibblerMixin:
     """Route the buffered layer (self.* types and open()) to _io._nibbler."""
     isolates_raw_views = True
     queues_writes_during_io = True
+    reads_are_atomic = True
 
     def setUp(self):
         super().setUp()
