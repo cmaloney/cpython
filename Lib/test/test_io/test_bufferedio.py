@@ -981,6 +981,33 @@ class CBufferedWriterTest(BufferedWriterTest, SizeofTest, CTestCase):
         with self.assertRaisesRegex(TypeError, "BufferedWriter"):
             self.tp(self.BytesIO(), 1024, 1024, 1024)
 
+    @threading_helper.requires_working_threading()
+    def test_write_detach_race(self):
+        # write() waiting for the buffered lock while detach() ran used to
+        # use the cleared raw stream: a segfault.  Waiting for the lock
+        # releases the GIL, so this crashed GIL builds too.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        for _ in range(50):
+            bufio = self.tp(self.FileIO(os_helper.TESTFN, "w"), 64)
+            go = threading.Event()
+
+            def writer():
+                go.wait()
+                for i in range(500):
+                    try:
+                        bufio.write(b"x" * (i % 100))
+                    except ValueError:  # detached
+                        return
+
+            def detacher():
+                go.wait()
+                bufio.detach().close()
+
+            threads = [threading.Thread(target=func)
+                       for func in [writer] * 3 + [detacher]]
+            with threading_helper.start_threads(threads):
+                go.set()
+
     def test_non_boolean_closed_attr(self):
         # gh-140650: check TypeError is raised
         class MockRawIOWithoutClosed(self.MockRawIO):
