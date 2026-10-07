@@ -598,12 +598,14 @@ _io__Buffered_close_impl(buffered *self)
     /* flush() will most probably re-take the lock, so drop it first */
     LEAVE_BUFFERED(self)
     r = _PyFile_Flush((PyObject *)self);
-    if (!ENTER_BUFFERED(self)) {
-        return NULL;
-    }
     PyObject *exc = NULL;
     if (r < 0) {
         exc = PyErr_GetRaisedException();
+    }
+    if (!ENTER_BUFFERED(self)) {
+        /* E.g. detached meanwhile: keep the flush() error as context. */
+        _PyErr_ChainExceptions1(exc);
+        return NULL;
     }
 
     res = PyObject_CallMethodNoArgs(self->raw, &_Py_ID(close));
