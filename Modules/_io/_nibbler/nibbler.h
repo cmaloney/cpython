@@ -19,7 +19,7 @@
  * - The I/O role: the thread writing out the front of the queue with the
  *   lock released around its raw calls (io_owner, with the `inflight` bytes
  *   it was given).  Meanwhile other threads may only append; everything
- *   else waits for the role, parked on io_owner in the parking lot (see
+ *   else waits for the role, parked in the parking lot (see
  *   nibbler_wait_io()).
  *
  * The owner (bufferedio.c) does the raw I/O and decides what the data
@@ -60,8 +60,11 @@ typedef struct {
 typedef struct {
     PyMutex lock;
     uint64_t owner;
-    /* See the I/O role above; io_waiters: threads are parked on io_owner. */
+    /* See the I/O role above.  io_releases counts releases of the role:
+       waiters park on it, as io_owner may be the same thread again by the
+       time they park (ABA); io_waiters: threads are parked on it. */
     uint64_t io_owner;
+    uint64_t io_releases;
     Py_ssize_t inflight;
     uint8_t io_waiters;
 
@@ -170,10 +173,13 @@ nibbler_thread_gone(PyInterpreterState *interp, uint64_t id)
 static void
 nibbler_set_io_owner(nibbler *n, uint64_t id)
 {
-    _Py_atomic_store_uint64(&n->io_owner, id);
-    if (id == 0 && n->io_waiters) {
-        n->io_waiters = 0;
-        _PyParkingLot_UnparkAll(&n->io_owner);
+    _Py_atomic_store_uint64_relaxed(&n->io_owner, id);
+    if (id == 0) {
+        _Py_atomic_store_uint64(&n->io_releases, n->io_releases + 1);
+        if (n->io_waiters) {
+            n->io_waiters = 0;
+            _PyParkingLot_UnparkAll(&n->io_releases);
+        }
     }
 }
 
@@ -298,9 +304,10 @@ nibbler_wait_io(nibbler *n, PyObject *obj)
             nibbler_abandon_io(n);
             return 0;
         }
+        uint64_t seen = n->io_releases;
         n->io_waiters = 1;
         nibbler_unlock(n);
-        int r = _PyParkingLot_Park(&n->io_owner, &io, sizeof(io), -1,
+        int r = _PyParkingLot_Park(&n->io_releases, &seen, sizeof(seen), -1,
                                    NULL, 1);
         if (r == Py_PARK_INTR && PyErr_CheckSignals() < 0) {
             return -1;
