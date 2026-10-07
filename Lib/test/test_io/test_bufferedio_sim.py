@@ -991,6 +991,120 @@ class NibblerRandomOpsTest(NibblerMixin, RandomOpsTest, CTestCase):
     pass
 
 
+# --- Writing out without the lock ---------------------------------------------
+
+@threading_helper.requires_working_threading()
+class WriteOutTest:
+    """write() and flush() write out without holding the lock: other
+    threads can queue writes meanwhile, and nothing else interleaves."""
+
+    def setUp(self):
+        super().setUp()
+        if not self.queues_writes_during_io:
+            self.skipTest("the lock is held across raw writes")
+
+    def gated(self, buffer_size=16):
+        # A raw stream whose writes from `blocked_thread` wait for
+        # `release`, after setting `entered`.
+        test = self
+
+        class Raw(self.RawIOBase):
+            blocked_thread = None
+            on_write = None
+            entered = threading.Event()
+            release = threading.Event()
+            out = bytearray()
+
+            def writable(self):
+                return True
+
+            def seekable(self):
+                return True
+
+            def tell(self):
+                return len(self.out)
+
+            def seek(self, pos, whence=0):
+                return len(self.out)
+
+            def write(self, b):
+                if threading.current_thread() is self.blocked_thread:
+                    self.entered.set()
+                    test.assertTrue(self.release.wait(support.SHORT_TIMEOUT))
+                if self.on_write is not None:
+                    on_write, self.on_write = self.on_write, None
+                    on_write()
+                self.out += b
+                return len(b)
+
+        raw = Raw()
+        return self.BufferedWriter(raw, buffer_size), raw
+
+    def start_blocked_write(self, f, raw, data):
+        t = threading.Thread(target=f.write, args=(data,))
+        raw.blocked_thread = t
+        t.start()
+        self.assertTrue(raw.entered.wait(support.SHORT_TIMEOUT))
+        self.addCleanup(t.join)
+        self.addCleanup(raw.release.set)
+        return t
+
+    def test_write_while_other_thread_in_raw_write(self):
+        f, raw = self.gated()
+        t = self.start_blocked_write(f, raw, b"a" * 20)
+        f.write(b"bbbb")  # fits: queued without waiting
+        self.assertTrue(t.is_alive())
+        raw.release.set()
+        t.join()
+        f.flush()
+        self.assertEqual(bytes(raw.out), b"a" * 20 + b"bbbb")
+
+    def check_waits_for_write_out(self, op):
+        f, raw = self.gated()
+        t = self.start_blocked_write(f, raw, b"a" * 20)
+        f.write(b"bbbb")
+        results = []
+        other = threading.Thread(target=lambda: results.append(op(f)))
+        other.start()
+        raw.release.set()
+        t.join()
+        other.join()
+        return f, raw, results
+
+    def test_tell_waits_for_write_out(self):
+        f, raw, results = self.check_waits_for_write_out(
+            lambda f: f.tell())
+        self.assertEqual(results, [24])
+
+    def test_close_waits_for_write_out(self):
+        # Writes queued during the write out are written by close().
+        f, raw, results = self.check_waits_for_write_out(
+            lambda f: f.close())
+        self.assertTrue(f.closed)
+        self.assertEqual(bytes(raw.out), b"a" * 20 + b"bbbb")
+
+    def test_raw_write_calling_write(self):
+        f, raw = self.gated()
+        raw.on_write = lambda: f.write(b"c")
+        f.write(b"a" * 20)
+        f.flush()
+        self.assertEqual(bytes(raw.out), b"a" * 20 + b"c")
+
+    def test_raw_write_calling_flush(self):
+        f, raw = self.gated()
+        raw.on_write = f.flush
+        with self.assertRaisesRegex(RuntimeError, "reentrant"):
+            f.write(b"a" * 20)
+
+
+class CWriteOutTest(WriteOutTest, CTestCase):
+    pass
+
+
+class NibblerWriteOutTest(NibblerMixin, WriteOutTest, CTestCase):
+    pass
+
+
 # --- Locks that can never be released --------------------------------------
 
 # A raw stream whose calls named in GATED block forever when made from a

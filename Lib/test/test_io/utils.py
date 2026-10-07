@@ -295,6 +295,8 @@ class CTestCase(unittest.TestCase):
     # Do views passed to the raw stream never alias data the buffered layer
     # later reuses?
     isolates_raw_views = False
+    # Can writes be queued while another thread is in a raw write?
+    queues_writes_during_io = False
 
     MockRawIO = CMockRawIO
     MisbehavedRawIO = CMisbehavedRawIO
@@ -317,6 +319,7 @@ class PyTestCase(unittest.TestCase):
     supports_buffer_size_zero = False
     retries_raw_eintr = False
     isolates_raw_views = False
+    queues_writes_during_io = False
 
     MockRawIO = PyMockRawIO
     MisbehavedRawIO = PyMisbehavedRawIO
@@ -346,6 +349,7 @@ _NIBBLER_BUFFERED = {
 class NibblerMixin:
     """Route the buffered layer (self.* types and open()) to _io._nibbler."""
     isolates_raw_views = True
+    queues_writes_during_io = True
 
     def setUp(self):
         super().setUp()

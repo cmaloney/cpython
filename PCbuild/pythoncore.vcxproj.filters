@@ -270,6 +270,9 @@
     <ClInclude Include="..\Modules\_io\_iomodule.h">
       <Filter>Modules\_io</Filter>
     </ClInclude>
+    <ClInclude Include="..\Modules\_io\_nibbler\nibbler.h">
+      <Filter>Modules\_io</Filter>
+    </ClInclude>
     <ClInclude Include="..\Modules\cjkcodecs\alg_jisx0201.h">
       <Filter>Modules\cjkcodecs</Filter>
     </ClInclude>
