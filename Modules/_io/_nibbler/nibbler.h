@@ -395,7 +395,10 @@ nibbler_relock(nibbler *n, PyObject *obj)
 {
     PyThreadState *tstate = _PyThreadState_GET();
     if (!PyMutex_LockFast(&n->lock)) {
-        (void)nibbler_lock_wait(n, obj, tstate, 0);
+        /* Fails only on a reentrant call, which this thread just left. */
+        int r = nibbler_lock_wait(n, obj, tstate, 0);
+        assert(r == 0);
+        (void)r;
     }
     _Py_atomic_store_uint64_relaxed(&n->owner, tstate->id);
     nibbler_hold(n);

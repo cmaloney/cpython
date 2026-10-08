@@ -282,6 +282,31 @@ buffered_set_blocking_error(Py_ssize_t written)
  * Raw stream calls
  */
 
+/* With unlocked, release the lock around a raw call; take it again with
+   buffered_relock_after_raw(). */
+static inline void
+buffered_unlock_for_raw(buffered *self, int unlocked)
+{
+    if (unlocked) {
+        buffered_unlock(self);
+    }
+}
+
+/* Undo buffered_unlock_for_raw(), keeping errno and the raised exception
+   of the raw call.  A signal does not interrupt this (its handler runs
+   later). */
+static void
+buffered_relock_after_raw(buffered *self, int unlocked)
+{
+    if (unlocked) {
+        int errnum = errno;
+        PyObject *exc = PyErr_GetRaisedException();
+        nibbler_relock(&self->nib, (PyObject *)self);
+        PyErr_SetRaisedException(exc);
+        errno = errnum;
+    }
+}
+
 /* Convert the result of a raw readinto(), write() or _writev() of up to len
    bytes: the count, -2 for None ("would block"), or -1 on error. */
 static Py_ssize_t
@@ -365,6 +390,7 @@ buffered_raw_write(buffered *self, Py_ssize_t avail, const morsel *extra,
     Py_ssize_t cnt = nibbler_pieces(&self->nib, avail, pieces, limit, &total);
     if (extra->len > 0 && cnt < limit && total == avail) {
         pieces[cnt++] = *extra;
+        total += extra->len;
     }
     assert(cnt > 0);
 
@@ -376,16 +402,9 @@ buffered_raw_write(buffered *self, Py_ssize_t avail, const morsel *extra,
             spans[i] = (_PyIO_Span){pieces[i].ptr, pieces[i].len};
             Py_XINCREF(pieces[i].obj);
         }
-        if (unlocked) {
-            buffered_unlock(self);
-        }
+        buffered_unlock_for_raw(self, unlocked);
         Py_ssize_t n = _PyFileIO_writev(self->raw, spans, cnt);
-        if (unlocked) {
-            /* errno is reported by the BlockingIOError. */
-            int errnum = errno;
-            nibbler_relock(&self->nib, (PyObject *)self);
-            errno = errnum;
-        }
+        buffered_relock_after_raw(self, unlocked);
         for (Py_ssize_t i = 0; i < cnt; i++) {
             Py_XDECREF(pieces[i].obj);
         }
@@ -412,17 +431,11 @@ buffered_raw_write(buffered *self, Py_ssize_t avail, const morsel *extra,
     if (arg == NULL) {
         return -1;
     }
-    total = 0;
-    for (Py_ssize_t i = 0; i < cnt; i++) {
-        total += pieces[i].len;
-    }
     const char *method = cnt == 1 ? "write" : "_writev";
     PyObject *name = cnt == 1 ? &_Py_ID(write) : &_Py_ID(_writev);
     PyObject *res;
     int errnum;
-    if (unlocked) {
-        buffered_unlock(self);
-    }
+    buffered_unlock_for_raw(self, unlocked);
     do {
         errno = 0;
         res = PyObject_CallMethodOneArg(self->raw, name, arg);
@@ -430,13 +443,9 @@ buffered_raw_write(buffered *self, Py_ssize_t avail, const morsel *extra,
     } while (res == NULL && _PyIO_trap_eintr());
     Py_DECREF(arg);
     Py_ssize_t n = buffered_raw_result(res, total, method);
-    if (unlocked) {
-        PyObject *exc = PyErr_GetRaisedException();
-        nibbler_relock(&self->nib, (PyObject *)self);
-        PyErr_SetRaisedException(exc);
-    }
     /* Decrefs may have changed errno, which the BlockingIOError reports. */
     errno = errnum;
+    buffered_relock_after_raw(self, unlocked);
     return n;
 }
 
