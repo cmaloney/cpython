@@ -629,6 +629,27 @@ buffered_fill(buffered *self)
     return n;
 }
 
+/* After a raw read raised: data[0:len], taken from the read-ahead or read
+   for the failed call, ends at the raw position, so make it the read-ahead
+   again for the next read to return (gh-51571).  The raised exception is
+   kept. */
+static void
+buffered_unread(buffered *self, const char *data, Py_ssize_t len)
+{
+    if (len == 0) {
+        return;
+    }
+    PyObject *exc = PyErr_GetRaisedException();
+    PyObject *block = PyBytes_FromStringAndSize(data, len);
+    if (block == NULL || nibbler_publish(&self->nib, block, len) < 0) {
+        _PyErr_ChainExceptions1(exc);
+    }
+    else {
+        PyErr_SetRaisedException(exc);
+    }
+    Py_XDECREF(block);
+}
+
 /* Read up to len bytes into dst: read-ahead first, then from the raw
    stream until len bytes, EOF, or the raw stream would block.  A request
    of at least a buffer's worth is read directly into dst, smaller ones
@@ -663,6 +684,9 @@ buffered_read_into(buffered *self, char *dst, Py_ssize_t len, int read1)
         }
         if (n == 0 || (n == -2 && written > 0)) {
             break;
+        }
+        if (n == -1) {
+            buffered_unread(self, dst, written);
         }
         if (n < 0) {
             return n;
@@ -808,6 +832,10 @@ buffered_readline(buffered *self, Py_ssize_t limit)
         if (buffered_readahead(self) == 0) {
             Py_ssize_t r = buffered_fill(self);
             if (r == -1) {
+                if (writer != NULL) {
+                    buffered_unread(self, PyBytesWriter_GetData(writer),
+                                    PyBytesWriter_GetSize(writer));
+                }
                 goto error;
             }
             if (r <= 0) {

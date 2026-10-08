@@ -312,6 +312,9 @@ class CTestCase(unittest.TestCase):
     # Does write() called from code a raw write runs (as a signal handler
     # can) buffer data that doesn't fit instead of raising?  (gh-118143)
     buffers_reentrant_writes = False
+    # Do readline() and read(n) keep the data read before a raw read
+    # raises for the next read?  (gh-51571)
+    keeps_data_on_raw_error = False
 
     MockRawIO = CMockRawIO
     MisbehavedRawIO = CMisbehavedRawIO
@@ -340,6 +343,7 @@ class PyTestCase(unittest.TestCase):
     keeps_reads_on_append = True
     tells_append_position = False
     buffers_reentrant_writes = False
+    keeps_data_on_raw_error = False
 
     MockRawIO = PyMockRawIO
     MisbehavedRawIO = PyMisbehavedRawIO
@@ -375,6 +379,7 @@ class NibblerMixin:
     keeps_reads_on_append = True
     tells_append_position = True
     buffers_reentrant_writes = True
+    keeps_data_on_raw_error = True
 
     def setUp(self):
         super().setUp()

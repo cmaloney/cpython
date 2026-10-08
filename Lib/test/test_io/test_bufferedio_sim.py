@@ -401,6 +401,32 @@ class SlowDeviceTest:
         got += f.read()
         self.assertEqual(bytes(got), data)
 
+    def test_read_error_keeps_partial_data(self):
+        if not self.keeps_data_on_raw_error:
+            self.skipTest("data read before a raw error is lost")
+        # gh-51571: a raw error (such as a socket timeout) in the middle of
+        # a readline() or read(n) loses none of the data read before it.
+        data = b"abcdefghij\n" + b"klm\n"
+
+        def readinto(f):
+            b = bytearray(len(data))
+            return bytes(b[:f.readinto(b)])
+
+        reads = {
+            "readline": (lambda f: f.readline(), 11),
+            "read": (lambda f: f.read(len(data)), len(data)),
+            "readinto": (readinto, len(data)),
+        }
+        for name, (read, size) in reads.items():
+            # Through the read-ahead, then directly into the result.
+            for buffer_size in (64, 4):
+                with self.subTest(read=name, buffer_size=buffer_size):
+                    raw = self.scripted_reader(data, [8, TimeoutError()])
+                    f = self.BufferedReader(raw, buffer_size)
+                    self.assertRaises(TimeoutError, read, f)
+                    self.assertEqual(read(f), data[:size])
+                    self.assertEqual(f.read(), data[size:])
+
     # Writing
 
     def test_trickle_write(self):
