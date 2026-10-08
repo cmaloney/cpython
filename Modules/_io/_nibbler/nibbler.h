@@ -17,10 +17,9 @@
  *   deadlocking.
  *
  * - The I/O role: the thread writing out the front of the queue with the
- *   lock released around its raw calls (io_owner, with the `inflight` bytes
- *   it was given).  Meanwhile other threads may only append; everything
- *   else waits for the role, parked in the parking lot (see
- *   nibbler_wait_io()).
+ *   lock released around its raw calls (`io`, with the `inflight` bytes it
+ *   was given).  Meanwhile other threads may only append; everything else
+ *   waits for the role, parked in the parking lot (see nibbler_wait_io()).
  *
  * The owner (bufferedio.c) does the raw I/O and decides what the data
  * means.  Functions are called with the lock held unless their section or
@@ -62,14 +61,12 @@ typedef struct {
 typedef struct {
     PyMutex lock;
     uint64_t owner;
-    /* See the I/O role above.  io_releases counts releases of the role:
-       waiters park on it, as io_owner may be the same thread again by the
-       time they park (ABA).  io_waiters is set while threads are parked
-       on it. */
-    uint64_t io_owner;
-    uint64_t io_releases;
+    /* See the I/O role above.  `io` is 0 while nobody has the role, else
+       the holder's thread state id shifted left by one, with
+       NIBBLER_IO_PARKED set once a thread parked waiting for it.  Changed
+       only with the lock held; waiters park on it. */
+    uint64_t io;
     Py_ssize_t inflight;
-    uint8_t io_waiters;
 
     Py_ssize_t capacity;
     morsel_list list;
@@ -261,26 +258,48 @@ nibbler_thread_gone(PyInterpreterState *interp, uint64_t id)
     return !found;
 }
 
-static void
-nibbler_set_io_owner(nibbler *n, uint64_t id)
+/* Set in `io` by a thread parking until the role is released. */
+#define NIBBLER_IO_PARKED 1
+
+/* The thread state id of the I/O role holder, or 0. */
+static inline uint64_t
+nibbler_io_holder(nibbler *n)
 {
-    _Py_atomic_store_uint64_relaxed(&n->io_owner, id);
-    if (id == 0) {
-        _Py_atomic_store_uint64(&n->io_releases, n->io_releases + 1);
-        if (n->io_waiters) {
-            n->io_waiters = 0;
-            _PyParkingLot_UnparkAll(&n->io_releases);
-        }
+    return n->io >> 1;
+}
+
+/* Is another thread writing out?  Then only appending is allowed. */
+static inline int
+nibbler_io_busy(nibbler *n)
+{
+    return n->io != 0;
+}
+
+/* Take the I/O role, which must be free. */
+static void
+nibbler_begin_io(nibbler *n)
+{
+    assert(n->io == 0);
+    _Py_atomic_store_uint64(&n->io, _PyThreadState_GET()->id << 1);
+}
+
+/* Release the I/O role, waking the threads parked waiting for it. */
+static void
+nibbler_end_io(nibbler *n)
+{
+    n->inflight = 0;
+    if (_Py_atomic_exchange_uint64(&n->io, 0) & NIBBLER_IO_PARKED) {
+        _PyParkingLot_UnparkAll(&n->io);
     }
 }
 
-/* Give up on the data a gone thread was writing out. */
+/* Release the I/O role of a gone thread, giving up on the data it was
+   writing out. */
 static void
 nibbler_abandon_io(nibbler *n)
 {
     morsels_consume(&n->list, n->inflight);
-    n->inflight = 0;
-    nibbler_set_io_owner(n, 0);
+    nibbler_end_io(n);
 }
 
 static int
@@ -331,7 +350,7 @@ nibbler_lock_wait(nibbler *n, PyObject *obj, PyThreadState *tstate,
         if (_Py_atomic_compare_exchange_uint64(&n->owner, &owner,
                                                tstate->id))
         {
-            if (owner != 0 && n->io_owner == owner) {
+            if (owner != 0 && nibbler_io_holder(n) == owner) {
                 nibbler_abandon_io(n);
             }
             return 0;
@@ -376,33 +395,35 @@ nibbler_unlock(nibbler *n)
     PyMutex_Unlock(&n->lock);
 }
 
-/* Wait until no other thread has the I/O role, parked rather than holding
-   the lock.  A gone holder is taken over the same way as a gone lock
-   holder.  Returns 0 with the lock held, or -1 with it released. */
+/* Wait until the I/O role is free, parked rather than holding the lock.
+   A gone holder is taken over the same way as a gone lock holder.  Returns
+   0 with the lock held, or -1 with it released.
+
+   Parking expects `io` to still be the value with NIBBLER_IO_PARKED set
+   here.  Every release sets it to 0 and every take to a value without the
+   bit, so any release after it was set either makes parking return at once
+   or wakes the parked thread: none is missed, even when the same thread
+   takes the role again. */
 static int
 nibbler_wait_io(nibbler *n, PyObject *obj)
 {
     PyThreadState *tstate = _PyThreadState_GET();
-    for (;;) {
-        uint64_t io = n->io_owner;
-        if (io == 0) {
-            return 0;
-        }
-        if (io == tstate->id) {
+    while (nibbler_io_busy(n)) {
+        uint64_t holder = nibbler_io_holder(n);
+        if (holder == tstate->id) {
             nibbler_unlock(n);
             return nibbler_reentrant(obj);
         }
         if (_Py_IsInterpreterFinalizing(tstate->interp)
-            || nibbler_thread_gone(tstate->interp, io))
+            || nibbler_thread_gone(tstate->interp, holder))
         {
             nibbler_abandon_io(n);
-            return 0;
+            break;
         }
-        uint64_t seen = n->io_releases;
-        n->io_waiters = 1;
+        uint64_t io = n->io | NIBBLER_IO_PARKED;
+        _Py_atomic_store_uint64(&n->io, io);
         nibbler_unlock(n);
-        int r = _PyParkingLot_Park(&n->io_releases, &seen, sizeof(seen), -1,
-                                   NULL, 1);
+        int r = _PyParkingLot_Park(&n->io, &io, sizeof(io), -1, NULL, 1);
         if (r == Py_PARK_INTR && PyErr_CheckSignals() < 0) {
             return -1;
         }
@@ -410,28 +431,7 @@ nibbler_wait_io(nibbler *n, PyObject *obj)
             return -1;
         }
     }
-}
-
-/* Is another thread writing out?  Then only appending is allowed. */
-static inline int
-nibbler_io_busy(nibbler *n)
-{
-    return n->io_owner != 0;
-}
-
-/* Take the I/O role, which must be free. */
-static void
-nibbler_begin_io(nibbler *n)
-{
-    assert(n->io_owner == 0);
-    nibbler_set_io_owner(n, _PyThreadState_GET()->id);
-}
-
-static void
-nibbler_end_io(nibbler *n)
-{
-    n->inflight = 0;
-    nibbler_set_io_owner(n, 0);
+    return 0;
 }
 
 /* Fill pieces with up to limit morsels from the front, avail bytes at
