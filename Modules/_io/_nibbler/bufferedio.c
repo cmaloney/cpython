@@ -61,9 +61,11 @@ find_nibblermodule_state_by_def(PyTypeObject *type)
  * and most methods.
  *
  * Buffered data is held by a nibbler (see nibbler.h), which also does the
- * locking.  Data flows in one direction at a time:
+ * locking.  Data flows in one direction at a time, given by what is
+ * buffered (with nothing buffered, the direction doesn't matter):
  *
- * - Writing: the morsels are pending writes, oldest first.  write() and
+ * - Writing: the morsels are pending writes, oldest first, and there is no
+ *   read window.  write() and
  *   flush() write them out together (in one call when the raw stream has a
  *   vectored _writev() method) with the I/O role, without holding the
  *   lock; meanwhile other threads can only queue more writes.
@@ -94,8 +96,6 @@ typedef struct {
     uint8_t writable;
     uint8_t raw_fileio;
     uint8_t raw_vectored;
-    /* The nibbler holds pending writes rather than read-ahead. */
-    uint8_t writing;
     /* close() has run (also read without the lock, by __sizeof__()). */
     uint8_t released;
 
@@ -200,11 +200,20 @@ buffered_lock_ready(buffered *self)
     return 0;
 }
 
+/* Are there pending writes, or is another thread writing them out?  Then
+   there is no read window. */
+static inline int
+buffered_writing(buffered *self)
+{
+    assert(self->nib.window == NULL || nibbler_nbytes(&self->nib) == 0);
+    return nibbler_nbytes(&self->nib) > 0 || nibbler_io_busy(&self->nib);
+}
+
 /* The read window (read-ahead), or NULL when there is none. */
 static inline nibbler_window *
 buffered_window(buffered *self)
 {
-    return self->writing ? NULL : self->nib.window;
+    return self->nib.window;
 }
 
 /* How much read-ahead there is (other threads may take some without the
@@ -212,7 +221,7 @@ buffered_window(buffered *self)
 static inline Py_ssize_t
 buffered_readahead(buffered *self)
 {
-    return self->writing ? 0 : nibbler_unread(&self->nib);
+    return nibbler_unread(&self->nib);
 }
 
 /* Returns 1 if closed, 0 if open, -1 on error. */
@@ -473,8 +482,8 @@ buffered_position(buffered *self)
     if (pos == -1) {
         return NULL;
     }
-    pos += (self->writing ? nibbler_nbytes(&self->nib)
-                          : -buffered_readahead(self));
+    /* At most one of them is not 0. */
+    pos += nibbler_nbytes(&self->nib) - buffered_readahead(self);
     // GH-95782
     return PyLong_FromOff_t(pos < 0 ? 0 : pos);
 }
@@ -489,7 +498,7 @@ static int
 buffered_add_write(buffered *self, PyObject *obj, const char *data,
                    Py_ssize_t len)
 {
-    assert(self->writing);
+    assert(buffered_window(self) == NULL);
     return nibbler_append(&self->nib, obj, data, len, self->raw_vectored);
 }
 
@@ -541,7 +550,6 @@ done:
 static int
 buffered_flush_writes(buffered *self, int unlocked)
 {
-    assert(self->writing);
     int blocked;
     if (buffered_write_out(self, nibbler_nbytes(&self->nib), NULL, 0,
                            &blocked, unlocked) < 0)
@@ -572,19 +580,8 @@ buffered_rewind(buffered *self)
 static int
 buffered_sync(buffered *self)
 {
-    return self->writing ? buffered_flush_writes(self, 0)
-                         : buffered_rewind(self);
-}
-
-/* Switch between holding read-ahead and pending writes. */
-static int
-buffered_switch_direction(buffered *self)
-{
-    if (buffered_sync(self) < 0) {
-        return -1;
-    }
-    self->writing = !self->writing;
-    return 0;
+    return buffered_writing(self) ? buffered_flush_writes(self, 0)
+                                  : buffered_rewind(self);
 }
 
 /*
@@ -1220,9 +1217,7 @@ static int
 buffered_enter_locked(buffered *self, const char *closed_msg, int direction)
 {
     /* Only writes can go on while another thread writes out. */
-    if (!(direction == WRITING && self->writing)
-        && buffered_wait_io(self) < 0)
-    {
+    if (direction != WRITING && buffered_wait_io(self) < 0) {
         return -1;
     }
     if (!buffered_raw_usable(self->raw)) {
@@ -1234,8 +1229,15 @@ buffered_enter_locked(buffered *self, const char *closed_msg, int direction)
     if (check_closed && buffered_check_closed(self, closed_msg) < 0) {
         goto error;
     }
-    if (direction != KEEP_DIRECTION && self->writing != direction
-        && buffered_switch_direction(self) < 0)
+    /* Switch direction: hand back read-ahead before writing, write out
+       pending writes before reading. */
+    if (direction == WRITING && buffered_window(self) != NULL
+        && buffered_rewind(self) < 0)
+    {
+        goto error;
+    }
+    if (direction == READING && buffered_writing(self)
+        && buffered_flush_writes(self, 0) < 0)
     {
         goto error;
     }
@@ -1278,8 +1280,8 @@ _io__Buffered_flush_impl(buffered *self)
     if (buffered_enter(self, "flush of closed file", KEEP_DIRECTION) < 0) {
         return NULL;
     }
-    int r = self->writing ? buffered_flush_writes(self, 1)
-                          : buffered_rewind(self);
+    int r = buffered_writing(self) ? buffered_flush_writes(self, 1)
+                                   : buffered_rewind(self);
     buffered_unlock(self);
     if (r < 0) {
         return NULL;
@@ -1522,7 +1524,7 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
     }
     /* The read-ahead (all that is unread now) is given up. */
     Py_ssize_t unread = nibbler_close_window(&self->nib);
-    if (!self->writing || buffered_flush_writes(self, 0) == 0) {
+    if (!buffered_writing(self) || buffered_flush_writes(self, 0) == 0) {
         if (whence == SEEK_CUR) {
             target -= unread;
         }
@@ -1684,7 +1686,6 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
             && _PyType_Lookup(Py_TYPE(raw), &_Py_ID(_writev)) != NULL);
         nibbler_init(&self->nib, buffer_size);
         self->writable = (uint8_t)writable;
-        self->writing = (uint8_t)(writable && !readable);
         FT_ATOMIC_STORE_UINT8_RELAXED(self->released, 0);
     }
     PyObject *old = buffered_swap_raw(self, err == 0 ? Py_NewRef(raw) : NULL);
