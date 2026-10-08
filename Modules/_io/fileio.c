@@ -1139,6 +1139,12 @@ _PyFileIO_check_access(PyObject *op, int reading, int writing)
     return 0;
 }
 
+int
+_PyFileIO_appending(PyObject *op)
+{
+    return PyFileIO_CAST(op)->appending;
+}
+
 /* Is the method `name` shadowed by an instance attribute?  1, 0, or -1. */
 static int
 fileio_overridden(fileio *self, PyObject *name)

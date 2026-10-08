@@ -829,6 +829,30 @@ class PositionTest:
         with self.open(os_helper.TESTFN, "rb") as f:
             self.assertEqual(f.read(), b"testestAB")
 
+    def test_append_mode_tell_after_write(self):
+        if not self.tells_append_position:
+            self.skipTest("tell() counts appended writes from the position")
+        # gh-80592: a write to a raw file in append mode goes to the end of
+        # the file, so tell() is the end of the file after it.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        for mode in ("ab", "a+b"):
+            with self.subTest(mode=mode):
+                with self.open(os_helper.TESTFN, "wb") as f:
+                    f.write(b"abc")
+                with self.open(os_helper.TESTFN, mode) as f:
+                    self.assertEqual(f.tell(), 3)
+                    f.write(b"def")
+                    self.assertEqual(f.tell(), 6)
+                    self.assertEqual(f.seek(0), 0)
+                    self.assertEqual(f.tell(), 0)
+                    f.write(b"ghi")
+                    self.assertEqual(f.tell(), 9)
+                    f.write(b"jkl")
+                    self.assertEqual(f.tell(), 12)
+                    self.assertEqual(f.seek(0, 1), 12)
+                with self.open(os_helper.TESTFN, "rb") as f:
+                    self.assertEqual(f.read(), b"abcdefghijkl")
+
 
     @property
     def detached_errors(self):

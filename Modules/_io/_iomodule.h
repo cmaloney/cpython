@@ -77,6 +77,8 @@ extern PyObject *_PyFileIO_close(PyObject *self);
 /* Raise like _PyIOBase_check_readable()/_writable() unless the FileIO is
    open and allows the requested access. */
 extern int _PyFileIO_check_access(PyObject *self, int reading, int writing);
+/* Was the FileIO (or subclass) opened in append mode? */
+extern int _PyFileIO_appending(PyObject *self);
 
 /* Shortcut to the core of the IncrementalNewlineDecoder.decode method */
 extern PyObject *_PyIncrementalNewlineDecoder_decode(

@@ -306,6 +306,9 @@ class CTestCase(unittest.TestCase):
     # Does writing to a raw stream in append mode keep data read before
     # the write as it is in the file?  (gh-64281)
     keeps_reads_on_append = False
+    # Does tell() count writes to a raw file in append mode at the end of
+    # the file?  (gh-80592)
+    tells_append_position = False
 
     MockRawIO = CMockRawIO
     MisbehavedRawIO = CMisbehavedRawIO
@@ -332,6 +335,7 @@ class PyTestCase(unittest.TestCase):
     reads_are_atomic = False
     survives_reentrant_close = False
     keeps_reads_on_append = True
+    tells_append_position = False
 
     MockRawIO = PyMockRawIO
     MisbehavedRawIO = PyMisbehavedRawIO
@@ -365,6 +369,7 @@ class NibblerMixin:
     reads_are_atomic = True
     survives_reentrant_close = True
     keeps_reads_on_append = True
+    tells_append_position = True
 
     def setUp(self):
         super().setUp()

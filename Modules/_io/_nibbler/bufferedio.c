@@ -92,9 +92,12 @@ typedef struct {
     PyObject *raw;
     char finalizing;
     /* Fixed by __init__(): raw exactly FileIO (call its C implementation
-       directly), raw has a vectored _writev() method. */
+       directly), raw has a vectored _writev() method, raw is a FileIO
+       opened in append mode (it writes at the end, whatever the position;
+       only set for writers). */
     uint8_t raw_fileio;
     uint8_t raw_vectored;
+    uint8_t raw_appending;
 
     /* The buffered data and the lock.  Its capacity is the buffer size, or
        0 while uninitialized and once closed or detached (also read without
@@ -1474,7 +1477,15 @@ _io__Buffered_tell_impl(buffered *self)
     if (buffered_lock_ready(self) < 0) {
         return NULL;
     }
-    PyObject *res = buffered_position(self);
+    PyObject *res = NULL;
+    /* Pending writes to a raw stream in append mode go to the end of the
+       file: write them out, and the raw position is the logical one
+       (gh-80592). */
+    if (!self->raw_appending || nibbler_nbytes(&self->nib) == 0
+        || buffered_flush_writes(self, 0) == 0)
+    {
+        res = buffered_position(self);
+    }
     buffered_unlock(self);
     return res;
 }
@@ -1702,6 +1713,10 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
             writable
             && (raw_fileio || !PyObject_TypeCheck(raw, state->PyFileIO_Type))
             && _PyType_Lookup(Py_TYPE(raw), &_Py_ID(_writev)) != NULL);
+        self->raw_appending = (
+            writable
+            && PyObject_TypeCheck(raw, state->PyFileIO_Type)
+            && _PyFileIO_appending(raw));
     }
     PyObject *old = buffered_swap_raw(self, err == 0 ? Py_NewRef(raw) : NULL);
     buffered_unlock(self);
