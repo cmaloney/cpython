@@ -10,7 +10,8 @@
  * so a bytes object never changes once it was handed out.
  *
  * Threads coordinate with two things, both taken over (not waited for) when
- * their holder is gone, see nibbler_lock_wait():
+ * their holder is gone, see nibbler_lock_wait().  Threads waiting for either
+ * hold nothing, so only a gone holder ever needs taking over:
  *
  * - The lock guards all of the state.  Its owner (the id of the holding
  *   thread state) detects reentrant calls, which raise instead of
@@ -275,18 +276,31 @@ nibbler_io_busy(nibbler *n)
     return n->io != 0;
 }
 
+/* Is the lock held by this thread? */
+static inline int
+nibbler_lock_is_mine(nibbler *n)
+{
+    return (_Py_atomic_load_uint64_relaxed(&n->owner)
+            == _PyThreadState_GET()->id);
+}
+
 /* Take the I/O role, which must be free. */
 static void
 nibbler_begin_io(nibbler *n)
 {
+    uint64_t id = _PyThreadState_GET()->id;
+    assert(nibbler_lock_is_mine(n));
     assert(n->io == 0);
-    _Py_atomic_store_uint64(&n->io, _PyThreadState_GET()->id << 1);
+    /* Shifting left loses no bit. */
+    assert((id >> 63) == 0);
+    _Py_atomic_store_uint64(&n->io, id << 1);
 }
 
 /* Release the I/O role, waking the threads parked waiting for it. */
 static void
 nibbler_end_io(nibbler *n)
 {
+    assert(nibbler_lock_is_mine(n));
     n->inflight = 0;
     if (_Py_atomic_exchange_uint64(&n->io, 0) & NIBBLER_IO_PARKED) {
         _PyParkingLot_UnparkAll(&n->io);
@@ -420,6 +434,8 @@ nibbler_wait_io(nibbler *n, PyObject *obj)
             nibbler_abandon_io(n);
             break;
         }
+        /* `io` only changes with the lock held, which this thread has. */
+        assert(nibbler_lock_is_mine(n));
         uint64_t io = n->io | NIBBLER_IO_PARKED;
         _Py_atomic_store_uint64(&n->io, io);
         nibbler_unlock(n);
