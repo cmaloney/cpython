@@ -11,11 +11,9 @@
 #include "Python.h"
 #include "pycore_fileutils.h"           // _PyFile_Flush()
 #include "pycore_import.h"              // _PyImport_SetModuleString()
-#include "pycore_lock.h"                // PyMutex_LockFast()
 #include "pycore_object.h"              // _PyObject_GC_UNTRACK()
+#include "pycore_pyatomic_ft_wrappers.h" // FT_ATOMIC_LOAD_PTR()
 #include "pycore_pyerrors.h"            // _PyErr_ChainExceptions1()
-#include "pycore_pylifecycle.h"         // _Py_IsInterpreterFinalizing()
-#include "pycore_pystate.h"             // _Py_FOR_EACH_TSTATE_BEGIN()
 #include "pycore_weakref.h"             // FT_CLEAR_WEAKREFS()
 
 #include "_iomodule.h"
@@ -38,24 +36,24 @@ typedef struct {
     PyTypeObject *PyBufferedWriter_Type;
     PyTypeObject *PyBufferedRandom_Type;
     PyTypeObject *PyBufferedRWPair_Type;
-} nibbler_state;
+} nibblermodule_state;
 
 static struct PyModuleDef _PyIO_nibbler_Module;
 
-static inline nibbler_state *
-get_nibbler_state(PyObject *module)
+static inline nibblermodule_state *
+get_nibblermodule_state(PyObject *module)
 {
     void *state = _PyModule_GetState(module);
     assert(state != NULL);
-    return (nibbler_state *)state;
+    return (nibblermodule_state *)state;
 }
 
-static inline nibbler_state *
-find_nibbler_state_by_def(PyTypeObject *type)
+static inline nibblermodule_state *
+find_nibblermodule_state_by_def(PyTypeObject *type)
 {
     PyObject *mod = PyType_GetModuleByDef(type, &_PyIO_nibbler_Module);
     assert(mod != NULL);
-    return get_nibbler_state(mod);
+    return get_nibblermodule_state(mod);
 }
 
 /*
@@ -65,13 +63,15 @@ find_nibbler_state_by_def(PyTypeObject *type)
  * Buffered data is held by a nibbler (see nibbler.h), which also does the
  * locking.  Data flows in one direction at a time:
  *
- * - Writing: the morsels are pending writes, oldest first.  They are
- *   written together, in one call when the raw stream has a vectored
- *   _writev() method, by write() and flush() without holding the lock.
+ * - Writing: the morsels are pending writes, oldest first.  write() and
+ *   flush() write them out together (in one call when the raw stream has a
+ *   vectored _writev() method) with the I/O role, without holding the
+ *   lock; meanwhile other threads can only queue more writes.
  *
- * - Reading: there is at most one morsel, the bytes the last fill read.
- *   Its pointer is the read position: the bytes before it were returned
- *   already (seek() can move back over them), the rest are read-ahead.
+ * - Reading: the read window holds the bytes the last fill read (see "The
+ *   read window" in nibbler.h).  Its position splits them: the bytes before
+ *   it were returned already (seek() can move back over them), the rest are
+ *   read-ahead, which reads take without the lock when they can.
  *
  * BufferedRandom switches direction as needed: before writing it hands
  * unread read-ahead back to the raw stream (by seeking), and before reading
@@ -94,7 +94,7 @@ typedef struct {
     uint8_t writable;
     uint8_t raw_fileio;
     uint8_t raw_vectored;
-    /* buf holds pending writes rather than read-ahead. */
+    /* The nibbler holds pending writes rather than read-ahead. */
     uint8_t writing;
     /* close() has run (also read without the lock, by __sizeof__()). */
     uint8_t released;
@@ -335,7 +335,7 @@ buffered_view(const morsel *m)
 }
 
 /* One raw write of the pending writes followed by extra (a morsel of data
-   not yet in buf, or with len 0): as much as one vectored write takes when
+   not yet pending, or with len 0): as much as one vectored write takes when
    the raw stream has _writev(), else the first morsel.  Returns the count,
    -2 if the raw stream would block (errno set for the BlockingIOError), or
    -1 on error. */
@@ -686,7 +686,6 @@ buffered_read_bytes(buffered *self, Py_ssize_t n, int read1)
         avail = buffered_readahead(self);
     }
     nibbler_window *w = buffered_window(self);
-    avail = buffered_readahead(self);
     if (w != NULL && (read1 ? avail > 0 : avail >= n)) {
         /* All of it, or for read1(), what there is. */
         Py_ssize_t start;
@@ -821,9 +820,7 @@ buffered_readline(buffered *self, Py_ssize_t limit)
             }
         }
         nibbler_window *w = buffered_window(self);
-        if (w == NULL) {
-            continue;
-        }
+        assert(w != NULL);
         Py_ssize_t start;
         Py_ssize_t k = nibbler_take_line(&self->nib, limit, &start);
         int done = k >= 0;
@@ -1023,14 +1020,7 @@ static PyObject *
 _io__Buffered_simple_flush_impl(buffered *self)
 /*[clinic end generated code: output=29ebb3820db1bdfd input=f33ef045e7250767]*/
 {
-    /* Without the lock: call the method on the stream taken. */
-    PyObject *raw = buffered_get_raw(self);
-    if (raw == NULL) {
-        return NULL;
-    }
-    PyObject *res = PyObject_CallMethodNoArgs(raw, &_Py_ID(flush));
-    Py_DECREF(raw);
-    return res;
+    return buffered_raw_call(self, &_Py_ID(flush));
 }
 
 /*[clinic input]
@@ -1064,8 +1054,9 @@ _io__Buffered_close_impl(buffered *self)
         goto end;
     }
     if (self->finalizing) {
-        PyObject *w = _io__Buffered__dealloc_warn_impl(self, (PyObject *)self);
-        if (w) {
+        PyObject *w = _io__Buffered__dealloc_warn_impl(self,
+                                                       (PyObject *)self);
+        if (w != NULL) {
             Py_DECREF(w);
         }
         else {
@@ -1174,7 +1165,6 @@ _io__Buffered_writable_impl(buffered *self)
     return buffered_raw_call(self, &_Py_ID(writable));
 }
 
-
 /*[clinic input]
 @getter
 _io._Buffered.name
@@ -1267,7 +1257,7 @@ error:
    can still be used except by writes.  Reading from the read-ahead, the
    common case, needs none of the checks.  On success the caller must
    unlock. */
-static inline int
+static int
 buffered_enter(buffered *self, const char *closed_msg, int direction)
 {
     if (buffered_lock(self) < 0) {
@@ -1460,7 +1450,6 @@ _io__Buffered_readline_impl(buffered *self, Py_ssize_t size)
     return res;
 }
 
-
 /*[clinic input]
 _io._Buffered.tell
 [clinic start generated code]*/
@@ -1488,17 +1477,16 @@ static PyObject *
 _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
 /*[clinic end generated code: output=7ae0e8dc46efdefb input=a9c4920bfcba6163]*/
 {
-    /* Do some error checking instead of trusting OS 'seek()'
-    ** error detection, just in case.
-    */
-    if ((whence < 0 || whence > 2)
+    /* Do some error checking instead of trusting OS 'seek()' error
+       detection, just in case. */
+    int supported = whence >= 0 && whence <= 2;
 #ifdef SEEK_HOLE
-        && (whence != SEEK_HOLE)
+    supported = supported || whence == SEEK_HOLE;
 #endif
 #ifdef SEEK_DATA
-        && (whence != SEEK_DATA)
+    supported = supported || whence == SEEK_DATA;
 #endif
-        ) {
+    if (!supported) {
         PyErr_Format(PyExc_ValueError,
                      "whence value %d unsupported", whence);
         return NULL;
@@ -1589,7 +1577,7 @@ buffered_iternext(PyObject *op)
     }
     else {
         line = PyObject_CallMethodNoArgs((PyObject *)self,
-                                             &_Py_ID(readline));
+                                         &_Py_ID(readline));
         if (line && !PyBytes_Check(line)) {
             PyErr_Format(PyExc_OSError,
                          "readline() should have returned a bytes object, "
@@ -1648,8 +1636,6 @@ buffered_repr(PyObject *op)
     return res;
 }
 
-/* Shared constructor: check raw supports the needed operations, then set
-   the object up for it. */
 /* Check raw supports what the class needs (BufferedRandom: seeking too). */
 static int
 buffered_check_raw(_PyIO_State *state, PyObject *raw, int raw_fileio,
@@ -1672,6 +1658,8 @@ buffered_check_raw(_PyIO_State *state, PyObject *raw, int raw_fileio,
     return 0;
 }
 
+/* Shared constructor: check raw supports the needed operations, then set
+   the object up for it. */
 static int
 buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
               int readable, int writable)
@@ -1681,7 +1669,7 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
     int err = buffered_check_raw(state, raw, raw_fileio, readable, writable);
     if (err == 0 && buffer_size <= 0) {
         PyErr_SetString(PyExc_ValueError,
-            "buffer size must be strictly positive");
+                        "buffer size must be strictly positive");
         err = -1;
     }
 
@@ -1691,7 +1679,7 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
     }
     nibbler_free(&self->nib);
     if (err == 0) {
-        self->raw_fileio = (char)raw_fileio;
+        self->raw_fileio = (uint8_t)raw_fileio;
         /* Use _writev() only where it can't bypass an overridden write():
            on FileIO itself, or on raw types not derived from it. */
         self->raw_vectored = (
@@ -1699,8 +1687,8 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
             && (raw_fileio || !PyObject_TypeCheck(raw, state->PyFileIO_Type))
             && _PyType_Lookup(Py_TYPE(raw), &_Py_ID(_writev)) != NULL);
         nibbler_init(&self->nib, buffer_size);
-        self->writable = (char)writable;
-        self->writing = (char)(writable && !readable);
+        self->writable = (uint8_t)writable;
+        self->writing = (uint8_t)(writable && !readable);
         FT_ATOMIC_STORE_UINT8_RELAXED(self->released, 0);
     }
     PyObject *old = buffered_swap_raw(self, err == 0 ? Py_NewRef(raw) : NULL);
@@ -1894,7 +1882,8 @@ _io_BufferedRWPair___init___impl(rwpair *self, PyObject *reader,
 /*[clinic end generated code: output=327e73d1aee8f984 input=620d42d71f33a031]*/
 {
     _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
-    nibbler_state *nstate = find_nibbler_state_by_def(Py_TYPE(self));
+    nibblermodule_state *nstate =
+        find_nibblermodule_state_by_def(Py_TYPE(self));
     if (_PyIOBase_check_readable(state, reader, Py_True) == NULL) {
         return -1;
     }
@@ -1903,15 +1892,15 @@ _io_BufferedRWPair___init___impl(rwpair *self, PyObject *reader,
     }
 
     self->reader = (buffered *)PyObject_CallFunction(
-            (PyObject *)nstate->PyBufferedReader_Type,
-            "On", reader, buffer_size);
+        (PyObject *)nstate->PyBufferedReader_Type, "On", reader,
+        buffer_size);
     if (self->reader == NULL) {
         return -1;
     }
 
     self->writer = (buffered *)PyObject_CallFunction(
-            (PyObject *)nstate->PyBufferedWriter_Type,
-            "On", writer, buffer_size);
+        (PyObject *)nstate->PyBufferedWriter_Type, "On", writer,
+        buffer_size);
     if (self->writer == NULL) {
         Py_CLEAR(self->reader);
         return -1;
@@ -2135,16 +2124,15 @@ _io_BufferedRWPair_closed_get_impl(rwpair *self)
 /*[clinic end generated code: output=4117400c74766f21 input=8248430ac54e5b25]*/
 {
     if (self->writer == NULL) {
-        PyErr_SetString(PyExc_RuntimeError,
-                "the BufferedRWPair object is being garbage-collected");
+        PyErr_SetString(
+            PyExc_RuntimeError,
+            "the BufferedRWPair object is being garbage-collected");
         return NULL;
     }
     return PyObject_GetAttr((PyObject *)self->writer, &_Py_ID(closed));
 }
 
-
-
-#define clinic_state() (find_nibbler_state_by_def(Py_TYPE(self)))
+#define clinic_state() (find_nibblermodule_state_by_def(Py_TYPE(self)))
 #include "clinic/bufferedio.c.h"
 #undef clinic_state
 
@@ -2281,7 +2269,8 @@ static PyMethodDef bufferedrwpair_methods[] = {
 };
 
 static PyMemberDef bufferedrwpair_members[] = {
-    {"__weaklistoffset__", Py_T_PYSSIZET, offsetof(rwpair, weakreflist), Py_READONLY},
+    {"__weaklistoffset__", Py_T_PYSSIZET, offsetof(rwpair, weakreflist),
+     Py_READONLY},
     {"__dictoffset__", Py_T_PYSSIZET, offsetof(rwpair, dict), Py_READONLY},
     {NULL}
 };
@@ -2310,7 +2299,6 @@ static PyType_Spec nibbler_bufferedrwpair_spec = {
               Py_TPFLAGS_IMMUTABLETYPE),
     .slots = bufferedrwpair_slots,
 };
-
 
 static PyMethodDef bufferedrandom_methods[] = {
     /* BufferedIOMixin methods */
@@ -2364,7 +2352,6 @@ static PyType_Spec nibbler_bufferedrandom_spec = {
     .slots = bufferedrandom_slots,
 };
 
-
 /* Is tp exactly _io._nibbler.BufferedReader, BufferedWriter or
    BufferedRandom (not a subclass)?  Lets TextIOWrapper apply the same
    fast paths it uses for the _io buffered classes. */
@@ -2380,13 +2367,12 @@ _PyIO_is_nibbler_buffered_type(PyTypeObject *tp)
             token == &nibbler_bufferedrandom_spec);
 }
 
-
 /* _io._nibbler submodule: GC, definition, and runtime creation. */
 
 static int
 nibblermodule_traverse(PyObject *mod, visitproc visit, void *arg)
 {
-    nibbler_state *state = get_nibbler_state(mod);
+    nibblermodule_state *state = get_nibblermodule_state(mod);
     Py_VISIT(state->PyBufferedIOBase_Type);
     Py_VISIT(state->PyBufferedReader_Type);
     Py_VISIT(state->PyBufferedWriter_Type);
@@ -2398,7 +2384,7 @@ nibblermodule_traverse(PyObject *mod, visitproc visit, void *arg)
 static int
 nibblermodule_clear(PyObject *mod)
 {
-    nibbler_state *state = get_nibbler_state(mod);
+    nibblermodule_state *state = get_nibblermodule_state(mod);
     Py_CLEAR(state->PyBufferedIOBase_Type);
     Py_CLEAR(state->PyBufferedReader_Type);
     Py_CLEAR(state->PyBufferedWriter_Type);
@@ -2417,7 +2403,7 @@ static struct PyModuleDef _PyIO_nibbler_Module = {
     .m_base = PyModuleDef_HEAD_INIT,
     .m_name = "_io._nibbler",
     .m_doc = "Buffered I/O classes mirroring _io, as an _io submodule.",
-    .m_size = sizeof(nibbler_state),
+    .m_size = sizeof(nibblermodule_state),
     .m_traverse = nibblermodule_traverse,
     .m_clear = nibblermodule_clear,
     .m_free = nibblermodule_free,
@@ -2460,7 +2446,7 @@ _PyIO_create_nibbler_submodule(PyObject *io_module, int as_io)
     if (mod == NULL) {
         return NULL;
     }
-    nibbler_state *state = get_nibbler_state(mod);
+    nibblermodule_state *state = get_nibblermodule_state(mod);
 
     const char *prefix = as_io ? "_io." : "_io._nibbler.";
     PyTypeObject *base = io_state->PyBufferedIOBase_Type;

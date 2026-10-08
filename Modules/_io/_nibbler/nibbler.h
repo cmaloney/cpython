@@ -23,8 +23,9 @@
  *   nibbler_wait_io()).
  *
  * The owner (bufferedio.c) does the raw I/O and decides what the data
- * means; all nibbler functions except nibbler_lock() are called with the
- * lock held.  Included only by bufferedio.c.
+ * means.  Functions are called with the lock held unless their section or
+ * their comment says otherwise (locking itself, and reading the window).
+ * Included only by bufferedio.c.
  */
 
 #ifndef Py_IO_NIBBLER_NIBBLER_H
@@ -38,11 +39,9 @@
 #include "pycore_pylifecycle.h"         // _Py_IsInterpreterFinalizing()
 #include "pycore_pystate.h"             // _Py_FOR_EACH_TSTATE_BEGIN()
 
-enum {
-    /* Exact bytes appended at least this large are kept by reference
-       instead of being copied, when the owner asks for it. */
-    NIBBLER_REF_MIN = 512,
-};
+/* Exact bytes appended at least this large are kept by reference instead
+   of being copied, when the owner asks for it. */
+#define NIBBLER_REF_MIN 512
 
 /* A run of bytes inside the bytes object obj, which keeps them alive.  obj
    is NULL only for data borrowed for the duration of a call. */
@@ -65,7 +64,8 @@ typedef struct {
     uint64_t owner;
     /* See the I/O role above.  io_releases counts releases of the role:
        waiters park on it, as io_owner may be the same thread again by the
-       time they park (ABA); io_waiters: threads are parked on it. */
+       time they park (ABA).  io_waiters is set while threads are parked
+       on it. */
     uint64_t io_owner;
     uint64_t io_releases;
     Py_ssize_t inflight;
@@ -81,7 +81,6 @@ typedef struct {
     Py_ssize_t held;
     uint8_t holding;
 } nibbler;
-
 
 /*
  * Morsel lists
@@ -157,7 +156,6 @@ morsels_consume(morsel_list *list, Py_ssize_t n)
     return taken;
 }
 
-
 /*
  * The read window
  *
@@ -212,6 +210,7 @@ nibbler_hold(nibbler *n)
     if (w != NULL && !n->holding) {
         Py_ssize_t c = FT_ATOMIC_LOAD_SSIZE_RELAXED(w->cursor);
         while (c >= 0 && !nibbler_cursor_cas(w, &c, NIBBLER_HELD)) {
+            /* retry */
         }
         assert(c >= 0);
         n->held = c;
@@ -228,7 +227,6 @@ nibbler_open(nibbler *n)
         FT_ATOMIC_STORE_SSIZE_RELEASE(n->window->cursor, n->held);
     }
 }
-
 
 /*
  * Locking and the I/O role
@@ -452,7 +450,6 @@ nibbler_written(nibbler *n, Py_ssize_t written)
     return k;
 }
 
-
 /*
  * Data
  */
@@ -548,11 +545,11 @@ nibbler_fill_block(nibbler *n)
     return Py_XNewRef(nibbler_fresh_block(n));
 }
 
-
 /*
  * Reading the window (see above)
  */
 
+/* Without the lock: the window, or NULL. */
 static inline nibbler_window *
 nibbler_window_get(nibbler *n)
 {
@@ -593,7 +590,13 @@ nibbler_line_length(const char *base, Py_ssize_t c, Py_ssize_t end,
         n = limit;
     }
     const char *nl = memchr(base + c, '\n', n);
-    return nl != NULL ? nl - (base + c) + 1 : n == limit ? n : -1;
+    if (nl != NULL) {
+        return nl - (base + c) + 1;
+    }
+    if (n == limit) {
+        return n;
+    }
+    return -1;
 }
 
 /* Without the lock: claim the line at the cursor of w, like
