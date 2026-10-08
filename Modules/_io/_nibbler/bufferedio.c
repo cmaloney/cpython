@@ -196,21 +196,6 @@ buffered_swap_raw(buffered *self, PyObject *raw)
     return _Py_atomic_exchange_ptr(&self->raw, raw);
 }
 
-/* Lock the object and check it is initialized and attached.  On success
-   the caller must unlock. */
-static int
-buffered_lock_ready(buffered *self)
-{
-    if (buffered_lock(self) < 0 || buffered_wait_io(self) < 0) {
-        return -1;
-    }
-    if (!buffered_raw_usable(self->raw)) {
-        buffered_unlock(self);
-        return buffered_not_ready();
-    }
-    return 0;
-}
-
 /* Are there pending writes, or is another thread writing them out?  Then
    there is no read window. */
 static inline int
@@ -596,11 +581,12 @@ buffered_rewind(buffered *self)
 }
 
 /* Bring the raw stream to the logical position: write out pending writes
-   or hand back read-ahead. */
+   (with unlocked, as buffered_flush_writes() does) or hand back
+   read-ahead. */
 static int
-buffered_sync(buffered *self)
+buffered_sync(buffered *self, int unlocked)
 {
-    return buffered_writing(self) ? buffered_flush_writes(self, 0)
+    return buffered_writing(self) ? buffered_flush_writes(self, unlocked)
                                   : buffered_rewind(self);
 }
 
@@ -875,6 +861,83 @@ error:
 }
 
 /*
+ * Entering methods
+ */
+
+enum {
+    KEEP_DIRECTION = -1,
+    READING = 0,
+    WRITING = 1,
+};
+
+/* The rest of buffered_enter(), with the lock held. */
+static int
+buffered_enter_locked(buffered *self, const char *closed_msg, int direction)
+{
+    /* Only writes can go on while another thread writes out. */
+    if (direction != WRITING && buffered_wait_io(self) < 0) {
+        return -1;
+    }
+    if (!buffered_raw_usable(self->raw)) {
+        buffered_unlock(self);
+        return buffered_not_ready();
+    }
+    /* Reading what is already buffered works after close(). */
+    int check_closed = (closed_msg != NULL
+                        && (direction == WRITING
+                            || buffered_readahead(self) == 0));
+    if (check_closed && buffered_check_closed(self, closed_msg) < 0) {
+        goto error;
+    }
+    /* Switch direction: hand back read-ahead before writing, write out
+       pending writes before reading. */
+    if (direction == WRITING && buffered_window(self) != NULL
+        && buffered_rewind(self) < 0)
+    {
+        goto error;
+    }
+    if (direction == READING && buffered_writing(self)
+        && buffered_flush_writes(self, 0) < 0)
+    {
+        goto error;
+    }
+    return 0;
+
+error:
+    buffered_unlock(self);
+    return -1;
+}
+
+/* Common start of the I/O methods: lock the object, check it is
+   initialized and open (unless closed_msg is NULL), and make it buffer in
+   the given direction (unless KEEP_DIRECTION).  Closed is checked with the
+   lock held since another thread could be holding it while closing the
+   file (issue #31976); leftover read-ahead can still be used except by
+   writes.  Reading from the read-ahead, the common case, needs none of the
+   checks.  On success the caller must unlock. */
+static inline int
+buffered_enter(buffered *self, const char *closed_msg, int direction)
+{
+    if (buffered_lock(self) < 0) {
+        return -1;
+    }
+    if (direction == READING && buffered_readahead(self) > 0
+        && buffered_raw_usable(self->raw))
+    {
+        return 0;
+    }
+    return buffered_enter_locked(self, closed_msg, direction);
+}
+
+/* Lock the object and check it is initialized and attached.  On success
+   the caller must unlock. */
+static int
+buffered_lock_ready(buffered *self)
+{
+    return buffered_enter(self, NULL, KEEP_DIRECTION);
+}
+
+/*
  * Methods
  */
 
@@ -1005,7 +1068,7 @@ buffered_raw_flush(buffered *self)
 static int
 buffered_flush_locked(buffered *self)
 {
-    return (buffered_writable(self) ? buffered_sync(self)
+    return (buffered_writable(self) ? buffered_sync(self, 0)
                                     : buffered_raw_flush(self));
 }
 
@@ -1136,7 +1199,7 @@ _io__Buffered_detach_impl(buffered *self)
         return NULL;
     }
     /* Also write out what other threads wrote since flush(). */
-    if (buffered_writable(self) && buffered_sync(self) < 0) {
+    if (buffered_writable(self) && buffered_sync(self, 0) < 0) {
         buffered_unlock(self);
         return NULL;
     }
@@ -1230,69 +1293,6 @@ _io__Buffered_isatty_impl(buffered *self)
     return buffered_raw_call(self, &_Py_ID(isatty));
 }
 
-enum {
-    KEEP_DIRECTION = -1,
-    READING = 0,
-    WRITING = 1,
-};
-
-/* The rest of buffered_enter(), with the lock held. */
-static int
-buffered_enter_locked(buffered *self, const char *closed_msg, int direction)
-{
-    /* Only writes can go on while another thread writes out. */
-    if (direction != WRITING && buffered_wait_io(self) < 0) {
-        return -1;
-    }
-    if (!buffered_raw_usable(self->raw)) {
-        buffered_unlock(self);
-        return buffered_not_ready();
-    }
-    /* Reading what is already buffered works after close(). */
-    int check_closed = direction == WRITING || buffered_readahead(self) == 0;
-    if (check_closed && buffered_check_closed(self, closed_msg) < 0) {
-        goto error;
-    }
-    /* Switch direction: hand back read-ahead before writing, write out
-       pending writes before reading. */
-    if (direction == WRITING && buffered_window(self) != NULL
-        && buffered_rewind(self) < 0)
-    {
-        goto error;
-    }
-    if (direction == READING && buffered_writing(self)
-        && buffered_flush_writes(self, 0) < 0)
-    {
-        goto error;
-    }
-    return 0;
-
-error:
-    buffered_unlock(self);
-    return -1;
-}
-
-/* Common start of the I/O methods: lock the object, check it is
-   initialized and open, and make it buffer in the given direction.
-   Closed is checked with the lock held since another thread could be
-   holding it while closing the file (issue #31976); leftover read-ahead
-   can still be used except by writes.  Reading from the read-ahead, the
-   common case, needs none of the checks.  On success the caller must
-   unlock. */
-static inline int
-buffered_enter(buffered *self, const char *closed_msg, int direction)
-{
-    if (buffered_lock(self) < 0) {
-        return -1;
-    }
-    if (direction == READING && buffered_readahead(self) > 0
-        && buffered_raw_usable(self->raw))
-    {
-        return 0;
-    }
-    return buffered_enter_locked(self, closed_msg, direction);
-}
-
 /*[clinic input]
 _io._Buffered.flush
 [clinic start generated code]*/
@@ -1304,8 +1304,7 @@ _io__Buffered_flush_impl(buffered *self)
     if (buffered_enter(self, "flush of closed file", KEEP_DIRECTION) < 0) {
         return NULL;
     }
-    int r = buffered_writing(self) ? buffered_flush_writes(self, 1)
-                                   : buffered_rewind(self);
+    int r = buffered_sync(self, 1);
     buffered_unlock(self);
     if (r < 0) {
         return NULL;
@@ -1581,7 +1580,7 @@ _io__Buffered_truncate_impl(buffered *self, PyTypeObject *cls, PyObject *pos)
         _PyIO_State *state = find_io_state_by_def(cls);
         PyErr_SetString(state->unsupported_operation, "truncate");
     }
-    else if (buffered_sync(self) == 0) {
+    else if (buffered_sync(self, 0) == 0) {
         res = PyObject_CallMethodOneArg(self->raw, &_Py_ID(truncate), pos);
     }
     buffered_unlock(self);
