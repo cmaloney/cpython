@@ -91,9 +91,8 @@ typedef struct {
        with the lock held. */
     PyObject *raw;
     char finalizing;
-    /* Fixed by __init__(): writable, raw exactly FileIO (call its C
-       implementation directly), raw has a vectored _writev() method. */
-    uint8_t writable;
+    /* Fixed by __init__(): raw exactly FileIO (call its C implementation
+       directly), raw has a vectored _writev() method. */
     uint8_t raw_fileio;
     uint8_t raw_vectored;
 
@@ -110,6 +109,18 @@ static inline buffered *
 buffered_cast(PyObject *op)
 {
     return (buffered *)op;
+}
+
+static PyType_Spec nibbler_bufferedreader_spec;
+static PyType_Spec nibbler_bufferedwriter_spec;
+static PyType_Spec nibbler_bufferedrandom_spec;
+
+/* Can it write: anything but a BufferedReader (or subclass)? */
+static int
+buffered_writable(buffered *self)
+{
+    return !PyType_GetBaseByToken(Py_TYPE(self),
+                                  &nibbler_bufferedreader_spec, NULL);
 }
 
 static inline int
@@ -985,7 +996,8 @@ buffered_raw_flush(buffered *self)
 static int
 buffered_flush_locked(buffered *self)
 {
-    return self->writable ? buffered_sync(self) : buffered_raw_flush(self);
+    return (buffered_writable(self) ? buffered_sync(self)
+                                    : buffered_raw_flush(self));
 }
 
 /* Is self.flush() ours: an exact class of ours, not shadowed in the
@@ -1115,7 +1127,7 @@ _io__Buffered_detach_impl(buffered *self)
         return NULL;
     }
     /* Also write out what other threads wrote since flush(). */
-    if (self->writable && buffered_sync(self) < 0) {
+    if (buffered_writable(self) && buffered_sync(self) < 0) {
         buffered_unlock(self);
         return NULL;
     }
@@ -1556,7 +1568,7 @@ _io__Buffered_truncate_impl(buffered *self, PyTypeObject *cls, PyObject *pos)
         return NULL;
     }
     PyObject *res = NULL;
-    if (!self->writable) {
+    if (!buffered_writable(self)) {
         _PyIO_State *state = find_io_state_by_def(cls);
         PyErr_SetString(state->unsupported_operation, "truncate");
     }
@@ -1683,12 +1695,12 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
     if (err == 0) {
         self->raw_fileio = (uint8_t)raw_fileio;
         /* Use _writev() only where it can't bypass an overridden write():
-           on FileIO itself, or on raw types not derived from it. */
+           on FileIO itself, or on raw types not derived from it.  (Readers
+           skip the lookups.) */
         self->raw_vectored = (
             writable
             && (raw_fileio || !PyObject_TypeCheck(raw, state->PyFileIO_Type))
             && _PyType_Lookup(Py_TYPE(raw), &_Py_ID(_writev)) != NULL);
-        self->writable = (uint8_t)writable;
     }
     PyObject *old = buffered_swap_raw(self, err == 0 ? Py_NewRef(raw) : NULL);
     buffered_unlock(self);
@@ -2136,10 +2148,6 @@ _io_BufferedRWPair_closed_get_impl(rwpair *self)
 #define clinic_state() (find_nibblermodule_state_by_def(Py_TYPE(self)))
 #include "clinic/bufferedio.c.h"
 #undef clinic_state
-
-static PyType_Spec nibbler_bufferedreader_spec;
-static PyType_Spec nibbler_bufferedwriter_spec;
-static PyType_Spec nibbler_bufferedrandom_spec;
 
 static PyMethodDef bufferedreader_methods[] = {
     /* BufferedIOMixin methods */
