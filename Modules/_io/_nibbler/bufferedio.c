@@ -1776,8 +1776,11 @@ _io_BufferedWriter___init___impl(buffered *self, PyObject *raw,
 
 /* The body of write(), with the lock held: buffer the data after *done
    (the bytes of it written out so far), writing out what is pending first
-   when it doesn't fit.  Returns 0, -1 on error, or BUFFERED_WRITE_RETRY;
-   the lock stays held. */
+   when it doesn't fit.  Called from code that the raw write of this
+   thread's write out runs (such as a signal handler), it buffers all of
+   the data, past the capacity if need be: the write out or the next flush
+   writes it.  Returns 0, -1 on error, or BUFFERED_WRITE_RETRY; the lock
+   stays held. */
 static int
 buffered_write_locked(buffered *self, Py_buffer *buffer, Py_ssize_t *done)
 {
@@ -1789,6 +1792,11 @@ buffered_write_locked(buffered *self, Py_buffer *buffer, Py_ssize_t *done)
            || nibbler_nbytes(&self->nib) + (len - *done) > self->nib.capacity)
     {
         if (nibbler_io_busy(&self->nib)) {
+            if (nibbler_io_is_mine(&self->nib)) {
+                /* gh-118143 */
+                return nibbler_append_copy(&self->nib, data + *done,
+                                           len - *done);
+            }
             return BUFFERED_WRITE_RETRY;
         }
         /* Write out what is pending, and the rest of data with it when one

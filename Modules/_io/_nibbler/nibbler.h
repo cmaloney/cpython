@@ -282,6 +282,13 @@ nibbler_io_busy(nibbler *n)
     return n->io != 0;
 }
 
+/* Is this thread writing out? */
+static inline int
+nibbler_io_is_mine(nibbler *n)
+{
+    return nibbler_io_holder(n) == _PyThreadState_GET()->id;
+}
+
 /* Is the lock held by this thread? */
 static inline int
 nibbler_lock_is_mine(nibbler *n)
@@ -789,6 +796,20 @@ nibbler_append(nibbler *n, PyObject *obj, const char *data, Py_ssize_t len,
     char *dst = PyBytes_AS_STRING(n->block) + used;
     memcpy(dst, data, len);
     return morsels_push(&n->list, n->block, dst, len);
+}
+
+/* Append a copy of data[0:len] in a bytes object of its own, past the
+   capacity if need be. */
+static int
+nibbler_append_copy(nibbler *n, const char *data, Py_ssize_t len)
+{
+    PyObject *obj = PyBytes_FromStringAndSize(data, len);
+    if (obj == NULL) {
+        return -1;
+    }
+    int r = morsels_push(&n->list, obj, PyBytes_AS_STRING(obj), len);
+    Py_DECREF(obj);
+    return r;
 }
 
 #endif  // !Py_IO_NIBBLER_NIBBLER_H

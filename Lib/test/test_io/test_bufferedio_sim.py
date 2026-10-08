@@ -1135,6 +1135,26 @@ class WriteOutTest:
         f.flush()
         self.assertEqual(bytes(raw.out), b"a" * 20 + b"c")
 
+    def test_raw_write_calling_large_write(self):
+        if not self.buffers_reentrant_writes:
+            self.skipTest("raises RuntimeError")
+        # gh-118143: a signal handler printing while the raw write it
+        # interrupted runs, with more than the buffer holds.  The data is
+        # kept for the write out, or the next flush, to write.
+        for op in ("write", "flush"):
+            with self.subTest(op=op):
+                f, raw = self.gated()
+                raw.on_write = lambda: f.write(b"c" * 40)
+                if op == "write":
+                    f.write(b"a" * 20)
+                else:
+                    f.write(b"a" * 10)
+                    f.flush()
+                f.flush()
+                self.assertEqual(bytes(raw.out),
+                                 b"a" * (20 if op == "write" else 10)
+                                 + b"c" * 40)
+
     def test_raw_write_calling_flush(self):
         f, raw = self.gated()
         raw.on_write = f.flush

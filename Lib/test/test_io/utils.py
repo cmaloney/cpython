@@ -309,6 +309,9 @@ class CTestCase(unittest.TestCase):
     # Does tell() count writes to a raw file in append mode at the end of
     # the file?  (gh-80592)
     tells_append_position = False
+    # Does write() called from code a raw write runs (as a signal handler
+    # can) buffer data that doesn't fit instead of raising?  (gh-118143)
+    buffers_reentrant_writes = False
 
     MockRawIO = CMockRawIO
     MisbehavedRawIO = CMisbehavedRawIO
@@ -336,6 +339,7 @@ class PyTestCase(unittest.TestCase):
     survives_reentrant_close = False
     keeps_reads_on_append = True
     tells_append_position = False
+    buffers_reentrant_writes = False
 
     MockRawIO = PyMockRawIO
     MisbehavedRawIO = PyMisbehavedRawIO
@@ -370,6 +374,7 @@ class NibblerMixin:
     survives_reentrant_close = True
     keeps_reads_on_append = True
     tells_append_position = True
+    buffers_reentrant_writes = True
 
     def setUp(self):
         super().setUp()
