@@ -893,8 +893,9 @@ enum {
     WRITING = 1,
 };
 
-/* The rest of buffered_enter(), with the lock held. */
-static int
+/* The rest of buffered_enter(), with the lock held.  Kept out of line so
+   that buffered_enter() stays small enough to be inlined. */
+Py_NO_INLINE static int
 buffered_enter_locked(buffered *self, const char *closed_msg, int direction)
 {
     /* Only writes can go on while another thread writes out. */
@@ -936,8 +937,9 @@ error:
    the given direction (unless KEEP_DIRECTION).  Closed is checked with the
    lock held since another thread could be holding it while closing the
    file (issue #31976); leftover read-ahead can still be used except by
-   writes.  Reading from the read-ahead, the common case, needs none of the
-   checks.  On success the caller must unlock. */
+   writes.  The common cases need only quick checks: reading from the
+   read-ahead, and writing to an open FileIO without read-ahead to hand
+   back.  On success the caller must unlock. */
 static inline int
 buffered_enter(buffered *self, const char *closed_msg, int direction)
 {
@@ -946,6 +948,12 @@ buffered_enter(buffered *self, const char *closed_msg, int direction)
     }
     if (direction == READING && buffered_readahead(self) > 0
         && buffered_raw_usable(self->raw))
+    {
+        return 0;
+    }
+    if (direction == WRITING && self->raw_fileio
+        && buffered_window(self) == NULL && buffered_raw_usable(self->raw)
+        && self->nib.capacity > 0 && !_PyFileIO_closed(self->raw))
     {
         return 0;
     }
