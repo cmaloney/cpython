@@ -82,8 +82,8 @@ find_nibblermodule_state_by_def(PyTypeObject *type)
 typedef struct {
     PyObject_HEAD
 
-    /* NULL until initialized, None after detach().  Only replaced with the
-       lock held (and from GC clear and dealloc): code holding the lock uses
+    /* NULL while uninitialized or detached.  Only replaced with the lock
+       held (and from GC clear and dealloc): code holding the lock uses
        it directly, code without takes a reference with buffered_get_raw().
        Everything below is set by __init__() and, unless noted, changed only
        with the lock held. */
@@ -132,24 +132,22 @@ buffered_wait_io(buffered *self)
             ? nibbler_wait_io(&self->nib, (PyObject *)self) : 0);
 }
 
-/* raw is set and not detached. */
+/* raw is set: initialized and not detached. */
 static inline int
 buffered_raw_usable(PyObject *raw)
 {
-    return raw != NULL && raw != Py_None;
+    return raw != NULL;
 }
 
 static int
-buffered_not_ready(buffered *self)
+buffered_not_ready(void)
 {
     PyErr_SetString(PyExc_ValueError,
-                    FT_ATOMIC_LOAD_PTR(self->raw) == Py_None
-                    ? "raw stream has been detached"
-                    : "I/O operation on uninitialized object");
+                    "I/O operation on uninitialized or detached object");
     return -1;
 }
 
-/* A new reference to raw (NULL or None when uninitialized or detached).
+/* A new reference to raw (NULL when uninitialized or detached).
    Needs no lock: a concurrent detach() leaves the caller using the stream
    it took. */
 static inline PyObject *
@@ -168,9 +166,7 @@ buffered_get_raw(buffered *self)
 {
     PyObject *raw = buffered_ref_raw(self);
     if (!buffered_raw_usable(raw)) {
-        Py_XDECREF(raw);
-        buffered_not_ready(self);
-        return NULL;
+        buffered_not_ready();
     }
     return raw;
 }
@@ -199,7 +195,7 @@ buffered_lock_ready(buffered *self)
     }
     if (!buffered_raw_usable(self->raw)) {
         buffered_unlock(self);
-        return buffered_not_ready(self);
+        return buffered_not_ready();
     }
     return 0;
 }
@@ -1113,7 +1109,7 @@ _io__Buffered_detach_impl(buffered *self)
     /* flush() takes the lock itself.  Calls racing with detach() may run
        on either side of it; the lock keeps the buffers consistent. */
     if (!buffered_raw_usable(FT_ATOMIC_LOAD_PTR(self->raw))) {
-        buffered_not_ready(self);
+        buffered_not_ready();
         return NULL;
     }
     if (_PyFile_Flush((PyObject *)self) < 0 || buffered_lock_ready(self) < 0) {
@@ -1124,7 +1120,7 @@ _io__Buffered_detach_impl(buffered *self)
         buffered_unlock(self);
         return NULL;
     }
-    PyObject *raw = buffered_swap_raw(self, Py_None);
+    PyObject *raw = buffered_swap_raw(self, NULL);
     nibbler_free(&self->nib);
     buffered_unlock(self);
     return raw;
@@ -1231,7 +1227,7 @@ buffered_enter_locked(buffered *self, const char *closed_msg, int direction)
     }
     if (!buffered_raw_usable(self->raw)) {
         buffered_unlock(self);
-        return buffered_not_ready(self);
+        return buffered_not_ready();
     }
     /* Reading what is already buffered works after close(). */
     int check_closed = direction == WRITING || buffered_readahead(self) == 0;
