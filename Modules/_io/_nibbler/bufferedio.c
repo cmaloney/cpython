@@ -1257,7 +1257,7 @@ error:
    can still be used except by writes.  Reading from the read-ahead, the
    common case, needs none of the checks.  On success the caller must
    unlock. */
-static int
+static inline int
 buffered_enter(buffered *self, const char *closed_msg, int direction)
 {
     if (buffered_lock(self) < 0) {
