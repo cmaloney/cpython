@@ -12,6 +12,8 @@
 #include "pycore_global_strings.h" // _Py_LATIN1_CHR()
 #include "pycore_interp.h"        // _PyInterpreterState_GetConfig()
 #include "pycore_long.h"          // _PyLong_IsNegative()
+#include "pycore_object.h"        // _Py_XGetRef()
+#include "pycore_pyatomic_ft_wrappers.h" // FT_ATOMIC_LOAD_PTR_RELAXED()
 #include "pycore_pyerrors.h"      // _PyErr_ChainExceptions1()
 #include "pycore_pystate.h"       // _PyInterpreterState_GET()
 
@@ -64,6 +66,37 @@ PyDoc_STRVAR(module_doc,
 "   I/O classes.\n"
     );
 
+
+/* The buffered classes open() uses, which _io._set_open_impl() may replace
+   while open() runs in other threads: open() takes a new reference with
+   iomodule_get_open_type().  With the GIL, plain loads and stores do. */
+#ifdef Py_GIL_DISABLED
+static PyObject *
+iomodule_get_open_type(PyTypeObject **slot)
+{
+    return _Py_XGetRef((PyObject **)slot);
+}
+
+static void
+iomodule_set_open_type(PyTypeObject **slot, PyObject *type)
+{
+    /* Lets iomodule_get_open_type() take references to it. */
+    _PyObject_SetMaybeWeakref(type);
+    Py_XDECREF(_Py_atomic_exchange_ptr(slot, type));
+}
+#else
+static PyObject *
+iomodule_get_open_type(PyTypeObject **slot)
+{
+    return Py_XNewRef(*slot);
+}
+
+static void
+iomodule_set_open_type(PyTypeObject **slot, PyObject *type)
+{
+    Py_XSETREF(*slot, (PyTypeObject *)type);
+}
+#endif
 
 /*
  * The main open() function
@@ -398,15 +431,15 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
 
     /* wraps into a buffered file */
     {
-        PyObject *Buffered_class;
+        PyTypeObject **slot;
         if (updating) {
-            Buffered_class = (PyObject *)state->open_random_type;
+            slot = &state->open_random_type;
         }
         else if (creating || writing || appending) {
-            Buffered_class = (PyObject *)state->open_writer_type;
+            slot = &state->open_writer_type;
         }
         else if (reading) {
-            Buffered_class = (PyObject *)state->open_reader_type;
+            slot = &state->open_reader_type;
         }
         else {
             PyErr_Format(PyExc_ValueError,
@@ -418,9 +451,11 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
         if (bufsize == NULL) {
             goto error;
         }
+        PyObject *Buffered_class = iomodule_get_open_type(slot);
         PyObject *args[] = {raw, bufsize};
         buffer = PyObject_Vectorcall(Buffered_class, args,
                                      Py_ARRAY_LENGTH(args), NULL);
+        Py_DECREF(Buffered_class);
         Py_DECREF(bufsize);
     }
     if (buffer == NULL)
@@ -604,9 +639,9 @@ iomodule_set_open_impl(PyObject *module, int nibbler)
         }
         Py_DECREF(sub);
     }
-    Py_XSETREF(state->open_reader_type, (PyTypeObject *)types[0]);
-    Py_XSETREF(state->open_writer_type, (PyTypeObject *)types[1]);
-    Py_XSETREF(state->open_random_type, (PyTypeObject *)types[2]);
+    iomodule_set_open_type(&state->open_reader_type, types[0]);
+    iomodule_set_open_type(&state->open_writer_type, types[1]);
+    iomodule_set_open_type(&state->open_random_type, types[2]);
     return 0;
 
 error:
@@ -631,7 +666,8 @@ _io__set_open_impl_impl(PyObject *module, PyObject *name)
 /*[clinic end generated code: output=da5db966fe58f749 input=7720ca0e2bd32bba]*/
 {
     _PyIO_State *state = get_io_state(module);
-    int was_nibbler = state->open_reader_type != state->PyBufferedReader_Type;
+    int was_nibbler = (FT_ATOMIC_LOAD_PTR_RELAXED(state->open_reader_type)
+                       != state->PyBufferedReader_Type);
     int nibbler;
     if (PyUnicode_EqualToUTF8(name, "_nibbler")) {
         nibbler = 1;

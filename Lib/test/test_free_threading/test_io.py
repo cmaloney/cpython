@@ -288,3 +288,26 @@ class BufferedWriterTest(TestCase):
                        for func in [writer] * 3 + [reader] * 3 + [detacher]]
             with threading_helper.start_threads(threads):
                 go.set()
+
+
+class SetOpenImplTest(TestCase):
+    def test_open_set_open_impl_race(self):
+        # open() read the buffered classes _io._set_open_impl() replaces
+        # without synchronization or a reference of its own.
+        import _io
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(b"x")
+        prev = _io._set_open_impl("_io")
+        self.addCleanup(_io._set_open_impl, prev)
+
+        def opener():
+            for _ in range(200):
+                with open(os_helper.TESTFN, "rb") as f:
+                    self.assertEqual(f.read(), b"x")
+
+        def switcher():
+            for i in range(200):
+                _io._set_open_impl("_nibbler" if i % 2 else "_io")
+
+        run_concurrently([opener] * 3 + [switcher])
