@@ -12,7 +12,7 @@
 #include "pycore_fileutils.h"           // _PyFile_Flush()
 #include "pycore_import.h"              // _PyImport_SetModuleString()
 #include "pycore_object.h"              // _PyObject_GC_UNTRACK()
-#include "pycore_pyatomic_ft_wrappers.h" // FT_ATOMIC_LOAD_PTR()
+#include "pycore_pyatomic_ft_wrappers.h" // FT_ATOMIC_LOAD_PTR_RELAXED()
 #include "pycore_pyerrors.h"            // _PyErr_ChainExceptions1()
 #include "pycore_weakref.h"             // FT_CLEAR_WEAKREFS()
 
@@ -158,18 +158,42 @@ buffered_not_ready(void)
     return -1;
 }
 
-/* A new reference to raw (NULL when uninitialized or detached).
-   Needs no lock: a concurrent detach() leaves the caller using the stream
-   it took. */
+/* raw is read without the lock by buffered_ref_raw(), which returns a new
+   reference to it (NULL when uninitialized or detached): a concurrent
+   detach() leaves the caller using the stream it took.  buffered_swap_raw()
+   replaces it (with the lock held, or with no other users) and returns the
+   old one.  With the GIL, plain loads and stores do. */
+#ifdef Py_GIL_DISABLED
 static inline PyObject *
 buffered_ref_raw(buffered *self)
 {
-#ifdef Py_GIL_DISABLED
     return _Py_XGetRef(&self->raw);
-#else
-    return Py_XNewRef(self->raw);
-#endif
 }
+
+static PyObject *
+buffered_swap_raw(buffered *self, PyObject *raw)
+{
+    if (raw != NULL) {
+        /* Lets buffered_ref_raw() take references without the lock. */
+        _PyObject_SetMaybeWeakref(raw);
+    }
+    return _Py_atomic_exchange_ptr(&self->raw, raw);
+}
+#else
+static inline PyObject *
+buffered_ref_raw(buffered *self)
+{
+    return Py_XNewRef(self->raw);
+}
+
+static PyObject *
+buffered_swap_raw(buffered *self, PyObject *raw)
+{
+    PyObject *old = self->raw;
+    self->raw = raw;
+    return old;
+}
+#endif
 
 /* A new reference to a usable raw, or NULL with ValueError. */
 static PyObject *
@@ -180,20 +204,6 @@ buffered_get_raw(buffered *self)
         buffered_not_ready();
     }
     return raw;
-}
-
-/* Replace raw (with the lock held, or with no other users) and return the
-   old one. */
-static PyObject *
-buffered_swap_raw(buffered *self, PyObject *raw)
-{
-#ifdef Py_GIL_DISABLED
-    if (raw != NULL) {
-        /* Lets buffered_ref_raw() take references without the lock. */
-        _PyObject_SetMaybeWeakref(raw);
-    }
-#endif
-    return _Py_atomic_exchange_ptr(&self->raw, raw);
 }
 
 /* Are there pending writes, or is another thread writing them out?  Then
@@ -1173,7 +1183,7 @@ _io__Buffered_detach_impl(buffered *self)
 {
     /* flush() takes the lock itself.  Calls racing with detach() may run
        on either side of it; the lock keeps the buffers consistent. */
-    if (!buffered_raw_usable(FT_ATOMIC_LOAD_PTR(self->raw))) {
+    if (!buffered_raw_usable(FT_ATOMIC_LOAD_PTR_RELAXED(self->raw))) {
         buffered_not_ready();
         return NULL;
     }

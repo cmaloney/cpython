@@ -39,6 +39,18 @@
 #include "pycore_pylifecycle.h"         // _Py_IsInterpreterFinalizing()
 #include "pycore_pystate.h"             // _Py_FOR_EACH_TSTATE_BEGIN()
 
+/* Compare-and-swap in the style of pycore_pyatomic_ft_wrappers.h (which
+   has none): atomic on free-threaded builds, a plain compare and store
+   with the GIL. */
+#ifdef Py_GIL_DISABLED
+#  define FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(value, expected, desired) \
+    _Py_atomic_compare_exchange_ssize(&value, expected, desired)
+#else
+#  define FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(value, expected, desired) \
+    ((value) == *(expected) ? ((value) = (desired), 1)               \
+                            : (*(expected) = (value), 0))
+#endif
+
 /* Exact bytes appended at least this large are kept by reference instead
    of being copied, when the owner asks for it. */
 #define NIBBLER_REF_MIN 512
@@ -59,21 +71,28 @@ typedef struct {
     Py_ssize_t nbytes;
 } morsel_list;
 
+/* Fields are used with the lock held, with plain loads and stores, unless
+   noted. */
 typedef struct {
     PyMutex lock;
+    /* Part of the lock: read, and swapped when taken over, by threads
+       without it, so always atomic like the mutex. */
     uint64_t owner;
     /* See the I/O role above.  `io` is 0 while nobody has the role, else
        the holder's thread state id shifted left by one, with
        NIBBLER_IO_PARKED set once a thread parked waiting for it.  Changed
-       only with the lock held; waiters park on it. */
+       only with the lock held, but always atomically: the parking lot
+       compares it without the lock (and without the GIL). */
     uint64_t io;
     Py_ssize_t inflight;
 
+    /* Also read without the lock (FT_ATOMIC relaxed). */
     Py_ssize_t capacity;
     morsel_list list;
     /* NULL until needed. */
     PyObject *block;
-    /* What the last read filled; NULL for none.  See "The read window". */
+    /* What the last read filled; NULL for none.  Also read without the
+       lock, see "The read window". */
     struct nibbler_window *window;
     /* The position in the window while the lock holder holds it. */
     Py_ssize_t held;
@@ -183,22 +202,6 @@ typedef struct nibbler_window {
     Py_ssize_t cursor;
 } nibbler_window;
 
-static inline int
-nibbler_cursor_cas(nibbler_window *w, Py_ssize_t *expected,
-                   Py_ssize_t desired)
-{
-#ifdef Py_GIL_DISABLED
-    return _Py_atomic_compare_exchange_ssize(&w->cursor, expected, desired);
-#else
-    if (w->cursor != *expected) {
-        *expected = w->cursor;
-        return 0;
-    }
-    w->cursor = desired;
-    return 1;
-#endif
-}
-
 /* The window if it is held, else NULL.  With the lock, a window is
    always held; without (in dealloc), it isn't. */
 static inline nibbler_window *
@@ -219,7 +222,10 @@ nibbler_hold(nibbler *n)
     nibbler_window *w = n->window;
     if (w != NULL) {
         Py_ssize_t c = FT_ATOMIC_LOAD_SSIZE_RELAXED(w->cursor);
-        while (c >= 0 && !nibbler_cursor_cas(w, &c, NIBBLER_HELD)) {
+        while (c >= 0
+               && !FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(w->cursor, &c,
+                                                    NIBBLER_HELD))
+        {
             /* retry */
         }
         if (c >= 0) {
@@ -293,7 +299,8 @@ nibbler_begin_io(nibbler *n)
     assert(n->io == 0);
     /* Shifting left loses no bit. */
     assert((id >> 63) == 0);
-    _Py_atomic_store_uint64(&n->io, id << 1);
+    /* Relaxed: see nibbler_wait_io(). */
+    _Py_atomic_store_uint64_relaxed(&n->io, id << 1);
 }
 
 /* Release the I/O role, waking the threads parked waiting for it. */
@@ -420,7 +427,12 @@ nibbler_unlock(nibbler *n)
    here.  Every release sets it to 0 and every take to a value without the
    bit, so any release after it was set either makes parking return at once
    or wakes the parked thread: none is missed, even when the same thread
-   takes the role again. */
+   takes the role again.
+
+   Stores to `io` need not be sequentially consistent: they are made with
+   the lock held, which orders them for the next holder (so the releasing
+   exchange sees NIBBLER_IO_PARKED), and the parking lot compares under the
+   bucket lock that _PyParkingLot_UnparkAll() takes after that exchange. */
 static int
 nibbler_wait_io(nibbler *n, PyObject *obj)
 {
@@ -440,7 +452,7 @@ nibbler_wait_io(nibbler *n, PyObject *obj)
         /* `io` only changes with the lock held, which this thread has. */
         assert(nibbler_lock_is_mine(n));
         uint64_t io = n->io | NIBBLER_IO_PARKED;
-        _Py_atomic_store_uint64(&n->io, io);
+        _Py_atomic_store_uint64_relaxed(&n->io, io);
         nibbler_unlock(n);
         int r = _PyParkingLot_Park(&n->io, &io, sizeof(io), -1, NULL, 1);
         if (r == Py_PARK_INTR && PyErr_CheckSignals() < 0) {
@@ -509,7 +521,7 @@ nibbler_claim(nibbler_window *w, Py_ssize_t want, int exact,
         if (exact && k < want) {
             return -1;
         }
-        if (nibbler_cursor_cas(w, &c, c + k)) {
+        if (FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(w->cursor, &c, c + k)) {
             *start = c;
             return k;
         }
@@ -552,7 +564,7 @@ nibbler_claim_line(nibbler_window *w, Py_ssize_t limit, Py_ssize_t *start)
         if (k < 0) {
             return -1;
         }
-        if (nibbler_cursor_cas(w, &c, c + k)) {
+        if (FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(w->cursor, &c, c + k)) {
             *start = c;
             return k;
         }
