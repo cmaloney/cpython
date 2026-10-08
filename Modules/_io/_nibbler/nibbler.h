@@ -483,104 +483,6 @@ nibbler_written(nibbler *n, Py_ssize_t written)
 }
 
 /*
- * Data
- */
-
-/* Set the capacity; 0 (with no data) makes the nibbler unusable.  It may
-   be read without the lock, relaxed. */
-static void
-nibbler_init(nibbler *n, Py_ssize_t capacity)
-{
-    FT_ATOMIC_STORE_SSIZE_RELAXED(n->capacity, capacity);
-}
-
-static Py_ssize_t nibbler_close_window(nibbler *n);
-
-/* Discard all data and release the memory holding it. */
-static void
-nibbler_free(nibbler *n)
-{
-    (void)nibbler_close_window(n);
-    morsels_free(&n->list);
-    Py_CLEAR(n->block);
-}
-
-static inline Py_ssize_t
-nibbler_nbytes(nibbler *n)
-{
-    return n->list.nbytes;
-}
-
-/* The block, when nothing but this nibbler references it (then all of it
-   can be overwritten); else a new one. */
-static PyObject *
-nibbler_fresh_block(nibbler *n)
-{
-    assert(n->capacity > 0);
-    if (n->block == NULL || !_PyObject_IsUniquelyReferenced(n->block)) {
-        PyObject *block = PyBytes_FromStringAndSize(NULL, n->capacity);
-        if (block == NULL) {
-            return NULL;
-        }
-        Py_XSETREF(n->block, block);
-    }
-    return n->block;
-}
-
-/* Stop copying into the block, which Python code may now reach. */
-static void
-nibbler_drop_block(nibbler *n)
-{
-    Py_CLEAR(n->block);
-}
-
-/* Append data[0:len], owned by obj (or NULL), which must fit in capacity:
-   by reference when by_ref allows it, else copied into the block. */
-static int
-nibbler_append(nibbler *n, PyObject *obj, const char *data, Py_ssize_t len,
-               int by_ref)
-{
-    assert(n->list.nbytes + len <= n->capacity);
-    if (len == 0) {
-        return 0;
-    }
-    if (by_ref && len >= NIBBLER_REF_MIN && obj != NULL
-        && PyBytes_CheckExact(obj))
-    {
-        return morsels_push(&n->list, obj, data, len);
-    }
-
-    /* Copy into the block after the last morsel in it, or into a fresh
-       block. */
-    Py_ssize_t used = -1;
-    for (Py_ssize_t i = n->list.count - 1; i >= 0; i--) {
-        morsel *m = &n->list.items[i];
-        if (m->obj == n->block) {
-            used = m->ptr + m->len - PyBytes_AS_STRING(n->block);
-            break;
-        }
-    }
-    if (used < 0 || n->capacity - used < len) {
-        if (nibbler_fresh_block(n) == NULL) {
-            return -1;
-        }
-        used = 0;
-    }
-    char *dst = PyBytes_AS_STRING(n->block) + used;
-    memcpy(dst, data, len);
-    return morsels_push(&n->list, n->block, dst, len);
-}
-
-/* A fresh block for a read to fill, with a new reference: the read holds
-   its own while it uses the block (see nibbler_lock_wait()).  Publish what
-   was read with nibbler_publish(). */
-static PyObject *
-nibbler_fill_block(nibbler *n)
-{
-    return Py_XNewRef(nibbler_fresh_block(n));
-}
-
-/*
  * Reading the window (see above)
  */
 
@@ -691,42 +593,59 @@ nibbler_unread(nibbler *n)
     return w != NULL ? w->filled - n->held : 0;
 }
 
-/* Take up to `want` bytes of the window: how many, starting at *start (in
-   n->window->block). */
-static inline Py_ssize_t
-nibbler_take(nibbler *n, Py_ssize_t want, Py_ssize_t *start)
+/* Take up to `want` bytes of the window as a bytes object, like
+   nibbler_window_bytes(); b"" when there is none. */
+static inline PyObject *
+nibbler_take_bytes(nibbler *n, Py_ssize_t want)
 {
-    Py_ssize_t k = Py_MIN(want, nibbler_unread(n));
-    *start = n->held;
+    nibbler_window *w = nibbler_held_window(n);
+    if (w == NULL) {
+        return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
+    }
+    Py_ssize_t start = n->held;
+    Py_ssize_t k = Py_MIN(want, w->filled - start);
+    n->held += k;
+    return nibbler_window_bytes(w, start, k);
+}
+
+/* Take up to len bytes of the window, copying them to dst.  Returns how
+   many. */
+static inline Py_ssize_t
+nibbler_take_into(nibbler *n, char *dst, Py_ssize_t len)
+{
+    nibbler_window *w = nibbler_held_window(n);
+    if (w == NULL) {
+        return 0;
+    }
+    Py_ssize_t k = Py_MIN(len, w->filled - n->held);
+    memcpy(dst, PyBytes_AS_STRING(w->block) + n->held, k);
     n->held += k;
     return k;
 }
 
-/* Take the line at the start of the window, like nibbler_claim_line(). */
+/* The length of the line at the position in the window, without taking
+   it, like nibbler_claim_line(): -1 when it may go on past the window, or
+   there is none. */
 static inline Py_ssize_t
-nibbler_take_line(nibbler *n, Py_ssize_t limit, Py_ssize_t *start)
+nibbler_line(nibbler *n, Py_ssize_t limit)
 {
     nibbler_window *w = nibbler_held_window(n);
     if (w == NULL) {
         return -1;
     }
-    Py_ssize_t k = nibbler_line_length(PyBytes_AS_STRING(w->block), n->held,
-                                       w->filled, limit);
-    if (k >= 0) {
-        *start = n->held;
-        n->held += k;
-    }
-    return k;
+    return nibbler_line_length(PyBytes_AS_STRING(w->block), n->held,
+                               w->filled, limit);
 }
 
 /* Like nibbler_peek(). */
 static PyObject *
 nibbler_peek_held(nibbler *n)
 {
-    if (nibbler_unread(n) == 0) {
+    Py_ssize_t unread = nibbler_unread(n);
+    if (unread == 0) {
         return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     }
-    return nibbler_window_bytes(n->window, n->held, nibbler_unread(n));
+    return nibbler_window_bytes(n->window, n->held, unread);
 }
 
 static void
@@ -786,6 +705,78 @@ nibbler_window_move(nibbler *n, Py_off_t offset)
     Py_ssize_t unread = nibbler_unread(n);
     n->held += (Py_ssize_t)offset;
     return unread;
+}
+
+/*
+ * Data
+ */
+
+/* Discard all data and release the memory holding it. */
+static void
+nibbler_free(nibbler *n)
+{
+    (void)nibbler_close_window(n);
+    morsels_free(&n->list);
+    Py_CLEAR(n->block);
+}
+
+static inline Py_ssize_t
+nibbler_nbytes(nibbler *n)
+{
+    return n->list.nbytes;
+}
+
+/* The block, when nothing but this nibbler references it (then all of it
+   can be overwritten); else a new one. */
+static PyObject *
+nibbler_fresh_block(nibbler *n)
+{
+    assert(n->capacity > 0);
+    if (n->block == NULL || !_PyObject_IsUniquelyReferenced(n->block)) {
+        PyObject *block = PyBytes_FromStringAndSize(NULL, n->capacity);
+        if (block == NULL) {
+            return NULL;
+        }
+        Py_XSETREF(n->block, block);
+    }
+    return n->block;
+}
+
+/* Append data[0:len], owned by obj (or NULL), which must fit in capacity:
+   by reference when by_ref allows it, else copied into the block. */
+static int
+nibbler_append(nibbler *n, PyObject *obj, const char *data, Py_ssize_t len,
+               int by_ref)
+{
+    assert(n->list.nbytes + len <= n->capacity);
+    if (len == 0) {
+        return 0;
+    }
+    if (by_ref && len >= NIBBLER_REF_MIN && obj != NULL
+        && PyBytes_CheckExact(obj))
+    {
+        return morsels_push(&n->list, obj, data, len);
+    }
+
+    /* Copy into the block after the last morsel in it, or into a fresh
+       block. */
+    Py_ssize_t used = -1;
+    for (Py_ssize_t i = n->list.count - 1; i >= 0; i--) {
+        morsel *m = &n->list.items[i];
+        if (m->obj == n->block) {
+            used = m->ptr + m->len - PyBytes_AS_STRING(n->block);
+            break;
+        }
+    }
+    if (used < 0 || n->capacity - used < len) {
+        if (nibbler_fresh_block(n) == NULL) {
+            return -1;
+        }
+        used = 0;
+    }
+    char *dst = PyBytes_AS_STRING(n->block) + used;
+    memcpy(dst, data, len);
+    return morsels_push(&n->list, n->block, dst, len);
 }
 
 #endif  // !Py_IO_NIBBLER_NIBBLER_H
