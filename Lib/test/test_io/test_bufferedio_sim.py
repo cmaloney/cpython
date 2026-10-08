@@ -808,6 +808,27 @@ class PositionTest:
         f.flush()
         self.assertEqual(bytes(raw.buf), b"abcdefghij")
 
+    def test_append_mode_write_after_read(self):
+        if not self.keeps_reads_on_append:
+            self.skipTest("writes in append mode overwrite read data")
+        # gh-64281: a raw stream in append mode writes at the end of the
+        # file whatever the position, so data read before a write must
+        # still read back as it is in the file.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with self.open(os_helper.TESTFN, "wb") as f:
+            f.write(b"testest")
+        with self.open(os_helper.TESTFN, "a+b") as f:
+            f.write(b"A")
+            f.seek(0)
+            self.assertEqual(f.read(), b"testestA")
+            f.seek(0)
+            self.assertEqual(f.read(1), b"t")
+            f.write(b"B")
+            f.seek(0)
+            self.assertEqual(f.read(), b"testestAB")
+        with self.open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(), b"testestAB")
+
 
     @property
     def detached_errors(self):
@@ -1102,6 +1123,242 @@ class CWriteOutTest(WriteOutTest, CTestCase):
 
 
 class NibblerWriteOutTest(NibblerMixin, WriteOutTest, CTestCase):
+    pass
+
+
+# --- Reentrant calls -----------------------------------------------------------
+
+class ReentrantCallTest:
+    """Code run by a buffered method (a raw stream method, the __index__()
+    of an argument) closing or detaching the object it runs for."""
+
+    def detaching(self, tp, raw, buffer_size):
+        # A tp over raw whose detach() is called from raw methods through
+        # fire(), once; flush() then does nothing, so detach() goes
+        # straight to the buffered object's lock.
+        class Detaching(tp):
+            detach_error = None
+            fired = firing = False
+
+            def flush(self):
+                if not self.firing:
+                    super().flush()
+
+            def fire(self):
+                if self.fired:
+                    return
+                self.fired = self.firing = True
+                try:
+                    self.detach()
+                except Exception as exc:
+                    self.detach_error = exc
+                finally:
+                    self.firing = False
+
+        f = Detaching(raw, buffer_size)
+        raw.owner = f
+        return f
+
+    def assertDetachRefused(self, f, raw):
+        self.assertIsInstance(f.detach_error, RuntimeError)
+        self.assertIs(f.raw, raw)
+
+    def test_close_with_flush_detaching(self):
+        # gh-154997
+        class Detaching(self.BufferedWriter):
+            armed = True
+
+            def flush(self):
+                if self.armed:
+                    self.armed = False
+                    self.detach()
+
+        f = Detaching(self.BytesIO())
+        self.assertRaises(ValueError, f.close)
+        self.assertIsNone(f.raw)
+
+    def test_raw_readinto_detaching(self):
+        # gh-154997
+        class Raw(self.RawIOBase):
+            def readable(self):
+                return True
+
+            def readinto(self, b):
+                self.owner.fire()
+                b[0:1] = b"a"
+                return 1
+
+        raw = Raw()
+        f = self.detaching(self.BufferedReader, raw, 4)
+        self.assertEqual(f.read(64), b"a" * 64)
+        self.assertDetachRefused(f, raw)
+
+    def test_raw_read_all_detaching(self):
+        # gh-154997
+        class Raw(self.RawIOBase):
+            def readable(self):
+                return True
+
+            def readall(self):
+                self.owner.fire()
+                return b"abcdef"
+
+        raw = Raw()
+        f = self.detaching(self.BufferedReader, raw, 4)
+        self.assertEqual(f.read(), b"abcdef")
+        self.assertDetachRefused(f, raw)
+
+    def test_raw_write_detaching(self):
+        # gh-154997
+        class Raw(self.RawIOBase):
+            out = bytearray()
+
+            def writable(self):
+                return True
+
+            def write(self, b):
+                self.owner.fire()
+                self.out += bytes(b)[:1]
+                return 1
+
+        raw = Raw()
+        f = self.detaching(self.BufferedWriter, raw, 4)
+        data = b"0123456789abcdef"
+        self.assertEqual(f.write(data), len(data))
+        self.assertDetachRefused(f, raw)
+        f.close()
+        self.assertEqual(raw.out, data)
+
+    def seekable_raw(self, method):
+        # A seekable raw stream whose `method` detaches its owner.
+        class Raw(self.RawIOBase):
+            out = bytearray()
+
+            def readable(self):
+                return True
+
+            def writable(self):
+                return True
+
+            def seekable(self):
+                return True
+
+            def _fire(self, name):
+                if name == method:
+                    self.owner.fire()
+
+            def readinto(self, b):
+                self._fire("readinto")
+                return 0
+
+            def write(self, b):
+                self._fire("write")
+                self.out += b
+                return len(b)
+
+            def seek(self, pos, whence=0):
+                self._fire("seek")
+                return 0
+
+            def tell(self):
+                self._fire("tell")
+                return len(self.out)
+
+            def truncate(self, pos=None):
+                self._fire("truncate")
+                return 0
+
+        return Raw()
+
+    def test_raw_calls_detaching(self):
+        # gh-154997: truncate() and seek() go on with the raw stream after
+        # calling raw methods.
+        for tp in (self.BufferedWriter, self.BufferedRandom):
+            for method in ("write", "truncate", "tell", "seek"):
+                with self.subTest(tp=tp.__name__, method=method):
+                    raw = self.seekable_raw(method)
+                    f = self.detaching(tp, raw, 64)
+                    f.write(b"012")
+                    f.truncate(1)
+                    f.write(b"34")
+                    self.assertEqual(f.tell(), 5)
+                    f.seek(0)
+                    self.assertDetachRefused(f, raw)
+                    f.close()
+                    self.assertEqual(raw.out, b"01234")
+
+    def test_seek_target_detaching(self):
+        # gh-154997: seek() either converts its target with the object in
+        # use, or finds it detached afterwards.
+        raw = self.seekable_raw(None)
+        f = self.detaching(self.BufferedRandom, raw, 64)
+        f.write(b"012")
+
+        class Target:
+            def __index__(self):
+                f.fire()
+                return 0
+
+        try:
+            self.assertEqual(f.seek(Target()), 0)
+        except ValueError:
+            # Detached before seeking.
+            self.assertIsNone(f.detach_error)
+            self.assertIsNone(f.raw)
+        else:
+            self.assertDetachRefused(f, raw)
+            f.close()
+            self.assertEqual(raw.out, b"012")
+
+    def test_seek_target_closing(self):
+        if not self.survives_reentrant_close:
+            self.skipTest("crashes (gh-143375)")
+        # gh-143375: the target closing the object while seek() has a
+        # partly written buffer to write out.
+        class Raw(self.RawIOBase):
+            calls = 0
+            out = bytearray()
+
+            def writable(self):
+                return True
+
+            def seekable(self):
+                return True
+
+            def seek(self, pos, whence=0):
+                return 0
+
+            def write(self, b):
+                self.calls += 1
+                if self.calls == 2:
+                    raise BlockingIOError
+                n = len(b) - 1 if self.calls == 1 else len(b)
+                self.out += bytes(b)[:n]
+                return n
+
+        raw = Raw()
+        f = self.BufferedWriter(raw)
+        f.write(b"ABCD")
+
+        class Target:
+            def __index__(self):
+                try:
+                    f.close()
+                except RuntimeError:
+                    pass
+                return 0
+
+        with self.assertRaises(BlockingIOError):
+            f.seek(Target())
+        f.close()
+        self.assertEqual(raw.out, b"ABCD")
+
+
+class CReentrantCallTest(ReentrantCallTest, CTestCase):
+    pass
+
+
+class NibblerReentrantCallTest(NibblerMixin, ReentrantCallTest, CTestCase):
     pass
 
 

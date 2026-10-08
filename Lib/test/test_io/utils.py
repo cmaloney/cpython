@@ -300,6 +300,12 @@ class CTestCase(unittest.TestCase):
     # Does each readline() and readinto() take whole lines or records when
     # threads read concurrently?  (_pyio's readline() and readinto() don't.)
     reads_are_atomic = True
+    # Does a method stay safe when code it calls (such as the __index__()
+    # of its argument) closes the object?  (gh-143375)
+    survives_reentrant_close = False
+    # Does writing to a raw stream in append mode keep data read before
+    # the write as it is in the file?  (gh-64281)
+    keeps_reads_on_append = False
 
     MockRawIO = CMockRawIO
     MisbehavedRawIO = CMisbehavedRawIO
@@ -324,6 +330,8 @@ class PyTestCase(unittest.TestCase):
     isolates_raw_views = False
     queues_writes_during_io = False
     reads_are_atomic = False
+    survives_reentrant_close = False
+    keeps_reads_on_append = True
 
     MockRawIO = PyMockRawIO
     MisbehavedRawIO = PyMisbehavedRawIO
@@ -355,6 +363,8 @@ class NibblerMixin:
     isolates_raw_views = True
     queues_writes_during_io = True
     reads_are_atomic = True
+    survives_reentrant_close = True
+    keeps_reads_on_append = True
 
     def setUp(self):
         super().setUp()
