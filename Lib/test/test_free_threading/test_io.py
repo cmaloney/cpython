@@ -1,5 +1,7 @@
 import codecs
+import errno
 import io
+import os
 import _pyio as pyio
 import threading
 from unittest import TestCase
@@ -232,6 +234,48 @@ class IncrementalNewlineDecoderTest(TestCase):
                 decoder.reset()
 
         run_concurrently([decode_worker] * 2 + [reset_worker] * 2)
+
+
+class FileIOTest(TestCase):
+    def test_close_race(self):
+        # close() wrote the file descriptor while fileno(), isatty() and
+        # the closed attribute read it from other threads without
+        # synchronization.
+        for _ in range(100):
+            f = io.FileIO(os.devnull, "rb")
+
+            def reader():
+                for _ in range(100):
+                    try:
+                        f.closed
+                        f.fileno()
+                        f.isatty()
+                        f.readable()
+                    except ValueError:  # I/O operation on closed file
+                        pass
+                    except OSError as exc:
+                        if exc.errno != errno.EBADF:
+                            raise
+
+            run_concurrently([reader] * 3 + [f.close])
+
+    def test_concurrent_close(self):
+        # Only one of concurrent close() calls closes the file descriptor:
+        # the others must not close it again (OSError EBADF, or worse
+        # closing a reused descriptor).
+        for _ in range(200):
+            f = io.FileIO(os.devnull, "rb")
+
+            def closer():
+                try:
+                    f.close()
+                except ValueError:
+                    # IOBase.close() flushes, which raises once another
+                    # close() marked the file closed.
+                    pass
+
+            run_concurrently([closer] * 4)
+            self.assertTrue(f.closed)
 
 
 class TextIOWrapperTest(TestCase):
