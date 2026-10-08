@@ -77,9 +77,8 @@ typedef struct {
     PyObject *block;
     /* What the last read filled; NULL for none.  See "The read window". */
     struct nibbler_window *window;
-    /* The lock holder holds the window, at position `held`. */
+    /* The position in the window while the lock holder holds it. */
     Py_ssize_t held;
-    uint8_t holding;
 } nibbler;
 
 /*
@@ -202,19 +201,33 @@ nibbler_cursor_cas(nibbler_window *w, Py_ssize_t *expected,
 #endif
 }
 
-/* With the lock just taken: hold the window. */
+/* The window if it is held, else NULL.  With the lock, a window is
+   always held; without (in dealloc), it isn't. */
+static inline nibbler_window *
+nibbler_held_window(nibbler *n)
+{
+    nibbler_window *w = n->window;
+    if (w != NULL && FT_ATOMIC_LOAD_SSIZE_RELAXED(w->cursor) == NIBBLER_HELD) {
+        return w;
+    }
+    return NULL;
+}
+
+/* With the lock just taken: hold the window.  It is held already when the
+   lock was taken over from a gone holder, at the position it left. */
 static inline void
 nibbler_hold(nibbler *n)
 {
     nibbler_window *w = n->window;
-    if (w != NULL && !n->holding) {
+    if (w != NULL) {
         Py_ssize_t c = FT_ATOMIC_LOAD_SSIZE_RELAXED(w->cursor);
         while (c >= 0 && !nibbler_cursor_cas(w, &c, NIBBLER_HELD)) {
             /* retry */
         }
-        assert(c >= 0);
-        n->held = c;
-        n->holding = 1;
+        if (c >= 0) {
+            n->held = c;
+        }
+        assert(c >= 0 || c == NIBBLER_HELD);
     }
 }
 
@@ -222,9 +235,9 @@ nibbler_hold(nibbler *n)
 static inline void
 nibbler_open(nibbler *n)
 {
-    if (n->holding) {
-        n->holding = 0;
-        FT_ATOMIC_STORE_SSIZE_RELEASE(n->window->cursor, n->held);
+    nibbler_window *w = nibbler_held_window(n);
+    if (w != NULL) {
+        FT_ATOMIC_STORE_SSIZE_RELEASE(w->cursor, n->held);
     }
 }
 
@@ -655,7 +668,8 @@ nibbler_peek(nibbler *n)
 static inline Py_ssize_t
 nibbler_unread(nibbler *n)
 {
-    return n->holding ? n->window->filled - n->held : 0;
+    nibbler_window *w = nibbler_held_window(n);
+    return w != NULL ? w->filled - n->held : 0;
 }
 
 /* Take up to `want` bytes of the window: how many, starting at *start (in
@@ -673,10 +687,10 @@ nibbler_take(nibbler *n, Py_ssize_t want, Py_ssize_t *start)
 static inline Py_ssize_t
 nibbler_take_line(nibbler *n, Py_ssize_t limit, Py_ssize_t *start)
 {
-    if (!n->holding) {
+    nibbler_window *w = nibbler_held_window(n);
+    if (w == NULL) {
         return -1;
     }
-    nibbler_window *w = n->window;
     Py_ssize_t k = nibbler_line_length(PyBytes_AS_STRING(w->block), n->held,
                                        w->filled, limit);
     if (k >= 0) {
@@ -712,9 +726,8 @@ nibbler_close_window(nibbler *n)
     if (w == NULL) {
         return 0;
     }
-    /* Not holding it only in dealloc, without the lock. */
+    /* Not held only in dealloc, without the lock. */
     Py_ssize_t unread = nibbler_unread(n);
-    n->holding = 0;
     FT_ATOMIC_STORE_SSIZE_RELEASE(w->cursor, NIBBLER_CLOSED);
     FT_ATOMIC_STORE_PTR_RELEASE(n->window, NULL);
     nibbler_retire(w);
@@ -737,7 +750,6 @@ nibbler_publish(nibbler *n, PyObject *block, Py_ssize_t filled)
     (void)nibbler_close_window(n);
     FT_ATOMIC_STORE_PTR_RELEASE(n->window, w);
     n->held = 0;
-    n->holding = 1;
     return 0;
 }
 
@@ -748,9 +760,8 @@ nibbler_publish(nibbler *n, PyObject *block, Py_ssize_t filled)
 static Py_ssize_t
 nibbler_window_move(nibbler *n, Py_off_t offset)
 {
-    if (!n->holding || offset < -n->held
-        || offset > n->window->filled - n->held)
-    {
+    nibbler_window *w = nibbler_held_window(n);
+    if (w == NULL || offset < -n->held || offset > w->filled - n->held) {
         return -1;
     }
     Py_ssize_t unread = nibbler_unread(n);
