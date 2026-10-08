@@ -454,10 +454,12 @@ nibbler_written(nibbler *n, Py_ssize_t written)
  * Data
  */
 
+/* Set the capacity; 0 (with no data) makes the nibbler unusable.  It may
+   be read without the lock, relaxed. */
 static void
 nibbler_init(nibbler *n, Py_ssize_t capacity)
 {
-    n->capacity = capacity;
+    FT_ATOMIC_STORE_SSIZE_RELAXED(n->capacity, capacity);
 }
 
 static Py_ssize_t nibbler_close_window(nibbler *n);
@@ -482,6 +484,7 @@ nibbler_nbytes(nibbler *n)
 static PyObject *
 nibbler_fresh_block(nibbler *n)
 {
+    assert(n->capacity > 0);
     if (n->block == NULL || !_PyObject_IsUniquelyReferenced(n->block)) {
         PyObject *block = PyBytes_FromStringAndSize(NULL, n->capacity);
         if (block == NULL) {
