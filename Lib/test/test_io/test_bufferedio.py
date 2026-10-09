@@ -1056,6 +1056,29 @@ class BufferedWriterTest(CommonBufferedTests):
         with self.assertRaises(TypeError):
             self.tp(self.MockRawIO(), 8, 12)
 
+    def test_raw_write_no_progress(self):
+        # gh-158414: retrying a raw write() that returns 0 could loop
+        # forever, so flush() and write() raise OSError instead.
+        class ZeroWriter(self.MockRawIO):
+            zeros = 10
+            def write(self, b):
+                if self.zeros:
+                    self.zeros -= 1
+                    return 0
+                return super().write(b)
+        raw = ZeroWriter()
+        bufio = self.tp(raw, 8)
+        bufio.write(b"abc")
+        self.assertRaises(OSError, bufio.flush)
+        self.assertEqual(raw.zeros, 9)
+        raw.zeros = 10
+        self.assertRaises(OSError, bufio.write, b"x" * 20)
+        self.assertEqual(raw.zeros, 9)
+        # The pending data was kept.
+        raw.zeros = 0
+        bufio.flush()
+        self.assertStartsWith(b"".join(raw._write_stack), b"abc")
+
     def test_close_blocked_flush_warns(self):
         # When the final flush would block, close() still closes the raw
         # stream and raises, but warns that the pending data is discarded.

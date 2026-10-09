@@ -378,6 +378,18 @@ buffered_view(const morsel *m)
     return view;
 }
 
+/* A raw write of len > 0 bytes that wrote none: raise, since retrying it
+   could loop forever (gh-158414).  Returns n, or -1. */
+static inline Py_ssize_t
+buffered_check_progress(Py_ssize_t n, Py_ssize_t len, const char *method)
+{
+    if (n == 0 && len > 0) {
+        PyErr_Format(PyExc_OSError, "raw %s() made no progress", method);
+        return -1;
+    }
+    return n;
+}
+
 /* One raw write of the pending writes followed by extra (a morsel of data
    not yet pending, or with len 0): as much as one vectored write takes when
    the raw stream has _writev(), else the first morsel.  Returns the count,
@@ -406,7 +418,8 @@ buffered_raw_write(buffered *self, Py_ssize_t avail, const morsel *extra,
             Py_XINCREF(pieces[i].obj);
         }
         buffered_unlock_for_raw(self, unlocked);
-        Py_ssize_t n = _PyFileIO_writev(self->raw, spans, cnt);
+        Py_ssize_t n = buffered_check_progress(
+            _PyFileIO_writev(self->raw, spans, cnt), total, "write");
         buffered_relock_after_raw(self, unlocked);
         for (Py_ssize_t i = 0; i < cnt; i++) {
             Py_XDECREF(pieces[i].obj);
@@ -446,7 +459,8 @@ buffered_raw_write(buffered *self, Py_ssize_t avail, const morsel *extra,
         errnum = errno;
     } while (res == NULL && _PyIO_trap_eintr());
     Py_DECREF(arg);
-    Py_ssize_t n = buffered_raw_result(res, total, method);
+    Py_ssize_t n = buffered_check_progress(
+        buffered_raw_result(res, total, method), total, method);
     /* Decrefs may have changed errno, which the BlockingIOError reports. */
     errno = errnum;
     buffered_relock_after_raw(self, unlocked);
@@ -586,7 +600,8 @@ buffered_write_direct(buffered *self, const char *data, Py_ssize_t len,
     buffered_unlock_for_raw(self, 1);
     for (;;) {
         _PyIO_Span span = {data + done, len - done};
-        Py_ssize_t n = _PyFileIO_writev(self->raw, &span, 1);
+        Py_ssize_t n = buffered_check_progress(
+            _PyFileIO_writev(self->raw, &span, 1), span.len, "write");
         if (n < 0) {
             if (n == -2) {
                 *blocked = 1;

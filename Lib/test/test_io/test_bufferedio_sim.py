@@ -812,6 +812,15 @@ class SlowDeviceTest:
         self.assertEqual(f.write(b"789"), 3)
         self.assertEqual(bytes(raw.received), b"0123456789")
 
+    def test_size_zero_write_no_progress(self):
+        # gh-158414: a raw write() returning 0 is not retried forever.
+        self.check_buffer_size_zero()
+        raw = self.scripted_writer([3, 0, 0])
+        f = self.BufferedWriter(raw, 0)
+        self.assertRaises(OSError, f.write, b"0123456789")
+        self.assertEqual(raw.calls, 2)
+        self.assertEqual(bytes(raw.received), b"012")
+
     def test_size_zero_seek_tell(self):
         self.check_buffer_size_zero()
         data = sample_data(500)
