@@ -705,6 +705,9 @@ struct textio
        text to it, and read from it, through the byte-level API
        (_PyIONibbler_*, see _iomodule.h) instead of its methods. */
     char nibbler;
+    /* With nibbler, write() of ASCII text may append it as it is, without
+       any other work: see textiowrapper_set_fastwrite(). */
+    char fastwrite;
     /* The codec is UTF-8: with nibbler, chunks are decoded straight from
        the buffer's read-ahead, taking only the bytes of whole characters,
        so the codec's own decoder (wrapped or not by an
@@ -910,6 +913,19 @@ static inline int
 is_asciicompat_encoding(encodefunc_t f)
 {
     return f == ascii_encode || f == latin1_encode || f == utf8_encode;
+}
+
+/* Once the settings changed: may write() append ASCII text to a nibbler
+   buffer as it is?  Not when the text must be encoded, translated or
+   flushed, or a decoder must be reset (the file is also read). */
+static void
+textiowrapper_set_fastwrite(textio *self)
+{
+    self->fastwrite = (self->nibbler && self->encodefunc != NULL
+                       && is_asciicompat_encoding(self->encodefunc)
+                       && !(self->writetranslate && self->writenl != NULL)
+                       && !self->line_buffering && !self->write_through
+                       && self->decoder == NULL);
 }
 
 /* Map normalized encoding names onto the specialized encoding funcs */
@@ -1263,6 +1279,7 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
     self->encodefunc = NULL;
     self->b2cratio = 0.0;
     self->nibbler = 0;
+    self->fastwrite = 0;
 
     if (encoding == NULL && _PyRuntime.preconfig.utf8_mode) {
         _Py_DECLARE_STR(utf_8, "utf-8");
@@ -1362,6 +1379,7 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
     if (_textiowrapper_fix_encoder_state(self) < 0) {
         goto error;
     }
+    textiowrapper_set_fastwrite(self);
 
     self->ok = 1;
     return 0;
@@ -1534,6 +1552,7 @@ _io_TextIOWrapper_reconfigure_impl(textio *self, PyObject *encoding,
         return NULL;
     }
     self->b2cratio = 0;
+    self->fastwrite = 0;  /* until all is set again */
 
     if (newline_obj != NULL && set_newline(self, newline) < 0) {
         return NULL;
@@ -1546,6 +1565,7 @@ _io_TextIOWrapper_reconfigure_impl(textio *self, PyObject *encoding,
 
     self->line_buffering = line_buffering;
     self->write_through = write_through;
+    textiowrapper_set_fastwrite(self);
     Py_RETURN_NONE;
 }
 
@@ -1782,6 +1802,19 @@ _io_TextIOWrapper_write_impl(textio *self, PyObject *text)
     CHECK_ATTACHED(self);
     CHECK_CLOSED(self);
 
+    if (self->fastwrite && PyUnicode_IS_ASCII(text)
+        && self->pending_bytes == NULL && self->buffer != NULL)
+    {
+        /* self->raw: CHECK_CLOSED found it open. */
+        textlen = PyUnicode_GET_LENGTH(text);
+        int r = _PyIONibbler_write(self->buffer, text, PyUnicode_DATA(text),
+                                   textlen, self->raw != NULL);
+        if (r != _PyIO_NIBBLER_NO) {
+            self->encoding_start_of_stream = 0;
+            return r < 0 ? NULL : PyLong_FromSsize_t(textlen);
+        }
+    }
+
     if (self->encoder == NULL) {
         return _unsupported(self->state, "not writable");
     }
@@ -1849,15 +1882,16 @@ _io_TextIOWrapper_write_impl(textio *self, PyObject *text)
     if (self->nibbler && self->pending_bytes == NULL && bytes_len > 0) {
         /* No pending_bytes: append to the buffer directly (it is the
            queue, and its capacity the flush threshold). */
-        PyObject *buffer = buffer_access_safe(self);
-        if (buffer == NULL) {
+        if (self->buffer == NULL) {
             Py_DECREF(b);
-            return NULL;
+            return buffer_access_safe(self);  /* raises */
         }
+        /* self->raw: CHECK_CLOSED found it open.  (If the encoder closed
+           it, the bytes are queued, as pending_bytes would be.) */
         int r = _PyIONibbler_write(
-            buffer, b, b == text ? PyUnicode_DATA(b) : PyBytes_AS_STRING(b),
-            bytes_len);
-        Py_DECREF(buffer);
+            self->buffer, b,
+            b == text ? PyUnicode_DATA(b) : PyBytes_AS_STRING(b), bytes_len,
+            self->raw != NULL);
         if (r != _PyIO_NIBBLER_NO) {
             Py_DECREF(b);
             if (r < 0) {

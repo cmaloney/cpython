@@ -108,9 +108,12 @@ extern int _PyIONibbler_consume(PyObject *buffered, const _PyIO_Morsel *m,
    without an exception when they are no longer buffered. */
 extern PyObject *_PyIONibbler_lookback(PyObject *buffered, Py_ssize_t n);
 /* Like write(obj), for data[0:len] owned by obj, except that it returns
-   _PyIO_NIBBLER_NO instead of waiting for another thread's lock. */
+   _PyIO_NIBBLER_NO instead of waiting for another thread's lock.  buffered
+   may be a borrowed reference.  closed_checked: the caller just found its
+   raw FileIO open (so it need not be checked again). */
 extern int _PyIONibbler_write(PyObject *buffered, PyObject *obj,
-                              const char *data, Py_ssize_t len);
+                              const char *data, Py_ssize_t len,
+                              int closed_checked);
 
 /* Shortcut to the core of the IncrementalNewlineDecoder.decode method */
 extern PyObject *_PyIncrementalNewlineDecoder_decode(

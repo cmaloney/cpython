@@ -1934,7 +1934,8 @@ buffered_write_locked(buffered *self, Py_buffer *buffer, Py_ssize_t *done)
    with room.  Returns 1 when done, 0 when the lock is needed, or -1 on
    error. */
 static inline int
-buffered_write_lockfree(buffered *self, const char *data, Py_ssize_t len)
+buffered_write_lockfree(buffered *self, const char *data, Py_ssize_t len,
+                        int closed_checked)
 {
     nibbler_end *e = nibbler_end_get(&self->nib, 1);
     Py_ssize_t r;
@@ -1945,7 +1946,7 @@ buffered_write_lockfree(buffered *self, const char *data, Py_ssize_t len)
        exact FileIO was closed by itself is queued too: nothing can write it
        out any more.  (Other raw streams: see buffered_check_closed().) */
     PyObject *raw = FT_ATOMIC_LOAD_PTR_RELAXED(self->raw);
-    int closed = self->raw_fileio && _PyFileIO_closed(raw);
+    int closed = !closed_checked && self->raw_fileio && _PyFileIO_closed(raw);
     nibbler_commit(e, r, data, len);
     if (closed) {
         PyErr_SetString(PyExc_ValueError, "write to closed file");
@@ -2009,7 +2010,7 @@ buffered_write(buffered *self, PyObject *obj)
         return NULL;
     }
     else if (view.len < NIBBLER_REF_MIN) {
-        int r = buffered_write_lockfree(self, view.buf, view.len);
+        int r = buffered_write_lockfree(self, view.buf, view.len, 0);
         if (r != 0) {
             PyBuffer_Release(&view);
             return r < 0 ? NULL : PyLong_FromSsize_t(view.len);
@@ -2036,7 +2037,7 @@ _io_BufferedWriter_write_impl(buffered *self, PyObject *obj)
     if (PyBytes_CheckExact(obj)) {
         Py_ssize_t len = PyBytes_GET_SIZE(obj);
         int r = (len < NIBBLER_REF_MIN
-                 ? buffered_write_lockfree(self, PyBytes_AS_STRING(obj), len)
+                 ? buffered_write_lockfree(self, PyBytes_AS_STRING(obj), len, 0)
                  : 0);
         if (r != 0) {
             return r < 0 ? NULL : PyLong_FromSsize_t(len);
@@ -2162,26 +2163,49 @@ _PyIONibbler_lookback(PyObject *op, Py_ssize_t n)
     return res;
 }
 
-int
-_PyIONibbler_write(PyObject *op, PyObject *obj, const char *data,
-                   Py_ssize_t len)
+/* _PyIONibbler_write() past its first case, out of line.  It never waits
+   for the lock: TextIOWrapper keeps the data instead (writing text never
+   blocked behind another thread's raw read). */
+Py_NO_INLINE static int
+nibbler_text_write(buffered *self, PyObject *obj, const char *data,
+                   Py_ssize_t len, int closed_checked)
 {
-    buffered *self = buffered_cast(op);
     if (self->dict != NULL
-        || ((PyHeapTypeObject *)Py_TYPE(op))->ht_token
+        || ((PyHeapTypeObject *)Py_TYPE(self))->ht_token
            == &nibbler_bufferedreader_spec)
     {
         return _PyIO_NIBBLER_NO;
     }
-    int r = len < NIBBLER_REF_MIN ? buffered_write_lockfree(self, data, len)
-                                  : 0;
+    int r = (len < NIBBLER_REF_MIN
+             ? buffered_write_lockfree(self, data, len, closed_checked) : 0);
     if (r != 0) {
         return r < 0 ? -1 : 0;
     }
-    /* Never waits for the lock: TextIOWrapper keeps the data instead
-       (writing text never blocked behind another thread's raw read). */
+    /* The caller's reference is borrowed: raw.write() could drop it. */
+    Py_INCREF(self);
     Py_buffer view = {.obj = obj, .buf = (void *)data, .len = len};
-    return buffered_write_view(self, &view, 1);
+    r = buffered_write_view(self, &view, 1);
+    Py_DECREF(self);
+    return r;
+}
+
+int
+_PyIONibbler_write(PyObject *op, PyObject *obj, const char *data,
+                   Py_ssize_t len, int closed_checked)
+{
+    buffered *self = buffered_cast(op);
+    /* The common case: room at the writing end (only a writer has one),
+       and the raw stream is known to be open. */
+    nibbler_end *e;
+    Py_ssize_t r;
+    if (closed_checked && self->dict == NULL && len < NIBBLER_REF_MIN
+        && (e = nibbler_end_get(&self->nib, 1)) != NULL
+        && (r = nibbler_reserve(e, len)) >= 0)
+    {
+        nibbler_commit(e, r, data, len);
+        return 0;
+    }
+    return nibbler_text_write(self, obj, data, len, closed_checked);
 }
 
 /*
