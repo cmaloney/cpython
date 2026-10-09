@@ -70,11 +70,11 @@ find_nibblermodule_state_by_def(PyTypeObject *type)
  *   vectored _writev() method) with the I/O role, without holding the
  *   lock; meanwhile other threads can only queue more writes.  With an
  *   exact FileIO, small writes that fit are queued without the lock (see
- *   "The tail" in nibbler.h), so all code holding the lock sees them
+ *   "The open end" in nibbler.h), so all code holding the lock sees them
  *   queued.
  *
- * - Reading: the read window holds the bytes the last fill read (see "The
- *   read window" in nibbler.h).  Its position splits them: the bytes before
+ * - Reading: the reading end holds the bytes the last fill read (see "The
+ *   open end" in nibbler.h).  Its position splits them: the bytes before
  *   it were returned already (seek() can move back over them), the rest are
  *   read-ahead, which reads take without the lock when they can.
  *
@@ -213,19 +213,20 @@ buffered_get_raw(buffered *self)
 }
 
 /* Are there pending writes, or is another thread writing them out?  Then
-   there is no read window. */
+   there is no read-ahead. */
 static inline int
 buffered_writing(buffered *self)
 {
-    assert(self->nib.window == NULL || nibbler_nbytes(&self->nib) == 0);
+    assert(nibbler_reading(&self->nib) == NULL
+           || nibbler_nbytes(&self->nib) == 0);
     return nibbler_nbytes(&self->nib) > 0 || nibbler_io_busy(&self->nib);
 }
 
-/* The read window (read-ahead), or NULL when there is none. */
-static inline nibbler_window *
-buffered_window(buffered *self)
+/* The read-ahead (the reading end), or NULL when there is none. */
+static inline nibbler_end *
+buffered_reading(buffered *self)
 {
-    return self->nib.window;
+    return nibbler_reading(&self->nib);
 }
 
 /* How much read-ahead there is (other threads may take some without the
@@ -413,8 +414,9 @@ buffered_raw_write(buffered *self, Py_ssize_t avail, const morsel *extra,
     }
 
     /* Python code may keep the views (and reach the block through them): it
-       must not be written to again.  (No tail: that needs raw_fileio.) */
-    assert(self->nib.tail == NULL);
+       must not be written to again.  (No end: appends without the lock
+       need raw_fileio, and nothing is read while writing.) */
+    assert(self->nib.end == NULL);
     Py_CLEAR(self->nib.block);
     PyObject *arg = NULL;
     if (cnt == 1) {
@@ -520,7 +522,7 @@ static int
 buffered_add_write(buffered *self, PyObject *obj, const char *data,
                    Py_ssize_t len)
 {
-    assert(buffered_window(self) == NULL);
+    assert(buffered_reading(self) == NULL);
     return nibbler_append(&self->nib, obj, data, len, self->raw_vectored);
 }
 
@@ -590,7 +592,7 @@ buffered_flush_writes(buffered *self, int unlocked)
 static int
 buffered_rewind(buffered *self)
 {
-    Py_ssize_t unread = nibbler_close_window(&self->nib);
+    Py_ssize_t unread = nibbler_drop_unread(&self->nib);
     if (unread > 0 && buffered_raw_seek(self, -unread, SEEK_CUR) < 0) {
         return -1;
     }
@@ -617,7 +619,7 @@ buffered_sync(buffered *self, int unlocked)
 static Py_ssize_t
 buffered_fill(buffered *self)
 {
-    (void)nibbler_close_window(&self->nib);
+    (void)nibbler_drop_unread(&self->nib);
     /* The read holds its own reference while it uses the block (see
        nibbler_lock_wait()). */
     PyObject *block = Py_XNewRef(nibbler_fresh_block(&self->nib));
@@ -675,7 +677,7 @@ buffered_read_into(buffered *self, char *dst, Py_ssize_t len, int read1)
         if (remaining >= self->nib.capacity) {
             /* Bypasses the read-ahead, which no longer precedes the raw
                position. */
-            (void)nibbler_close_window(&self->nib);
+            (void)nibbler_drop_unread(&self->nib);
             n = buffered_raw_read(self, dst + written, remaining);
             written += Py_MAX(n, 0);
         }
@@ -821,7 +823,7 @@ buffered_read_all(buffered *self)
         Py_DECREF(rest);
     }
     /* The raw stream moved past the read-ahead. */
-    (void)nibbler_close_window(&self->nib);
+    (void)nibbler_drop_unread(&self->nib);
     return res;
 }
 
@@ -919,7 +921,7 @@ buffered_enter_locked(buffered *self, const char *closed_msg, int direction)
     }
     /* Switch direction: hand back read-ahead before writing, write out
        pending writes before reading. */
-    if (direction == WRITING && buffered_window(self) != NULL
+    if (direction == WRITING && buffered_reading(self) != NULL
         && buffered_rewind(self) < 0)
     {
         goto error;
@@ -956,7 +958,7 @@ buffered_enter(buffered *self, const char *closed_msg, int direction)
         return 0;
     }
     if (direction == WRITING && self->raw_fileio
-        && buffered_window(self) == NULL && buffered_raw_usable(self->raw)
+        && buffered_reading(self) == NULL && buffered_raw_usable(self->raw)
         && self->nib.capacity > 0 && !_PyFileIO_closed(self->raw))
     {
         return 0;
@@ -1392,10 +1394,10 @@ _io__Buffered_read_impl(buffered *self, Py_ssize_t n)
         return NULL;
     }
     /* Without the lock when the read-ahead has all of it. */
-    nibbler_window *w = nibbler_window_get(&self->nib);
+    nibbler_end *e = nibbler_end_get(&self->nib, 0);
     Py_ssize_t start;
-    if (w != NULL && n >= 0 && nibbler_claim(w, n, 1, &start) >= 0) {
-        return nibbler_window_bytes(w, start, n);
+    if (e != NULL && n >= 0 && nibbler_claim(e, n, 1, &start) >= 0) {
+        return nibbler_end_bytes(e, start, n);
     }
     /* read(0) needs no read-ahead: don't make BufferedRandom write out
        pending data for it. */
@@ -1421,12 +1423,12 @@ _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
 /*[clinic end generated code: output=bcc4fb4e54d103a3 input=7d22de9630b61774]*/
 {
     /* Without the lock (and no raw read) when there is read-ahead. */
-    nibbler_window *w = nibbler_window_get(&self->nib);
+    nibbler_end *e = nibbler_end_get(&self->nib, 0);
     Py_ssize_t start;
-    Py_ssize_t k = w == NULL ? -1 : nibbler_claim(
-        w, n < 0 ? PY_SSIZE_T_MAX : n, 0, &start);
+    Py_ssize_t k = e == NULL ? -1 : nibbler_claim(
+        e, n < 0 ? PY_SSIZE_T_MAX : n, 0, &start);
     if (k > 0 || (k == 0 && n == 0)) {
-        return nibbler_window_bytes(w, start, k);
+        return nibbler_end_bytes(e, start, k);
     }
     if (buffered_enter(self, "read of closed file",
                        n == 0 ? KEEP_DIRECTION : READING) < 0)
@@ -1491,10 +1493,10 @@ _io__Buffered_readline_impl(buffered *self, Py_ssize_t size)
 /*[clinic end generated code: output=24dd2aa6e33be83c input=673b6240e315ef8a]*/
 {
     /* Without the lock when the line is in the read-ahead. */
-    nibbler_window *w = nibbler_window_get(&self->nib);
+    nibbler_end *e = nibbler_end_get(&self->nib, 0);
     Py_ssize_t start, k;
-    if (w != NULL && (k = nibbler_claim_line(w, size, &start)) >= 0) {
-        return nibbler_window_bytes(w, start, k);
+    if (e != NULL && (k = nibbler_claim_line(e, size, &start)) >= 0) {
+        return nibbler_end_bytes(e, start, k);
     }
     if (buffered_enter(self, "readline of closed file",
                        size == 0 ? KEEP_DIRECTION : READING) < 0)
@@ -1567,7 +1569,7 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
     {
         goto end;
     }
-    if (buffered_window(self) != NULL
+    if (buffered_reading(self) != NULL
         && (whence == SEEK_SET || whence == SEEK_CUR))
     {
         /* Move within the last fill if the target is in it: its bytes end
@@ -1580,7 +1582,7 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
         if (whence == SEEK_SET) {
             offset = target - (raw_pos - buffered_readahead(self));
         }
-        Py_ssize_t unread = nibbler_window_move(&self->nib, offset);
+        Py_ssize_t unread = nibbler_move(&self->nib, offset);
         if (unread >= 0) {
             Py_off_t pos = raw_pos - (unread - offset);
             // GH-95782
@@ -1589,7 +1591,7 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
         }
     }
     /* The read-ahead (all that is unread now) is given up. */
-    Py_ssize_t unread = nibbler_close_window(&self->nib);
+    Py_ssize_t unread = nibbler_drop_unread(&self->nib);
     if (!buffered_writing(self) || buffered_flush_writes(self, 0) == 0) {
         if (whence == SEEK_CUR) {
             target -= unread;
@@ -1873,22 +1875,23 @@ buffered_write_locked(buffered *self, Py_buffer *buffer, Py_ssize_t *done)
     return buffered_add_write(self, buffer->obj, data + *done, len - *done);
 }
 
-/* Without the lock: queue data[0:len] at the tail, if there is one with
-   room.  Returns 1 when done, 0 when the lock is needed, or -1 on error. */
+/* Without the lock: queue data[0:len] at the writing end, if there is one
+   with room.  Returns 1 when done, 0 when the lock is needed, or -1 on
+   error. */
 static inline int
 buffered_write_lockfree(buffered *self, const char *data, Py_ssize_t len)
 {
-    nibbler_tail *t = nibbler_tail_get(&self->nib);
+    nibbler_end *e = nibbler_end_get(&self->nib, 1);
     Py_ssize_t r;
-    if (t == NULL || (r = nibbler_reserve(t, len)) < 0) {
+    if (e == NULL || (r = nibbler_reserve(e, len)) < 0) {
         return 0;
     }
     /* Until committed, nothing can replace raw (a FileIO, since there is a
-       tail).  Data written once it was closed by itself is queued too:
+       writing end).  Data written once it was closed by itself is queued too:
        nothing can write it out any more. */
     PyObject *raw = FT_ATOMIC_LOAD_PTR_RELAXED(self->raw);
     int closed = raw == NULL || _PyFileIO_closed(raw);
-    nibbler_commit(t, r, data, len);
+    nibbler_commit(e, r, data, len);
     if (closed) {
         PyErr_SetString(PyExc_ValueError, "write to closed file");
         return -1;
@@ -1920,7 +1923,7 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
         int r = buffered_write_locked(self, buffer, &done);
         if (r == 0 && self->raw_fileio) {
             /* The next writes may need no lock. */
-            nibbler_start_tail(&self->nib);
+            nibbler_start_appending(&self->nib);
         }
         if (r == BUFFERED_WRITE_RETRY
             && nibbler_wait_io(&self->nib, (PyObject *)self) < 0)
