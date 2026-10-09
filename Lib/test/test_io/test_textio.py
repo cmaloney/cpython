@@ -554,6 +554,58 @@ class TextIOWrapperTest:
                     self.multi_line_test(f, enc)
                 f.close()
 
+    def test_truncate_after_read(self):
+        # gh-70346: truncate() without a size cuts at the text position,
+        # where the next write would go, not where the buffer read up to.
+        text = "line one\nline two\nline three\n"
+        for enc in ("ascii", "latin-1", "utf-8", "utf-16", "utf-7"):
+            with self.subTest(encoding=enc):
+                with self.open(os_helper.TESTFN, "w", encoding=enc) as f:
+                    f.write(text)
+                with self.open(os_helper.TESTFN, "r+", encoding=enc) as f:
+                    self.assertEqual(f.readline(), "line one\n")
+                    pos = f.tell()
+                    f.truncate()
+                    self.assertEqual(f.tell(), pos)
+                    self.assertEqual(f.read(), "")
+                    f.write("X")
+                with self.open(os_helper.TESTFN, "r", encoding=enc) as f:
+                    self.assertEqual(f.read(), "line one\nX")
+        # An explicit size is a byte count; the text after the position up
+        # to it is still read.
+        with self.open(os_helper.TESTFN, "w", encoding="ascii") as f:
+            f.write(text)
+        with self.open(os_helper.TESTFN, "r+", encoding="ascii") as f:
+            self.assertEqual(f.read(3), "lin")
+            self.assertEqual(f.truncate(12), 12)
+            self.assertEqual(f.tell(), 3)
+            self.assertEqual(f.read(), "e one\nlin")
+        # A file larger than a decoded chunk.
+        big = "".join(f"line {i:05}\n" for i in range(3000))
+        with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.write(big)
+        with self.open(os_helper.TESTFN, "r+", encoding="utf-8") as f:
+            self.assertEqual(f.readline(), "line 00000\n")
+            f.truncate()
+        with self.open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(), b"line 00000\n")
+        # While iterating: where tell() works, truncate() cuts there;
+        # where next() disabled tell(), truncate() raises like it.
+        with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.write(big)
+        with self.open(os_helper.TESTFN, "r+", encoding="utf-8") as f:
+            self.assertEqual(next(f), "line 00000\n")
+            try:
+                pos = f.tell()
+            except OSError:
+                self.assertRaises(OSError, f.truncate)
+            else:
+                f.truncate()
+                self.assertEqual(f.tell(), pos)
+                self.assertEqual(f.read(), "")
+                with self.open(os_helper.TESTFN, "rb") as g:
+                    self.assertEqual(g.read(), b"line 00000\n")
+
     def multi_line_test(self, f, enc):
         f.seek(0)
         f.truncate()
