@@ -686,6 +686,61 @@ class SlowDeviceTest:
         f.flush()
         self.assertEqual(bytes(raw.received), b"x" * 40)
 
+    def test_write_error_keeps_rest_that_fits(self):
+        # An error (other than BlockingIOError) after part of write()'s
+        # data was written keeps the rest pending when it fits in the
+        # buffer: write() raises, and flush() writes the rest.
+        data = sample_data(100)
+        raw = self.scripted_writer([36, OSError(errno.EIO, "EIO")])
+        f = self.BufferedWriter(raw, 64)
+        with self.assertRaises(OSError) as cm:
+            f.write(data)
+        self.assertNotIsInstance(cm.exception, BlockingIOError)
+        self.assertEqual(cm.exception.errno, errno.EIO)
+        self.assertEqual(cm.exception.characters_written, 100)
+        self.assertEqual(bytes(raw.received), data[:36])
+        f.flush()
+        self.assertEqual(bytes(raw.received), data)
+
+    def test_write_error_keeps_what_fits(self):
+        # When the rest doesn't fit, as much of it as fits is kept, and
+        # characters_written says how much of the data was accepted
+        # (written or kept): the caller writes the rest again.
+        data = sample_data(200)
+        raw = self.scripted_writer([30, TimeoutError("timed out")])
+        f = self.BufferedWriter(raw, 64)
+        with self.assertRaises(TimeoutError) as cm:
+            f.write(data)
+        n = cm.exception.characters_written
+        self.assertEqual(n, 30 + 64)
+        f.write(data[n:])
+        f.flush()
+        self.assertEqual(bytes(raw.received), data)
+
+    def test_write_interrupted_keeps_rest(self):
+        # The same for an exception that isn't an OSError (such as one a
+        # signal handler raises), which has no characters_written.
+        data = sample_data(100)
+        raw = self.scripted_writer([36, KeyboardInterrupt()])
+        f = self.BufferedWriter(raw, 64)
+        with self.assertRaises(KeyboardInterrupt) as cm:
+            f.write(data)
+        self.assertNotHasAttr(cm.exception, "characters_written")
+        f.flush()
+        self.assertEqual(bytes(raw.received), data)
+
+    def test_size_zero_write_error_reports_written(self):
+        if not self.supports_buffer_size_zero:
+            self.skipTest("buffer_size=0 not supported")
+        data = sample_data(100)
+        raw = self.scripted_writer([30, OSError(errno.EIO, "EIO")])
+        f = self.BufferedWriter(raw, 0)
+        with self.assertRaises(OSError) as cm:
+            f.write(data)
+        self.assertEqual(cm.exception.characters_written, 30)
+        f.flush()
+        self.assertEqual(bytes(raw.received), data[:30])
+
     # Real file descriptors
 
     @threading_helper.requires_working_threading()

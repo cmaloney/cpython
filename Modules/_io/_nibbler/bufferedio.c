@@ -540,20 +540,27 @@ buffered_add_write(buffered *self, PyObject *obj, const char *data,
     return nibbler_append(&self->nib, obj, data, len, self->raw_vectored);
 }
 
+/* How a write out stopped: everything written, the raw stream would
+   block, or an error. */
+enum {
+    WRITE_DONE = 0,
+    WRITE_BLOCKED = 1,
+    WRITE_ERROR = -1,
+};
+
 /* Write the first `target` bytes of the pending writes followed by
-   data[0:len] until all of it is written or the raw stream would block
-   (*blocked is then set).  Written bytes are dropped as they go, so on
-   error the unwritten rest is still pending.  With unlocked, the lock is
-   released around the raw calls; other threads can then only queue more
-   writes, which are left pending.  Returns how much of data was written,
-   or -1 on error. */
+   data[0:len] until all of it is written, the raw stream would block or
+   an error is raised; *status says which.  Written bytes are dropped as
+   they go, so on error the unwritten rest is still pending.  With
+   unlocked, the lock is released around the raw calls; other threads can
+   then only queue more writes, which are left pending.  Returns how much
+   of data was written, also on error. */
 static Py_ssize_t
 buffered_write_out(buffered *self, Py_ssize_t target, const char *data,
-                   Py_ssize_t len, int *blocked, int unlocked)
+                   Py_ssize_t len, int *status, int unlocked)
 {
     morsel extra = {NULL, data, len};
-    Py_ssize_t res = -1;
-    *blocked = 0;
+    *status = WRITE_ERROR;
     nibbler_begin_io(&self->nib);
     while (target > 0 || extra.len > 0) {
         Py_ssize_t n = buffered_raw_write(self, target, &extra, unlocked);
@@ -561,8 +568,8 @@ buffered_write_out(buffered *self, Py_ssize_t target, const char *data,
             goto done;
         }
         if (n == -2) {
-            *blocked = 1;
-            break;
+            *status = WRITE_BLOCKED;
+            goto done;
         }
         Py_ssize_t k = nibbler_written(&self->nib, n);
         target -= k;
@@ -584,11 +591,11 @@ buffered_write_out(buffered *self, Py_ssize_t target, const char *data,
             goto done;
         }
     }
-    res = len - extra.len;
+    *status = WRITE_DONE;
 
 done:
     nibbler_end_io(&self->nib);
-    return res;
+    return len - extra.len;
 }
 
 /* Unbuffered write() to a FileIO with nothing pending: write data[0:len]
@@ -596,15 +603,14 @@ done:
    and without the lock, like buffered_write_out() but without its pending
    writes.  Signal handlers run only before retrying (and in the raw call
    on EINTR); writes they make are left pending.  Returns how much was
-   written (all of it unless the raw stream would block, with *blocked
-   set), or -1 on error. */
+   written, also when *status is not WRITE_DONE. */
 static Py_ssize_t
 buffered_write_direct(buffered *self, const char *data, Py_ssize_t len,
-                      int *blocked)
+                      int *status)
 {
     assert(self->raw_fileio && !buffered_writing(self));
     Py_ssize_t done = 0;
-    *blocked = 0;
+    *status = WRITE_ERROR;
     nibbler_begin_io(&self->nib);
     buffered_unlock_for_raw(self, 1);
     for (;;) {
@@ -613,24 +619,22 @@ buffered_write_direct(buffered *self, const char *data, Py_ssize_t len,
             _PyFileIO_writev(self->raw, &span, 1), span.len, "write");
         if (n < 0) {
             if (n == -2) {
-                *blocked = 1;
-                break;
+                *status = WRITE_BLOCKED;
             }
-            done = -1;
             break;
         }
         done += n;
         /* A partial write may have been interrupted by a signal (see
            write(2)): run signal handlers before blocking again. */
         if (done == len) {
+            *status = WRITE_DONE;
             break;
         }
         if (PyErr_CheckSignals() < 0) {
-            done = -1;
             break;
         }
     }
-    if (done == len) {
+    if (*status == WRITE_DONE) {
         nibbler_relock(&self->nib, (PyObject *)self);
     }
     else {
@@ -647,17 +651,13 @@ buffered_write_direct(buffered *self, const char *data, Py_ssize_t len,
 static int
 buffered_flush_writes(buffered *self, int unlocked)
 {
-    int blocked;
-    if (buffered_write_out(self, nibbler_nbytes(&self->nib), NULL, 0,
-                           &blocked, unlocked) < 0)
-    {
-        return -1;
-    }
-    if (blocked) {
+    int status;
+    (void)buffered_write_out(self, nibbler_nbytes(&self->nib), NULL, 0,
+                             &status, unlocked);
+    if (status == WRITE_BLOCKED) {
         buffered_set_blocking_error(0);
-        return -1;
     }
-    return 0;
+    return status == WRITE_DONE ? 0 : -1;
 }
 
 /* Hand unread read-ahead back to the raw stream, so the raw position is
@@ -1981,6 +1981,41 @@ _io_BufferedWriter___init___impl(buffered *self, PyObject *raw,
    since anything may have changed. */
 #define BUFFERED_WRITE_RETRY 1
 
+/* write() raised an error other than BlockingIOError after `done` bytes of
+   its data reached the raw stream: keep the rest pending, as much of it as
+   fits, so that flush() writes it, and set the error's characters_written
+   to how much of the data was accepted (written or kept).  Without that,
+   the caller couldn't tell what to write again.  Returns -1. */
+static int
+buffered_write_failed(buffered *self, Py_buffer *buffer, Py_ssize_t done)
+{
+    if (done == 0) {
+        /* None of the data was taken: the caller can just retry. */
+        return -1;
+    }
+    PyObject *exc = PyErr_GetRaisedException();
+    Py_ssize_t room = Py_MAX(0, self->nib.capacity
+                                - nibbler_nbytes(&self->nib));
+    Py_ssize_t keep = Py_MIN(buffer->len - done, room);
+    if (buffered_add_write(self, buffer->obj, (const char *)buffer->buf + done,
+                           keep) < 0)
+    {
+        _PyErr_ChainExceptions1(exc);
+        return -1;
+    }
+    if (PyErr_GivenExceptionMatches(exc, PyExc_OSError)) {
+        PyObject *n = PyLong_FromSsize_t(done + keep);
+        if (n == NULL
+            || PyObject_SetAttrString(exc, "characters_written", n) < 0)
+        {
+            PyErr_Clear();
+        }
+        Py_XDECREF(n);
+    }
+    PyErr_SetRaisedException(exc);
+    return -1;
+}
+
 /* The body of write(), with the lock held: buffer the data after *done
    (the bytes of it written out so far), writing out what is pending first
    when it doesn't fit.  Called from code that the raw write of this
@@ -2001,14 +2036,13 @@ buffered_write_locked(buffered *self, Py_buffer *buffer, Py_ssize_t *done)
     {
         /* Unbuffered: one raw write, without queueing.  Writes made
            meanwhile by signal handlers are written out below. */
-        int blocked;
-        Py_ssize_t n = buffered_write_direct(self, data + *done,
-                                             len - *done, &blocked);
-        if (n < 0) {
-            return -1;
+        int status;
+        *done += buffered_write_direct(self, data + *done, len - *done,
+                                       &status);
+        if (status == WRITE_ERROR) {
+            return buffered_write_failed(self, buffer, *done);
         }
-        *done += n;
-        if (blocked) {
+        if (status == WRITE_BLOCKED) {
             buffered_set_blocking_error(*done);
             return -1;
         }
@@ -2030,17 +2064,16 @@ buffered_write_locked(buffered *self, Py_buffer *buffer, Py_ssize_t *done)
         /* Write out what is pending, and the rest of data with it when one
            vectored write takes both or it is too large to buffer, without
            the lock: other threads can queue writes meanwhile. */
-        int blocked;
+        int status;
         Py_ssize_t rest = len - *done;
         Py_ssize_t direct = (self->raw_vectored || rest >= self->nib.capacity
                              ? rest : 0);
-        Py_ssize_t n = buffered_write_out(self, nibbler_nbytes(&self->nib),
-                                          data + *done, direct, &blocked, 1);
-        if (n < 0) {
-            return -1;
+        *done += buffered_write_out(self, nibbler_nbytes(&self->nib),
+                                    data + *done, direct, &status, 1);
+        if (status == WRITE_ERROR) {
+            return buffered_write_failed(self, buffer, *done);
         }
-        *done += n;
-        if (blocked) {
+        if (status == WRITE_BLOCKED) {
             Py_ssize_t room = Py_MAX(0, self->nib.capacity
                                         - nibbler_nbytes(&self->nib));
             if (len - *done > room) {

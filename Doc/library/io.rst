@@ -1257,7 +1257,14 @@ lost, and :meth:`!close` raises the :exc:`BlockingIOError`.  To avoid losing
 data, call :meth:`~IOBase.flush` until it succeeds before closing.
 
 Errors other than "would block" (such as a timeout or :data:`errno.EIO`)
-are raised.  Note that :meth:`FileIO.readall` and :meth:`FileIO.read` with no
+are raised.  When the :meth:`~BufferedIOBase.write` of a buffered stream
+raises one after part of the data was written, as much of the rest as fits
+in the buffer stays buffered, for :meth:`~BufferedWriter.flush` to write.
+If the error is an :exc:`OSError`, its :attr:`~BlockingIOError.characters_written`
+attribute is then set to the number of bytes taken from the data (written or
+buffered): the rest was not taken and should be written again.  When the
+error has no such attribute because none of the data was written, none of it
+was taken.  Note that :meth:`FileIO.readall` and :meth:`FileIO.read` with no
 size (and so the :meth:`!read` with no size of a buffered stream over a
 :class:`FileIO`) may discard the bytes they already read when a later system
 call fails.

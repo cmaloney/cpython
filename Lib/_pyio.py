@@ -1315,6 +1315,18 @@ class BufferedWriter(_BufferedIOMixin):
                         written -= overage
                         self._write_buf = self._write_buf[:self.buffer_size]
                         raise BlockingIOError(e.errno, e.strerror, written)
+                except BaseException as e:
+                    # Another error after part of b reached the raw
+                    # stream (earlier data was all written then): keep as
+                    # much of the rest pending as fits, for flush() to
+                    # write, and say how much of b was accepted.
+                    unwritten = len(self._write_buf)
+                    if unwritten < written:
+                        keep = min(unwritten, self.buffer_size)
+                        del self._write_buf[keep:]
+                        if isinstance(e, OSError):
+                            e.characters_written = written - unwritten + keep
+                    raise
             return written
 
     def truncate(self, pos=None):
