@@ -68,7 +68,10 @@ find_nibblermodule_state_by_def(PyTypeObject *type)
  *   read window.  write() and
  *   flush() write them out together (in one call when the raw stream has a
  *   vectored _writev() method) with the I/O role, without holding the
- *   lock; meanwhile other threads can only queue more writes.
+ *   lock; meanwhile other threads can only queue more writes.  With an
+ *   exact FileIO, small writes that fit are queued without the lock (see
+ *   "The tail" in nibbler.h), so all code holding the lock sees them
+ *   queued.
  *
  * - Reading: the read window holds the bytes the last fill read (see "The
  *   read window" in nibbler.h).  Its position splits them: the bytes before
@@ -410,7 +413,8 @@ buffered_raw_write(buffered *self, Py_ssize_t avail, const morsel *extra,
     }
 
     /* Python code may keep the views (and reach the block through them): it
-       must not be written to again. */
+       must not be written to again.  (No tail: that needs raw_fileio.) */
+    assert(self->nib.tail == NULL);
     Py_CLEAR(self->nib.block);
     PyObject *arg = NULL;
     if (cnt == 1) {
@@ -1869,6 +1873,29 @@ buffered_write_locked(buffered *self, Py_buffer *buffer, Py_ssize_t *done)
     return buffered_add_write(self, buffer->obj, data + *done, len - *done);
 }
 
+/* Without the lock: queue data[0:len] at the tail, if there is one with
+   room.  Returns 1 when done, 0 when the lock is needed, or -1 on error. */
+static inline int
+buffered_write_lockfree(buffered *self, const char *data, Py_ssize_t len)
+{
+    nibbler_tail *t = nibbler_tail_get(&self->nib);
+    Py_ssize_t r;
+    if (t == NULL || (r = nibbler_reserve(t, len)) < 0) {
+        return 0;
+    }
+    /* Until committed, nothing can replace raw (a FileIO, since there is a
+       tail).  Data written once it was closed by itself is queued too:
+       nothing can write it out any more. */
+    PyObject *raw = FT_ATOMIC_LOAD_PTR_RELAXED(self->raw);
+    int closed = raw == NULL || _PyFileIO_closed(raw);
+    nibbler_commit(t, r, data, len);
+    if (closed) {
+        PyErr_SetString(PyExc_ValueError, "write to closed file");
+        return -1;
+    }
+    return 1;
+}
+
 /*[clinic input]
 _io.BufferedWriter.write
     buffer: Py_buffer
@@ -1879,12 +1906,22 @@ static PyObject *
 _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
 /*[clinic end generated code: output=7f8d1365759bfc6b input=dd87dd85fc7f8850]*/
 {
+    if (buffer->len < NIBBLER_REF_MIN) {
+        int r = buffered_write_lockfree(self, buffer->buf, buffer->len);
+        if (r != 0) {
+            return r < 0 ? NULL : PyLong_FromSsize_t(buffer->len);
+        }
+    }
     Py_ssize_t done = 0;
     for (;;) {
         if (buffered_enter(self, "write to closed file", WRITING) < 0) {
             return NULL;
         }
         int r = buffered_write_locked(self, buffer, &done);
+        if (r == 0 && self->raw_fileio) {
+            /* The next writes may need no lock. */
+            nibbler_start_tail(&self->nib);
+        }
         if (r == BUFFERED_WRITE_RETRY
             && nibbler_wait_io(&self->nib, (PyObject *)self) < 0)
         {

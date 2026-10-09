@@ -6,8 +6,10 @@
  * exact bytes objects) or copied into `block`, a bytes object of `capacity`
  * bytes filled in order.  Data read is a window over the block a read filled,
  * which readers take bytes from without the lock (see "The read window"
- * below).  A block is only written into while nothing else references it,
- * so a bytes object never changes once it was handed out.
+ * below).  Small appends that fit after the copies in the block can go there
+ * without the lock (see "The tail" below).  A block is only written into
+ * while nothing else references it, so a bytes object never changes once it
+ * was handed out.
  *
  * Threads coordinate with two things, both taken over (not waited for) when
  * their holder is gone, see nibbler_lock_wait().  Threads waiting for either
@@ -96,6 +98,9 @@ typedef struct {
     struct nibbler_window *window;
     /* The position in the window while the lock holder holds it. */
     Py_ssize_t held;
+    /* Where appends go without the lock; NULL for none.  Also read without
+       the lock, see "The tail". */
+    struct nibbler_tail *tail;
 } nibbler;
 
 /*
@@ -235,7 +240,188 @@ nibbler_hold(nibbler *n)
     }
 }
 
-/* Before releasing the lock: let lock-free readers at the window again. */
+/*
+ * The tail
+ *
+ * Appends that fit after the morsels go into the block without the lock
+ * when the last morsel is copies in it: the tail is block[start:limit],
+ * after them.  An append reserves its bytes by advancing `reserved` with a
+ * compare-and-swap, copies its data there, then adds its length to
+ * `committed`.  Reservation order is append order, so each thread's
+ * appends stay in its order.
+ *
+ * Whoever holds the lock seals the tail (`reserved` is then ~end, which is
+ * negative, so appends without the lock fail and take the lock), waits
+ * until every append that reserved has committed, and makes those bytes
+ * part of the last morsel.  Releasing the lock opens the tail again after
+ * the morsels, if they still end in its block, with `limit` keeping
+ * everything appended within the capacity.  So code holding the lock sees
+ * plain morsels, as with the window.
+ *
+ * Nothing that waits (or lets the thread be stopped, or detached) comes
+ * between reserving and committing, so a waiting sealer only ever waits for
+ * a thread that is running its copy: fork and finalization stop threads
+ * only where they can detach.  With the GIL nobody is ever between them
+ * while another thread runs, so plain loads and stores do.
+ *
+ * Within one tail, the end in `reserved` (sealed or not) only grows, and
+ * `limit` only grows for a given end; so an append that loaded an outdated
+ * limit before its compare-and-swap succeeded never goes past the current
+ * one.  The block is never written over from its start while it has a
+ * tail: that needs a fresh block, which drops the tail (freed, with its
+ * reference to the block, once no append without the lock can still be
+ * using it, like a window).  Bytes past the morsels are never handed out,
+ * so appends there never change memory anyone else uses.
+ */
+
+typedef struct nibbler_tail {
+    PyObject *block;
+    /* The end of the morsels when the tail was opened (lock held only). */
+    Py_ssize_t start;
+    Py_ssize_t limit;
+    Py_ssize_t reserved;
+    Py_ssize_t committed;
+} nibbler_tail;
+
+/* With the lock just taken: seal the tail, wait for appends still copying,
+   and add what was appended to the last morsel.  It may be sealed already,
+   when it wasn't opened again or the lock was taken over from a gone
+   holder. */
+static inline void
+nibbler_seal(nibbler *n)
+{
+    nibbler_tail *t = n->tail;
+    if (t == NULL) {
+        return;
+    }
+    Py_ssize_t r = FT_ATOMIC_LOAD_SSIZE_RELAXED(t->reserved);
+    while (r >= 0 && !FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(t->reserved, &r, ~r)) {
+        /* retry */
+    }
+    if (r < 0) {
+        r = ~r;
+    }
+#ifdef Py_GIL_DISABLED
+    while (_Py_atomic_load_ssize_acquire(&t->committed) != r) {
+        _Py_yield();
+    }
+#else
+    assert(t->committed == r);
+#endif
+    if (r > t->start) {
+        morsel *last = &n->list.items[n->list.count - 1];
+        assert(last->obj == t->block);
+        assert(last->ptr + last->len == PyBytes_AS_STRING(t->block) + t->start);
+        last->len += r - t->start;
+        n->list.nbytes += r - t->start;
+        t->start = r;
+    }
+}
+
+/* Before releasing the lock: open the tail after the morsels if they end
+   in its block, else leave it sealed. */
+static inline void
+nibbler_unseal(nibbler *n)
+{
+    nibbler_tail *t = n->tail;
+    if (t == NULL || n->list.count == 0) {
+        return;
+    }
+    morsel *last = &n->list.items[n->list.count - 1];
+    if (last->obj != t->block) {
+        return;
+    }
+    assert(n->window == NULL);
+    Py_ssize_t end = last->ptr + last->len - PyBytes_AS_STRING(t->block);
+    Py_ssize_t room = Py_MIN(n->capacity - n->list.nbytes,
+                             PyBytes_GET_SIZE(t->block) - end);
+    assert(end >= t->start);
+    t->start = end;
+    FT_ATOMIC_STORE_SSIZE_RELAXED(t->committed, end);
+    FT_ATOMIC_STORE_SSIZE_RELAXED(t->limit, end + room);
+    FT_ATOMIC_STORE_SSIZE_RELEASE(t->reserved, end);
+}
+
+/* Drop the tail (sealed, or without the lock in dealloc). */
+static void
+nibbler_drop_tail(nibbler *n)
+{
+    nibbler_tail *t = n->tail;
+    if (t != NULL) {
+        FT_ATOMIC_STORE_PTR_RELEASE(n->tail, NULL);
+        _PyObject_XDecRefDelayed(t->block);
+        _PyMem_FreeDelayed(t, sizeof(*t));
+    }
+}
+
+/* Let appends go after the morsels without the lock from now on, if they
+   end in the block.  Without memory for it, they just don't. */
+static void
+nibbler_start_tail(nibbler *n)
+{
+    if (n->tail != NULL || n->list.count == 0
+        || n->list.items[n->list.count - 1].obj != n->block)
+    {
+        return;
+    }
+    nibbler_tail *t = PyMem_Malloc(sizeof(*t));
+    if (t == NULL) {
+        return;
+    }
+    morsel *last = &n->list.items[n->list.count - 1];
+    Py_ssize_t end = last->ptr + last->len - PyBytes_AS_STRING(n->block);
+    t->block = Py_NewRef(n->block);
+    t->start = end;
+    t->limit = 0;
+    /* Sealed: releasing the lock opens it. */
+    t->reserved = ~end;
+    t->committed = end;
+    FT_ATOMIC_STORE_PTR_RELEASE(n->tail, t);
+}
+
+/* Without the lock: the tail, or NULL. */
+static inline nibbler_tail *
+nibbler_tail_get(nibbler *n)
+{
+    return FT_ATOMIC_LOAD_PTR_ACQUIRE(n->tail);
+}
+
+/* Without the lock: reserve len bytes of t.  Returns their offset in the
+   block, or -1 when t is sealed or they don't fit.  nibbler_commit() must
+   follow, with nothing that can wait in between. */
+static inline Py_ssize_t
+nibbler_reserve(nibbler_tail *t, Py_ssize_t len)
+{
+    Py_ssize_t r = FT_ATOMIC_LOAD_SSIZE_ACQUIRE(t->reserved);
+    for (;;) {
+        if (r < 0 || len > FT_ATOMIC_LOAD_SSIZE_RELAXED(t->limit) - r) {
+            return -1;
+        }
+        if (FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(t->reserved, &r, r + len)) {
+            return r;
+        }
+    }
+}
+
+/* Copy data[0:len] to the bytes reserved at offset r. */
+static inline void
+nibbler_commit(nibbler_tail *t, Py_ssize_t r, const char *data,
+               Py_ssize_t len)
+{
+    memcpy(PyBytes_AS_STRING(t->block) + r, data, len);
+    FT_ATOMIC_ADD_SSIZE(t->committed, len);
+}
+
+/* With the lock just taken: hold the window and seal the tail. */
+static inline void
+nibbler_hold_all(nibbler *n)
+{
+    nibbler_hold(n);
+    nibbler_seal(n);
+}
+
+/* Before releasing the lock: let lock-free readers at the window again,
+   and lock-free appends at the tail. */
 static inline void
 nibbler_open(nibbler *n)
 {
@@ -243,6 +429,7 @@ nibbler_open(nibbler *n)
     if (w != NULL) {
         FT_ATOMIC_STORE_SSIZE_RELEASE(w->cursor, n->held);
     }
+    nibbler_unseal(n);
 }
 
 /*
@@ -398,7 +585,7 @@ nibbler_lock(nibbler *n, PyObject *obj)
         return -1;
     }
     _Py_atomic_store_uint64_relaxed(&n->owner, tstate->id);
-    nibbler_hold(n);
+    nibbler_hold_all(n);
     return 0;
 }
 
@@ -415,7 +602,7 @@ nibbler_relock(nibbler *n, PyObject *obj)
         (void)r;
     }
     _Py_atomic_store_uint64_relaxed(&n->owner, tstate->id);
-    nibbler_hold(n);
+    nibbler_hold_all(n);
 }
 
 static inline void
@@ -735,6 +922,7 @@ static void
 nibbler_free(nibbler *n)
 {
     (void)nibbler_close_window(n);
+    nibbler_drop_tail(n);
     morsels_free(&n->list);
     Py_CLEAR(n->block);
 }
@@ -746,11 +934,12 @@ nibbler_nbytes(nibbler *n)
 }
 
 /* The block, when nothing but this nibbler references it (then all of it
-   can be overwritten); else a new one. */
+   can be overwritten); else a new one.  Either way, the tail is dropped. */
 static PyObject *
 nibbler_fresh_block(nibbler *n)
 {
     assert(n->capacity > 0);
+    nibbler_drop_tail(n);
     if (n->block == NULL || !_PyObject_IsUniquelyReferenced(n->block)) {
         PyObject *block = PyBytes_FromStringAndSize(NULL, n->capacity);
         if (block == NULL) {
