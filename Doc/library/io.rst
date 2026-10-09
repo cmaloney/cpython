@@ -1227,11 +1227,13 @@ Reading:
   is none.  :meth:`~IOBase.readline` returns what has arrived so far: a line
   may be returned without its end, and ``b""`` is returned when nothing has
   arrived (so :meth:`~IOBase.readlines` and iteration stop there).
-* Text streams (:class:`TextIOWrapper`): :meth:`~TextIOBase.read` with no
-  size raises :exc:`BlockingIOError` if no data is available.
-  :meth:`~TextIOBase.read` with a size and :meth:`~TextIOBase.readline`
-  return the characters decoded so far, which may be ``""``.  The bytes of a
-  character that has only partly arrived are kept for the next read.
+* Text streams (:class:`TextIOWrapper`): :meth:`~TextIOBase.read`,
+  :meth:`~TextIOBase.readline` and iteration raise :exc:`BlockingIOError`
+  if no character is available.  Otherwise :meth:`~TextIOBase.read` with a
+  size returns the characters available, which may be fewer than requested,
+  and :meth:`~TextIOBase.readline` returns what has arrived of the line,
+  which may lack its end.  The bytes of a character that has only partly
+  arrived are kept for the next read.
 
 Writing:
 

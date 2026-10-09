@@ -2195,6 +2195,23 @@ textiowrapper_utf8_ready(textio *self)
     return empty;
 }
 
+/* textiowrapper_read_chunk() result: the buffer would block before any
+   character was decoded (0 is EOF). */
+#define TEXTIO_BLOCKED 2
+
+/* Raise BlockingIOError for a text read that got no character. */
+static void
+textiowrapper_set_blocking_error(void)
+{
+    PyObject *err = PyObject_CallFunction(
+        PyExc_BlockingIOError, "is", EAGAIN,
+        "read could not complete without blocking");
+    if (err != NULL) {
+        PyErr_SetObject(PyExc_BlockingIOError, err);
+        Py_DECREF(err);
+    }
+}
+
 /* textiowrapper_read_chunk() with nibbler and decode_utf8: decode straight
    from the buffer's read-ahead, taking only the bytes of whole characters
    (a partial one stays in the buffer, which keeps it in front of the next
@@ -2228,7 +2245,7 @@ textiowrapper_read_chunk_nibbler(textio *self, Py_ssize_t size_hint)
     PyObject *chars;
     Py_ssize_t used;
     Py_ssize_t need = 1;
-    int final;
+    int final, blocked;
     for (;;) {
         _PyIO_Morsel m;
         r = _PyIONibbler_peek(buffer, need, &m);
@@ -2238,7 +2255,7 @@ textiowrapper_read_chunk_nibbler(textio *self, Py_ssize_t size_hint)
         }
         /* Fewer than needed: EOF, unless the raw stream would block.  Then
            a partial character stays in the buffer for the next read. */
-        int blocked = r == _PyIO_NIBBLER_BLOCKED;
+        blocked = r == _PyIO_NIBBLER_BLOCKED;
         final = m.len < need && !blocked;
         used = Py_MIN(m.len, Py_MAX(size, need));
         Py_ssize_t len = used;
@@ -2275,7 +2292,10 @@ textiowrapper_read_chunk_nibbler(textio *self, Py_ssize_t size_hint)
     Py_CLEAR(self->snapshot);
     self->snap_flags = dec_flags;
     self->snap_len = used;
-    return used > 0 || nchars > 0;
+    if (used == 0 && nchars == 0) {
+        return blocked ? TEXTIO_BLOCKED : 0;
+    }
+    return 1;
 }
 
 /* With a snapshot from textiowrapper_read_chunk_nibbler() (snap_len),
@@ -2442,6 +2462,9 @@ textiowrapper_read_chunk(textio *self, Py_ssize_t size_hint)
     }
     Py_DECREF(input_chunk);
 
+    if (eof && blocked) {
+        return TEXTIO_BLOCKED;
+    }
     return (eof == 0);
 
   fail:
@@ -2550,6 +2573,14 @@ _io_TextIOWrapper_read_impl(textio *self, Py_ssize_t n)
                     continue;
                 }
                 goto fail;
+            }
+            if (res == TEXTIO_BLOCKED) {
+                if (remaining == n) {
+                    /* Nothing to return: "" would mean EOF. */
+                    textiowrapper_set_blocking_error();
+                    goto fail;
+                }
+                break;
             }
             if (res == 0)  /* EOF */
                 break;
@@ -2725,11 +2756,17 @@ _textiowrapper_readline(textio *self, Py_ssize_t limit)
                 }
                 goto error;
             }
-            if (res == 0)
+            if (res != 1)
                 break;
         }
-        if (res == 0) {
-            /* end of file */
+        if (res == TEXTIO_BLOCKED && remaining == NULL && chunks == NULL) {
+            /* Nothing to return: "" would mean EOF.  (A partial line is
+               returned, as at EOF.) */
+            textiowrapper_set_blocking_error();
+            goto error;
+        }
+        if (res != 1) {
+            /* end of file, or would block */
             textiowrapper_set_decoded_chars(self, NULL);
             textiowrapper_clear_snapshot(self);
             start = endpos = offset_to_buffer = 0;

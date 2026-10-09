@@ -2465,6 +2465,9 @@ class TextIOWrapper(TextIOBase):
             # the next input to be decoded is dec_buffer + input_chunk.
             self._snapshot = (dec_flags, dec_buffer + input_chunk)
 
+        if blocked and not decoded_chars:
+            # Would block, with no character: None (falsy, but not EOF).
+            return None
         return not eof
 
     def _pack_cookie(self, position, dec_flags=0,
@@ -2714,8 +2717,14 @@ class TextIOWrapper(TextIOBase):
             eof = False
             result = self._get_decoded_chars(size)
             while len(result) < size and not eof:
-                eof = not self._read_chunk()
+                more = self._read_chunk()
+                eof = not more
                 result += self._get_decoded_chars(size - len(result))
+                if more is None and not result:
+                    # Nothing to return: "" would mean EOF.
+                    raise BlockingIOError(
+                        errno.EAGAIN,
+                        "read could not complete without blocking")
             return result
 
     def __next__(self):
@@ -2802,11 +2811,16 @@ class TextIOWrapper(TextIOBase):
                 break
 
             # No line ending seen yet - get more data'
-            while self._read_chunk():
+            while more := self._read_chunk():
                 if self._decoded_chars:
                     break
             if self._decoded_chars:
                 line += self._get_decoded_chars()
+            elif more is None and not line:
+                # Nothing to return: "" would mean EOF.  (A partial line
+                # is returned, as at EOF.)
+                raise BlockingIOError(
+                    errno.EAGAIN, "read could not complete without blocking")
             else:
                 # end of file
                 self._set_decoded_chars('')

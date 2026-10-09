@@ -809,6 +809,25 @@ class TextIOWrapperTest:
         self.assertEqual(t.read(10), "\u20acb")
         self.assertEqual(t.read(10), "")
 
+    def test_read_would_block_raises(self):
+        # gh-57531: when the stream would block before any character is
+        # available, read(n), readline() and iteration raise
+        # BlockingIOError, as read() does: "" means EOF.  What there is is
+        # returned: a short read(n), or a partial line from readline().
+        raw = self.MockRawIO((None, None, None, b"ab", None, b"c\nd", None,
+                              None, b"e"))
+        t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
+        self.assertRaises(BlockingIOError, t.read, 5)
+        self.assertRaises(BlockingIOError, t.readline)
+        self.assertRaises(BlockingIOError, next, t)
+        self.assertEqual(t.read(5), "ab")
+        self.assertEqual(t.readline(), "c\n")
+        self.assertEqual(t.readline(), "d")
+        self.assertRaises(BlockingIOError, t.readline)
+        self.assertEqual(t.read(5), "e")
+        self.assertEqual(t.read(5), "")
+        self.assertEqual(t.readline(), "")
+
     def test_read_by_chunk(self):
         # make sure "\r\n" straddles 128 char boundary.
         txt = self.TextIOWrapper(self.BytesIO(b"A" * 127 + b"\r\nB"), encoding="utf-8")
