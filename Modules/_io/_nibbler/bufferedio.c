@@ -1363,6 +1363,23 @@ _io__Buffered_peek_impl(buffered *self, Py_ssize_t size)
     return res;
 }
 
+/* read(n) (-1: all) and read1(n) with the lock: out of line, so that the
+   lock-free paths stay small.  read(0) and read1(0) need no read-ahead:
+   don't make BufferedRandom write out pending data for them. */
+Py_NO_INLINE static PyObject *
+buffered_read_locked(buffered *self, Py_ssize_t n, int read1)
+{
+    if (buffered_enter(self, "read of closed file",
+                       n == 0 ? KEEP_DIRECTION : READING) < 0)
+    {
+        return NULL;
+    }
+    PyObject *res = (n == -1 ? buffered_read_all(self)
+                             : buffered_read_bytes(self, n, read1));
+    buffered_unlock(self);
+    return res;
+}
+
 /*[clinic input]
 _io._Buffered.read
     size as n: Py_ssize_t(accept={int, NoneType}) = -1
@@ -1384,17 +1401,7 @@ _io__Buffered_read_impl(buffered *self, Py_ssize_t n)
     if (e != NULL && n >= 0 && nibbler_claim(e, n, 1, &start) >= 0) {
         return nibbler_end_bytes(e, start, n);
     }
-    /* read(0) needs no read-ahead: don't make BufferedRandom write out
-       pending data for it. */
-    if (buffered_enter(self, "read of closed file",
-                       n == 0 ? KEEP_DIRECTION : READING) < 0)
-    {
-        return NULL;
-    }
-    PyObject *res = (n == -1 ? buffered_read_all(self)
-                             : buffered_read_bytes(self, n, 0));
-    buffered_unlock(self);
-    return res;
+    return buffered_read_locked(self, n, 0);
 }
 
 /*[clinic input]
@@ -1415,15 +1422,7 @@ _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
     if (k > 0 || (k == 0 && n == 0)) {
         return nibbler_end_bytes(e, start, k);
     }
-    if (buffered_enter(self, "read of closed file",
-                       n == 0 ? KEEP_DIRECTION : READING) < 0)
-    {
-        return NULL;
-    }
-    PyObject *res = buffered_read_bytes(self, n < 0 ? self->nib.capacity : n,
-                                        1);
-    buffered_unlock(self);
-    return res;
+    return buffered_read_locked(self, n < 0 ? self->nib.capacity : n, 1);
 }
 
 static PyObject *
@@ -1467,6 +1466,21 @@ _io__Buffered_readinto1_impl(buffered *self, Py_buffer *buffer)
     return buffered_readinto_common(self, buffer, 1);
 }
 
+/* readline() with the lock: out of line, so that the lock-free path
+   stays small. */
+Py_NO_INLINE static PyObject *
+buffered_readline_locked(buffered *self, Py_ssize_t size)
+{
+    if (buffered_enter(self, "readline of closed file",
+                       size == 0 ? KEEP_DIRECTION : READING) < 0)
+    {
+        return NULL;
+    }
+    PyObject *res = buffered_readline(self, size);
+    buffered_unlock(self);
+    return res;
+}
+
 /*[clinic input]
 _io._Buffered.readline
     size: Py_ssize_t(accept={int, NoneType}) = -1
@@ -1483,14 +1497,7 @@ _io__Buffered_readline_impl(buffered *self, Py_ssize_t size)
     if (e != NULL && (k = nibbler_claim_line(e, size, &start)) >= 0) {
         return nibbler_end_bytes(e, start, k);
     }
-    if (buffered_enter(self, "readline of closed file",
-                       size == 0 ? KEEP_DIRECTION : READING) < 0)
-    {
-        return NULL;
-    }
-    PyObject *res = buffered_readline(self, size);
-    buffered_unlock(self);
-    return res;
+    return buffered_readline_locked(self, size);
 }
 
 /*[clinic input]
