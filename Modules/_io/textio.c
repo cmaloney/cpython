@@ -324,29 +324,12 @@ check_decoded(PyObject *decoded)
 #define SEEN_CRLF 4
 #define SEEN_ALL (SEEN_CR | SEEN_LF | SEEN_CRLF)
 
-PyObject *
-_PyIncrementalNewlineDecoder_decode(PyObject *myself,
-                                    PyObject *input, int final)
+/* The newline part of decode(): output, the decoded input (a reference
+   stolen), with the eventual \r from a previous pass, translated. */
+static PyObject *
+nldecoder_translate(nldecoder_object *self, PyObject *output, int final)
 {
-    PyObject *output;
-    Py_ssize_t output_len;
-    nldecoder_object *self = nldecoder_object_CAST(myself);
-
-    CHECK_INITIALIZED_DECODER(self);
-
-    /* decode input (with the eventual \r from a previous pass) */
-    if (self->decoder != Py_None) {
-        output = PyObject_CallMethodObjArgs(self->decoder,
-            &_Py_ID(decode), input, final ? Py_True : Py_False, NULL);
-    }
-    else {
-        output = Py_NewRef(input);
-    }
-
-    if (check_decoded(output) < 0)
-        return NULL;
-
-    output_len = PyUnicode_GET_LENGTH(output);
+    Py_ssize_t output_len = PyUnicode_GET_LENGTH(output);
     if (self->pendingcr && (final || output_len > 0)) {
         /* Prefix output with CR */
         int kind;
@@ -516,6 +499,29 @@ _PyIncrementalNewlineDecoder_decode(PyObject *myself,
   error:
     Py_DECREF(output);
     return NULL;
+}
+
+PyObject *
+_PyIncrementalNewlineDecoder_decode(PyObject *myself,
+                                    PyObject *input, int final)
+{
+    PyObject *output;
+    nldecoder_object *self = nldecoder_object_CAST(myself);
+
+    CHECK_INITIALIZED_DECODER(self);
+
+    /* decode input (with the eventual \r from a previous pass) */
+    if (self->decoder != Py_None) {
+        output = PyObject_CallMethodObjArgs(self->decoder,
+            &_Py_ID(decode), input, final ? Py_True : Py_False, NULL);
+    }
+    else {
+        output = Py_NewRef(input);
+    }
+
+    if (check_decoded(output) < 0)
+        return NULL;
+    return nldecoder_translate(self, output, final);
 }
 
 /*[clinic input]
@@ -695,6 +701,17 @@ struct textio
     char has_read1;
     char telling;
     char finalizing;
+    /* The buffer is an exact _io._nibbler buffered object: write encoded
+       text to it, and read from it, through the byte-level API
+       (_PyIONibbler_*, see _iomodule.h) instead of its methods. */
+    char nibbler;
+    /* The codec is UTF-8: with nibbler, chunks are decoded straight from
+       the buffer's read-ahead, taking only the bytes of whole characters,
+       so the codec's own decoder (wrapped or not by an
+       IncrementalNewlineDecoder) is bypassed.  It must then hold no bytes,
+       which is checked again once other paths fed it (dec_fed). */
+    char decode_utf8;
+    char dec_fed;
     /* Specialized encoding func (see below) */
     encodefunc_t encodefunc;
     /* Whether or not it's the start of the stream */
@@ -719,6 +736,8 @@ struct textio
      * dec_flags is the second (integer) item of the decoder state and
      * next_input is the chunk of input bytes that comes next after the
      * snapshot point.  We use this to reconstruct decoder states in tell().
+     * With nibbler, next_input may be its length instead: the bytes are
+     * still in the buffer, just before its position.
      */
     PyObject *snapshot;
     /* Bytes-to-characters ratio for the current chunk. Serves as input for
@@ -983,9 +1002,19 @@ _textiowrapper_set_decoder(textio *self, PyObject *codec_info,
         return 0;
 
     Py_CLEAR(self->decoder);
+    self->decode_utf8 = 0;
+    self->dec_fed = 0;
     self->decoder = _PyCodecInfo_GetIncrementalDecoder(codec_info, errors);
     if (self->decoder == NULL)
         return -1;
+
+    /* Get the normalized named of the codec */
+    if (PyObject_GetOptionalAttr(codec_info, &_Py_ID(name), &res) < 0) {
+        return -1;
+    }
+    self->decode_utf8 = (res != NULL && PyUnicode_Check(res)
+                         && _PyUnicode_EqualToASCIIString(res, "utf-8"));
+    Py_XDECREF(res);
 
     if (self->readuniversal) {
         _PyIO_State *state = self->state;
@@ -1233,6 +1262,7 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
     self->pending_bytes_count = 0;
     self->encodefunc = NULL;
     self->b2cratio = 0.0;
+    self->nibbler = 0;
 
     if (encoding == NULL && _PyRuntime.preconfig.utf8_mode) {
         _Py_DECLARE_STR(utf_8, "utf-8");
@@ -1282,6 +1312,7 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
     }
 
     self->buffer = Py_NewRef(buffer);
+    self->nibbler = (char)_PyIO_is_nibbler_buffered_type(Py_TYPE(buffer));
 
     /* Build the decoder object */
     _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
@@ -1815,6 +1846,28 @@ _io_TextIOWrapper_write_impl(textio *self, PyObject *text)
         bytes_len = PyBytes_GET_SIZE(b);
     }
 
+    if (self->nibbler && self->pending_bytes == NULL && bytes_len > 0) {
+        /* No pending_bytes: append to the buffer directly (it is the
+           queue, and its capacity the flush threshold). */
+        PyObject *buffer = buffer_access_safe(self);
+        if (buffer == NULL) {
+            Py_DECREF(b);
+            return NULL;
+        }
+        int r = _PyIONibbler_write(
+            buffer, b, b == text ? PyUnicode_DATA(b) : PyBytes_AS_STRING(b),
+            bytes_len);
+        Py_DECREF(buffer);
+        if (r != _PyIO_NIBBLER_NO) {
+            Py_DECREF(b);
+            if (r < 0) {
+                return NULL;
+            }
+            bytes_len = 0;
+            b = NULL;
+        }
+    }
+
     // We should avoid concatenating huge data.
     // Flush the buffer before adding b to the buffer if b is not small.
     // https://github.com/python/cpython/issues/87426
@@ -1833,7 +1886,10 @@ _io_TextIOWrapper_write_impl(textio *self, PyObject *text)
         }
     }
 
-    if (bytes_len > 0) {
+    if (b == NULL) {
+        /* Written to the buffer already. */
+    }
+    else if (bytes_len > 0) {
         if (self->pending_bytes == NULL) {
             assert(self->pending_bytes_count == 0);
             self->pending_bytes = b;
@@ -1939,6 +1995,163 @@ textiowrapper_get_decoded_chars(textio *self, Py_ssize_t n)
     return chars;
 }
 
+/* With decode_utf8: chars, decoded from bytes without the codec's decoder
+   (a reference stolen), with its newlines translated the way the decoder
+   would. */
+static PyObject *
+textiowrapper_utf8_newlines(textio *self, PyObject *chars, int final)
+{
+    if (chars != NULL
+        && Py_IS_TYPE(self->decoder, self->state->PyIncrementalNewlineDecoder_Type))
+    {
+        return nldecoder_translate(nldecoder_object_CAST(self->decoder),
+                                   chars, final);
+    }
+    return chars;
+}
+
+/* May decode_utf8 bypass the decoder: does it hold no bytes?  Returns 1,
+   0, or -1 on error. */
+static int
+textiowrapper_utf8_ready(textio *self)
+{
+    if (!self->dec_fed) {
+        return 1;
+    }
+    PyObject *state = PyObject_CallMethodNoArgs(self->decoder,
+                                                &_Py_ID(getstate));
+    if (state == NULL) {
+        return -1;
+    }
+    int empty = (PyTuple_Check(state) && PyTuple_GET_SIZE(state) == 2
+                 && PyBytes_Check(PyTuple_GET_ITEM(state, 0))
+                 && PyBytes_GET_SIZE(PyTuple_GET_ITEM(state, 0)) == 0);
+    Py_DECREF(state);
+    if (empty) {
+        self->dec_fed = 0;
+    }
+    return empty;
+}
+
+/* textiowrapper_read_chunk() with nibbler and decode_utf8: decode straight
+   from the buffer's read-ahead, taking only the bytes of whole characters
+   (a partial one stays in the buffer, which keeps it in front of the next
+   fill).  Returns like textiowrapper_read_chunk(), or _PyIO_NIBBLER_NO. */
+static int
+textiowrapper_read_chunk_nibbler(textio *self, Py_ssize_t size_hint)
+{
+    int r = textiowrapper_utf8_ready(self);
+    if (r <= 0) {
+        return r < 0 ? -1 : _PyIO_NIBBLER_NO;
+    }
+    const char *errors = PyUnicode_AsUTF8(self->errors);
+    if (errors == NULL) {
+        return -1;
+    }
+    /* The decoder state at the snapshot point: no bytes, and the pending
+       \r of the newline decoder (the UTF-8 decoder has no flags). */
+    int dec_flags = 0;
+    if (Py_IS_TYPE(self->decoder, self->state->PyIncrementalNewlineDecoder_Type)) {
+        dec_flags = nldecoder_object_CAST(self->decoder)->pendingcr;
+    }
+    if (size_hint > 0) {
+        size_hint = (Py_ssize_t)(Py_MAX(self->b2cratio, 1.0) * size_hint);
+    }
+    Py_ssize_t size = Py_MAX(self->chunk_size, size_hint);
+
+    PyObject *buffer = buffer_access_safe(self);
+    if (buffer == NULL) {
+        return -1;
+    }
+    PyObject *chars;
+    Py_ssize_t used;
+    Py_ssize_t need = 1;
+    int final;
+    for (;;) {
+        _PyIO_Morsel m;
+        r = _PyIONibbler_peek(buffer, need, &m);
+        if (r < 0) {
+            Py_DECREF(buffer);
+            return r;
+        }
+        /* Fewer than needed: EOF (or would block) */
+        final = m.len < need;
+        used = Py_MIN(m.len, Py_MAX(size, need));
+        Py_ssize_t len = used;
+        chars = PyUnicode_DecodeUTF8Stateful(m.ptr, len, errors,
+                                             final ? NULL : &used);
+        if (chars != NULL && used == 0 && len > 0 && !final) {
+            /* Only part of a character: get more after it. */
+            need = len + 1;
+            r = 0;
+        }
+        else {
+            r = chars == NULL ? -1 : _PyIONibbler_consume(buffer, &m, used);
+        }
+        Py_XDECREF(m.obj);
+        if (r == 1) {
+            break;
+        }
+        Py_XDECREF(chars);
+        if (r < 0) {
+            Py_DECREF(buffer);
+            return -1;
+        }
+        /* Again with more, or another thread took bytes meanwhile. */
+    }
+    Py_DECREF(buffer);
+    chars = textiowrapper_utf8_newlines(self, chars, final);
+    if (chars == NULL) {
+        return -1;
+    }
+    textiowrapper_set_decoded_chars(self, chars);
+    Py_ssize_t nchars = PyUnicode_GET_LENGTH(chars);
+    self->b2cratio = nchars > 0 ? (double)used / nchars : 0.0;
+    if (self->telling) {
+        PyObject *snapshot = Py_BuildValue("in", dec_flags, used);
+        if (snapshot == NULL) {
+            return -1;
+        }
+        Py_XSETREF(self->snapshot, snapshot);
+    }
+    return used > 0 || nchars > 0;
+}
+
+/* With a snapshot from textiowrapper_read_chunk_nibbler(), replace the
+   length of its next input with the bytes, looked back at in the buffer. */
+static int
+textiowrapper_snapshot_input(textio *self)
+{
+    PyObject *len = PyTuple_GET_ITEM(self->snapshot, 1);
+    if (!PyLong_CheckExact(len)) {
+        return 0;
+    }
+    Py_ssize_t n = PyLong_AsSsize_t(len);
+    PyObject *buffer = buffer_access_safe(self);
+    if (n < 0 || buffer == NULL) {
+        Py_XDECREF(buffer);
+        return -1;
+    }
+    PyObject *input = _PyIONibbler_lookback(buffer, n);
+    Py_DECREF(buffer);
+    if (input == NULL) {
+        if (!PyErr_Occurred()) {
+            /* The buffer was read or moved by other means. */
+            PyErr_SetString(PyExc_OSError,
+                            "can't reconstruct logical file position");
+        }
+        return -1;
+    }
+    PyObject *snapshot = PyTuple_Pack(2, PyTuple_GET_ITEM(self->snapshot, 0),
+                                      input);
+    Py_DECREF(input);
+    if (snapshot == NULL) {
+        return -1;
+    }
+    Py_SETREF(self->snapshot, snapshot);
+    return 0;
+}
+
 /* Read and decode the next chunk of data from the BufferedReader.
  */
 static int
@@ -1962,6 +2175,14 @@ textiowrapper_read_chunk(textio *self, Py_ssize_t size_hint)
         _unsupported(self->state, "not readable");
         return -1;
     }
+
+    if (self->nibbler && self->decode_utf8) {
+        int r = textiowrapper_read_chunk_nibbler(self, size_hint);
+        if (r != _PyIO_NIBBLER_NO) {
+            return r;
+        }
+    }
+    self->dec_fed = 1;
 
     if (self->telling) {
         /* To prepare for tell(), we need to snapshot a point in the file
@@ -2107,7 +2328,23 @@ _io_TextIOWrapper_read_impl(textio *self, Py_ssize_t n)
         }
 
         _PyIO_State *state = self->state;
-        if (Py_IS_TYPE(self->decoder, state->PyIncrementalNewlineDecoder_Type))
+        int direct = 0;
+        if (self->nibbler && self->decode_utf8 && PyBytes_Check(bytes)) {
+            direct = textiowrapper_utf8_ready(self);
+            if (direct < 0) {
+                Py_DECREF(bytes);
+                goto fail;
+            }
+        }
+        if (direct) {
+            /* Without the codec's decoder, as in _read_chunk. */
+            const char *errors = PyUnicode_AsUTF8(self->errors);
+            decoded = errors == NULL ? NULL : textiowrapper_utf8_newlines(
+                self, PyUnicode_DecodeUTF8Stateful(
+                    PyBytes_AS_STRING(bytes), PyBytes_GET_SIZE(bytes),
+                    errors, NULL), 1);
+        }
+        else if (Py_IS_TYPE(self->decoder, state->PyIncrementalNewlineDecoder_Type))
             decoded = _PyIncrementalNewlineDecoder_decode(self->decoder,
                                                           bytes, 1);
         else
@@ -2791,6 +3028,7 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
         }
         Py_XSETREF(self->snapshot, snapshot);
 
+        self->dec_fed = 1;
         decoded = PyObject_CallMethodObjArgs(self->decoder, &_Py_ID(decode),
             input_chunk, cookie.need_eof ? Py_True : Py_False, NULL);
 
@@ -2863,6 +3101,10 @@ _io_TextIOWrapper_tell_impl(textio *self)
         goto fail;
     }
 
+    /* Before flush(), which can drop the buffer's read-ahead. */
+    if (self->snapshot != NULL && textiowrapper_snapshot_input(self) < 0) {
+        goto fail;
+    }
     if (_textiowrapper_writeflush(self) < 0)
         return NULL;
     if (_PyFile_Flush((PyObject *)self) < 0) {

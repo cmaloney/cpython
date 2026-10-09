@@ -107,7 +107,8 @@ extern int _PyIONibbler_consume(PyObject *buffered, const _PyIO_Morsel *m,
 /* A copy of the n bytes read last (before the unread ones), or NULL
    without an exception when they are no longer buffered. */
 extern PyObject *_PyIONibbler_lookback(PyObject *buffered, Py_ssize_t n);
-/* Like write(obj), for data[0:len] owned by obj. */
+/* Like write(obj), for data[0:len] owned by obj, except that it returns
+   _PyIO_NIBBLER_NO instead of waiting for another thread's lock. */
 extern int _PyIONibbler_write(PyObject *buffered, PyObject *obj,
                               const char *data, Py_ssize_t len);
 

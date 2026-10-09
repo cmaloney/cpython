@@ -533,6 +533,18 @@ nibbler_lock(nibbler *n, PyObject *obj)
     return 0;
 }
 
+/* Lock if that needs no waiting.  Returns 1 if locked, else 0. */
+static inline int
+nibbler_trylock(nibbler *n)
+{
+    if (!PyMutex_LockFast(&n->lock)) {
+        return 0;
+    }
+    _Py_atomic_store_uint64_relaxed(&n->owner, _PyThreadState_GET()->id);
+    nibbler_hold(n);
+    return 1;
+}
+
 /* Lock again after a raw call made without the lock: a signal must not
    interrupt this (its handler runs later). */
 static void
