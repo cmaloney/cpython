@@ -695,6 +695,26 @@ class TextIOWrapperTest:
         self.assertEqual(f.tell(), p2)
         f.close()
 
+    def test_tell_after_flush(self):
+        # flush() after a read doesn't keep tell() from working (it dropped
+        # the read-ahead that tell() looks back at with _io._nibbler).
+        with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.write("a\xe9\nline2\nline3\n")
+        with self.open(os_helper.TESTFN, "r+", encoding="utf-8") as f:
+            self.assertEqual(f.readline(), "a\xe9\n")
+            f.flush()
+            self.assertEqual(f.tell(), 4)
+            self.assertEqual(f.readline(), "line2\n")
+            f.flush()
+            f.flush()
+            self.assertEqual(f.tell(), 10)
+            f.seek(4)
+            self.assertEqual(f.readline(), "line2\n")
+            self.assertEqual(f.read(2), "li")
+            f.flush()
+            self.assertEqual(f.tell(), 12)
+            self.assertEqual(f.read(), "ne3\n")
+
     def test_tell_while_iterating(self):
         if not self.tells_while_iterating:
             self.skipTest("next() disables tell()")

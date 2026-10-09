@@ -3963,6 +3963,15 @@ _io_TextIOWrapper_flush_impl(textio *self)
     CHECK_ATTACHED(self);
     CHECK_CLOSED(self);
     self->telling = self->seekable;
+    /* The buffer's flush() can drop its read-ahead, which a snapshot kept
+       without objects looks back at: make it a tuple first.  If that can't
+       be done, tell() will raise as it would have anyway. */
+    if (self->snap_len >= 0 && textiowrapper_snapshot_input(self) < 0) {
+        if (!PyErr_ExceptionMatches(PyExc_OSError)) {
+            return NULL;
+        }
+        PyErr_Clear();
+    }
     if (_textiowrapper_writeflush(self) < 0)
         return NULL;
     return buffer_callmethod_noargs(self, &_Py_ID(flush));
