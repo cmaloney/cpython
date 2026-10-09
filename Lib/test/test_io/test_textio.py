@@ -606,6 +606,49 @@ class TextIOWrapperTest:
                 with self.open(os_helper.TESTFN, "rb") as g:
                     self.assertEqual(g.read(), b"line 00000\n")
 
+    def test_truncate_below_position(self):
+        # As for binary files, the position is not changed: reads return
+        # nothing, and a write lands at the position, after a gap of zero
+        # bytes.
+        text = "0123456789\nabcdefghij\n"
+        for enc in ("utf-8", "utf-16-le", "utf-16"):
+            for prep in ("read", "readline", "write", "seek", "readall"):
+                if enc == "utf-16" and prep == "readall":
+                    # A write after reading to the end writes a BOM in
+                    # the middle of the file: a separate problem.
+                    continue
+                with self.subTest(encoding=enc, prep=prep):
+                    with self.open(os_helper.TESTFN, "w", encoding=enc) as f:
+                        f.write(text)
+                    with self.open(os_helper.TESTFN, "rb") as f:
+                        data = f.read()
+                    with self.open(os_helper.TESTFN, "r+", encoding=enc) as f:
+                        if prep == "read":
+                            f.read(8)
+                        elif prep == "readline":
+                            f.readline()
+                            f.read(1)
+                        elif prep == "write":
+                            f.read(0)
+                            f.write("x" * 4)
+                        elif prep == "seek":
+                            f.read(8)
+                            f.seek(f.tell())
+                        else:
+                            f.read()
+                        pos = f.tell()
+                        self.assertEqual(f.truncate(3), 3)
+                        self.assertEqual(f.tell(), pos)
+                        self.assertEqual(f.read(), "")
+                        self.assertEqual(f.write("Z"), 1)
+                    with self.open(os_helper.TESTFN, "rb") as f:
+                        got = f.read()
+                    zlen = 1 if enc == "utf-8" else 2
+                    self.assertEqual(len(got), pos + zlen)
+                    self.assertEqual(got[3:pos], b"\0" * (pos - 3))
+                    if prep != "write":
+                        self.assertEqual(got[:3], data[:3])
+
     def multi_line_test(self, f, enc):
         f.seek(0)
         f.truncate()
