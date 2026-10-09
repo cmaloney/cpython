@@ -2870,8 +2870,11 @@ textiowrapper_parse_cookie(cookie_type *cookie, PyObject *cookieObj)
     memcpy(&cookie->need_eof, buffer + OFF_NEED_EOF, sizeof(cookie->need_eof));
 
     /* gh-153662: tell() never gives negative counts, and seek() would use
-       them as sizes. */
-    if (cookie->bytes_to_feed < 0 || cookie->chars_to_skip < 0) {
+       them as sizes.  gh-91112: nor a position that doesn't fit, or another
+       need_eof (out of range bits would set those). */
+    if (cookie->bytes_to_feed < 0 || cookie->chars_to_skip < 0
+        || cookie->start_pos < 0 || (unsigned char)cookie->need_eof > 1)
+    {
         PyErr_SetString(PyExc_OSError, "can't restore logical file position");
         return -1;
     }
@@ -3083,6 +3086,15 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
      */
     if (textiowrapper_parse_cookie(&cookie, cookieObj) < 0)
         goto fail;
+    if (self->decoder == NULL
+        && (cookie.dec_flags || cookie.bytes_to_feed || cookie.chars_to_skip
+            || cookie.need_eof))
+    {
+        /* gh-91112: tell() gives no decoder state without a decoder, so
+           these are bits of a position too large to fit. */
+        PyErr_SetString(PyExc_OSError, "can't restore logical file position");
+        goto fail;
+    }
 
     /* Seek back to the safe start point. */
     posobj = PyLong_FromOff_t(cookie.start_pos);

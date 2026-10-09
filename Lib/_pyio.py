@@ -2623,6 +2623,13 @@ class TextIOWrapper(TextIOBase):
         # and replay the effect of read(chars_to_skip) from there.
         start_pos, dec_flags, bytes_to_feed, need_eof, chars_to_skip = \
             self._unpack_cookie(cookie)
+        # gh-91112: out of range bits of a cookie that tell() can't have
+        # returned (a position too large, or decoder state for a stream
+        # that doesn't read) must not be silently dropped or reused.
+        if (cookie >> 257 or (not self.readable() and
+                             (dec_flags or bytes_to_feed or chars_to_skip
+                              or need_eof))):
+            raise OSError("can't restore logical file position")
 
         # Seek back to the safe start point.
         self.buffer.seek(start_pos)
