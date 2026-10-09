@@ -859,6 +859,41 @@ class SlowDeviceTest:
         self.assertEqual(raw.calls, 2)
         self.assertEqual(bytes(raw.received), b"012")
 
+    def test_size_zero_random_unseekable(self):
+        # Unbuffered, BufferedRandom needs no seeking: it works over a
+        # read-write stream that can't seek, such as a terminal or socket,
+        # like the FileIO that open(fd, "r+b", buffering=0) used to return.
+        self.check_buffer_size_zero()
+        Reader = make_scripted_reader(self.RawIOBase)
+        class Duplex(Reader):
+            def writable(self):
+                return True
+            def seekable(self):
+                return False
+            def write(self, b):
+                self.received += b
+                return len(b)
+        raw = Duplex(b"hello world")
+        raw.received = bytearray()
+        f = self.BufferedRandom(raw, 0)
+        self.assertEqual(f.read(5), b"hello")
+        self.assertEqual(f.write(b"abc"), 3)
+        self.assertEqual(f.read(), b" world")
+        self.assertEqual(f.write(b"de"), 2)
+        self.assertEqual(bytes(raw.received), b"abcde")
+        self.assertRaises(self.UnsupportedOperation, f.seek, 0)
+
+    @unittest.skipUnless(hasattr(os, "openpty"), "requires openpty")
+    def test_size_zero_random_pty(self):
+        self.check_buffer_size_zero()
+        master, slave = os.openpty()
+        with self.FileIO(master, "r+b") as m_raw, \
+             self.FileIO(slave, "r+b") as s_raw:
+            m = self.BufferedRandom(m_raw, 0)
+            s = self.BufferedRandom(s_raw, 0)
+            self.assertEqual(s.write(b"ping\n"), 5)
+            self.assertEqual(m.read(5), b"ping\r\n"[:5])
+
     def test_size_zero_seek_tell(self):
         self.check_buffer_size_zero()
         data = sample_data(500)

@@ -1865,9 +1865,13 @@ buffered_repr(PyObject *op)
 /* Check raw supports what the class needs (BufferedRandom: seeking too). */
 static int
 buffered_check_raw(_PyIO_State *state, PyObject *raw, int raw_fileio,
-                   int readable, int writable)
+                   int readable, int writable, Py_ssize_t buffer_size)
 {
-    if (readable && writable
+    /* Unbuffered, it never seeks to switch between reading and writing
+       (only to hand back data kept after a raw read raised), so that
+       open(fd, "r+b", buffering=0) works for a pipe or terminal, as it
+       does with FileIO. */
+    if (readable && writable && buffer_size != 0
         && _PyIOBase_check_seekable(state, raw, Py_True) == NULL)
     {
         return -1;
@@ -1892,7 +1896,8 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
 {
     _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
     int raw_fileio = Py_IS_TYPE(raw, state->PyFileIO_Type);
-    int err = buffered_check_raw(state, raw, raw_fileio, readable, writable);
+    int err = buffered_check_raw(state, raw, raw_fileio, readable, writable,
+                                 buffer_size);
     if (err == 0 && buffer_size < 0) {
         PyErr_SetString(PyExc_ValueError,
                         "buffer size must not be negative");
