@@ -457,6 +457,28 @@ class BufferedReaderTest(CommonBufferedTests):
 
         self.assertEqual(b"abcdefg", bufio.read())
 
+    def test_readall(self):
+        if not self.has_readall:
+            self.skipTest("no readall()")
+        sizes = [16, 4096]
+        if self.supports_buffer_size_zero:
+            sizes.append(0)
+        for size in sizes:
+            with self.subTest(buffer_size=size):
+                rawio = self.MockRawIO((b"abc", b"d", b"efg"))
+                bufio = self.tp(rawio, buffer_size=size)
+                self.assertEqual(bufio.read(2), b"ab")
+                self.assertEqual(bufio.readall(), b"cdefg")
+                self.assertEqual(bufio.readall(), b"")
+                # Would block before any data: None, like read().
+                rawio = self.MockRawIO((b"abc", None, None, b"d"))
+                bufio = self.tp(rawio, buffer_size=size)
+                self.assertEqual(bufio.readall(), b"abc")
+                self.assertIsNone(bufio.readall())
+                self.assertEqual(bufio.readall(), b"d")
+                bufio.close()
+                self.assertRaises(ValueError, bufio.readall)
+
     @threading_helper.requires_working_threading()
     @support.requires_resource('cpu')
     def test_threads(self):
@@ -1008,6 +1030,14 @@ class BufferedWriterTest(CommonBufferedTests):
 class CBufferedWriterTest(BufferedWriterTest, SizeofTest, CTestCase):
     tp = io.BufferedWriter
 
+    def test_readall(self):
+        if not self.has_readall:
+            self.skipTest("no readall()")
+        for size in (0, 16) if self.supports_buffer_size_zero else (16,):
+            with self.subTest(buffer_size=size):
+                bufio = self.tp(self.MockRawIO(), buffer_size=size)
+                self.assertRaises(self.UnsupportedOperation, bufio.readall)
+
     def test_initialization(self):
         rawio = self.MockRawIO()
         bufio = self.tp(rawio)
@@ -1121,6 +1151,14 @@ class BufferedRWPairTest:
         self.assertEqual(pair.read(), b"ef")
         pair = self.tp(self.BytesIO(b"abc"), self.MockRawIO())
         self.assertEqual(pair.read(None), b"abc")
+
+    def test_readall(self):
+        if not self.has_readall:
+            self.skipTest("no readall()")
+        pair = self.tp(self.BytesIO(b"abcdef"), self.MockRawIO())
+        self.assertEqual(pair.read(2), b"ab")
+        self.assertEqual(pair.readall(), b"cdef")
+        self.assertEqual(pair.readall(), b"")
 
     def test_readlines(self):
         pair = lambda: self.tp(self.BytesIO(b"abc\ndef\nh"), self.MockRawIO())

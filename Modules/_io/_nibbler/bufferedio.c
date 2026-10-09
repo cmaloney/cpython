@@ -1429,6 +1429,24 @@ _io__Buffered_read_impl(buffered *self, Py_ssize_t n)
 }
 
 /*[clinic input]
+_io._Buffered.readall
+
+Read until EOF, like read() with no size.
+[clinic start generated code]*/
+
+static PyObject *
+_io__Buffered_readall_impl(buffered *self)
+/*[clinic end generated code: output=78e22877f49cb977 input=2c2a4790ffd94db6]*/
+{
+    if (buffered_enter(self, "read of closed file", READING) < 0) {
+        return NULL;
+    }
+    PyObject *res = buffered_read_all(self);
+    buffered_unlock(self);
+    return res;
+}
+
+/*[clinic input]
 _io._Buffered.read1
     size as n: Py_ssize_t = -1
     /
@@ -1935,6 +1953,21 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
     }
 }
 
+/*[clinic input]
+_io.BufferedWriter.readall
+
+Not supported: a BufferedWriter can't read.
+[clinic start generated code]*/
+
+static PyObject *
+_io_BufferedWriter_readall_impl(buffered *self)
+/*[clinic end generated code: output=7637ea071b897d9d input=d1b433b1d223747c]*/
+{
+    _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
+    PyErr_SetString(state->unsupported_operation, "readall");
+    return NULL;
+}
+
 /*
  * class BufferedRandom
  */
@@ -2094,6 +2127,17 @@ _io_BufferedRWPair_read_impl(rwpair *self, PyObject *size)
 /*[clinic end generated code: output=0668e3c5dbd3e93d input=eddb5e52aba9ebe5]*/
 {
     return rwpair_forward_call(self->reader, &_Py_ID(read), size);
+}
+
+/*[clinic input]
+_io.BufferedRWPair.readall
+[clinic start generated code]*/
+
+static PyObject *
+_io_BufferedRWPair_readall_impl(rwpair *self)
+/*[clinic end generated code: output=34f8123873a98737 input=815cdbaf5b6079fe]*/
+{
+    return rwpair_forward_call(self->reader, &_Py_ID(readall), NULL);
 }
 
 /*[clinic input]
@@ -2271,6 +2315,7 @@ static PyMethodDef bufferedreader_methods[] = {
     _IO__BUFFERED__DEALLOC_WARN_METHODDEF
 
     _IO__BUFFERED_READ_METHODDEF
+    _IO__BUFFERED_READALL_METHODDEF
     _IO__BUFFERED_PEEK_METHODDEF
     _IO__BUFFERED_READ1_METHODDEF
     _IO__BUFFERED_READINTO_METHODDEF
@@ -2336,6 +2381,7 @@ static PyMethodDef bufferedwriter_methods[] = {
     _IO__BUFFERED__DEALLOC_WARN_METHODDEF
 
     _IO_BUFFEREDWRITER_WRITE_METHODDEF
+    _IO_BUFFEREDWRITER_READALL_METHODDEF
     _IO__BUFFERED_TRUNCATE_METHODDEF
     _IO__BUFFERED_FLUSH_METHODDEF
     _IO__BUFFERED_SEEK_METHODDEF
@@ -2370,6 +2416,7 @@ static PyType_Spec nibbler_bufferedwriter_spec = {
 
 static PyMethodDef bufferedrwpair_methods[] = {
     _IO_BUFFEREDRWPAIR_READ_METHODDEF
+    _IO_BUFFEREDRWPAIR_READALL_METHODDEF
     _IO_BUFFEREDRWPAIR_PEEK_METHODDEF
     _IO_BUFFEREDRWPAIR_READ1_METHODDEF
     _IO_BUFFEREDRWPAIR_READINTO_METHODDEF
@@ -2436,6 +2483,7 @@ static PyMethodDef bufferedrandom_methods[] = {
     _IO__BUFFERED_TELL_METHODDEF
     _IO__BUFFERED_TRUNCATE_METHODDEF
     _IO__BUFFERED_READ_METHODDEF
+    _IO__BUFFERED_READALL_METHODDEF
     _IO__BUFFERED_READ1_METHODDEF
     _IO__BUFFERED_READINTO_METHODDEF
     _IO__BUFFERED_READINTO1_METHODDEF

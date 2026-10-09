@@ -302,6 +302,24 @@ exit:
     return return_value;
 }
 
+PyDoc_STRVAR(_io__Buffered_readall__doc__,
+"readall($self, /)\n"
+"--\n"
+"\n"
+"Read until EOF, like read() with no size.");
+
+#define _IO__BUFFERED_READALL_METHODDEF    \
+    {"readall", (PyCFunction)_io__Buffered_readall, METH_NOARGS, _io__Buffered_readall__doc__},
+
+static PyObject *
+_io__Buffered_readall_impl(buffered *self);
+
+static PyObject *
+_io__Buffered_readall(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    return _io__Buffered_readall_impl((buffered *)self);
+}
+
 PyDoc_STRVAR(_io__Buffered_read1__doc__,
 "read1($self, size=-1, /)\n"
 "--\n"
@@ -715,6 +733,24 @@ exit:
     return return_value;
 }
 
+PyDoc_STRVAR(_io_BufferedWriter_readall__doc__,
+"readall($self, /)\n"
+"--\n"
+"\n"
+"Not supported: a BufferedWriter can\'t read.");
+
+#define _IO_BUFFEREDWRITER_READALL_METHODDEF    \
+    {"readall", (PyCFunction)_io_BufferedWriter_readall, METH_NOARGS, _io_BufferedWriter_readall__doc__},
+
+static PyObject *
+_io_BufferedWriter_readall_impl(buffered *self);
+
+static PyObject *
+_io_BufferedWriter_readall(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    return _io_BufferedWriter_readall_impl((buffered *)self);
+}
+
 PyDoc_STRVAR(_io_BufferedRandom___init____doc__,
 "BufferedRandom(raw, buffer_size=DEFAULT_BUFFER_SIZE)\n"
 "--\n"
@@ -883,6 +919,23 @@ skip_optional:
 
 exit:
     return return_value;
+}
+
+PyDoc_STRVAR(_io_BufferedRWPair_readall__doc__,
+"readall($self, /)\n"
+"--\n"
+"\n");
+
+#define _IO_BUFFEREDRWPAIR_READALL_METHODDEF    \
+    {"readall", (PyCFunction)_io_BufferedRWPair_readall, METH_NOARGS, _io_BufferedRWPair_readall__doc__},
+
+static PyObject *
+_io_BufferedRWPair_readall_impl(rwpair *self);
+
+static PyObject *
+_io_BufferedRWPair_readall(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    return _io_BufferedRWPair_readall_impl((rwpair *)self);
 }
 
 PyDoc_STRVAR(_io_BufferedRWPair_peek__doc__,
@@ -1111,4 +1164,4 @@ _io_BufferedRWPair_closed_get(PyObject *self, void *Py_UNUSED(context))
 
 #define _IO_BUFFEREDRWPAIR_CLOSED_GETSETDEF {"closed", (getter)_io_BufferedRWPair_closed_get, (setter)NULL, NULL},
 
-/*[clinic end generated code: output=38b7b90b9948e3ba input=a9049054013a1b77]*/
+/*[clinic end generated code: output=121b8de7dbc77e36 input=a9049054013a1b77]*/

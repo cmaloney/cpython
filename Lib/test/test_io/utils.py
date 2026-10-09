@@ -324,6 +324,9 @@ class CTestCase(unittest.TestCase):
     # Do readline() and read(n) keep the data read before a raw read
     # raises for the next read?  (gh-51571)
     keeps_data_on_raw_error = is_nibbler
+    # Do the buffered classes have readall(), like raw streams (so that
+    # open(buffering=0) can return one)?
+    has_readall = is_nibbler
 
     MockRawIO = CMockRawIO
     MisbehavedRawIO = CMisbehavedRawIO
@@ -354,6 +357,7 @@ class PyTestCase(unittest.TestCase):
     tells_append_position = False
     buffers_reentrant_writes = False
     keeps_data_on_raw_error = False
+    has_readall = False
 
     MockRawIO = PyMockRawIO
     MisbehavedRawIO = PyMisbehavedRawIO
