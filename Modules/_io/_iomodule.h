@@ -79,6 +79,9 @@ extern PyObject *_PyFileIO_close(PyObject *self);
 extern int _PyFileIO_check_access(PyObject *self, int reading, int writing);
 /* Was the FileIO (or subclass) opened in append mode? */
 extern int _PyFileIO_appending(PyObject *self);
+/* Was the FileIO (or subclass) opened on a regular file, which reads never
+   find "would block"? */
+extern int _PyFileIO_regular(PyObject *self);
 
 /* Byte-level access to an exact _io._nibbler buffered object, for
    TextIOWrapper: it decodes straight from the read-ahead and appends
@@ -151,6 +154,10 @@ extern Py_ssize_t _PyIO_find_line_ending(
    Should only be called when PyErr_Occurred() is true.
 */
 extern int _PyIO_trap_eintr(void);
+/* Raise BlockingIOError for a read that got nothing because the stream
+   would block, where returning None or an empty result can't say so
+   (iteration, text reads). */
+extern void _PyIO_set_read_blocking_error(void);
 /* Warn that close() discarded n buffered bytes because writing them out
    would block.  Keeps the raised exception, or chains it to the warning's
    if that raised. */

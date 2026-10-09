@@ -524,6 +524,9 @@ class IOBase(metaclass=abc.ABCMeta):
         if hasattr(self, "peek"):
             def nreadahead():
                 readahead = self.peek(1)
+                if readahead is None:
+                    # Would block.
+                    return None
                 if not readahead:
                     return 1
                 n = (readahead.find(b"\n") + 1) or len(readahead)
@@ -544,7 +547,11 @@ class IOBase(metaclass=abc.ABCMeta):
                 size = size_index()
         res = bytearray()
         while size < 0 or len(res) < size:
-            b = self.read(nreadahead())
+            n = nreadahead()
+            b = None if n is None else self.read(n)
+            if b is None:
+                # Would block before the end of the line.
+                return self._readline_would_block(res, size)
             if not b:
                 break
             res += b
@@ -552,12 +559,21 @@ class IOBase(metaclass=abc.ABCMeta):
                 break
         return res.take_bytes()
 
+    def _readline_would_block(self, res, size):
+        # What readline() returns when the stream would block after res:
+        # None if nothing arrived, else the partial line.
+        return res.take_bytes() if res else None
+
     def __iter__(self):
         self._checkClosed()
         return self
 
     def __next__(self):
         line = self.readline()
+        if line is None:
+            # Would block: StopIteration would end the loop for good.
+            raise BlockingIOError(
+                errno.EAGAIN, "read could not complete without blocking")
         if not line:
             raise StopIteration
         return line
@@ -1151,6 +1167,18 @@ class BufferedReader(_BufferedIOMixin):
         self._read_pos = 0
         return out[:n] if out else nodata_val
 
+    def _readline_would_block(self, res, size):
+        # Keep the partial line for the next call, which can then find its
+        # end, unless it is too long to keep.
+        if size < 0 and len(res) >= _READLINE_KEEP_MAX * self.buffer_size:
+            return res.take_bytes()
+        if res:
+            with self._read_lock:
+                self._read_buf = (res.take_bytes() +
+                                  self._read_buf[self._read_pos:])
+                self._read_pos = 0
+        return None
+
     def peek(self, size=0):
         """Returns buffered bytes without advancing the position.
 
@@ -1455,6 +1483,9 @@ class BufferedRWPair(BufferedIOBase):
     def read1(self, size=-1):
         return self.reader.read1(size)
 
+    def readline(self, size=-1):
+        return self.reader.readline(size)
+
     def readinto1(self, b):
         return self.reader.readinto1(b)
 
@@ -1567,6 +1598,12 @@ class BufferedRandom(BufferedWriter, BufferedReader):
                 self.raw.seek(self._read_pos - len(self._read_buf), 1)
                 self._reset_read_buf()
         return BufferedWriter.write(self, b)
+
+
+# Without a size, a partial line that would block is kept for the next
+# readline() (which then returns None) until it is this many times the
+# buffer size: then it is returned as it is.
+_READLINE_KEEP_MAX = 64
 
 
 def _new_buffersize(bytes_read):
@@ -2482,6 +2519,7 @@ class TextIOWrapper(TextIOBase):
             # At the snapshot point, len(dec_buffer) bytes before the read,
             # the next input to be decoded is dec_buffer + input_chunk.
             self._snapshot = (dec_flags, dec_buffer + input_chunk)
+            self._snapshot_held = len(dec_buffer)
 
         if blocked and not decoded_chars:
             # Would block, with no character: None (falsy, but not EOF).
@@ -2774,7 +2812,14 @@ class TextIOWrapper(TextIOBase):
                 size = size_index()
 
         # Grab all the decoded text (we will rewind any extra bits later).
+        line_start = self._decoded_chars_used
         line = self._get_decoded_chars()
+        # While the line spans chunks, the tell() snapshot of where it
+        # started: if the stream would block before the line ends, the line
+        # is kept for the next call, so the position must stay at its
+        # start.
+        line_snapshot = None
+        first_chunk = True
 
         start = 0
         # Make the decoder if it doesn't already exist.
@@ -2835,14 +2880,28 @@ class TextIOWrapper(TextIOBase):
                 break
 
             # No line ending seen yet - get more data'
-            while more := self._read_chunk():
-                if self._decoded_chars:
+            if first_chunk and self._telling and self._snapshot is not None:
+                dec_flags, next_input = self._snapshot
+                line_snapshot = (self._decoded_chars, line_start, dec_flags,
+                                 [next_input])
+            first_chunk = False
+            while True:
+                more = self._read_chunk()
+                if line_snapshot is not None:
+                    next_input = self._snapshot[1]
+                    line_snapshot[3].append(next_input[self._snapshot_held:])
+                if not more or self._decoded_chars:
                     break
             if self._decoded_chars:
                 line += self._get_decoded_chars()
-            elif more is None and not line:
-                # Nothing to return: "" would mean EOF.  (A partial line
-                # is returned, as at EOF.)
+            elif more is None and (
+                    size >= 0 or
+                    len(line) < _READLINE_KEEP_MAX * self._CHUNK_SIZE):
+                # Would block before the end of the line: keep what there
+                # is of it for the next call, and raise, since "" would
+                # mean EOF.
+                if line:
+                    self._keep_line(line, line_snapshot)
                 raise BlockingIOError(
                     errno.EAGAIN, "read could not complete without blocking")
             else:
@@ -2857,6 +2916,21 @@ class TextIOWrapper(TextIOBase):
         # Rewind _decoded_chars to just after the line ending we found.
         self._rewind_decoded_chars(len(line) - endpos)
         return line[:endpos]
+
+    def _keep_line(self, line, line_snapshot):
+        if line_snapshot is not None:
+            dec, start, dec_flags, inputs = line_snapshot
+            input = b"".join(inputs)
+            self._set_decoded_chars(dec[:start] + line)
+            self._decoded_chars_used = start
+            self._snapshot = (dec_flags, input)
+            self._b2cratio = len(input) / len(self._decoded_chars)
+        else:
+            # No snapshot of the line's start: tell() can't work until the
+            # next seek().
+            self._set_decoded_chars(line)
+            self._snapshot = None
+            self._telling = False
 
     @property
     def newlines(self):

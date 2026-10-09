@@ -339,6 +339,9 @@ class CTestCase(unittest.TestCase):
     peek_reads_to_size = is_nibbler
     # Does TextIOWrapper.tell() work while iterating?  (gh-81217)
     tells_while_iterating = is_nibbler
+    # Does readline() that would block keep a partial line longer than the
+    # buffer for the next call?  (_io's keeps one only if it fits.)
+    keeps_long_partial_lines = is_nibbler
     # Does TextIOWrapper put encoded text straight into its buffer and
     # decode from the buffer's read-ahead, instead of keeping bytes of its
     # own (pending_bytes) and reading chunks with read1()?
@@ -378,6 +381,7 @@ class PyTestCase(unittest.TestCase):
     keeps_writes_racing_close = False
     peek_reads_to_size = True
     tells_while_iterating = False
+    keeps_long_partial_lines = True
     text_uses_buffer_directly = False
 
     MockRawIO = PyMockRawIO

@@ -459,6 +459,47 @@ class BufferedReaderTest(CommonBufferedTests):
         self.assertEqual(bufio.read1(10), b"")
         self.assertEqual(bufio.readinto1(bytearray(10)), 0)
 
+    def test_readline_would_block_keeps_partial_line(self):
+        # gh-57531: readline() that would block before the end of the line
+        # returns None and keeps the partial line for the next call;
+        # iteration raises BlockingIOError.
+        rawio = self.MockRawIO((b"ab", None, b"c", None, b"d\nef", None,
+                                b"g"))
+        bufio = self.tp(rawio)
+        self.assertIsNone(bufio.readline())
+        self.assertIsNone(bufio.readline())
+        self.assertEqual(bufio.readline(), b"abcd\n")
+        self.assertRaises(BlockingIOError, next, bufio)
+        self.assertEqual(next(bufio), b"efg")
+        self.assertRaises(StopIteration, next, bufio)
+
+    def test_readline_would_block_limit(self):
+        if not self.is_C:
+            # _pyio's readline(size) can return more than size bytes when
+            # the line spans two peek() results.
+            self.skipTest("_pyio readline(size) overshoots size")
+        # With a limit: what arrived up to it is a line.
+        rawio = self.MockRawIO((b"ab", None, b"cdef", None, b"g\n"))
+        bufio = self.tp(rawio)
+        self.assertIsNone(bufio.readline(3))
+        self.assertEqual(bufio.readline(3), b"abc")
+        self.assertIsNone(bufio.readline(5))
+        self.assertEqual(bufio.readline(5), b"defg\n")
+        self.assertEqual(bufio.readline(5), b"")
+
+    def test_readline_would_block_long_partial_line(self):
+        # A partial line longer than the buffer is kept too, up to 64 times
+        # the buffer size; past that it is returned as it is.
+        if self.keeps_long_partial_lines:
+            rawio = self.MockRawIO((b"x" * 40, None, b"y\n"))
+            bufio = self.tp(rawio, 16)
+            self.assertIsNone(bufio.readline())
+            self.assertEqual(bufio.readline(), b"x" * 40 + b"y\n")
+        rawio = self.MockRawIO((b"x" * (64 * 16), None, b"y\n"))
+        bufio = self.tp(rawio, 16)
+        self.assertEqual(bufio.readline(), b"x" * (64 * 16))
+        self.assertEqual(bufio.readline(), b"y\n")
+
     def test_read_past_eof(self):
         rawio = self.MockRawIO((b"abc", b"d", b"efg"))
         bufio = self.tp(rawio)

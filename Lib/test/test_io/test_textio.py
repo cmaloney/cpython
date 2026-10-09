@@ -908,7 +908,7 @@ class TextIOWrapperTest:
         # gh-57531: when the stream would block before any character is
         # available, read(n), readline() and iteration raise
         # BlockingIOError, as read() does: "" means EOF.  What there is is
-        # returned: a short read(n), or a partial line from readline().
+        # returned by read(n), as a short read.
         raw = self.MockRawIO((None, None, None, b"ab", None, b"c\nd", None,
                               None, b"e"))
         t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
@@ -917,11 +917,48 @@ class TextIOWrapperTest:
         self.assertRaises(BlockingIOError, next, t)
         self.assertEqual(t.read(5), "ab")
         self.assertEqual(t.readline(), "c\n")
-        self.assertEqual(t.readline(), "d")
+        # A partial line is kept for the next call (see
+        # test_readline_would_block_keeps_partial_line).
         self.assertRaises(BlockingIOError, t.readline)
-        self.assertEqual(t.read(5), "e")
+        self.assertRaises(BlockingIOError, t.readline)
+        self.assertEqual(t.read(5), "de")
         self.assertEqual(t.read(5), "")
         self.assertEqual(t.readline(), "")
+
+    def test_readline_would_block_keeps_partial_line(self):
+        # A readline() that would block before the end of the line raises
+        # BlockingIOError and keeps the partial line for the next call.
+        raw = self.MockRawIO((b"ab", None, b"c", None, b"d\nef", None,
+                              b"g\r", None, b"\nh"))
+        t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8",
+                               newline="")
+        self.assertRaises(BlockingIOError, t.readline)
+        self.assertRaises(BlockingIOError, t.readline)
+        self.assertEqual(t.readline(), "abcd\n")
+        self.assertRaises(BlockingIOError, next, t)
+        # "\r" may be followed by "\n": wait for it.
+        self.assertRaises(BlockingIOError, t.readline)
+        self.assertEqual(next(t), "efg\r\n")
+        self.assertEqual(t.readline(), "h")
+        self.assertEqual(t.readline(), "")
+        # With a limit: what arrived up to it is a line.
+        raw = self.MockRawIO((b"ab", None, b"cdef", None, b"g\n"))
+        t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
+        self.assertRaises(BlockingIOError, t.readline, 3)
+        self.assertEqual(t.readline(3), "abc")
+        self.assertRaises(BlockingIOError, t.readline, 5)
+        self.assertEqual(t.readline(5), "defg\n")
+        # Too long to keep: returned as it is, as at EOF.
+        raw = self.MockRawIO((b"x" * 100, None, b"y\n"))
+        t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
+        t._CHUNK_SIZE = 1
+        self.assertEqual(t.readline(), "x" * 100)
+        self.assertEqual(t.readline(), "y\n")
+        raw = self.MockRawIO((b"x" * 63, None, b"y\n"))
+        t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
+        t._CHUNK_SIZE = 1
+        self.assertRaises(BlockingIOError, t.readline)
+        self.assertEqual(t.readline(), "x" * 63 + "y\n")
 
     def test_read_by_chunk(self):
         # make sure "\r\n" straddles 128 char boundary.

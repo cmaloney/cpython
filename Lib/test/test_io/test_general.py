@@ -324,8 +324,17 @@ class IOTest:
         # Crash when readline() returns an object without __len__
         class R(self.IOBase):
             def readline(self):
-                return None
+                return 0
         self.assertRaises((TypeError, StopIteration), next, R())
+
+    def test_next_readline_would_block(self):
+        # readline() returns None when a non-blocking stream would block:
+        # iteration raises BlockingIOError, since StopIteration would end
+        # the loop for good.
+        class R(self.IOBase):
+            def readline(self):
+                return None
+        self.assertRaises(BlockingIOError, next, R())
 
     def test_next_nonsizeable(self):
         # Issue #30061

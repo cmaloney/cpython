@@ -642,6 +642,11 @@ _io__IOBase_readline_impl(PyObject *self, Py_ssize_t limit)
                 }
                 goto fail;
             }
+            if (readahead == Py_None) {
+                /* Would block. */
+                Py_DECREF(readahead);
+                goto would_block;
+            }
             if (!PyBytes_Check(readahead)) {
                 PyErr_Format(PyExc_OSError,
                              "peek() should have returned a bytes object, "
@@ -682,6 +687,10 @@ _io__IOBase_readline_impl(PyObject *self, Py_ssize_t limit)
             }
             goto fail;
         }
+        if (b == Py_None) {
+            Py_DECREF(b);
+            goto would_block;
+        }
         if (!PyBytes_Check(b)) {
             PyErr_Format(PyExc_OSError,
                          "read() should have returned a bytes object, "
@@ -710,6 +719,15 @@ _io__IOBase_readline_impl(PyObject *self, Py_ssize_t limit)
 
     Py_XDECREF(peek);
     return PyBytesWriter_Finish(writer);
+  would_block:
+    /* Would block before the end of the line: None if nothing arrived,
+       else the partial line (which can't be kept). */
+    Py_XDECREF(peek);
+    if (PyBytesWriter_GetSize(writer) == 0) {
+        PyBytesWriter_Discard(writer);
+        Py_RETURN_NONE;
+    }
+    return PyBytesWriter_Finish(writer);
   fail:
     Py_XDECREF(peek);
     PyBytesWriter_Discard(writer);
@@ -732,6 +750,12 @@ iobase_iternext(PyObject *self)
 
     if (line == NULL)
         return NULL;
+    if (line == Py_None) {
+        /* Would block: StopIteration would end the loop for good. */
+        Py_DECREF(line);
+        _PyIO_set_read_blocking_error();
+        return NULL;
+    }
 
     if (PyObject_Size(line) <= 0) {
         /* Error or empty */
