@@ -23,6 +23,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 import unittest
 
 from test import support
@@ -1382,6 +1383,26 @@ class WriteOutTest:
                 self.assertEqual(bytes(raw.out),
                                  b"a" * (20 if op == "write" else 10)
                                  + b"c" * 40)
+
+    @unittest.skipUnless(hasattr(signal, "setitimer"), "requires setitimer")
+    def test_signal_handler_printing_during_writes(self):
+        if not self.buffers_reentrant_writes:
+            self.skipTest("raises RuntimeError")
+        # gh-112608: a signal handler that print()s to a file while the
+        # main code writes to it, with signals arriving during write outs
+        # (gh-118143).  Its text is queued, never "reentrant call".
+        with self.open(os.devnull, "w", encoding="ascii") as f:
+            def handler(*args):
+                print("handler", file=f)
+            old = signal.signal(signal.SIGALRM, handler)
+            self.addCleanup(signal.signal, signal.SIGALRM, old)
+            signal.setitimer(signal.ITIMER_REAL, 0.0005, 0.0005)
+            try:
+                deadline = time.monotonic() + 0.5
+                while time.monotonic() < deadline:
+                    print("loop" * 50, file=f)
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
 
     def test_fileio_write_while_other_thread_in_raw_write(self):
         # With a FileIO raw stream (where writes may be queued without the

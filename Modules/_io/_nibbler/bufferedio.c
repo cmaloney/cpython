@@ -568,10 +568,19 @@ buffered_write_out(buffered *self, Py_ssize_t target, const char *data,
         target -= k;
         extra.ptr += n - k;
         extra.len -= n - k;
+        if (target == 0 && extra.len == 0) {
+            break;
+        }
         /* Partial writes can return successfully when interrupted by a
            signal (see write(2)).  Run signal handlers before blocking
-           another time, possibly indefinitely. */
-        if (PyErr_CheckSignals() < 0) {
+           another time, possibly indefinitely.  With unlocked, without
+           the lock: a handler writing to this object (print()) then
+           queues its data (gh-118143) instead of failing as a reentrant
+           call. */
+        buffered_unlock_for_raw(self, unlocked);
+        int r = PyErr_CheckSignals();
+        buffered_relock_after_raw(self, unlocked);
+        if (r < 0) {
             goto done;
         }
     }
