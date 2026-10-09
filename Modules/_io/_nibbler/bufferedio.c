@@ -337,12 +337,12 @@ buffered_raw_result(PyObject *res, Py_ssize_t len, const char *method)
     return n;
 }
 
-/* Python code had view (of memory without an exporter, see
-   buffered_owned_view()): release it, so that keeping it gives no access
-   to the memory any more (gh-60198, gh-157075).  Returns 1 if the memory
-   can still be reached anyway, through a view made from it or a buffer it
-   exported: then it must neither be reused nor handed out without a copy.
-   Keeps the raised exception.  Steals view. */
+/* Python code had view (see buffered_owned_view()): release it, so that
+   keeping it gives no access to the memory any more (gh-60198, gh-157075).
+   Returns 1 if the memory can still be reached anyway, through a view made
+   from it or a buffer it exported: then memory of ours must neither be
+   reused nor handed out without a copy.  Keeps the raised exception.
+   Steals view. */
 static int
 buffered_release_view(PyObject *view)
 {
@@ -360,51 +360,48 @@ buffered_release_view(PyObject *view)
     return shared;
 }
 
-/* A memoryview of mem[0:len] for Python code (writable with PyBUF_WRITE).
-   With owner, a bytes object holding mem, the views made from it keep
-   owner alive, so that the memory stays valid as long as Python code can
-   reach it; without, it must stay valid otherwise. */
+/* A memoryview of mem[0:len] for Python code (writable with PyBUF_WRITE),
+   inside owner: a bytes object of ours, or the object whose buffer the
+   caller passed (whose export the view holds, so that a view made from it
+   keeps that memory valid like any other).  Without owner, the memory must
+   stay valid otherwise. */
 static PyObject *
 buffered_owned_view(char *mem, Py_ssize_t len, int flags, PyObject *owner)
 {
     PyObject *view = PyMemoryView_FromMemory(mem, len, flags);
-    if (view != NULL && owner != NULL) {
+    if (view == NULL || owner == NULL) {
+        return view;
+    }
+    PyMemoryViewObject *mv = (PyMemoryViewObject *)view;
+    Py_buffer *master = &mv->mbuf->master;
+    if (PyBytes_CheckExact(owner)) {
         /* Released with the managed buffer; bytes have no
            bf_releasebuffer. */
-        assert(PyBytes_CheckExact(owner));
-        ((PyMemoryViewObject *)view)->mbuf->master.obj = Py_NewRef(owner);
+        master->obj = Py_NewRef(owner);
+        return view;
     }
+    /* The view keeps its own shape; the managed buffer releases the export
+       when the last view made from it goes. */
+    Py_buffer whole;
+    if (PyObject_GetBuffer(owner, &whole, PyBUF_WRITABLE) < 0) {
+        Py_DECREF(view);
+        return NULL;
+    }
+    char *start = whole.buf;
+    if (mem < start || mem + len > start + whole.len) {
+        /* Not the memory the caller passed after all. */
+        PyBuffer_Release(&whole);
+        return view;
+    }
+    *master = whole;
+    mv->view.obj = owner;
     return view;
 }
 
-static Py_ssize_t
-buffered_raw_read(buffered *self, char *dst, Py_ssize_t len, PyObject *owner,
-                  int *shared);
-
-/* buffered_raw_read() into memory of the caller (which Python code must not
-   reach after the call): through a bytes object of our own. */
-Py_NO_INLINE static Py_ssize_t
-buffered_raw_read_copy(buffered *self, char *dst, Py_ssize_t len)
-{
-    PyObject *tmp = PyBytes_FromStringAndSize(NULL, len);
-    if (tmp == NULL) {
-        return -1;
-    }
-    int shared = 0;
-    Py_ssize_t n = buffered_raw_read(self, PyBytes_AS_STRING(tmp), len, tmp,
-                                     &shared);
-    if (n > 0) {
-        memcpy(dst, PyBytes_AS_STRING(tmp), n);
-    }
-    Py_DECREF(tmp);
-    return n;
-}
-
-/* One raw readinto() of up to len bytes at dst, inside the bytes object
-   owner, or with owner NULL, in memory of the caller.  Returns the count
-   (0 at EOF), -2 if the raw stream would block, or -1 on error.  Sets
-   *shared if Python code can still reach owner's memory (see
-   buffered_release_view()). */
+/* One raw readinto() of up to len bytes at dst, inside owner (see
+   buffered_owned_view()).  Returns the count (0 at EOF), -2 if the raw
+   stream would block, or -1 on error.  Sets *shared if Python code can
+   still reach the memory (see buffered_release_view()). */
 static Py_ssize_t
 buffered_raw_read(buffered *self, char *dst, Py_ssize_t len, PyObject *owner,
                   int *shared)
@@ -412,9 +409,7 @@ buffered_raw_read(buffered *self, char *dst, Py_ssize_t len, PyObject *owner,
     if (self->raw_fileio) {
         return _PyFileIO_readinto(self->raw, dst, len);
     }
-    if (owner == NULL) {
-        return buffered_raw_read_copy(self, dst, len);
-    }
+    assert(owner != NULL);
     PyObject *view = buffered_owned_view(dst, len, PyBUF_WRITE, owner);
     if (view == NULL) {
         return -1;
@@ -1824,8 +1819,11 @@ buffered_readinto_common(buffered *self, Py_buffer *buffer, int readinto1)
     if (buffered_enter(self, "readinto of closed file", READING) < 0) {
         return NULL;
     }
+    /* The raw stream reads into the caller's memory itself; what Python
+       code keeps of it stays valid through the caller's object. */
+    int shared = 0;
     Py_ssize_t n = buffered_read_into(self, buffer->buf, buffer->len,
-                                      readinto1, NULL, NULL);
+                                      readinto1, buffer->obj, &shared);
     buffered_unlock(self);
     if (n == -2) {
         Py_RETURN_NONE;

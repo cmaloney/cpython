@@ -13,6 +13,7 @@ Each test class runs against the C (_io), Python (_pyio) and C nibbler
 capability attributes (see utils.py); is_C only picks error messages and
 known _pyio quirks.
 """
+import array
 import errno
 import glob
 import os
@@ -27,7 +28,7 @@ import time
 import unittest
 
 from test import support
-from test.support import os_helper, threading_helper
+from test.support import import_helper, os_helper, threading_helper
 from .utils import CTestCase, PyTestCase, NibblerMixin
 
 
@@ -1274,16 +1275,52 @@ class PositionTest:
         read = got[:3] + got[4:]  # peek() doesn't consume
         pos = sum(map(len, read))
         self.assertEqual(b"".join(read), data[:pos])
+        # readinto() hands the raw stream the caller's own memory: a view
+        # it keeps writes there later, but keeps that memory alive.
         buf = bytearray(300)
         n = f.readinto(buf)
-        raw.scribble()
         self.assertEqual(bytes(buf[:n]), data[pos:pos + n])
+        raw.scribble()
         rest = f.read()
         raw.scribble()
         self.assertEqual(rest, data[pos + n:])
         del f, buf
         support.gc_collect()
         raw.scribble()
+
+    def test_readinto_reads_into_callers_buffer(self):
+        # readinto() of at least a buffer's worth gives the raw stream the
+        # caller's own memory to read into, without a copy.
+        ctypes = import_helper.import_module('ctypes')
+
+        def address(b):
+            c = ctypes.c_char.from_buffer(b)
+            try:
+                return ctypes.addressof(c)
+            finally:
+                del c
+
+        class AddressRaw(self.RawIOBase):
+            def __init__(self):
+                self.addresses = []
+
+            def readable(self):
+                return True
+
+            def readinto(self, b):
+                self.addresses.append(address(b))
+                b[:] = b"x" * len(b)
+                return len(b)
+
+        raw = AddressRaw()
+        f = self.BufferedReader(raw, 16)
+        for buf in (bytearray(100), memoryview(bytearray(100)),
+                    array.array('b', bytes(100))):
+            with self.subTest(type(buf).__name__):
+                raw.addresses.clear()
+                self.assertEqual(f.readinto(buf), 100)
+                self.assertEqual(raw.addresses, [address(buf)])
+                self.assertEqual(bytes(buf), b"x" * 100)
 
     def test_overflow_keeps_small_write_buffered(self):
         # Without vectored writes, a small write that doesn't fit after
