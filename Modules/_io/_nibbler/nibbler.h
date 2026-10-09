@@ -731,15 +731,24 @@ nibbler_window_move(nibbler *n, Py_off_t offset)
  * Data
  */
 
+/* Replace the block with block (a new reference, or NULL), releasing the
+   old one.  __sizeof__() reads the pointer without the lock, so every
+   store to it goes through here. */
+static inline void
+nibbler_set_block(nibbler *n, PyObject *block)
+{
+    PyObject *old = n->block;
+    FT_ATOMIC_STORE_PTR_RELAXED(n->block, block);
+    Py_XDECREF(old);
+}
+
 /* Discard all data and release the memory holding it. */
 static void
 nibbler_free(nibbler *n)
 {
     (void)nibbler_close_window(n);
     morsels_free(&n->list);
-    PyObject *block = n->block;
-    FT_ATOMIC_STORE_PTR_RELAXED(n->block, NULL);
-    Py_XDECREF(block);
+    nibbler_set_block(n, NULL);
 }
 
 static inline Py_ssize_t
@@ -759,9 +768,7 @@ nibbler_fresh_block(nibbler *n)
         if (block == NULL) {
             return NULL;
         }
-        PyObject *old = n->block;
-        FT_ATOMIC_STORE_PTR_RELAXED(n->block, block);
-        Py_XDECREF(old);
+        nibbler_set_block(n, block);
     }
     return n->block;
 }

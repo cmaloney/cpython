@@ -422,7 +422,7 @@ buffered_raw_write(buffered *self, Py_ssize_t avail, const morsel *extra,
 
     /* Python code may keep the views (and reach the block through them): it
        must not be written to again. */
-    Py_CLEAR(self->nib.block);
+    nibbler_set_block(&self->nib, NULL);
     PyObject *arg = NULL;
     if (cnt == 1) {
         arg = buffered_view(&pieces[0]);
