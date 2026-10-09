@@ -339,6 +339,10 @@ class CTestCase(unittest.TestCase):
     peek_reads_to_size = is_nibbler
     # Does TextIOWrapper.tell() work while iterating?  (gh-81217)
     tells_while_iterating = is_nibbler
+    # Does TextIOWrapper put encoded text straight into its buffer and
+    # decode from the buffer's read-ahead, instead of keeping bytes of its
+    # own (pending_bytes) and reading chunks with read1()?
+    text_uses_buffer_directly = is_nibbler
 
     MockRawIO = CMockRawIO
     MisbehavedRawIO = CMisbehavedRawIO
@@ -374,6 +378,7 @@ class PyTestCase(unittest.TestCase):
     keeps_writes_racing_close = False
     peek_reads_to_size = True
     tells_while_iterating = False
+    text_uses_buffer_directly = False
 
     MockRawIO = PyMockRawIO
     MisbehavedRawIO = PyMisbehavedRawIO

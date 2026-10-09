@@ -938,6 +938,41 @@ class NibblerSlowDeviceTest(NibblerMixin, SlowDeviceTest, CTestCase):
     pass
 
 
+# --- Text over a buffered object ------------------------------------------------
+
+class TextTest:
+    """TextIOWrapper over a buffered object."""
+
+    def setUp(self):
+        super().setUp()
+        if not self.text_uses_buffer_directly:
+            self.skipTest("text keeps bytes of its own")
+
+    def test_text_and_buffer_writes_keep_order(self):
+        # gh-52203: sys.stdout.write() then sys.stdout.buffer.write() come
+        # out in that order.
+        raw = self.BytesIO()
+        t = self.TextIOWrapper(self.BufferedWriter(raw), encoding="utf-8")
+        t.write("unicode ")
+        t.buffer.write(b"bytes ")
+        t.write("\xe9 ")
+        t.buffer.write(b"more")
+        t.flush()
+        self.assertEqual(raw.getvalue(), b"unicode bytes \xc3\xa9 more")
+
+
+class CTextTest(TextTest, CTestCase):
+    pass
+
+
+class PyTextTest(TextTest, PyTestCase):
+    pass
+
+
+class NibblerTextTest(NibblerMixin, TextTest, CTestCase):
+    pass
+
+
 # --- Positioning within the buffer ---------------------------------------------
 
 class PositionTest:
