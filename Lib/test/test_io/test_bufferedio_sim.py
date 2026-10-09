@@ -836,6 +836,19 @@ class SlowDeviceTest:
         self.assertEqual(f.write(b"789"), 3)
         self.assertEqual(bytes(raw.received), b"0123456789")
 
+    def test_size_zero_empty_write(self):
+        # gh-148773: an empty write makes no raw call (a tty may take a
+        # write of 0 bytes as a hangup).
+        self.check_buffer_size_zero()
+        raw = self.scripted_writer()
+        f = self.BufferedWriter(raw, 0)
+        self.assertEqual(f.write(b""), 0)
+        self.assertEqual(f.write(bytearray()), 0)
+        f.flush()
+        self.assertEqual(raw.calls, 0)
+        self.assertEqual(f.write(b"x"), 1)
+        self.assertEqual(raw.calls, 1)
+
     def test_size_zero_write_no_progress(self):
         # gh-158414: a raw write() returning 0 is not retried forever.
         self.check_buffer_size_zero()
