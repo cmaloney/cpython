@@ -2910,7 +2910,15 @@ class TextIOWrapper(TextIOBase):
                                      self._decoded_chars_used - len(line),
                                      dec_flags, [next_input])
             while True:
-                more = self._read_chunk()
+                try:
+                    more = self._read_chunk()
+                except BaseException:
+                    # Keep the partial line for the next call, as the
+                    # buffer keeps what it read (such as before a socket
+                    # timeout, gh-51571).
+                    if line:
+                        self._keep_line(line, line_snapshot)
+                    raise
                 if line_snapshot is not None:
                     next_input = self._snapshot[1]
                     line_snapshot[3].append(next_input[self._snapshot_held:])

@@ -352,6 +352,10 @@ class socket(_socket.socket):
         else:
             assert writing
             buffer = io.BufferedWriter(raw, buffering)
+        if reading and getattr(buffer, "_is_nibbler", False):
+            # This buffered reader keeps the data it read before a timeout
+            # for the next read, so reading may go on (gh-51571).
+            raw._timeout_retryable = True
         if binary:
             return buffer
         encoding = io.text_encoding(encoding)
@@ -732,6 +736,9 @@ class SocketIO(io.RawIOBase):
         self._reading = "r" in mode
         self._writing = "w" in mode
         self._timeout_occurred = False
+        # Whether reads may go on after a timeout: only if the buffered
+        # reader over this object keeps the data it read before one.
+        self._timeout_retryable = False
 
     def readinto(self, b):
         """Read up to len(b) bytes into the writable buffer *b* and return
@@ -748,7 +755,8 @@ class SocketIO(io.RawIOBase):
         try:
             return self._sock.recv_into(b)
         except timeout:
-            self._timeout_occurred = True
+            if not self._timeout_retryable:
+                self._timeout_occurred = True
             raise
         except error as e:
             if e.errno in _blocking_errnos:

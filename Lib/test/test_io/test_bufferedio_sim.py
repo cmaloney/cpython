@@ -415,6 +415,29 @@ class SlowDeviceTest:
         self.assertEqual(f.read(10), "€b")
         self.assertEqual(f.read(10), "")
 
+    def test_text_readline_error_keeps_partial_line(self):
+        # gh-51571: a raw read that raises (such as a socket timeout) in the
+        # middle of a line loses nothing: the next readline() returns the
+        # whole line.
+        data = "ab\xe9cd\nef".encode()
+        raw = self.scripted_reader(data, [4, TimeoutError("timed out")])
+        f = self.TextIOWrapper(self.BufferedReader(raw, 16), encoding="utf-8")
+        self.assertRaises(TimeoutError, f.readline)
+        self.assertEqual(f.readline(), "ab\xe9cd\n")
+        self.assertEqual(f.readline(), "ef")
+
+    def test_read_all_error_keeps_data(self):
+        # read() of a raw stream with only RawIOBase.readall() keeps what
+        # it read before a raw read raised.
+        if not self.keeps_data_on_raw_error:
+            self.skipTest("data read before a raw error is lost")
+        data = sample_data(100)
+        raw = self.scripted_reader(data, [30, 20, TimeoutError("timed out")])
+        f = self.BufferedReader(raw, 16)
+        self.assertEqual(f.read(5), data[:5])
+        self.assertRaises(TimeoutError, f.read)
+        self.assertEqual(f.read(), data[5:])
+
     def test_read_eintr_is_retried(self):
         if not self.retries_raw_eintr:
             self.skipTest("buffered layer does not retry raw EINTR")

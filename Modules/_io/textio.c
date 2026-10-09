@@ -2965,6 +2965,20 @@ _textiowrapper_readline(textio *self, Py_ssize_t limit)
                 if (_PyIO_trap_eintr()) {
                     continue;
                 }
+                /* Keep the partial line for the next call, as the buffer
+                   keeps what it read (such as before a socket timeout,
+                   gh-51571). */
+                if (remaining != NULL || chunks != NULL) {
+                    PyObject *exc = PyErr_GetRaisedException();
+                    if (textiowrapper_keep_line(self, self->line_snap,
+                                                chunks, remaining) < 0)
+                    {
+                        _PyErr_ChainExceptions1(exc);
+                    }
+                    else {
+                        PyErr_SetRaisedException(exc);
+                    }
+                }
                 goto error;
             }
             /* Part of the line was put aside after line_snap was reset

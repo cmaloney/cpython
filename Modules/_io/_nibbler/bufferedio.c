@@ -831,10 +831,11 @@ buffered_read_bytes(buffered *self, Py_ssize_t n, int read1)
     return PyBytesWriter_FinishWithSize(writer, r);
 }
 
-/* Call raw.read() until EOF or it would block.  Returns the joined data,
-   or the final b"" or None when there was none. */
+/* Call raw.read(size) (raw.read() without size) until EOF or it would
+   block.  Returns the joined data, or the final b"" or None when there was
+   none.  If a call raises, what was read is kept as read-ahead. */
 static PyObject *
-buffered_read_chunks(buffered *self)
+buffered_read_chunks(buffered *self, PyObject *size)
 {
     PyObject *chunks = PyList_New(0);
     if (chunks == NULL) {
@@ -842,8 +843,13 @@ buffered_read_chunks(buffered *self)
     }
     PyObject *data;
     for (;;) {
-        data = PyObject_CallMethodNoArgs(self->raw, &_Py_ID(read));
+        data = (size == NULL
+                ? PyObject_CallMethodNoArgs(self->raw, &_Py_ID(read))
+                : PyObject_CallMethodOneArg(self->raw, &_Py_ID(read), size));
         if (data == NULL) {
+            if (_PyIO_trap_eintr()) {
+                continue;
+            }
             break;
         }
         if (data != Py_None && !PyBytes_Check(data)) {
@@ -865,6 +871,31 @@ buffered_read_chunks(buffered *self)
             break;
         }
     }
+    if (data == NULL && PyList_GET_SIZE(chunks) > 0) {
+        /* A raw read raised (such as a socket timeout): put what was read
+           back after the read-ahead, for the next read (gh-51571). */
+        PyObject *exc = PyErr_GetRaisedException();
+        Py_ssize_t k = nibbler_unread(&self->nib);
+        PyObject *rest = PyBytes_Join(Py_GetConstant(Py_CONSTANT_EMPTY_BYTES),
+                                      chunks);
+        PyObject *all = NULL;
+        if (rest != NULL) {
+            all = PyBytes_FromStringAndSize(NULL, k + PyBytes_GET_SIZE(rest));
+        }
+        if (all != NULL) {
+            char *dst = PyBytes_AS_STRING(all);
+            (void)nibbler_take_into(&self->nib, dst, k);
+            memcpy(dst + k, PyBytes_AS_STRING(rest), PyBytes_GET_SIZE(rest));
+            (void)nibbler_drop_unread(&self->nib);
+            PyErr_SetRaisedException(exc);
+            buffered_unread(self, dst, PyBytes_GET_SIZE(all));
+        }
+        else {
+            _PyErr_ChainExceptions1(exc);
+        }
+        Py_XDECREF(rest);
+        Py_XDECREF(all);
+    }
     Py_DECREF(chunks);
     return data;
 }
@@ -881,7 +912,24 @@ buffered_raw_read_all(buffered *self)
         return NULL;
     }
     if (readall == NULL) {
-        return buffered_read_chunks(self);
+        return buffered_read_chunks(self, NULL);
+    }
+    /* RawIOBase.readall() loses what it read when a later read raises (as
+       a socket timeout can): read the chunks here instead, to keep them. */
+    _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
+    if (_PyType_Lookup(Py_TYPE(self->raw), &_Py_ID(readall))
+        == _PyType_Lookup(state->PyRawIOBase_Type, &_Py_ID(readall)))
+    {
+        Py_DECREF(readall);
+        /* With a size: read() without one is readall(). */
+        PyObject *size = PyLong_FromSsize_t(Py_MAX(self->nib.capacity,
+                                                   DEFAULT_BUFFER_SIZE));
+        if (size == NULL) {
+            return NULL;
+        }
+        PyObject *res = buffered_read_chunks(self, size);
+        Py_DECREF(size);
+        return res;
     }
     PyObject *res = PyObject_CallNoArgs(readall);
     Py_DECREF(readall);
