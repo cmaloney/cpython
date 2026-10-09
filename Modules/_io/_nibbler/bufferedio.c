@@ -1232,6 +1232,7 @@ _io__Buffered_close_impl(buffered *self)
         return NULL;
     }
     PyObject *res = NULL;
+    Py_ssize_t discarded = 0;
     /* gh-138720: Use the same closed check as flush(). */
     int r = buffered_is_closed(self);
     if (r != 0) {
@@ -1272,6 +1273,13 @@ _io__Buffered_close_impl(buffered *self)
         }
     }
 
+    if (exc != NULL && PyErr_GivenExceptionMatches(exc, PyExc_BlockingIOError)
+        && nibbler_reading(&self->nib) == NULL)
+    {
+        /* The flush would block: pending writes are freed below. */
+        discarded = nibbler_nbytes(&self->nib);
+    }
+
     res = self->raw_fileio ? _PyFileIO_close(self->raw)
                            : PyObject_CallMethodNoArgs(self->raw,
                                                        &_Py_ID(close));
@@ -1285,6 +1293,10 @@ _io__Buffered_close_impl(buffered *self)
     }
 end:
     buffered_unlock(self);
+    if (discarded > 0) {
+        /* Without the lock: the warning may write to this file. */
+        _PyIO_warn_discarded(discarded);
+    }
     return res;
 }
 

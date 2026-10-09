@@ -1367,12 +1367,22 @@ class BufferedWriter(_BufferedIOMixin):
         # probably just re-take the lock) in case flush has been overridden in
         # a subclass or the user set self.flush to something. This is the same
         # behavior as the C implementation.
+        discarded = 0
         try:
             # may raise BlockingIOError or BrokenPipeError etc
             self.flush()
+        except BlockingIOError:
+            # Writing out would block: the pending data is lost.
+            discarded = len(self._write_buf)
+            raise
         finally:
             with self._write_lock:
                 self.raw.close()
+            if discarded:
+                import warnings
+                warnings.warn(f"close() discarded {discarded} buffered bytes: "
+                              "writing them would block", RuntimeWarning,
+                              stacklevel=2)
 
 
 class BufferedRWPair(BufferedIOBase):

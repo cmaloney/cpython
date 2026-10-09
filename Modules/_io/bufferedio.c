@@ -575,6 +575,7 @@ _io__Buffered_close_impl(buffered *self)
 /*[clinic end generated code: output=7280b7b42033be0c input=56d95935b03fd326]*/
 {
     PyObject *res = NULL;
+    Py_ssize_t discarded = 0;
     int r;
 
     CHECK_INITIALIZED(self)
@@ -609,6 +610,13 @@ _io__Buffered_close_impl(buffered *self)
         _PyErr_ChainExceptions1(exc);
         return NULL;
     }
+    if (exc != NULL && PyErr_GivenExceptionMatches(exc, PyExc_BlockingIOError)
+        && VALID_WRITE_BUFFER(self))
+    {
+        /* The flush would block: pending writes are lost with the buffer. */
+        discarded = Py_SAFE_DOWNCAST(self->write_end - self->write_pos,
+                                     Py_off_t, Py_ssize_t);
+    }
 
     res = PyObject_CallMethodNoArgs(self->raw, &_Py_ID(close));
 
@@ -627,6 +635,10 @@ _io__Buffered_close_impl(buffered *self)
 
 end:
     LEAVE_BUFFERED(self)
+    if (discarded > 0) {
+        /* Without the lock: the warning may write to this file. */
+        _PyIO_warn_discarded(discarded);
+    }
     return res;
 }
 
@@ -926,6 +938,21 @@ _PyIO_trap_eintr(void)
     /* This silences any error set by PyObject_RichCompareBool() */
     PyErr_SetRaisedException(exc);
     return 0;
+}
+
+void
+_PyIO_warn_discarded(Py_ssize_t n)
+{
+    PyObject *exc = PyErr_GetRaisedException();
+    if (PyErr_WarnFormat(PyExc_RuntimeWarning, 1,
+                         "close() discarded %zd buffered bytes: writing them "
+                         "would block", n) < 0)
+    {
+        _PyErr_ChainExceptions1(exc);
+    }
+    else {
+        PyErr_SetRaisedException(exc);
+    }
 }
 
 /*
