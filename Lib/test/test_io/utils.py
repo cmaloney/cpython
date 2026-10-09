@@ -288,8 +288,9 @@ class CTestCase(unittest.TestCase):
     io = io
     is_C = True
     # Does the buffered layer accept buffer_size=0 ("no internal buffer,
-    # but still retry partial reads/writes")?
-    supports_buffer_size_zero = False
+    # but still retry partial reads/writes")?  _io's classes may be
+    # _io._nibbler's (_PYTHON_IO_DEFAULT_IMPL=_nibbler).
+    supports_buffer_size_zero = io.BufferedReader is _nibbler.BufferedReader
     # Is InterruptedError raised by the raw stream retried (PEP 475 style)?
     retries_raw_eintr = True
     # Do views passed to the raw stream never alias data the buffered layer
@@ -372,6 +373,7 @@ _NIBBLER_BUFFERED = {
 
 class NibblerMixin:
     """Route the buffered layer (self.* types and open()) to _io._nibbler."""
+    supports_buffer_size_zero = True
     isolates_raw_views = True
     queues_writes_during_io = True
     reads_are_atomic = True
