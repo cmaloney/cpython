@@ -541,6 +541,20 @@ class SlowDeviceTest:
         with self.assertRaisesRegex(ValueError, msg):
             f.write(b"c")
 
+    def test_write_after_other_raw_closed(self):
+        # Raw streams other than FileIO say whether they are closed when
+        # asked with the lock: from then on, writes queued without it raise
+        # too.
+        raw = self.MockRawIO()
+        f = self.BufferedWriter(raw, 16)
+        f.write(b"a")
+        f.write(b"b")
+        raw.close()
+        with self.assertRaises(ValueError):
+            f.flush()
+        with self.assertRaises(ValueError):
+            f.write(b"c")
+
     def test_closed_follows_raw(self):
         # close() keeps the raw stream, which says whether it is closed:
         # closing it directly closes the buffered object, and close() after

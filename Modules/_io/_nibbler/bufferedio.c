@@ -69,10 +69,13 @@ find_nibblermodule_state_by_def(PyTypeObject *type)
  *   read window.  write() and
  *   flush() write them out together (in one call when the raw stream has a
  *   vectored _writev() method) with the I/O role, without holding the
- *   lock; meanwhile other threads can only queue more writes.  With an
- *   exact FileIO, small writes that fit are queued without the lock (see
- *   "The open end" in nibbler.h), so all code holding the lock sees them
- *   queued.
+ *   lock; meanwhile other threads can only queue more writes.  Small
+ *   writes that fit are queued without the lock (see "The open end" in
+ *   nibbler.h), so all code holding the lock sees them queued.  They
+ *   check that an exact FileIO is open; other raw streams are asked with
+ *   the lock, and once one says it is closed the open end is dropped, so
+ *   that writes take the lock and raise (closing through the buffered
+ *   object drops it too).
  *
  * - Reading: the reading end holds the bytes the last fill read (see "The
  *   open end" in nibbler.h).  Its position splits them: the bytes before
@@ -252,12 +255,14 @@ buffered_is_closed(buffered *self)
     return closed;
 }
 
-/* Raise ValueError(closed_msg) if closed. */
+/* Raise ValueError(closed_msg) if closed.  Then writes can't go on
+   without the lock either. */
 static int
 buffered_check_closed(buffered *self, const char *closed_msg)
 {
     int closed = buffered_is_closed(self);
     if (closed > 0) {
+        nibbler_stop_appending(&self->nib);
         PyErr_SetString(PyExc_ValueError, closed_msg);
     }
     return closed == 0 ? 0 : -1;
@@ -410,9 +415,8 @@ buffered_raw_write(buffered *self, Py_ssize_t avail, const morsel *extra,
     }
 
     /* Python code may keep the views (and reach the block through them): it
-       must not be written to again.  (No end: appends without the lock
-       need raw_fileio, and nothing is read while writing.) */
-    assert(self->nib.end == NULL);
+       must not be written to again, also by appends without the lock. */
+    nibbler_drop_end(&self->nib);
     Py_CLEAR(self->nib.block);
     PyObject *arg = NULL;
     if (cnt == 1) {
@@ -1937,11 +1941,11 @@ buffered_write_lockfree(buffered *self, const char *data, Py_ssize_t len)
     if (e == NULL || (r = nibbler_reserve(e, len)) < 0) {
         return 0;
     }
-    /* Until committed, nothing can replace raw (a FileIO, since there is a
-       writing end).  Data written once it was closed by itself is queued too:
-       nothing can write it out any more. */
+    /* Until committed, nothing can replace raw.  Data written once an
+       exact FileIO was closed by itself is queued too: nothing can write it
+       out any more.  (Other raw streams: see buffered_check_closed().) */
     PyObject *raw = FT_ATOMIC_LOAD_PTR_RELAXED(self->raw);
-    int closed = raw == NULL || _PyFileIO_closed(raw);
+    int closed = self->raw_fileio && _PyFileIO_closed(raw);
     nibbler_commit(e, r, data, len);
     if (closed) {
         PyErr_SetString(PyExc_ValueError, "write to closed file");
@@ -1973,7 +1977,7 @@ buffered_write_view(buffered *self, Py_buffer *view, int nowait)
             return -1;
         }
         int r = buffered_write_locked(self, view, &done);
-        if (r == 0 && self->raw_fileio) {
+        if (r == 0) {
             /* The next writes may need no lock. */
             nibbler_start_appending(&self->nib);
         }

@@ -351,6 +351,15 @@ nibbler_start_appending(nibbler *n)
     (void)nibbler_new_end(n, n->block, 0, 0, 1);
 }
 
+/* No more appends without the lock (dropping a writing end). */
+static void
+nibbler_stop_appending(nibbler *n)
+{
+    if (n->end != NULL && n->end->writing) {
+        nibbler_drop_end(n);
+    }
+}
+
 /* Without the lock: reserve len bytes of the writing end e.  Returns their
    offset in the block, or -1 when e is held or they don't fit.
    nibbler_commit() must follow, with nothing that can wait in between. */
