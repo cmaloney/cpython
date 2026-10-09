@@ -1596,9 +1596,7 @@ class LockReleaseTest:
     the lock: a daemon thread at shutdown, or a thread gone in a fork."""
 
     def run_child(self, code):
-        import _io
-        nibbler = self.BufferedRandom is _io._nibbler.BufferedRandom
-        if not nibbler:
+        if not self.is_nibbler:
             self.skipTest("only _io._nibbler takes over such locks")
         code = ("from _io._nibbler import BufferedRandom\n"
                 + GATED_RAW + textwrap.dedent(code))

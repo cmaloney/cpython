@@ -14,6 +14,7 @@
 #include "pycore_object.h"              // _PyObject_GC_UNTRACK()
 #include "pycore_pyatomic_ft_wrappers.h" // FT_ATOMIC_LOAD_PTR_RELAXED()
 #include "pycore_pyerrors.h"            // _PyErr_ChainExceptions1()
+#include "pycore_typeobject.h"          // _PyType_GetDict()
 #include "pycore_weakref.h"             // FT_CLEAR_WEAKREFS()
 
 #include "_iomodule.h"
@@ -2528,7 +2529,9 @@ static struct PyModuleDef _PyIO_nibbler_Module = {
 };
 
 /* Create a type from spec with base, named prefix + its class name, and
-   add it to mod.  Returns a new reference, or NULL on error. */
+   add it to mod.  The class attribute _is_nibbler (True) tells tests these
+   classes from _io's, also when they replace them.  Returns a new
+   reference, or NULL on error. */
 static PyTypeObject *
 nibbler_add_type(PyObject *mod, const PyType_Spec *spec, PyTypeObject *base,
                  const char *prefix)
@@ -2544,6 +2547,13 @@ nibbler_add_type(PyObject *mod, const PyType_Spec *spec, PyTypeObject *base,
     if (type == NULL) {
         return NULL;
     }
+    if (PyDict_SetItemString(_PyType_GetDict(type), "_is_nibbler",
+                             Py_True) < 0)
+    {
+        Py_DECREF(type);
+        return NULL;
+    }
+    PyType_Modified(type);
     if (PyModule_AddType(mod, type) < 0) {
         Py_DECREF(type);
         return NULL;
