@@ -960,6 +960,25 @@ class TextTest:
         t.flush()
         self.assertEqual(raw.getvalue(), b"unicode bytes \xc3\xa9 more")
 
+    def test_text_reads_use_buffer_size(self):
+        # gh-153656: text reads make raw reads of the buffer size, not of
+        # TextIOWrapper's chunk size (8192).
+        Reader = make_scripted_reader(self.RawIOBase)
+        class RecordingReader(Reader):
+            def readinto(self, b):
+                self.sizes.append(len(b))
+                return super().readinto(b)
+        data = b"line\n" * 50_000
+        for encoding in ("utf-8", "latin-1"):
+            with self.subTest(encoding=encoding):
+                raw = RecordingReader(data)
+                raw.sizes = []
+                t = self.TextIOWrapper(self.BufferedReader(raw, 100_000),
+                                       encoding=encoding)
+                for _ in range(1000):
+                    self.assertEqual(t.readline(), "line\n")
+                self.assertEqual(raw.sizes, [100_000])
+
 
 class CTextTest(TextTest, CTestCase):
     pass
