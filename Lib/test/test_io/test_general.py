@@ -1418,6 +1418,87 @@ class NibblerMiscIOTest(NibblerMixin, CMiscIOTest):
     pass
 
 
+@support.cpython_only
+class UnbufferedImplTest(unittest.TestCase):
+    # _io._set_unbuffered_impl("_nibbler") (or _PYTHON_IO_UNBUFFERED_IMPL)
+    # makes binary open(buffering=0) wrap the FileIO in the _io._nibbler
+    # buffered class for the mode, with buffer size 0.
+
+    def setUp(self):
+        import _io
+        self._io = _io
+        prev = _io._set_unbuffered_impl("_nibbler")
+        self.addCleanup(_io._set_unbuffered_impl, prev)
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(b"0123456789")
+
+    def test_types(self):
+        nibbler = self._io._nibbler
+        for mode, tp in [("rb", nibbler.BufferedReader),
+                         ("wb", nibbler.BufferedWriter),
+                         ("ab", nibbler.BufferedWriter),
+                         ("r+b", nibbler.BufferedRandom),
+                         ("w+b", nibbler.BufferedRandom),
+                         ("a+b", nibbler.BufferedRandom)]:
+            with self.subTest(mode=mode):
+                with io.open(os_helper.TESTFN, mode, buffering=0) as f:
+                    self.assertIs(type(f), tp)
+                    self.assertIs(type(f.raw), io.FileIO)
+                    self.assertEqual(f.raw.mode, f.mode)
+        os_helper.unlink(os_helper.TESTFN)
+        with io.open(os_helper.TESTFN, "xb", buffering=0) as f:
+            self.assertIs(type(f), nibbler.BufferedWriter)
+
+    def test_round_trip(self):
+        with io.open(os_helper.TESTFN, "r+b", buffering=0) as f:
+            self.assertEqual(f.read(3), b"012")
+            self.assertEqual(f.write(b"abc"), 3)
+            # Nothing is buffered: the raw file is already up to date.
+            self.assertEqual(f.raw.tell(), 6)
+            self.assertEqual(f.seek(1), 1)
+            self.assertEqual(f.read(), b"12abc6789")
+            self.assertEqual(f.seek(-2, os.SEEK_END), 8)
+            self.assertEqual(f.write(b"XYZ"), 3)
+            self.assertEqual(f.tell(), 11)
+        with io.open(os_helper.TESTFN, "rb", buffering=0) as f:
+            self.assertEqual(f.read(), b"012abc67XYZ")
+        with io.open(os_helper.TESTFN, "wb", buffering=0) as f:
+            f.write(b"new")
+            with open(os_helper.TESTFN, "rb") as g:
+                self.assertEqual(g.read(), b"new")
+
+    def test_text_mode_raises(self):
+        for mode in ("r", "w", "r+", "a"):
+            with self.subTest(mode=mode):
+                with self.assertRaisesRegex(ValueError,
+                                            "can't have unbuffered text"):
+                    io.open(os_helper.TESTFN, mode, buffering=0,
+                            encoding="ascii")
+
+    def test_switch_off(self):
+        self.assertEqual(self._io._set_unbuffered_impl("_io"), "_nibbler")
+        with io.open(os_helper.TESTFN, "rb", buffering=0) as f:
+            self.assertIs(type(f), io.FileIO)
+        with io.open(os_helper.TESTFN, "rb") as f:
+            self.assertIsInstance(f, io.BufferedReader)
+        with self.assertRaises(ValueError):
+            self._io._set_unbuffered_impl("other")
+
+    def test_environment(self):
+        code = ("import io, sys\n"
+                "with io.open(sys.executable, 'rb', buffering=0) as f:\n"
+                "    print(type(f).__name__,\n"
+                "          getattr(type(f), '_is_nibbler', False))\n")
+        env = {"_PYTHON_IO_UNBUFFERED_IMPL": "_nibbler"}
+        rc, out, err = assert_python_ok("-c", code, **env)
+        self.assertEqual(out.strip(), b"BufferedReader True")
+        # -E and -I ignore it.
+        for opt in ("-E", "-I"):
+            rc, out, err = assert_python_ok(opt, "-c", code, **env)
+            self.assertEqual(out.strip(), b"FileIO False")
+
+
 class ProtocolsTest(unittest.TestCase):
     class MyReader:
         def read(self, sz=-1):
