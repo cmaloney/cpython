@@ -281,6 +281,27 @@ _io__Buffered__dealloc_warn(PyObject *self, PyObject *source)
     return return_value;
 }
 
+PyDoc_STRVAR(_io__Buffered__discard_writes__doc__,
+"_discard_writes($self, /)\n"
+"--\n"
+"\n"
+"Drop the pending writes; return how many bytes they were.\n"
+"\n"
+"TextIOWrapper.close() calls this when its flush failed, so that the\n"
+"close() of its buffer doesn\'t try to write them again.");
+
+#define _IO__BUFFERED__DISCARD_WRITES_METHODDEF    \
+    {"_discard_writes", (PyCFunction)_io__Buffered__discard_writes, METH_NOARGS, _io__Buffered__discard_writes__doc__},
+
+static PyObject *
+_io__Buffered__discard_writes_impl(buffered *self);
+
+static PyObject *
+_io__Buffered__discard_writes(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    return _io__Buffered__discard_writes_impl((buffered *)self);
+}
+
 PyDoc_STRVAR(_io__Buffered_simple_flush__doc__,
 "flush($self, /)\n"
 "--\n"
@@ -1472,4 +1493,4 @@ exit:
 
 #define _IO_BUFFEREDRWPAIR_CLOSED_GETSETDEF {"closed", (getter)_io_BufferedRWPair_closed_get, (setter)NULL, NULL},
 
-/*[clinic end generated code: output=977268784a67dce4 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=89ac5249deb93b4d input=a9049054013a1b77]*/

@@ -1257,10 +1257,13 @@ Writing:
   reliably reported.
 
 Closing: if the flush done by :meth:`~IOBase.close` of a buffered or text
-stream would block, the raw stream is closed anyway and the data still
-buffered is discarded.  A :exc:`RuntimeWarning` says how many bytes were
-lost, and :meth:`!close` raises the :exc:`BlockingIOError`.  To avoid losing
-data, call :meth:`~IOBase.flush` until it succeeds before closing.
+stream fails, because it would block or for any other reason (an error, or
+an exception such as :exc:`KeyboardInterrupt` raised while it waits), the
+stream is closed anyway, raw stream included, and the data still buffered
+is discarded.  A :exc:`RuntimeWarning` says how many bytes were lost, and
+:meth:`!close` raises the exception.  Nothing tries to write the data again,
+neither a later :meth:`!close` nor the finalizer.  To avoid losing data,
+call :meth:`~IOBase.flush` until it succeeds before closing.
 
 Errors other than "would block" (such as a timeout or :data:`errno.EIO`)
 are raised.  When the :meth:`~BufferedIOBase.write` of a buffered stream

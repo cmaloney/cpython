@@ -1422,18 +1422,26 @@ class BufferedWriter(_BufferedIOMixin):
         try:
             # may raise BlockingIOError or BrokenPipeError etc
             self.flush()
-        except BlockingIOError:
-            # Writing out would block: the pending data is lost.
-            discarded = len(self._write_buf)
+        except BaseException as exc:
+            # The pending data is lost, and nothing writes it again
+            # (gh-83973, gh-55589).
+            discarded = self._discard_writes()
+            would_block = isinstance(exc, BlockingIOError)
             raise
         finally:
             with self._write_lock:
                 self.raw.close()
             if discarded:
-                import warnings
-                warnings.warn(f"close() discarded {discarded} buffered bytes: "
-                              "writing them would block", RuntimeWarning,
-                              stacklevel=2)
+                _warn_discarded(discarded, would_block)
+
+    def _discard_writes(self):
+        # Drop the pending writes; return how many bytes they were.
+        # TextIOWrapper.close() calls this when its flush failed, so that
+        # the close() of its buffer doesn't try to write them again.
+        with self._write_lock:
+            n = len(self._write_buf)
+            self._write_buf.clear()
+        return n
 
 
 class BufferedRWPair(BufferedIOBase):
@@ -1598,6 +1606,13 @@ class BufferedRandom(BufferedWriter, BufferedReader):
                 self.raw.seek(self._read_pos - len(self._read_buf), 1)
                 self._reset_read_buf()
         return BufferedWriter.write(self, b)
+
+
+def _warn_discarded(n, would_block):
+    import warnings
+    warnings.warn(f"close() discarded {n} buffered bytes: writing them "
+                  f"{'would block' if would_block else 'failed'}",
+                  RuntimeWarning, stacklevel=3)
 
 
 # Without a size, a partial line that would block is kept for the next
@@ -2379,7 +2394,15 @@ class TextIOWrapper(TextIOBase):
         if self.buffer is not None and not self.closed:
             try:
                 self._finish_encoder()
-                self.flush()
+                try:
+                    self.flush()
+                except BaseException as exc:
+                    # Close completely, without the buffer's close() writing
+                    # the data out again (gh-83973, gh-55589).
+                    discard = getattr(self.buffer, "_discard_writes", None)
+                    if discard is not None and (n := discard()):
+                        _warn_discarded(n, isinstance(exc, BlockingIOError))
+                    raise
             finally:
                 self.buffer.close()
 

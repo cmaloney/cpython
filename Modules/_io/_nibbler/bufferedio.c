@@ -1172,6 +1172,32 @@ _io__Buffered__dealloc_warn_impl(buffered *self, PyObject *source)
     Py_RETURN_NONE;
 }
 
+/*[clinic input]
+_io._Buffered._discard_writes
+
+Drop the pending writes; return how many bytes they were.
+
+TextIOWrapper.close() calls this when its flush failed, so that the
+close() of its buffer doesn't try to write them again.
+[clinic start generated code]*/
+
+static PyObject *
+_io__Buffered__discard_writes_impl(buffered *self)
+/*[clinic end generated code: output=4a612257ab62b745 input=8c98a37d7a14ddfa]*/
+{
+    if (buffered_lock_ready(self) < 0) {
+        return NULL;
+    }
+    Py_ssize_t n = 0;
+    if (buffered_writing(self)) {
+        nibbler_stop_appending(&self->nib);
+        n = nibbler_nbytes(&self->nib);
+        morsels_clear(&self->nib.list);
+    }
+    buffered_unlock(self);
+    return PyLong_FromSsize_t(n);
+}
+
 /* .raw: None while uninitialized or detached. */
 static PyObject *
 buffered_raw_get(PyObject *op, void *Py_UNUSED(closure))
@@ -1279,6 +1305,7 @@ _io__Buffered_close_impl(buffered *self)
     }
     PyObject *res = NULL;
     Py_ssize_t discarded = 0;
+    int would_block = 0;
     /* gh-138720: Use the same closed check as flush(). */
     int r = buffered_is_closed(self);
     if (r != 0) {
@@ -1319,11 +1346,11 @@ _io__Buffered_close_impl(buffered *self)
         }
     }
 
-    if (exc != NULL && PyErr_GivenExceptionMatches(exc, PyExc_BlockingIOError)
-        && nibbler_reading(&self->nib) == NULL)
-    {
-        /* The flush would block: pending writes are freed below. */
+    if (exc != NULL && nibbler_reading(&self->nib) == NULL) {
+        /* The flush failed: pending writes are freed below, and nothing
+           writes them again (gh-83973, gh-55589). */
         discarded = nibbler_nbytes(&self->nib);
+        would_block = PyErr_GivenExceptionMatches(exc, PyExc_BlockingIOError);
     }
 
     res = self->raw_fileio ? _PyFileIO_close(self->raw)
@@ -1341,7 +1368,7 @@ end:
     buffered_unlock(self);
     if (discarded > 0) {
         /* Without the lock: the warning may write to this file. */
-        _PyIO_warn_discarded(discarded);
+        _PyIO_warn_discarded(discarded, would_block);
     }
     return res;
 }
@@ -2787,6 +2814,7 @@ static PyMethodDef bufferedreader_methods[] = {
     _IO__BUFFERED_FILENO_METHODDEF
     _IO__BUFFERED_ISATTY_METHODDEF
     _IO__BUFFERED__DEALLOC_WARN_METHODDEF
+    _IO__BUFFERED__DISCARD_WRITES_METHODDEF
 
     _IO__BUFFERED_READ_METHODDEF
     _IO__BUFFERED_READALL_METHODDEF
@@ -2853,6 +2881,7 @@ static PyMethodDef bufferedwriter_methods[] = {
     _IO__BUFFERED_FILENO_METHODDEF
     _IO__BUFFERED_ISATTY_METHODDEF
     _IO__BUFFERED__DEALLOC_WARN_METHODDEF
+    _IO__BUFFERED__DISCARD_WRITES_METHODDEF
 
     _IO_BUFFEREDWRITER_WRITE_METHODDEF
     _IO_BUFFEREDWRITER_READALL_METHODDEF
@@ -2951,6 +2980,7 @@ static PyMethodDef bufferedrandom_methods[] = {
     _IO__BUFFERED_FILENO_METHODDEF
     _IO__BUFFERED_ISATTY_METHODDEF
     _IO__BUFFERED__DEALLOC_WARN_METHODDEF
+    _IO__BUFFERED__DISCARD_WRITES_METHODDEF
 
     _IO__BUFFERED_FLUSH_METHODDEF
 

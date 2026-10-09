@@ -741,6 +741,44 @@ class SlowDeviceTest:
         f.flush()
         self.assertEqual(bytes(raw.received), data[:30])
 
+    def test_close_flush_error_discards(self):
+        # When the flush of close() fails, for any reason, close() still
+        # closes completely: the pending data is discarded with a warning,
+        # and nothing writes it again (gh-83973, gh-55589).
+        for step, exc in ((OSError(errno.EPIPE, "EPIPE"), BrokenPipeError),
+                          (None, BlockingIOError),
+                          (KeyboardInterrupt(), KeyboardInterrupt)):
+            with self.subTest(exc=exc):
+                raw = self.scripted_writer([step])
+                f = self.BufferedWriter(raw, 64)
+                f.write(b"x" * 10)
+                with self.assertWarnsRegex(RuntimeWarning,
+                                           "discarded 10 buffered bytes"):
+                    with self.assertRaises(exc):
+                        f.close()
+                self.assertTrue(f.closed)
+                self.assertTrue(raw.closed)
+                calls = raw.calls
+                f.close()
+                del f
+                support.gc_collect()
+                self.assertEqual(raw.calls, calls)
+                self.assertEqual(raw.received, b"")
+
+    def test_text_close_flush_error_no_retry(self):
+        # TextIOWrapper.close() doesn't write the data again through the
+        # close() of its buffer either.
+        raw = self.scripted_writer([OSError(errno.EPIPE, "EPIPE")])
+        f = self.TextIOWrapper(self.BufferedWriter(raw, 64), encoding="ascii")
+        f.write("abc")
+        with self.assertWarnsRegex(RuntimeWarning,
+                                   "discarded 3 buffered bytes"):
+            with self.assertRaises(BrokenPipeError):
+                f.close()
+        self.assertTrue(f.closed)
+        self.assertEqual(raw.calls, 1)
+        self.assertEqual(raw.received, b"")
+
     # Real file descriptors
 
     @threading_helper.requires_working_threading()
