@@ -1665,8 +1665,11 @@ class LockReleaseTest:
 
     def check_shutdown(self, daemon_op, waiters=0):
         # A daemon thread blocks in a raw call holding the lock (others
-        # wait for it), so at shutdown it can never release it.  The main
-        # thread's write is flushed while finalizing.
+        # wait for it), so at shutdown it can never release it: flushing
+        # sys.stdout while finalizing takes it over.  (The main thread
+        # writes first: a text write now waits for the lock, so made at
+        # exit before finalizing it would wait forever, like a buffered
+        # write.)
         code = f"""
             import atexit, sys
             from threading import Thread
@@ -1682,12 +1685,13 @@ class LockReleaseTest:
                 f.buffer.flush()
 
             @atexit.register
-            def write_while_blocked():
+            def block_at_exit():
+                f.write('!')
+                f.flush()
                 Thread(target=holder, daemon=True).start()
                 entered.wait()
                 for _ in range({waiters}):
                     Thread(target=waiter, daemon=True).start()
-                f.write('!')
             """
         self.assertEqual(self.run_child(code), (0, b"!", ""))
 
@@ -1820,6 +1824,48 @@ class ConcurrentAccessTest:
             prefix = b"%02d:" % t
             mine = [line for line in lines if line.startswith(prefix)]
             self.assertEqual(mine, sorted(mine))
+
+    def test_text_write_waits_for_raw_read(self):
+        # A text write while another thread is in a raw read of the
+        # buffered object below may wait for it, then goes through.
+        import io
+        in_read = threading.Event()
+        release = threading.Event()
+
+        class Raw(io.RawIOBase):
+            out = b""
+            def readable(self):
+                return True
+            def writable(self):
+                return True
+            def seekable(self):
+                return True
+            def seek(self, pos, whence=0):
+                return 0
+            def readinto(self, b):
+                in_read.set()
+                release.wait(support.SHORT_TIMEOUT)
+                return 0
+            def write(self, b):
+                self.out += bytes(b)
+                return len(b)
+
+        raw = Raw()
+        f = self.BufferedRandom(raw)
+        t = io.TextIOWrapper(f, encoding="ascii")
+
+        def write():
+            t.write("text")
+            t.flush()
+
+        reader = threading.Thread(target=f.read, args=(1,))
+        writer = threading.Thread(target=write)
+        with threading_helper.start_threads([reader]):
+            self.assertTrue(in_read.wait(support.SHORT_TIMEOUT))
+            with threading_helper.start_threads([writer]):
+                writer.join(0.05)
+                release.set()
+        self.assertEqual(raw.out, b"text")
 
     def test_small_writes_racing_other_calls(self):
         # Small writes stay whole and in order per thread while other

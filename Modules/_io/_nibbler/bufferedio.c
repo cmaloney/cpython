@@ -954,24 +954,6 @@ error:
     return -1;
 }
 
-/* buffered_enter() once locked. */
-static inline int
-buffered_entered(buffered *self, const char *closed_msg, int direction)
-{
-    if (direction == READING && nibbler_unread(&self->nib) > 0
-        && buffered_raw_usable(self->raw))
-    {
-        return 0;
-    }
-    if (direction == WRITING && self->raw_fileio
-        && nibbler_reading(&self->nib) == NULL
-        && buffered_raw_usable(self->raw) && !_PyFileIO_closed(self->raw))
-    {
-        return 0;
-    }
-    return buffered_enter_locked(self, closed_msg, direction);
-}
-
 /* Common start of the I/O methods: lock the object, check it is
    initialized and open (unless closed_msg is NULL), and make it buffer in
    the given direction (unless KEEP_DIRECTION).  Closed is checked with the
@@ -986,7 +968,18 @@ buffered_enter(buffered *self, const char *closed_msg, int direction)
     if (buffered_lock(self) < 0) {
         return -1;
     }
-    return buffered_entered(self, closed_msg, direction);
+    if (direction == READING && nibbler_unread(&self->nib) > 0
+        && buffered_raw_usable(self->raw))
+    {
+        return 0;
+    }
+    if (direction == WRITING && self->raw_fileio
+        && nibbler_reading(&self->nib) == NULL
+        && buffered_raw_usable(self->raw) && !_PyFileIO_closed(self->raw))
+    {
+        return 0;
+    }
+    return buffered_enter_locked(self, closed_msg, direction);
 }
 
 /* Lock the object and check it is initialized and attached.  On success
@@ -1956,25 +1949,14 @@ buffered_write_lockfree(buffered *self, const char *data, Py_ssize_t len,
 }
 
 /* write() of view->buf[0:view->len], owned by view->obj, with the lock.
-   With nowait, returns _PyIO_NIBBLER_NO (nothing written) if another
-   thread holds the lock.  Returns 0 or -1.  Out of line, so that the
-   lock-free paths before it stay small. */
+   Returns 0 or -1.  Out of line, so that the lock-free paths before it
+   stay small. */
 Py_NO_INLINE static int
-buffered_write_view(buffered *self, Py_buffer *view, int nowait)
+buffered_write_view(buffered *self, Py_buffer *view)
 {
-    const char *msg = "write to closed file";
     Py_ssize_t done = 0;
     for (;;) {
-        if (nowait) {
-            if (!nibbler_trylock(&self->nib)) {
-                return _PyIO_NIBBLER_NO;
-            }
-            nowait = 0;
-            if (buffered_entered(self, msg, WRITING) < 0) {
-                return -1;
-            }
-        }
-        else if (buffered_enter(self, msg, WRITING) < 0) {
+        if (buffered_enter(self, "write to closed file", WRITING) < 0) {
             return -1;
         }
         int r = buffered_write_locked(self, view, &done);
@@ -2016,7 +1998,7 @@ buffered_write(buffered *self, PyObject *obj)
             return r < 0 ? NULL : PyLong_FromSsize_t(view.len);
         }
     }
-    int r = buffered_write_view(self, &view, 0);
+    int r = buffered_write_view(self, &view);
     Py_ssize_t len = view.len;
     if (exported) {
         PyBuffer_Release(&view);
@@ -2163,9 +2145,7 @@ _PyIONibbler_lookback(PyObject *op, Py_ssize_t n)
     return res;
 }
 
-/* _PyIONibbler_write() past its first case, out of line.  It never waits
-   for the lock: TextIOWrapper keeps the data instead (writing text never
-   blocked behind another thread's raw read). */
+/* _PyIONibbler_write() past its first case, out of line. */
 Py_NO_INLINE static int
 nibbler_text_write(buffered *self, PyObject *obj, const char *data,
                    Py_ssize_t len, int closed_checked)
@@ -2184,7 +2164,7 @@ nibbler_text_write(buffered *self, PyObject *obj, const char *data,
     /* The caller's reference is borrowed: raw.write() could drop it. */
     Py_INCREF(self);
     Py_buffer view = {.obj = obj, .buf = (void *)data, .len = len};
-    r = buffered_write_view(self, &view, 1);
+    r = buffered_write_view(self, &view);
     Py_DECREF(self);
     return r;
 }
