@@ -1023,6 +1023,48 @@ class TextIOWrapperTest:
                             t.seek(pos)
                         self.assertEqual(line + t.read(), expected)
 
+    def test_tell_after_next_would_block(self):
+        # A BlockingIOError from next() doesn't leave tell() disabled as
+        # during iteration: it reports the position after the last line,
+        # counting what the decoder holds as unread.
+        class BlockOnce(self.RawIOBase):
+            def __init__(self, data, at):
+                self.data, self.at, self.pos = data, at, 0
+            def readable(self): return True
+            def seekable(self): return True
+            def tell(self): return self.pos
+            def seek(self, pos, whence=0):
+                self.pos = pos
+                return pos
+            def readinto(self, b):
+                if self.pos == self.at:
+                    self.at = None
+                    return None
+                end = len(self.data) if self.at is None else self.at
+                n = min(len(b), end - self.pos)
+                b[:n] = self.data[self.pos:self.pos + n]
+                self.pos += n
+                return n
+        cases = [
+            ("utf-8", "ab\ncd", 3),
+            ("latin-1", "ab\ncd", 3),
+            ("utf-8", "ab\n\u20accd", 4),
+            ("utf-16", "ab\ncd", 9),
+        ]
+        for encoding, text, at in cases:
+            data = text.encode(encoding)
+            for seek in (False, True):
+                with self.subTest(encoding=encoding, at=at, seek=seek):
+                    raw = BlockOnce(data, at)
+                    t = self.TextIOWrapper(self.BufferedReader(raw),
+                                           encoding=encoding)
+                    self.assertEqual(next(t), "ab\n")
+                    self.assertRaises(BlockingIOError, next, t)
+                    pos = t.tell()
+                    if seek:
+                        t.seek(pos)
+                    self.assertEqual("ab\n" + t.read(), text)
+
     def test_read_by_chunk(self):
         # make sure "\r\n" straddles 128 char boundary.
         txt = self.TextIOWrapper(self.BytesIO(b"A" * 127 + b"\r\nB"), encoding="utf-8")

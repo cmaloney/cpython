@@ -2814,7 +2814,21 @@ class TextIOWrapper(TextIOBase):
 
     def __next__(self):
         self._telling = False
-        line = self.readline()
+        try:
+            line = self.readline()
+        except BlockingIOError:
+            # No end of the iteration: tell() should work again, as at
+            # EOF.  Without a partial line kept for the next call, all
+            # decoded text was returned, so the position is the buffer's,
+            # less what the decoder holds.  (With one, the snapshot of
+            # where it started was not taken while iterating.)
+            if (self._seekable and self._decoder is not None and
+                    not self._decoded_chars[self._decoded_chars_used:]):
+                dec_buffer, dec_flags = self._decoder.getstate()
+                self._set_decoded_chars('')
+                self._snapshot = (dec_flags, dec_buffer)
+                self._telling = True
+            raise
         if not line:
             self._snapshot = None
             self._telling = self._seekable

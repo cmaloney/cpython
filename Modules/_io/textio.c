@@ -4062,6 +4062,42 @@ _io_TextIOWrapper_close_impl(textio *self)
     }
 }
 
+/* next() raised BlockingIOError, which is no end of the iteration, so
+   tell() should work again, as at EOF.  Without a partial line kept for
+   the next call, all decoded text was returned, so the position is the
+   buffer's, less what the decoder holds: make that the snapshot.  (With
+   one, the snapshot of where it started was not taken while iterating, so
+   tell() stays disabled.)  Keeps the raised exception. */
+Py_NO_INLINE static void
+textiowrapper_tell_after_blocking(textio *self)
+{
+    if (self->decoder == NULL
+        || (self->decoded_chars != NULL
+            && self->decoded_chars_used
+               < PyUnicode_GET_LENGTH(self->decoded_chars)))
+    {
+        return;
+    }
+    PyObject *exc = PyErr_GetRaisedException();
+    PyObject *state = PyObject_CallMethodNoArgs(self->decoder,
+                                                &_Py_ID(getstate));
+    PyObject *dec_buffer, *dec_flags;
+    if (state != NULL && PyTuple_Check(state)
+        && PyArg_ParseTuple(state, "OO", &dec_buffer, &dec_flags)
+        && PyBytes_Check(dec_buffer))
+    {
+        PyObject *snapshot = PyTuple_Pack(2, dec_flags, dec_buffer);
+        if (snapshot != NULL) {
+            textiowrapper_set_decoded_chars(self, NULL);
+            textiowrapper_set_snapshot(self, snapshot);
+            self->telling = 1;
+        }
+    }
+    Py_XDECREF(state);
+    PyErr_Clear();
+    PyErr_SetRaisedException(exc);
+}
+
 static PyObject *
 textiowrapper_iternext_lock_held(PyObject *op)
 {
@@ -4073,7 +4109,8 @@ textiowrapper_iternext_lock_held(PyObject *op)
 
     /* Building snapshots for tell() costs too much while iterating, except
        with nibbler (gh-81217). */
-    if (!(self->nibbler && self->decode_utf8)) {
+    int stop_telling = !(self->nibbler && self->decode_utf8);
+    if (stop_telling) {
         self->telling = 0;
     }
     if (Py_IS_TYPE(self, self->state->PyTextIOWrapper_Type)) {
@@ -4091,8 +4128,14 @@ textiowrapper_iternext_lock_held(PyObject *op)
         }
     }
 
-    if (line == NULL)
+    if (line == NULL) {
+        if (stop_telling && self->seekable
+            && PyErr_ExceptionMatches(PyExc_BlockingIOError))
+        {
+            textiowrapper_tell_after_blocking(self);
+        }
         return NULL;
+    }
 
     if (PyUnicode_GET_LENGTH(line) == 0) {
         /* Reached EOF or would have blocked */
