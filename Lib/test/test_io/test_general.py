@@ -1096,7 +1096,9 @@ class MiscIOTest:
         self.assertIsInstance(self.TextIOBase, abc.ABCMeta)
 
     def _check_abc_inheritance(self, abcmodule):
-        with self.open(os_helper.TESTFN, "wb", buffering=0) as f:
+        # Build the raw object directly: open(buffering=0) may return a
+        # buffered object with buffer_size=0 for some implementations.
+        with self.FileIO(os_helper.TESTFN, "wb") as f:
             self.assertIsInstance(f, abcmodule.IOBase)
             self.assertIsInstance(f, abcmodule.RawIOBase)
             self.assertNotIsInstance(f, abcmodule.BufferedIOBase)
