@@ -436,3 +436,24 @@ class SetOpenImplTest(TestCase):
                 _io._set_open_impl("_nibbler" if i % 2 else "_io")
 
         run_concurrently([opener] * 3 + [switcher])
+
+    def test_open_set_unbuffered_impl_race(self):
+        # open(buffering=0) gets the class _io._set_unbuffered_impl()
+        # replaces (or unsets) as one reference.
+        import _io
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(b"x")
+        prev = _io._set_unbuffered_impl("_io")
+        self.addCleanup(_io._set_unbuffered_impl, prev)
+
+        def opener():
+            for _ in range(200):
+                with open(os_helper.TESTFN, "rb", buffering=0) as f:
+                    self.assertEqual(f.read(), b"x")
+
+        def switcher():
+            for i in range(200):
+                _io._set_unbuffered_impl("_nibbler" if i % 2 else "_io")
+
+        run_concurrently([opener] * 3 + [switcher])

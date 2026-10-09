@@ -287,37 +287,46 @@ class PyMockNonBlockWriterIO(MockNonBlockWriterIO, pyio.RawIOBase):
 class CTestCase(unittest.TestCase):
     io = io
     is_C = True
+    # Capabilities of the buffered layer.  Those of _io._nibbler only are
+    # properties: CTestCase's classes are _io._nibbler's with
+    # _PYTHON_IO_DEFAULT_IMPL=_nibbler (and with NibblerMixin), which have
+    # the class attribute _is_nibbler.
+
+    @property
+    def is_nibbler(self):
+        return getattr(self.BufferedReader, '_is_nibbler', False)
+
     # Does the buffered layer accept buffer_size=0 ("no internal buffer,
     # but still retry partial reads/writes")?
-    supports_buffer_size_zero = False
+    supports_buffer_size_zero = is_nibbler
     # Is InterruptedError raised by the raw stream retried (PEP 475 style)?
     retries_raw_eintr = True
     # Do views passed to the raw stream never alias data the buffered layer
     # later reuses?
-    isolates_raw_views = False
+    isolates_raw_views = is_nibbler
     # Can writes be queued while another thread is in a raw write?
-    queues_writes_during_io = False
+    queues_writes_during_io = is_nibbler
     # Does each readline() and readinto() take whole lines or records when
     # threads read concurrently?  (_pyio's readline() and readinto() don't.)
     reads_are_atomic = True
     # Is tell() atomic with respect to writes in other threads (so it never
     # goes back while they append)?  (_io and _pyio's tell() don't lock.)
-    tells_are_atomic = False
+    tells_are_atomic = is_nibbler
     # Does a method stay safe when code it calls (such as the __index__()
     # of its argument) closes the object?  (gh-143375)
-    survives_reentrant_close = False
+    survives_reentrant_close = is_nibbler
     # Does writing to a raw stream in append mode keep data read before
     # the write as it is in the file?  (gh-64281)
-    keeps_reads_on_append = False
+    keeps_reads_on_append = is_nibbler
     # Does tell() count writes to a raw file in append mode at the end of
     # the file?  (gh-80592)
-    tells_append_position = False
+    tells_append_position = is_nibbler
     # Does write() called from code a raw write runs (as a signal handler
     # can) buffer data that doesn't fit instead of raising?  (gh-118143)
-    buffers_reentrant_writes = False
+    buffers_reentrant_writes = is_nibbler
     # Do readline() and read(n) keep the data read before a raw read
     # raises for the next read?  (gh-51571)
-    keeps_data_on_raw_error = False
+    keeps_data_on_raw_error = is_nibbler
 
     MockRawIO = CMockRawIO
     MisbehavedRawIO = CMisbehavedRawIO
@@ -337,6 +346,7 @@ class CTestCase(unittest.TestCase):
 class PyTestCase(unittest.TestCase):
     io = pyio
     is_C = False
+    is_nibbler = False
     supports_buffer_size_zero = False
     retries_raw_eintr = False
     isolates_raw_views = False
@@ -375,16 +385,9 @@ _NIBBLER_BUFFERED = {
 
 
 class NibblerMixin:
-    """Route the buffered layer (self.* types and open()) to _io._nibbler."""
-    isolates_raw_views = True
-    queues_writes_during_io = True
-    reads_are_atomic = True
-    tells_are_atomic = True
-    survives_reentrant_close = True
-    keeps_reads_on_append = True
-    tells_append_position = True
-    buffers_reentrant_writes = True
-    keeps_data_on_raw_error = True
+    """Route the buffered layer (self.* types and open()) to _io._nibbler.
+
+    CTestCase's capability properties follow (see is_nibbler)."""
 
     def setUp(self):
         super().setUp()
