@@ -421,7 +421,10 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
         goto error;
     }
 
-    if (buffering == 0 && !binary) {
+    /* Unbuffered text can only be written, and only over a buffered object
+       with buffer size 0 (with _io._set_unbuffered_impl("_nibbler"), see
+       below): gh-61606. */
+    if (buffering == 0 && !binary && (reading || updating)) {
         PyErr_SetString(PyExc_ValueError,
                         "can't have unbuffered text I/O");
         goto error;
@@ -453,6 +456,11 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
         PyObject *Buffered_class = iomodule_get_open_type(slot);
         if (Buffered_class == NULL) {
             assert(buffering == 0);
+            if (!binary) {
+                PyErr_SetString(PyExc_ValueError,
+                                "can't have unbuffered text I/O");
+                goto error;
+            }
             return result;
         }
         PyObject *bufsize = PyLong_FromLong(buffering);
@@ -481,12 +489,17 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
     if (modeobj == NULL)
         goto error;
 
-    /* wraps into a TextIOWrapper */
-    wrapper = PyObject_CallFunction((PyObject *)state->PyTextIOWrapper_Type,
-                                    "OsssO",
-                                    buffer,
-                                    encoding, errors, newline,
-                                    line_buffering ? Py_True : Py_False);
+    /* wraps into a TextIOWrapper; unbuffered, one that writes through */
+    if (buffering == 0) {
+        wrapper = PyObject_CallFunction(
+            (PyObject *)state->PyTextIOWrapper_Type, "OsssOO", buffer,
+            encoding, errors, newline, Py_False, Py_True);
+    }
+    else {
+        wrapper = PyObject_CallFunction(
+            (PyObject *)state->PyTextIOWrapper_Type, "OsssO", buffer,
+            encoding, errors, newline, line_buffering ? Py_True : Py_False);
+    }
     if (wrapper == NULL)
         goto error;
     result = wrapper;
