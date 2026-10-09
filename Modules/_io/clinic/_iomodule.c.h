@@ -134,8 +134,9 @@ PyDoc_STRVAR(_io_open__doc__,
 
 static PyObject *
 _io_open_impl(PyObject *module, PyObject *file, const char *mode,
-              int buffering, const char *encoding, const char *errors,
-              const char *newline, int closefd, PyObject *opener);
+              PyObject *buffering_obj, const char *encoding,
+              const char *errors, const char *newline, int closefd,
+              PyObject *opener);
 
 static PyObject *
 _io_open(PyObject *module, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
@@ -172,7 +173,7 @@ _io_open(PyObject *module, PyObject *const *args, Py_ssize_t nargs, PyObject *kw
     Py_ssize_t noptargs = nargs + (kwnames ? PyTuple_GET_SIZE(kwnames) : 0) - 1;
     PyObject *file;
     const char *mode = "r";
-    int buffering = -1;
+    PyObject *buffering_obj = NULL;
     const char *encoding = NULL;
     const char *errors = NULL;
     const char *newline = NULL;
@@ -202,10 +203,7 @@ _io_open(PyObject *module, PyObject *const *args, Py_ssize_t nargs, PyObject *kw
         }
     }
     if (args[2]) {
-        buffering = PyLong_AsInt(args[2]);
-        if (buffering == -1 && PyErr_Occurred()) {
-            goto exit;
-        }
+        buffering_obj = args[2];
         if (!--noptargs) {
             goto skip_optional_pos;
         }
@@ -275,7 +273,7 @@ _io_open(PyObject *module, PyObject *const *args, Py_ssize_t nargs, PyObject *kw
     }
     opener = args[7];
 skip_optional_pos:
-    return_value = _io_open_impl(module, file, mode, buffering, encoding, errors, newline, closefd, opener);
+    return_value = _io_open_impl(module, file, mode, buffering_obj, encoding, errors, newline, closefd, opener);
 
 exit:
     return return_value;
@@ -456,4 +454,4 @@ _io__set_unbuffered_impl(PyObject *module, PyObject *arg)
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=b0139f7e8e652cde input=a9049054013a1b77]*/
+/*[clinic end generated code: output=6216803617f432c1 input=a9049054013a1b77]*/
