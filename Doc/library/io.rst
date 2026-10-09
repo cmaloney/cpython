@@ -1229,7 +1229,9 @@ Reading:
   line for the next call.  A partial line that grows too long to keep (64
   times the buffer size, or the buffer size in some implementations) is
   returned as it is.  Iteration raises :exc:`BlockingIOError` instead of
-  stopping.
+  stopping.  :meth:`~IOBase.readlines` returns the complete lines that have
+  arrived (keeping a partial last line for the next call, as
+  :meth:`~IOBase.readline` does), or ``None`` if there are none.
 * Text streams (:class:`TextIOWrapper`): :meth:`~TextIOBase.read`,
   :meth:`~TextIOBase.readline` and iteration raise :exc:`BlockingIOError`
   if no character is available.  Otherwise :meth:`~TextIOBase.read` with a
@@ -1238,8 +1240,10 @@ Reading:
   :exc:`BlockingIOError` if the end of the line (or *size* characters) has
   not arrived yet, and keep what has arrived of the line for the next call,
   unless it has grown too long to keep (64 times the chunk size): then it is
-  returned as it is.  The bytes of a character that has only partly arrived
-  are kept for the next read.
+  returned as it is.  :meth:`~IOBase.readlines` returns the complete lines
+  that have arrived, keeping a partial last line for the next call, and
+  raises :exc:`BlockingIOError` if there are none.  The bytes of a character
+  that has only partly arrived are kept for the next read.
 
 Writing:
 

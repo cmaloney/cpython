@@ -473,6 +473,26 @@ class BufferedReaderTest(CommonBufferedTests):
         self.assertEqual(next(bufio), b"efg")
         self.assertRaises(StopIteration, next, bufio)
 
+    def test_readlines_would_block(self):
+        # readlines() that would block returns the complete lines so far
+        # and keeps the partial last line for the next call; with none,
+        # it returns None, as readline() does.
+        rawio = self.MockRawIO((b"ab\ncd\nef", None, b"g\nh", None, None,
+                                b"i\n"))
+        bufio = self.tp(rawio)
+        self.assertEqual(bufio.readlines(), [b"ab\n", b"cd\n"])
+        self.assertEqual(bufio.readlines(), [b"efg\n"])
+        self.assertIsNone(bufio.readlines())
+        self.assertEqual(bufio.readlines(), [b"hi\n"])
+        self.assertEqual(bufio.readlines(), [])
+        # With a hint.
+        rawio = self.MockRawIO((b"ab\ncd\nef", None, b"g\n", None))
+        bufio = self.tp(rawio)
+        self.assertEqual(bufio.readlines(2), [b"ab\n"])
+        self.assertEqual(bufio.readlines(100), [b"cd\n"])
+        self.assertEqual(bufio.readlines(100), [b"efg\n"])
+        self.assertEqual(bufio.readlines(100), [])
+
     def test_readline_would_block_limit(self):
         if not self.is_C:
             # _pyio's readline(size) can return more than size bytes when

@@ -789,19 +789,6 @@ _io__IOBase_readlines_impl(PyObject *self, Py_ssize_t hint)
     if (result == NULL)
         return NULL;
 
-    if (hint <= 0) {
-        /* XXX special-casing this made sense in the Python version in order
-           to remove the bytecode interpretation overhead, but it could
-           probably be removed here. */
-        PyObject *ret = PyObject_CallMethodObjArgs(result, &_Py_ID(extend),
-                                                   self, NULL);
-        if (ret == NULL) {
-            goto error;
-        }
-        Py_DECREF(ret);
-        return result;
-    }
-
     it = PyObject_GetIter(self);
     if (it == NULL) {
         goto error;
@@ -811,16 +798,34 @@ _io__IOBase_readlines_impl(PyObject *self, Py_ssize_t hint)
         Py_ssize_t line_length;
         PyObject *line = PyIter_Next(it);
         if (line == NULL) {
-            if (PyErr_Occurred()) {
+            if (!PyErr_Occurred()) {
+                break; /* StopIteration raised */
+            }
+            if (!PyErr_ExceptionMatches(PyExc_BlockingIOError)) {
                 goto error;
             }
-            else
-                break; /* StopIteration raised */
+            /* Would block before the end of a line (which the stream
+               keeps for the next call): the lines so far.  Without any,
+               do as readline() does: return None for binary, raise for
+               text ("" and [] would mean EOF). */
+            if (PyList_GET_SIZE(result) == 0) {
+                _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
+                if (PyObject_TypeCheck(self, state->PyTextIOBase_Type)) {
+                    goto error;
+                }
+                Py_SETREF(result, Py_NewRef(Py_None));
+            }
+            PyErr_Clear();
+            break;
         }
 
         if (PyList_Append(result, line) < 0) {
             Py_DECREF(line);
             goto error;
+        }
+        if (hint <= 0) {
+            Py_DECREF(line);
+            continue;
         }
         line_length = PyObject_Size(line);
         Py_DECREF(line);

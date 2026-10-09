@@ -586,14 +586,25 @@ class IOBase(metaclass=abc.ABCMeta):
         lines so far exceeds hint.
         """
         if hint is None or hint <= 0:
-            return list(self)
+            hint = None
         n = 0
         lines = []
-        for line in self:
-            lines.append(line)
-            n += len(line)
-            if n >= hint:
-                break
+        try:
+            for line in self:
+                lines.append(line)
+                if hint is not None:
+                    n += len(line)
+                    if n >= hint:
+                        break
+        except BlockingIOError:
+            # Would block before the end of a line (which the stream keeps
+            # for the next call): the lines so far.  Without any, do as
+            # readline() does: return None for binary, raise for text (""
+            # and [] would mean EOF).
+            if not lines:
+                if isinstance(self, TextIOBase):
+                    raise
+                return None
         return lines
 
     def writelines(self, lines):

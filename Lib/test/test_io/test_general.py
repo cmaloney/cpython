@@ -336,6 +336,33 @@ class IOTest:
                 return None
         self.assertRaises(BlockingIOError, next, R())
 
+    def test_readlines_would_block(self):
+        # readlines() built on iteration: when readline() would block, the
+        # lines so far, or with none, what readline() gives: None for
+        # binary, BlockingIOError for text.
+        def stream(base, script):
+            class R(base):
+                def readline(self, size=-1):
+                    line = script.pop(0)
+                    if line is BlockingIOError:
+                        raise BlockingIOError(errno.EAGAIN, "would block")
+                    return line
+            return R()
+
+        f = stream(self.IOBase, [b"a\n", None, None, b"b\n", b"c\n", None,
+                                 b""])
+        self.assertEqual(f.readlines(), [b"a\n"])
+        self.assertIsNone(f.readlines())
+        self.assertEqual(f.readlines(1), [b"b\n"])
+        self.assertEqual(f.readlines(100), [b"c\n"])
+        self.assertEqual(f.readlines(), [])
+        f = stream(self.TextIOBase, ["a\n", BlockingIOError, BlockingIOError,
+                                     "b\n", BlockingIOError, ""])
+        self.assertEqual(f.readlines(), ["a\n"])
+        self.assertRaises(BlockingIOError, f.readlines)
+        self.assertEqual(f.readlines(100), ["b\n"])
+        self.assertEqual(f.readlines(), [])
+
     def test_next_nonsizeable(self):
         # Issue #30061
         # Crash when __next__() returns an object without __len__

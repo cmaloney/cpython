@@ -925,6 +925,26 @@ class TextIOWrapperTest:
         self.assertEqual(t.read(5), "")
         self.assertEqual(t.readline(), "")
 
+    def test_readlines_would_block(self):
+        # readlines() that would block returns the complete lines so far
+        # and keeps the partial last line for the next call; with none,
+        # it raises BlockingIOError, as readline() does.
+        raw = self.MockRawIO((b"ab\ncd\nef", None, b"g\nh", None, None,
+                              b"i\n"))
+        t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
+        self.assertEqual(t.readlines(), ["ab\n", "cd\n"])
+        self.assertEqual(t.readlines(), ["efg\n"])
+        self.assertRaises(BlockingIOError, t.readlines)
+        self.assertEqual(t.readlines(), ["hi\n"])
+        self.assertEqual(t.readlines(), [])
+        # With a hint.
+        raw = self.MockRawIO((b"ab\ncd\nef", None, b"g\n", None))
+        t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
+        self.assertEqual(t.readlines(2), ["ab\n"])
+        self.assertEqual(t.readlines(100), ["cd\n"])
+        self.assertEqual(t.readlines(100), ["efg\n"])
+        self.assertEqual(t.readlines(100), [])
+
     def test_readline_would_block_keeps_partial_line(self):
         # A readline() that would block before the end of the line raises
         # BlockingIOError and keeps the partial line for the next call.
