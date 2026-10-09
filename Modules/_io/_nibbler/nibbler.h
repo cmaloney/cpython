@@ -62,12 +62,17 @@
    call. */
 typedef _PyIO_Morsel morsel;
 
-/* Morsels in order, with their total length. */
+/* Morsels in order, with their total length: items[0:count], with room
+   for `capacity` from items on.  Dropping morsels from the front moves
+   items forward over `dropped` slots, which are taken back once there are
+   as many as morsels left: writing out a long list a few morsels at a
+   time then takes linear time. */
 typedef struct {
     morsel *items;
     Py_ssize_t count;
     Py_ssize_t capacity;
     Py_ssize_t nbytes;
+    Py_ssize_t dropped;
 } morsel_list;
 
 /* Fields are used with the lock held, with plain loads and stores, unless
@@ -103,6 +108,26 @@ typedef struct {
  * Morsel lists
  */
 
+/* The start of the memory holding the morsels. */
+static inline morsel *
+morsels_base(morsel_list *list)
+{
+    return list->dropped > 0 ? list->items - list->dropped : list->items;
+}
+
+/* Move the morsels to the start of their memory. */
+static void
+morsels_compact(morsel_list *list)
+{
+    morsel *base = morsels_base(list);
+    if (base != list->items) {
+        memmove(base, list->items, (size_t)list->count * sizeof(morsel));
+        list->items = base;
+        list->capacity += list->dropped;
+        list->dropped = 0;
+    }
+}
+
 static void
 morsels_clear(morsel_list *list)
 {
@@ -111,6 +136,7 @@ morsels_clear(morsel_list *list)
     }
     list->count = 0;
     list->nbytes = 0;
+    morsels_compact(list);
 }
 
 static void
@@ -120,6 +146,22 @@ morsels_free(morsel_list *list)
     PyMem_Free(list->items);
     list->items = NULL;
     list->capacity = 0;
+}
+
+/* Make room for `need` morsels in all. */
+static int
+morsels_grow(morsel_list *list, Py_ssize_t need)
+{
+    Py_ssize_t capacity = Py_MAX(Py_MAX(2 * list->capacity, need), 8);
+    morsel *base = PyMem_Realloc(morsels_base(list),
+                                 (list->dropped + capacity) * sizeof(morsel));
+    if (base == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    list->items = base + list->dropped;
+    list->capacity = capacity;
+    return 0;
 }
 
 /* Append ptr[0:len], inside obj; extends the last morsel when contiguous. */
@@ -132,16 +174,10 @@ morsels_push(morsel_list *list, PyObject *obj, const char *ptr,
         last->len += len;
     }
     else {
-        if (list->count == list->capacity) {
-            Py_ssize_t capacity = list->capacity ? 2 * list->capacity : 8;
-            morsel *items = PyMem_Realloc(list->items,
-                                          capacity * sizeof(morsel));
-            if (items == NULL) {
-                PyErr_NoMemory();
-                return -1;
-            }
-            list->items = items;
-            list->capacity = capacity;
+        if (list->count == list->capacity
+            && morsels_grow(list, list->count + 1) < 0)
+        {
+            return -1;
         }
         list->items[list->count++] = (morsel){Py_NewRef(obj), ptr, len};
     }
@@ -154,23 +190,20 @@ morsels_push(morsel_list *list, PyObject *obj, const char *ptr,
 static int
 morsels_splice(morsel_list *dst, morsel_list *src)
 {
-    if (dst->count + src->count > dst->capacity) {
-        Py_ssize_t capacity = Py_MAX(2 * dst->capacity,
-                                     dst->count + src->count);
-        morsel *items = PyMem_Realloc(dst->items, capacity * sizeof(morsel));
-        if (items == NULL) {
-            PyErr_NoMemory();
-            return -1;
-        }
-        dst->items = items;
-        dst->capacity = capacity;
+    if (dst->count + src->count > dst->capacity
+        && morsels_grow(dst, dst->count + src->count) < 0)
+    {
+        return -1;
     }
-    memcpy(dst->items + dst->count, src->items,
-           (size_t)src->count * sizeof(morsel));
+    if (src->count > 0) {
+        memcpy(dst->items + dst->count, src->items,
+               (size_t)src->count * sizeof(morsel));
+    }
     dst->count += src->count;
     dst->nbytes += src->nbytes;
     src->count = 0;
     src->nbytes = 0;
+    morsels_compact(src);
     return 0;
 }
 
@@ -202,10 +235,16 @@ morsels_consume(morsel_list *list, Py_ssize_t n)
         }
         Py_DECREF(m->obj);
     }
-    list->count -= done;
-    memmove(list->items, list->items + done,
-            (size_t)list->count * sizeof(morsel));
     list->nbytes -= taken;
+    if (done > 0) {
+        list->items += done;
+        list->count -= done;
+        list->capacity -= done;
+        list->dropped += done;
+        if (list->dropped >= list->count) {
+            morsels_compact(list);
+        }
+    }
     return taken;
 }
 

@@ -1115,13 +1115,21 @@ _PyFileIO_writev(PyObject *op, const _PyIO_Span *spans, Py_ssize_t cnt)
     }
 #ifdef HAVE_WRITEV
     /* Writing less than everything is a valid partial write: at most
-       _PyIO_WRITEV_MAX (and IOV_MAX) spans, and like _Py_write() at most
+       _PyIO_WRITEV_LONG (and IOV_MAX) spans, and like _Py_write() at most
        _PY_WRITE_MAX bytes in total (macOS fails larger writes). */
-    struct iovec iov[_PyIO_WRITEV_MAX];
-    cnt = Py_MIN(cnt, _PyIO_WRITEV_MAX);
+    struct iovec stack[_PyIO_WRITEV_MAX];
+    struct iovec *iov = stack;
+    cnt = Py_MIN(cnt, _PyIO_WRITEV_LONG);
 #ifdef IOV_MAX
     cnt = Py_MIN(cnt, IOV_MAX);
 #endif
+    if (cnt > _PyIO_WRITEV_MAX) {
+        iov = PyMem_New(struct iovec, cnt);
+        if (iov == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+    }
     size_t room = _PY_WRITE_MAX;
     Py_ssize_t i = 0;
     for (; i < cnt && room > 0; i++) {
@@ -1140,6 +1148,9 @@ _PyFileIO_writev(PyObject *op, const _PyIO_Span *spans, Py_ssize_t cnt)
         err = errno;
         Py_END_ALLOW_THREADS
     } while (n < 0 && err == EINTR && !(async_err = PyErr_CheckSignals()));
+    if (iov != stack) {
+        PyMem_Free(iov);
+    }
     if (n < 0) {
         if (async_err) {
             return -1;

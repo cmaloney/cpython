@@ -476,15 +476,27 @@ buffered_check_progress(Py_ssize_t n, Py_ssize_t len, const char *method)
 
 /* One raw write of the pending writes followed by extra (a morsel of data
    not yet pending, or with len 0): as much as one vectored write takes when
-   the raw stream has _writev(), else the first morsel.  Returns the count,
-   -2 if the raw stream would block (errno set for the BlockingIOError), or
-   -1 on error. */
+   the raw stream has _writev(), else the first morsel.  Up to IOV_MAX
+   morsels go to one writev() of a FileIO when there are that many.
+   Returns the count, -2 if the raw stream would block (errno set for the
+   BlockingIOError), or -1 on error. */
 static Py_ssize_t
 buffered_raw_write(buffered *self, Py_ssize_t avail, const morsel *extra,
                    int unlocked)
 {
-    morsel pieces[_PyIO_WRITEV_MAX];
+    morsel stack[_PyIO_WRITEV_MAX];
+    morsel *pieces = stack;
     Py_ssize_t limit = self->raw_vectored ? _PyIO_WRITEV_MAX : 1;
+    if (_PyIO_WRITEV_LONG > _PyIO_WRITEV_MAX && self->raw_vectored
+        && self->raw_fileio && self->nib.list.count >= _PyIO_WRITEV_MAX)
+    {
+        limit = _PyIO_WRITEV_LONG;
+        pieces = PyMem_Malloc(limit * (sizeof(morsel) + sizeof(_PyIO_Span)));
+        if (pieces == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+    }
     Py_ssize_t total;
     Py_ssize_t cnt = nibbler_pieces(&self->nib, avail, pieces, limit, &total);
     if (extra->len > 0 && cnt < limit && total == avail) {
@@ -496,7 +508,9 @@ buffered_raw_write(buffered *self, Py_ssize_t avail, const morsel *extra,
     if (self->raw_fileio) {
         /* The raw call holds its own references, see nibbler_lock_wait()
            (Python-level calls get views, which do). */
-        _PyIO_Span spans[_PyIO_WRITEV_MAX];
+        _PyIO_Span stack_spans[_PyIO_WRITEV_MAX];
+        _PyIO_Span *spans = (pieces == stack ? stack_spans
+                             : (_PyIO_Span *)(pieces + limit));
         for (Py_ssize_t i = 0; i < cnt; i++) {
             spans[i] = (_PyIO_Span){pieces[i].ptr, pieces[i].len};
             Py_XINCREF(pieces[i].obj);
@@ -507,6 +521,9 @@ buffered_raw_write(buffered *self, Py_ssize_t avail, const morsel *extra,
         buffered_relock_after_raw(self, unlocked);
         for (Py_ssize_t i = 0; i < cnt; i++) {
             Py_XDECREF(pieces[i].obj);
+        }
+        if (pieces != stack) {
+            PyMem_Free(pieces);
         }
         return n;
     }
