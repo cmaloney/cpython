@@ -334,6 +334,9 @@ class CTestCase(unittest.TestCase):
     # (_io and _pyio's close() flush, release the lock, then close the raw
     # stream, so a write in between can be dropped.)
     keeps_writes_racing_close = is_nibbler
+    # Does peek(n) return min(n, buffer size) bytes when the raw stream has
+    # them, reading after the read-ahead?  (gh-50061)
+    peek_reads_to_size = is_nibbler
 
     MockRawIO = CMockRawIO
     MisbehavedRawIO = CMisbehavedRawIO
@@ -367,6 +370,7 @@ class PyTestCase(unittest.TestCase):
     keeps_data_on_raw_error = False
     has_readall = False
     keeps_writes_racing_close = False
+    peek_reads_to_size = True
 
     MockRawIO = PyMockRawIO
     MisbehavedRawIO = PyMisbehavedRawIO

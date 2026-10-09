@@ -359,6 +359,30 @@ class SlowDeviceTest:
             out += chunk
         self.assertEqual(out, data)
 
+    def test_peek_reads_to_size(self):
+        if not self.peek_reads_to_size:
+            self.skipTest("peek() returns the read-ahead, however short")
+        # gh-50061: peek(n) returns at least min(n, buffer size) bytes when
+        # the raw stream has them, with at most one raw read.
+        data = sample_data(1_000)
+        raw = self.scripted_reader(data)
+        f = self.BufferedReader(raw, 16)
+        self.assertEqual(f.read(10), data[:10])
+        calls = raw.calls
+        peeked = f.peek(10)
+        self.assertEqual(raw.calls, calls + 1)
+        self.assertGreaterEqual(len(peeked), 10)
+        self.assertLessEqual(len(peeked), 16)
+        self.assertEqual(peeked, data[10:10 + len(peeked)])
+        peeked = f.peek(100)
+        self.assertEqual(peeked, data[10:26])
+        self.assertEqual(raw.calls, calls + 1)
+        self.assertEqual(f.read(16), data[10:26])
+        # At EOF: what there is.
+        f = self.BufferedReader(self.scripted_reader(data[:12]), 16)
+        self.assertEqual(f.read(10), data[:10])
+        self.assertEqual(f.peek(10), data[10:12])
+
     def test_read_would_block(self):
         # None ("would block") from the raw stream surfaces as a short or
         # None result; retrying eventually yields all data, in order.

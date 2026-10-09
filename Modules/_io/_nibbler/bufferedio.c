@@ -1456,8 +1456,11 @@ static PyObject *
 _io__Buffered_peek_impl(buffered *self, Py_ssize_t size)
 /*[clinic end generated code: output=ba7a097ca230102b input=37ffb97d06ff4adb]*/
 {
-    /* Without the lock when there is read-ahead. */
-    PyObject *res = nibbler_peek(&self->nib);
+    /* At least min(size, buffer size) bytes, when the raw stream has them
+       (gh-50061). */
+    Py_ssize_t want = Py_MAX(Py_MIN(size, self->nib.capacity), 1);
+    /* Without the lock when the read-ahead has them. */
+    PyObject *res = nibbler_peek(&self->nib, want);
     if (res == NULL || PyBytes_GET_SIZE(res) > 0) {
         return res;
     }
@@ -1473,10 +1476,12 @@ _io__Buffered_peek_impl(buffered *self, Py_ssize_t size)
         buffered_unlock(self);
         return NULL;
     }
-    /* Either return the read-ahead or refill it, never both: refilling a
-       partly consumed buffer would lose block alignment. */
-    Py_ssize_t r = nibbler_unread(&self->nib) > 0 ? 1 : buffered_fill(self, 0);
-    if (r == -2) {
+    /* With fewer than want unread, one raw read after them.  (The fill
+       keeps them in front, which costs block alignment, so it is only done
+       when asked for more than the read-ahead has.) */
+    Py_ssize_t r = (nibbler_unread(&self->nib) >= want
+                    ? 1 : buffered_fill(self, 0));
+    if (r == -2 && nibbler_unread(&self->nib) == 0) {
         /* Would block, with nothing to return. */
         res = Py_NewRef(Py_None);
     }

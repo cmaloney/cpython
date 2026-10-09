@@ -720,13 +720,13 @@ nibbler_end_bytes(nibbler_end *e, Py_ssize_t start, Py_ssize_t k)
 }
 
 /* Without the lock: the unread bytes, without taking them (for peek());
-   b"" when there are none or the end is held. */
+   b"" when there are fewer than want (at least 1) or the end is held. */
 static PyObject *
-nibbler_peek(nibbler *n)
+nibbler_peek(nibbler *n, Py_ssize_t want)
 {
     nibbler_end *e = nibbler_end_get(n, 0);
     Py_ssize_t c = e == NULL ? -1 : FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
-    if (c < 0 || c == e->limit) {
+    if (c < 0 || e->limit - c < want) {
         return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     }
     return nibbler_end_bytes(e, c, e->limit - c);
