@@ -1502,6 +1502,26 @@ class TextIOWrapperTest:
                     with self.assertRaises((OSError, OverflowError)):
                         f.seek(cookie)
 
+    def test_close_and_detach_finish_encoder(self):
+        # gh-79792: the incremental encoder gets final=True, so the idna
+        # codec writes its last label.
+        class Recorder(self.BytesIO):
+            def close(self):
+                self.final = self.getvalue()
+                super().close()
+        b = Recorder()
+        t = self.TextIOWrapper(b, encoding="idna")
+        t.write("www.somesite.com")
+        t.close()
+        self.assertEqual(b.final, b"www.somesite.com")
+        b = self.BytesIO()
+        t = self.TextIOWrapper(b, encoding="idna")
+        t.write("www.somesite.com")
+        t.flush()
+        self.assertEqual(b.getvalue(), b"www.somesite.")
+        self.assertIs(t.detach(), b)
+        self.assertEqual(b.getvalue(), b"www.somesite.com")
+
 
 class MemviewBytesIO(io.BytesIO):
     '''A BytesIO object whose read method returns memoryviews
