@@ -57,13 +57,10 @@
    of being copied, when the owner asks for it. */
 #define NIBBLER_REF_MIN 512
 
-/* A run of bytes inside the bytes object obj, which keeps them alive.  obj
-   is NULL only for data borrowed for the duration of a call. */
-typedef struct {
-    PyObject *obj;
-    const char *ptr;
-    Py_ssize_t len;
-} morsel;
+/* A run of bytes inside the bytes object obj, which keeps them alive (see
+   _iomodule.h).  obj is NULL only for data borrowed for the duration of a
+   call. */
+typedef _PyIO_Morsel morsel;
 
 /* Morsels in order, with their total length. */
 typedef struct {
