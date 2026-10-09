@@ -129,6 +129,29 @@ class TestPrint(unittest.TestCase):
                 raise RuntimeError
         self.assertRaises(RuntimeError, print, 1, file=noflush(), flush=True)
 
+    def test_one_write(self):
+        # Everything a print() call writes goes in one write() call.
+        class Recorder:
+            def __init__(self):
+                self.writes = []
+
+            def write(self, s):
+                self.writes.append(s)
+
+        f = Recorder()
+        print(1, 'a', ClassWith__str__('b'), sep='-', end='!', file=f)
+        print(file=f)
+        print('x', 'y', file=f)
+        self.assertEqual(f.writes, ['1-a-b!', '\n', 'x y\n'])
+
+        # Nothing is written when an argument can't be converted.
+        class Bad:
+            def __str__(self):
+                raise ZeroDivisionError
+        f = Recorder()
+        self.assertRaises(ZeroDivisionError, print, 'a', Bad(), file=f)
+        self.assertEqual(f.writes, [])
+
     def test_gh130163(self):
         class X:
             def __str__(self):
