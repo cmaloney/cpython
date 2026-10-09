@@ -990,6 +990,44 @@ class BufferedWriterTest(CommonBufferedTests):
         finally:
             os_helper.unlink(os_helper.TESTFN)
 
+    @threading_helper.requires_working_threading()
+    def test_tell_racing_writes(self):
+        # tell() racing write()s returns a position the stream actually
+        # passed through (a whole number of records), never a mix of the
+        # raw position and the pending buffer seen at different times.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        record = b"abcdefg"
+        nwriters, nrecords = 4, 2000
+        with self.open(os_helper.TESTFN, self.write_mode, buffering=0) as raw:
+            # A buffer size that isn't a multiple of the record size, so
+            # that flushes split records.
+            bufio = self.tp(raw, 100)
+            done = threading.Event()
+            bad = []
+
+            def writer():
+                for _ in range(nrecords):
+                    bufio.write(record)
+
+            def teller():
+                last = 0
+                while not done.is_set():
+                    pos = bufio.tell()
+                    if pos % len(record) or pos < last:
+                        bad.append((last, pos))
+                    last = pos
+
+            writers = [threading.Thread(target=writer)
+                       for _ in range(nwriters)]
+            tellers = [threading.Thread(target=teller) for _ in range(2)]
+            with threading_helper.start_threads(tellers):
+                with threading_helper.start_threads(writers):
+                    pass
+                done.set()
+            self.assertEqual(bad, [])
+            self.assertEqual(bufio.tell(), nwriters * nrecords * len(record))
+            bufio.close()
+
     def test_misbehaved_io(self):
         rawio = self.MisbehavedRawIO()
         bufio = self.tp(rawio, 5)
