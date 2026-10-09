@@ -2257,7 +2257,7 @@ textiowrapper_read_chunk(textio *self, Py_ssize_t size_hint)
     Py_buffer input_chunk_buf;
     PyObject *decoded_chars, *chunk_size;
     Py_ssize_t nbytes, nchars;
-    int eof;
+    int eof, blocked;
 
     /* The return value is True unless EOF was reached.  The decoded string is
      * placed in self._decoded_chars (replacing its previous value).  The
@@ -2330,6 +2330,12 @@ textiowrapper_read_chunk(textio *self, Py_ssize_t size_hint)
     Py_DECREF(chunk_size);
     if (input_chunk == NULL)
         goto fail;
+    /* None: the raw stream would block.  There is no data for now, but it
+       is not EOF either: a partial character stays in the decoder. */
+    blocked = input_chunk == Py_None;
+    if (blocked) {
+        Py_SETREF(input_chunk, Py_GetConstant(Py_CONSTANT_EMPTY_BYTES));
+    }
 
     if (PyObject_GetBuffer(input_chunk, &input_chunk_buf, 0) != 0) {
         PyErr_Format(PyExc_TypeError,
@@ -2343,7 +2349,7 @@ textiowrapper_read_chunk(textio *self, Py_ssize_t size_hint)
     eof = (nbytes == 0);
 
     decoded_chars = _textiowrapper_decode(self->state, self->decoder,
-                                          input_chunk, eof);
+                                          input_chunk, eof && !blocked);
     PyBuffer_Release(&input_chunk_buf);
     if (decoded_chars == NULL)
         goto fail;

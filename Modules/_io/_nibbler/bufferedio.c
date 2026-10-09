@@ -776,8 +776,9 @@ buffered_read_bytes(buffered *self, Py_ssize_t n, int read1)
            out without a copy. */
         Py_ssize_t r = buffered_fill(self, n);
         if (r <= 0) {
-            /* EOF, or would block. */
-            return r == -1 ? NULL : Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
+            /* EOF, or None if it would block. */
+            return (r == 0 ? Py_GetConstant(Py_CONSTANT_EMPTY_BYTES)
+                    : r == -2 ? Py_NewRef(Py_None) : NULL);
         }
         avail = nibbler_unread(&self->nib);
     }
@@ -796,10 +797,7 @@ buffered_read_bytes(buffered *self, Py_ssize_t n, int read1)
                                       read1);
     if (r < 0) {
         PyBytesWriter_Discard(writer);
-        if (r == -2 && !read1) {
-            Py_RETURN_NONE;
-        }
-        return r == -2 ? Py_GetConstant(Py_CONSTANT_EMPTY_BYTES) : NULL;
+        return r == -2 ? Py_NewRef(Py_None) : NULL;
     }
     return PyBytesWriter_FinishWithSize(writer, r);
 }
@@ -1450,7 +1448,12 @@ _io__Buffered_peek_impl(buffered *self, Py_ssize_t size)
     }
     /* Either return the read-ahead or refill it, never both: refilling a
        partly consumed buffer would lose block alignment. */
-    if (nibbler_unread(&self->nib) > 0 || buffered_fill(self, 0) != -1) {
+    Py_ssize_t r = nibbler_unread(&self->nib) > 0 ? 1 : buffered_fill(self, 0);
+    if (r == -2) {
+        /* Would block, with nothing to return. */
+        res = Py_NewRef(Py_None);
+    }
+    else if (r != -1) {
         res = nibbler_peek_held(&self->nib);
     }
     buffered_unlock(self);

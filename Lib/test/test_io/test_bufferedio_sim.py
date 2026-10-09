@@ -382,8 +382,6 @@ class SlowDeviceTest:
         # A raw stream that would block in the middle of a multibyte
         # character: its first bytes stay buffered for the next read,
         # instead of being decoded as if at EOF.
-        if not self.is_nibbler:
-            self.skipTest("decodes the partial character as if at EOF")
         data = "a\xe9€b".encode()
         raw = self.scripted_reader(data, [2, None, 2, None])
         f = self.TextIOWrapper(self.BufferedReader(raw, 16), encoding="utf-8")

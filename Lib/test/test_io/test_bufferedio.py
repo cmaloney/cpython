@@ -437,13 +437,27 @@ class BufferedReaderTest(CommonBufferedTests):
         self.assertEqual(b"abcd", bufio.read(6))
         self.assertEqual(b"e", bufio.read(1))
         self.assertEqual(b"fg", bufio.read())
-        self.assertEqual(b"", bufio.peek(1))
+        self.assertIsNone(bufio.peek(1))
         self.assertIsNone(bufio.read())
         self.assertEqual(b"", bufio.read())
 
         rawio = self.MockRawIO((b"a", None, None))
         self.assertEqual(b"a", rawio.readall())
         self.assertIsNone(rawio.readall())
+
+    def test_read1_peek_readinto_non_blocking(self):
+        # gh-57531: they return None when the raw stream would block with
+        # nothing buffered, as read() does; b"" and 0 mean EOF.
+        rawio = self.MockRawIO((None, None, None, None, b"abc"))
+        bufio = self.tp(rawio)
+        self.assertIsNone(bufio.peek(1))
+        self.assertIsNone(bufio.read1(10))
+        self.assertIsNone(bufio.readinto1(bytearray(10)))
+        self.assertIsNone(bufio.readinto(bytearray(10)))
+        self.assertEqual(bufio.read1(10), b"abc")
+        self.assertEqual(bufio.peek(1), b"")
+        self.assertEqual(bufio.read1(10), b"")
+        self.assertEqual(bufio.readinto1(bytearray(10)), 0)
 
     def test_read_past_eof(self):
         rawio = self.MockRawIO((b"abc", b"d", b"efg"))

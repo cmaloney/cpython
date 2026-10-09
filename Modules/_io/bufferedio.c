@@ -57,8 +57,10 @@ _bufferediobase_readinto_generic(PyObject *self, Py_buffer *buffer, char readint
         ? &_Py_ID(read1)
         : &_Py_ID(read);
     data = _PyObject_CallMethod(self, attr, "n", buffer->len);
-    if (data == NULL)
-        return NULL;
+    if (data == NULL || data == Py_None) {
+        /* None: the raw stream would block. */
+        return data;
+    }
 
     if (!PyBytes_Check(data)) {
         Py_DECREF(data);
@@ -1106,12 +1108,10 @@ _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
     Py_ssize_t r = _bufferedreader_raw_read(self,
                                             PyBytesWriter_GetData(writer), n);
     LEAVE_BUFFERED(self)
-    if (r == -1) {
+    if (r < 0) {
         PyBytesWriter_Discard(writer);
-        return NULL;
-    }
-    if (r == -2) {
-        r = 0;
+        /* None if the raw stream would block: b"" means EOF. */
+        return r == -2 ? Py_NewRef(Py_None) : NULL;
     }
 
     return PyBytesWriter_FinishWithSize(writer, r);
@@ -1980,9 +1980,11 @@ _bufferedreader_peek_unlocked(buffered *self)
     r = _bufferedreader_fill_buffer(self);
     if (r == -1)
         return NULL;
-    if (r == -2)
-        r = 0;
     self->pos = 0;
+    if (r == -2) {
+        /* None if the raw stream would block: b"" means EOF. */
+        Py_RETURN_NONE;
+    }
     return PyBytes_FromStringAndSize(self->buffer, r);
 }
 
