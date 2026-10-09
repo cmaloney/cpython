@@ -2869,6 +2869,12 @@ textiowrapper_parse_cookie(cookie_type *cookie, PyObject *cookieObj)
     memcpy(&cookie->chars_to_skip, buffer + OFF_CHARS_TO_SKIP, sizeof(cookie->chars_to_skip));
     memcpy(&cookie->need_eof, buffer + OFF_NEED_EOF, sizeof(cookie->need_eof));
 
+    /* gh-153662: tell() never gives negative counts, and seek() would use
+       them as sizes. */
+    if (cookie->bytes_to_feed < 0 || cookie->chars_to_skip < 0) {
+        PyErr_SetString(PyExc_OSError, "can't restore logical file position");
+        return -1;
+    }
     return 0;
 }
 
