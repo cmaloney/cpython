@@ -494,10 +494,6 @@ class BufferedReaderTest(CommonBufferedTests):
         self.assertEqual(bufio.readlines(100), [])
 
     def test_readline_would_block_limit(self):
-        if not self.is_C:
-            # _pyio's readline(size) can return more than size bytes when
-            # the line spans two peek() results.
-            self.skipTest("_pyio readline(size) overshoots size")
         # With a limit: what arrived up to it is a line.
         rawio = self.MockRawIO((b"ab", None, b"cdef", None, b"g\n"))
         bufio = self.tp(rawio)

@@ -319,6 +319,31 @@ class IOTest:
         with self.open(os_helper.TESTFN, "r", encoding="utf-8") as f:
             self.assertRaises(TypeError, f.readline, 5.3)
 
+    def test_readline_size_across_peeks(self):
+        # readline(size) returns at most size bytes when the line spans
+        # several peek() results.
+        if self.is_C:
+            self.skipTest("_io's IOBase.readline(size) overshoots size too")
+        class R(self.IOBase):
+            def __init__(self, data):
+                self.data = data
+
+            def readable(self):
+                return True
+
+            def peek(self, size=0):
+                return self.data[:2]
+
+            def read(self, size=-1):
+                b, self.data = self.data[:size], self.data[size:]
+                return b
+
+        f = R(b"abcdefgh\nij\n")
+        self.assertEqual(f.readline(5), b"abcde")
+        self.assertEqual(f.readline(5), b"fgh\n")
+        self.assertEqual(f.readline(1), b"i")
+        self.assertEqual(f.readline(), b"j\n")
+
     def test_readline_nonsizeable(self):
         # Issue #30061
         # Crash when readline() returns an object without __len__
