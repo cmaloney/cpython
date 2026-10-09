@@ -1891,22 +1891,35 @@ buffered_write_lockfree(buffered *self, const char *data, Py_ssize_t len)
     return 1;
 }
 
-/* write() with the data in buffer. */
-static PyObject *
-buffered_write(buffered *self, Py_buffer *buffer)
+/* write() of obj with the lock: out of line, so that the lock-free path
+   stays small. */
+Py_NO_INLINE static PyObject *
+buffered_write(buffered *self, PyObject *obj)
 {
-    if (buffer->len < NIBBLER_REF_MIN) {
-        int r = buffered_write_lockfree(self, buffer->buf, buffer->len);
+    /* Exact bytes need no buffer export: only obj, buf and len are used. */
+    Py_buffer view;
+    int exported = !PyBytes_CheckExact(obj);
+    if (!exported) {
+        view = (Py_buffer){.obj = obj, .buf = PyBytes_AS_STRING(obj),
+                           .len = PyBytes_GET_SIZE(obj)};
+    }
+    else if (PyObject_GetBuffer(obj, &view, PyBUF_SIMPLE) < 0) {
+        return NULL;
+    }
+    else if (view.len < NIBBLER_REF_MIN) {
+        int r = buffered_write_lockfree(self, view.buf, view.len);
         if (r != 0) {
-            return r < 0 ? NULL : PyLong_FromSsize_t(buffer->len);
+            PyBuffer_Release(&view);
+            return r < 0 ? NULL : PyLong_FromSsize_t(view.len);
         }
     }
+    PyObject *res = NULL;
     Py_ssize_t done = 0;
     for (;;) {
         if (buffered_enter(self, "write to closed file", WRITING) < 0) {
-            return NULL;
+            break;
         }
-        int r = buffered_write_locked(self, buffer, &done);
+        int r = buffered_write_locked(self, &view, &done);
         if (r == 0 && self->raw_fileio) {
             /* The next writes may need no lock. */
             nibbler_start_appending(&self->nib);
@@ -1914,13 +1927,18 @@ buffered_write(buffered *self, Py_buffer *buffer)
         if (r == BUFFERED_WRITE_RETRY
             && nibbler_wait_io(&self->nib, (PyObject *)self) < 0)
         {
-            return NULL;
+            break;
         }
         buffered_unlock(self);
         if (r != BUFFERED_WRITE_RETRY) {
-            return r < 0 ? NULL : PyLong_FromSsize_t(buffer->len);
+            res = r < 0 ? NULL : PyLong_FromSsize_t(view.len);
+            break;
         }
     }
+    if (exported) {
+        PyBuffer_Release(&view);
+    }
+    return res;
 }
 
 /*[clinic input]
@@ -1934,19 +1952,15 @@ _io_BufferedWriter_write_impl(buffered *self, PyObject *obj)
 /*[clinic end generated code: output=4b5acd5810c0fa55 input=b4d277ddee118f17]*/
 {
     if (PyBytes_CheckExact(obj)) {
-        /* Exact bytes need no buffer export: only obj, buf and len are
-           used. */
-        Py_buffer view = {.obj = obj, .buf = PyBytes_AS_STRING(obj),
-                          .len = PyBytes_GET_SIZE(obj)};
-        return buffered_write(self, &view);
+        Py_ssize_t len = PyBytes_GET_SIZE(obj);
+        int r = (len < NIBBLER_REF_MIN
+                 ? buffered_write_lockfree(self, PyBytes_AS_STRING(obj), len)
+                 : 0);
+        if (r != 0) {
+            return r < 0 ? NULL : PyLong_FromSsize_t(len);
+        }
     }
-    Py_buffer view;
-    if (PyObject_GetBuffer(obj, &view, PyBUF_SIMPLE) < 0) {
-        return NULL;
-    }
-    PyObject *res = buffered_write(self, &view);
-    PyBuffer_Release(&view);
-    return res;
+    return buffered_write(self, obj);
 }
 
 /*
