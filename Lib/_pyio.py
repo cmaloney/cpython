@@ -1517,7 +1517,13 @@ class BufferedRandom(BufferedWriter, BufferedReader):
     def truncate(self, pos=None):
         if pos is None:
             pos = self.tell()
-        # Use seek to flush the read buffer.
+        if self._read_buf:
+            # Drop the read-ahead, which may hold bytes cut away, and put
+            # the raw stream back at the position, where the next write
+            # goes.
+            with self._read_lock:
+                self.raw.seek(self._read_pos - len(self._read_buf), 1)
+                self._reset_read_buf()
         return BufferedWriter.truncate(self, pos)
 
     def read(self, size=None):

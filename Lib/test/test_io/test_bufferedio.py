@@ -1602,6 +1602,26 @@ class BufferedRandomTest(BufferedReaderTest, BufferedWriterTest):
         self.assertEqual(bufio.write(b"BB"), 2) # the write buffer increases
         self.assertEqual(bufio.truncate(), 4)
 
+    def test_truncate_drops_read_ahead(self):
+        # Bytes cut away are not read back, and the next write goes to
+        # the position.
+        raw = self.BytesIO(b"0123456789" * 3)
+        bufio = self.tp(raw, 100)
+        self.assertEqual(bufio.read(3), b"012")
+        self.assertEqual(bufio.truncate(), 3)
+        self.assertEqual(bufio.tell(), 3)
+        self.assertEqual(bufio.read(), b"")
+        bufio.write(b"X")
+        bufio.flush()
+        self.assertEqual(raw.getvalue(), b"012X")
+
+        raw = self.BytesIO(b"0123456789" * 3)
+        bufio = self.tp(raw, 100)
+        self.assertEqual(bufio.read(3), b"012")
+        self.assertEqual(bufio.truncate(5), 5)
+        self.assertEqual(bufio.tell(), 3)
+        self.assertEqual(bufio.read(), b"34")
+
     def test_misbehaved_io(self):
         BufferedReaderTest.test_misbehaved_io(self)
         BufferedWriterTest.test_misbehaved_io(self)
