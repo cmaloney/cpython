@@ -5,6 +5,7 @@
 #include "pycore_fileutils.h"     // _Py_BEGIN_SUPPRESS_IPH
 #include "pycore_object.h"        // _PyObject_GC_UNTRACK()
 #include "pycore_pyerrors.h"      // _PyErr_ChainExceptions1()
+#include "pycore_pymem.h"         // _PyMem_FreeDelayed()
 #include "pycore_pystate.h"       // _PyInterpreterState_GET()
 #include "pycore_weakref.h"       // FT_CLEAR_WEAKREFS()
 
@@ -83,7 +84,12 @@ typedef struct {
        estimate, as it is subject to Time-Of-Check to Time-Of-Use (TOCTOU)
        issues / bugs. Both the underlying file descriptor and file may be
        modified outside of the fileio object / Python (ex. gh-90102, GH-121941,
-       gh-109523). */
+       gh-109523).
+
+       With free threading, methods read it without a lock: they load the
+       pointer once with FT_ATOMIC_LOAD_PTR_ACQUIRE().  close() keeps it, and
+       fileio_set_stat() frees a replaced result only once no thread can still
+       be using it. */
     struct _Py_stat_struct *stat_atopen;
     PyObject *weakreflist;
     PyObject *dict;
@@ -129,6 +135,22 @@ _io_FileIO__dealloc_warn_impl(fileio *self, PyObject *source)
     Py_RETURN_NONE;
 }
 
+/* Replace the stat result with st (which may be NULL).  A method running in
+   another thread may still use the old result, so with free threading it is
+   freed once all threads pass a quiescent state. */
+static void
+fileio_set_stat(fileio *self, struct _Py_stat_struct *st)
+{
+#ifdef Py_GIL_DISABLED
+    struct _Py_stat_struct *old = _Py_atomic_exchange_ptr(&self->stat_atopen,
+                                                          st);
+    _PyMem_FreeDelayed(old, sizeof(*old));
+#else
+    PyMem_Free(self->stat_atopen);
+    self->stat_atopen = st;
+#endif
+}
+
 /* Returns 0 on success, -1 with exception set on failure. */
 static int
 internal_close(fileio *self)
@@ -153,8 +175,6 @@ internal_close(fileio *self)
             save_errno = errno;
         _Py_END_SUPPRESS_IPH
         Py_END_ALLOW_THREADS
-        PyMem_Free(self->stat_atopen);
-        self->stat_atopen = NULL;
     }
     if (err < 0) {
         errno = save_errno;
@@ -282,6 +302,7 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
     int flags = 0;
     int fd = -1;
     int fd_is_own = 0;
+    struct _Py_stat_struct *st = NULL;
 #ifdef O_CLOEXEC
     int *atomic_flag_works = &_Py_open_cloexec_works;
 #elif !defined(MS_WINDOWS)
@@ -298,7 +319,7 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
     _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
     assert(PyFileIO_Check(state, self));
 #endif
-    if (self->fd >= 0) {
+    if (FT_ATOMIC_LOAD_INT_RELAXED(self->fd) >= 0) {
         if (self->closefd) {
             /* Have to close the existing file first. */
             if (internal_close(self) < 0) {
@@ -306,7 +327,7 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
             }
         }
         else
-            self->fd = -1;
+            FT_ATOMIC_STORE_INT_RELAXED(self->fd, -1);
     }
 
     if (PyBool_Check(nameobj)) {
@@ -437,14 +458,17 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
         goto error;
     }
 
-    PyMem_Free(self->stat_atopen);
-    self->stat_atopen = PyMem_New(struct _Py_stat_struct, 1);
-    if (self->stat_atopen == NULL) {
+    /* Drop the stat result of a previous file when re-initialized. */
+    if (FT_ATOMIC_LOAD_PTR_RELAXED(self->stat_atopen) != NULL) {
+        fileio_set_stat(self, NULL);
+    }
+    st = PyMem_New(struct _Py_stat_struct, 1);
+    if (st == NULL) {
         PyErr_NoMemory();
         goto error;
     }
     if (fd >= 0) {
-        self->fd = fd;
+        FT_ATOMIC_STORE_INT_RELAXED(self->fd, fd);
         self->closefd = closefd;
     }
     else {
@@ -460,24 +484,23 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
             do {
                 Py_BEGIN_ALLOW_THREADS
 #ifdef MS_WINDOWS
-                self->fd = _wopen(widename, flags, 0666);
+                fd = _wopen(widename, flags, 0666);
 #else
-                self->fd = open(name, flags, 0666);
+                fd = open(name, flags, 0666);
 #endif
-                if (self->fd >= 0) {
-                    fstat_result = _Py_fstat_noraise(self->fd,
-                                                     self->stat_atopen);
+                if (fd >= 0) {
+                    fstat_result = _Py_fstat_noraise(fd, st);
                     fstat_errno = errno;
                     fstat_done = 1;
                 }
                 Py_END_ALLOW_THREADS
-            } while (self->fd < 0 && errno == EINTR &&
+            } while (fd < 0 && errno == EINTR &&
                      !(async_err = PyErr_CheckSignals()));
 
             if (async_err)
                 goto error;
 
-            if (self->fd < 0) {
+            if (fd < 0) {
                 PyErr_SetFromErrnoWithFilenameObject(PyExc_OSError, nameobj);
                 goto error;
             }
@@ -500,22 +523,23 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
                 goto error;
             }
 
-            self->fd = PyLong_AsInt(fdobj);
+            fd = PyLong_AsInt(fdobj);
             Py_DECREF(fdobj);
-            if (self->fd < 0) {
+            if (fd < 0) {
                 if (!PyErr_Occurred()) {
                     /* The opener returned a negative but didn't set an
                        exception.  See issue #27066 */
                     PyErr_Format(PyExc_ValueError,
-                                 "opener returned %d", self->fd);
+                                 "opener returned %d", fd);
                 }
                 goto error;
             }
         }
+        FT_ATOMIC_STORE_INT_RELAXED(self->fd, fd);
         fd_is_own = 1;
 
 #ifndef MS_WINDOWS
-        if (_Py_set_inheritable(self->fd, 0, atomic_flag_works) < 0)
+        if (_Py_set_inheritable(fd, 0, atomic_flag_works) < 0)
             goto error;
 #endif
     }
@@ -525,7 +549,7 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
     }
     else {
         Py_BEGIN_ALLOW_THREADS
-        fstat_result = _Py_fstat_noraise(self->fd, self->stat_atopen);
+        fstat_result = _Py_fstat_noraise(fd, st);
         Py_END_ALLOW_THREADS
     }
     if (fstat_result < 0) {
@@ -542,25 +566,28 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
             goto error;
         }
 
-        PyMem_Free(self->stat_atopen);
-        self->stat_atopen = NULL;
+        PyMem_Free(st);
+        st = NULL;
     }
     else {
 #if defined(S_ISDIR) && defined(EISDIR)
         /* On Unix, open will succeed for directories.
            In Python, there should be no file objects referring to
            directories, so we need a check.  */
-        if (S_ISDIR(self->stat_atopen->st_mode)) {
+        if (S_ISDIR(st->st_mode)) {
             errno = EISDIR;
             PyErr_SetFromErrnoWithFilenameObject(PyExc_OSError, nameobj);
             goto error;
         }
 #endif /* defined(S_ISDIR) */
     }
+    /* Publish the complete stat result. */
+    fileio_set_stat(self, st);
+    st = NULL;
 
 #if defined(MS_WINDOWS) || defined(__CYGWIN__)
     /* don't translate newlines (\r\n <=> \n) */
-    _setmode(self->fd, O_BINARY);
+    _setmode(fd, O_BINARY);
 #endif
 
     if (PyObject_SetAttr((PyObject *)self, &_Py_ID(name), nameobj) < 0)
@@ -581,14 +608,14 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
  error:
     ret = -1;
     if (!fd_is_own)
-        self->fd = -1;
-    if (self->fd >= 0) {
+        FT_ATOMIC_STORE_INT_RELAXED(self->fd, -1);
+    if (FT_ATOMIC_LOAD_INT_RELAXED(self->fd) >= 0) {
         PyObject *exc = PyErr_GetRaisedException();
         internal_close(self);
         _PyErr_ChainExceptions1(exc);
     }
-    PyMem_Free(self->stat_atopen);
-    self->stat_atopen = NULL;
+    PyMem_Free(st);
+    fileio_set_stat(self, NULL);
 
  done:
 #ifdef MS_WINDOWS
@@ -817,8 +844,11 @@ _io_FileIO_readall_impl(fileio *self, PyTypeObject *cls)
         return err_mode(state, "reading");
     }
 
-    if (self->stat_atopen != NULL && self->stat_atopen->st_size < _PY_READ_MAX) {
-        end = (Py_off_t)self->stat_atopen->st_size;
+    /* Size estimate only: the file may be closed or re-initialized by now. */
+    struct _Py_stat_struct *st =
+        FT_ATOMIC_LOAD_PTR_ACQUIRE(self->stat_atopen);
+    if (st != NULL && st->st_size < _PY_READ_MAX) {
+        end = (Py_off_t)st->st_size;
     }
     else {
         end = -1;
@@ -1455,9 +1485,8 @@ _io_FileIO_truncate_impl(fileio *self, PyTypeObject *cls, PyObject *posobj)
     /* Since the file was truncated, its size at open is no longer accurate
        as an estimate. Clear out the stat result, and rely on dynamic resize
        code if a readall is requested. */
-    if (self->stat_atopen != NULL) {
-        PyMem_Free(self->stat_atopen);
-        self->stat_atopen = NULL;
+    if (FT_ATOMIC_LOAD_PTR_RELAXED(self->stat_atopen) != NULL) {
+        fileio_set_stat(self, NULL);
     }
 
     return posobj;
@@ -1574,8 +1603,13 @@ static PyObject *
 _io_FileIO__isatty_open_only_impl(fileio *self)
 /*[clinic end generated code: output=2b4689154d4b8b84 input=228767ff567cdfb6]*/
 {
-    if (self->stat_atopen != NULL && !S_ISCHR(self->stat_atopen->st_mode)) {
-        Py_RETURN_FALSE;
+    /* A closed file keeps its stat result: let isatty() raise. */
+    if (FT_ATOMIC_LOAD_INT_RELAXED(self->fd) >= 0) {
+        struct _Py_stat_struct *st =
+            FT_ATOMIC_LOAD_PTR_ACQUIRE(self->stat_atopen);
+        if (st != NULL && !S_ISCHR(st->st_mode)) {
+            Py_RETURN_FALSE;
+        }
     }
     return _io_FileIO_isatty_impl(self);
 }
@@ -1659,8 +1693,13 @@ _io_FileIO__blksize_get_impl(fileio *self)
 /*[clinic end generated code: output=e47eaf8cd6c0079f input=699d87d750798ccb]*/
 {
 #ifdef HAVE_STRUCT_STAT_ST_BLKSIZE
-    if (self->stat_atopen != NULL && self->stat_atopen->st_blksize > 1) {
-        return self->stat_atopen->st_blksize;
+    /* A closed file keeps its stat result, but reports the default. */
+    if (FT_ATOMIC_LOAD_INT_RELAXED(self->fd) >= 0) {
+        struct _Py_stat_struct *st =
+            FT_ATOMIC_LOAD_PTR_ACQUIRE(self->stat_atopen);
+        if (st != NULL && st->st_blksize > 1) {
+            return st->st_blksize;
+        }
     }
 #endif /* HAVE_STRUCT_STAT_ST_BLKSIZE */
     return DEFAULT_BUFFER_SIZE;

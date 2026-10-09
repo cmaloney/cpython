@@ -5,6 +5,7 @@ import os
 import _pyio as pyio
 import threading
 from unittest import TestCase
+from test import support
 from test.support import os_helper, threading_helper
 from test.support.threading_helper import run_concurrently
 from random import randint
@@ -276,6 +277,55 @@ class FileIOTest(TestCase):
 
             run_concurrently([closer] * 4)
             self.assertTrue(f.closed)
+
+    def _stat_reader(self, f):
+        # readall(), _blksize and isatty() use the stat result saved when
+        # the file was opened.
+        # TSan reports read() racing with close() or open() reusing the
+        # descriptor, which no lock prevents; readall() still runs in
+        # other builds.
+        readall = not support.check_sanitizer(thread=True)
+        def reader():
+            for _ in range(20):
+                try:
+                    if readall:
+                        f.readall()
+                    f._blksize
+                    f._isatty_open_only()
+                    f.isatty()
+                except (ValueError, OSError):
+                    # Closed file, or a descriptor closed under the call.
+                    pass
+        return reader
+
+    def test_stat_close_race(self):
+        # close() freed the stat result while readers used it.
+        path = os_helper.TESTFN
+        self.addCleanup(os_helper.unlink, path)
+        with open(path, "wb") as f:
+            f.write(b"x" * 100)
+        for _ in range(100):
+            f = io.FileIO(path, "rb")
+            run_concurrently([self._stat_reader(f)] * 3 + [f.close])
+            self.assertTrue(f.closed)
+
+    def test_stat_reinit_race(self):
+        # Re-initializing a FileIO replaces its stat result while readers
+        # use the old one.
+        paths = [os_helper.TESTFN + str(i) for i in range(3)]
+        for i, path in enumerate(paths):
+            self.addCleanup(os_helper.unlink, path)
+            with open(path, "wb") as f:
+                f.write(b"x" * (100 << i))
+        for _ in range(50):
+            f = io.FileIO(paths[0], "rb")
+
+            def reinit():
+                for path in paths * 5:
+                    f.__init__(path, "rb")
+
+            run_concurrently([self._stat_reader(f)] * 3 + [reinit])
+            f.close()
 
 
 class TextIOWrapperTest(TestCase):
