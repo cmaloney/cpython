@@ -2166,13 +2166,15 @@ textiowrapper_read_chunk_nibbler(textio *self, Py_ssize_t size_hint)
             Py_DECREF(buffer);
             return r;
         }
-        /* Fewer than needed: EOF (or would block) */
-        final = m.len < need;
+        /* Fewer than needed: EOF, unless the raw stream would block.  Then
+           a partial character stays in the buffer for the next read. */
+        int blocked = r == _PyIO_NIBBLER_BLOCKED;
+        final = m.len < need && !blocked;
         used = Py_MIN(m.len, Py_MAX(size, need));
         Py_ssize_t len = used;
         chars = PyUnicode_DecodeUTF8Stateful(m.ptr, len, errors,
                                              final ? NULL : &used);
-        if (chars != NULL && used == 0 && len > 0 && !final) {
+        if (chars != NULL && used == 0 && len > 0 && !final && !blocked) {
             /* Only part of a character: get more after it. */
             need = len + 1;
             r = 0;

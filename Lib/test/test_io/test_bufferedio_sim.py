@@ -378,6 +378,20 @@ class SlowDeviceTest:
             out += chunk
         self.assertEqual(out, data)
 
+    def test_text_read_would_block_keeps_partial_char(self):
+        # A raw stream that would block in the middle of a multibyte
+        # character: its first bytes stay buffered for the next read,
+        # instead of being decoded as if at EOF.
+        if not self.is_nibbler:
+            self.skipTest("decodes the partial character as if at EOF")
+        data = "a\xe9€b".encode()
+        raw = self.scripted_reader(data, [2, None, 2, None])
+        f = self.TextIOWrapper(self.BufferedReader(raw, 16), encoding="utf-8")
+        self.assertEqual(f.read(10), "a")
+        self.assertEqual(f.read(10), "\xe9")
+        self.assertEqual(f.read(10), "€b")
+        self.assertEqual(f.read(10), "")
+
     def test_read_eintr_is_retried(self):
         if not self.retries_raw_eintr:
             self.skipTest("buffered layer does not retry raw EINTR")

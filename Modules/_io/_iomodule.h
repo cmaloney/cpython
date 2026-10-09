@@ -97,7 +97,11 @@ typedef struct {
 
 /* The unread bytes, without taking them: at least `need` (reading more,
    after them, when fewer are unread) unless the raw stream reached EOF or
-   would block.  *m gets a new reference (obj is NULL when len is 0). */
+   would block.  *m gets a new reference (obj is NULL when len is 0).
+   Returns _PyIO_NIBBLER_BLOCKED, with what is unread in *m, when the raw
+   stream would block before there were `need`; fewer than `need` with 0
+   means EOF. */
+#define _PyIO_NIBBLER_BLOCKED 1
 extern int _PyIONibbler_peek(PyObject *buffered, Py_ssize_t need,
                              _PyIO_Morsel *m);
 /* Take the first n bytes of what _PyIONibbler_peek() gave in *m.  Returns

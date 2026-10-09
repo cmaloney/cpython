@@ -2161,12 +2161,11 @@ buffered_text_peek_locked(buffered *self, Py_ssize_t need, morsel *m)
         /* The unread bytes and more can't fit in a block. */
         r = _PyIO_NIBBLER_NO;
     }
-    else if (nibbler_unread(&self->nib) < need
-             && buffered_fill(self, 0) == -1)
-    {
-        r = -1;
+    else if (nibbler_unread(&self->nib) < need) {
+        Py_ssize_t n = buffered_fill(self, 0);
+        r = n == -1 ? -1 : n == -2 ? _PyIO_NIBBLER_BLOCKED : 0;
     }
-    else if (nibbler_unread(&self->nib) > 0) {
+    if (r >= 0 && nibbler_unread(&self->nib) > 0) {
         *m = self->nib.list.items[0];
         Py_INCREF(m->obj);
     }
