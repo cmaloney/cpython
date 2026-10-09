@@ -903,11 +903,13 @@ nibbler_fresh_block(nibbler *n)
     return n->block;
 }
 
-/* The rest of nibbler_append(), out of line so that it stays small. */
-Py_NO_INLINE static int
-nibbler_append_slow(nibbler *n, PyObject *obj, const char *data,
-                    Py_ssize_t len, int by_ref)
+/* Append data[0:len], owned by obj (or NULL), which must fit in capacity:
+   by reference when by_ref allows it, else copied into the block. */
+static int
+nibbler_append(nibbler *n, PyObject *obj, const char *data, Py_ssize_t len,
+               int by_ref)
 {
+    assert(n->list.nbytes + len <= n->capacity);
     if (len == 0) {
         return 0;
     }
@@ -936,31 +938,6 @@ nibbler_append_slow(nibbler *n, PyObject *obj, const char *data,
     char *dst = PyBytes_AS_STRING(n->block) + used;
     memcpy(dst, data, len);
     return morsels_push(&n->list, n->block, dst, len);
-}
-
-/* Append data[0:len], owned by obj (or NULL), which must fit in capacity:
-   by reference when by_ref allows it, else copied into the block.  Small
-   data that fits after the last morsel, when that is the copies in the
-   block, just extends it. */
-static inline int
-nibbler_append(nibbler *n, PyObject *obj, const char *data, Py_ssize_t len,
-               int by_ref)
-{
-    assert(n->list.nbytes + len <= n->capacity);
-    if (len < NIBBLER_REF_MIN && n->list.count > 0) {
-        morsel *last = &n->list.items[n->list.count - 1];
-        if (last->obj == n->block) {
-            Py_ssize_t used = (last->ptr + last->len
-                               - PyBytes_AS_STRING(n->block));
-            if (n->capacity - used >= len) {
-                memcpy(PyBytes_AS_STRING(n->block) + used, data, len);
-                last->len += len;
-                n->list.nbytes += len;
-                return 0;
-            }
-        }
-    }
-    return nibbler_append_slow(n, obj, data, len, by_ref);
 }
 
 /* Append a copy of data[0:len] in a bytes object of its own, past the
