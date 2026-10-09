@@ -965,7 +965,11 @@ enum {
 };
 
 /* The rest of buffered_enter(), with the lock held.  Kept out of line so
-   that buffered_enter() stays small enough to be inlined. */
+   that buffered_enter() stays small enough to be inlined: small writes go
+   lock-free, but writes under the lock still pay for a call otherwise
+   (a 600-byte bytearray write() took 1656 instead of 1626 instructions
+   in a GIL -O3 build; without this and the quick check for writes below,
+   1289 instead of 1245 in a PGO+LTO build). */
 Py_NO_INLINE static int
 buffered_enter_locked(buffered *self, const char *closed_msg, int direction)
 {
@@ -1010,7 +1014,9 @@ error:
    file (issue #31976); leftover read-ahead can still be used except by
    writes.  The common cases need only quick checks: reading from the
    read-ahead, and writing to an open FileIO without read-ahead to hand
-   back.  On success the caller must unlock. */
+   back (without it, a 600-byte bytearray write() took 1661 instead of
+   1626 instructions in a GIL -O3 build).  On success the caller must
+   unlock. */
 static inline int
 buffered_enter(buffered *self, const char *closed_msg, int direction)
 {
