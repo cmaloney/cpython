@@ -2784,6 +2784,7 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
             Py_DECREF(input_chunk);
             goto fail;
         }
+        Py_ssize_t nbytes = PyBytes_GET_SIZE(input_chunk);
 
         snapshot = Py_BuildValue("iN", cookie.dec_flags, input_chunk);
         if (snapshot == NULL) {
@@ -2798,6 +2799,15 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
             goto fail;
 
         textiowrapper_set_decoded_chars(self, decoded);
+        /* tell() estimates its position inside the snapshot with b2cratio,
+           so it must describe the chunk just fed, not the last one read. */
+        Py_ssize_t nchars = PyUnicode_GET_LENGTH(decoded);
+        if (nchars > 0) {
+            self->b2cratio = (double)nbytes / nchars;
+        }
+        else {
+            self->b2cratio = 0.0;
+        }
 
         /* Skip chars_to_skip of the decoded characters. */
         if (PyUnicode_GetLength(self->decoded_chars) < cookie.chars_to_skip) {

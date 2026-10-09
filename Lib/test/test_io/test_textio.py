@@ -704,6 +704,19 @@ class TextIOWrapperTest:
             remaining = f.read()
             self.assertEqual(remaining, "")
 
+    def test_tell_after_seek_with_chars_to_skip(self):
+        # seek() to a cookie with characters to skip feeds the decoder a
+        # new snapshot; tell() must not estimate positions inside it with
+        # the bytes-per-char ratio of the previously read chunk.
+        b = self.BufferedReader(self.BytesIO(b'\ra'), 2)
+        f = self.TextIOWrapper(b, encoding="utf-8")
+        f._CHUNK_SIZE = 2
+        self.assertEqual(f.read(1), "\n")
+        pos = f.tell()
+        self.assertEqual(f.read(), "a")
+        f.seek(pos)
+        self.assertEqual(f.read(1), "a")
+        self.assertEqual(f.tell(), 2)
 
     def test_seek_with_encoder_state(self):
         f = self.open(os_helper.TESTFN, "w", encoding="euc_jis_2004")
