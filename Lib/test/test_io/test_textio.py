@@ -715,6 +715,28 @@ class TextIOWrapperTest:
             self.assertEqual(f.tell(), 12)
             self.assertEqual(f.read(), "ne3\n")
 
+    def test_tell_after_next_and_flush(self):
+        # flush() while iterating doesn't make tell() use a snapshot that
+        # wasn't kept: it gives the position, or raises as it does while
+        # iterating if that isn't known.
+        with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.write("a\nbc\nd\n")
+        with self.open(os_helper.TESTFN, "r+", encoding="utf-8") as f:
+            self.assertEqual(next(f), "a\n")
+            f.flush()
+            if self.tells_while_iterating:
+                self.assertEqual(f.tell(), 2)
+            else:
+                self.assertRaisesRegex(OSError, "disabled by next",
+                                       f.tell)
+            self.assertEqual(next(f), "bc\n")
+            self.assertEqual(next(f), "d\n")
+            # All the text read was returned: the position is known.
+            f.flush()
+            self.assertEqual(f.tell(), 7)
+            f.seek(2)
+            self.assertEqual(f.readline(), "bc\n")
+
     def test_tell_while_iterating(self):
         if not self.tells_while_iterating:
             self.skipTest("next() disables tell()")

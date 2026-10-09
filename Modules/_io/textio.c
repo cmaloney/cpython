@@ -3951,6 +3951,8 @@ _io_TextIOWrapper_isatty_impl(textio *self)
     return buffer_callmethod_noargs(self, &_Py_ID(isatty));
 }
 
+static void textiowrapper_resume_telling(textio *self);
+
 /*[clinic input]
 @critical_section
 _io.TextIOWrapper.flush
@@ -3962,7 +3964,11 @@ _io_TextIOWrapper_flush_impl(textio *self)
 {
     CHECK_ATTACHED(self);
     CHECK_CLOSED(self);
-    self->telling = self->seekable;
+    if (!self->telling && self->seekable) {
+        /* Not just telling = seekable: the snapshot was not kept while
+           iterating. */
+        textiowrapper_resume_telling(self);
+    }
     /* The buffer's flush() can drop its read-ahead, which a snapshot kept
        without objects looks back at: make it a tuple first.  If that can't
        be done, tell() will raise as it would have anyway. */
@@ -4071,20 +4077,23 @@ _io_TextIOWrapper_close_impl(textio *self)
     }
 }
 
-/* next() raised BlockingIOError, which is no end of the iteration, so
-   tell() should work again, as at EOF.  Without a partial line kept for
-   the next call, all decoded text was returned, so the position is the
-   buffer's, less what the decoder holds: make that the snapshot.  (With
-   one, the snapshot of where it started was not taken while iterating, so
-   tell() stays disabled.)  Keeps the raised exception. */
+/* Let tell() work again after next() disabled it, if the position is
+   known: when all decoded text was returned, it is the buffer's, less what
+   the decoder holds, so make that the snapshot.  (Otherwise the snapshot
+   of where the text left starts was not taken while iterating, so tell()
+   stays disabled.)  Keeps the raised exception. */
 Py_NO_INLINE static void
-textiowrapper_tell_after_blocking(textio *self)
+textiowrapper_resume_telling(textio *self)
 {
-    if (self->decoder == NULL
-        || (self->decoded_chars != NULL
-            && self->decoded_chars_used
-               < PyUnicode_GET_LENGTH(self->decoded_chars)))
+    if (self->decoded_chars != NULL
+        && self->decoded_chars_used
+           < PyUnicode_GET_LENGTH(self->decoded_chars))
     {
+        return;
+    }
+    if (self->decoder == NULL) {
+        /* Not readable: no decoded text, the position is the buffer's. */
+        self->telling = 1;
         return;
     }
     PyObject *exc = PyErr_GetRaisedException();
@@ -4141,7 +4150,9 @@ textiowrapper_iternext_lock_held(PyObject *op)
         if (stop_telling && self->seekable
             && PyErr_ExceptionMatches(PyExc_BlockingIOError))
         {
-            textiowrapper_tell_after_blocking(self);
+            /* No end of the iteration, but tell() should work again, as
+               at EOF. */
+            textiowrapper_resume_telling(self);
         }
         return NULL;
     }
