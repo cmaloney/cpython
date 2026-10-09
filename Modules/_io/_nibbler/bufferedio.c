@@ -1884,15 +1884,9 @@ buffered_write_lockfree(buffered *self, const char *data, Py_ssize_t len)
     return 1;
 }
 
-/*[clinic input]
-_io.BufferedWriter.write
-    buffer: Py_buffer
-    /
-[clinic start generated code]*/
-
+/* write() with the data in buffer. */
 static PyObject *
-_io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
-/*[clinic end generated code: output=7f8d1365759bfc6b input=dd87dd85fc7f8850]*/
+buffered_write(buffered *self, Py_buffer *buffer)
 {
     if (buffer->len < NIBBLER_REF_MIN) {
         int r = buffered_write_lockfree(self, buffer->buf, buffer->len);
@@ -1920,6 +1914,32 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
             return r < 0 ? NULL : PyLong_FromSsize_t(buffer->len);
         }
     }
+}
+
+/*[clinic input]
+_io.BufferedWriter.write
+    buffer as obj: object
+    /
+[clinic start generated code]*/
+
+static PyObject *
+_io_BufferedWriter_write_impl(buffered *self, PyObject *obj)
+/*[clinic end generated code: output=4b5acd5810c0fa55 input=b4d277ddee118f17]*/
+{
+    if (PyBytes_CheckExact(obj)) {
+        /* Exact bytes need no buffer export: only obj, buf and len are
+           used. */
+        Py_buffer view = {.obj = obj, .buf = PyBytes_AS_STRING(obj),
+                          .len = PyBytes_GET_SIZE(obj)};
+        return buffered_write(self, &view);
+    }
+    Py_buffer view;
+    if (PyObject_GetBuffer(obj, &view, PyBUF_SIMPLE) < 0) {
+        return NULL;
+    }
+    PyObject *res = buffered_write(self, &view);
+    PyBuffer_Release(&view);
+    return res;
 }
 
 /*

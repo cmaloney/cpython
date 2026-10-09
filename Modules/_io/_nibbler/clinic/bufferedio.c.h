@@ -693,24 +693,14 @@ PyDoc_STRVAR(_io_BufferedWriter_write__doc__,
     {"write", (PyCFunction)_io_BufferedWriter_write, METH_O, _io_BufferedWriter_write__doc__},
 
 static PyObject *
-_io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer);
+_io_BufferedWriter_write_impl(buffered *self, PyObject *obj);
 
 static PyObject *
-_io_BufferedWriter_write(PyObject *self, PyObject *arg)
+_io_BufferedWriter_write(PyObject *self, PyObject *obj)
 {
     PyObject *return_value = NULL;
-    Py_buffer buffer = {NULL, NULL};
 
-    if (PyObject_GetBuffer(arg, &buffer, PyBUF_SIMPLE) != 0) {
-        goto exit;
-    }
-    return_value = _io_BufferedWriter_write_impl((buffered *)self, &buffer);
-
-exit:
-    /* Cleanup for buffer */
-    if (buffer.obj) {
-       PyBuffer_Release(&buffer);
-    }
+    return_value = _io_BufferedWriter_write_impl((buffered *)self, obj);
 
     return return_value;
 }
@@ -1111,4 +1101,4 @@ _io_BufferedRWPair_closed_get(PyObject *self, void *Py_UNUSED(context))
 
 #define _IO_BUFFEREDRWPAIR_CLOSED_GETSETDEF {"closed", (getter)_io_BufferedRWPair_closed_get, (setter)NULL, NULL},
 
-/*[clinic end generated code: output=38b7b90b9948e3ba input=a9049054013a1b77]*/
+/*[clinic end generated code: output=e8921046d663860c input=a9049054013a1b77]*/
