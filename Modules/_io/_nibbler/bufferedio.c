@@ -84,12 +84,12 @@ find_nibblermodule_state_by_def(PyTypeObject *type)
  * data straight to the raw stream, retrying partial writes, and keeps none
  * when the raw stream would block.  Reads go straight to the raw stream
  * too, retrying short reads as with a buffer but never asking for more
- * bytes than the caller wants: readline() reads a byte at a time, so it
- * reads nothing past the line, and read1() with no size makes one raw read
- * of up to DEFAULT_BUFFER_SIZE bytes.  peek() raises UnsupportedOperation,
- * as it can't look ahead without taking the bytes.  The only read-ahead is
- * data kept after a raw read raised (see buffered_unread()), which reads,
- * and peek(), return first.
+ * bytes than the caller wants: read1() with no size makes one raw read of
+ * up to DEFAULT_BUFFER_SIZE bytes.  peek() and readline() (so also
+ * iteration and readlines()) raise UnsupportedOperation, as they can't
+ * look ahead without taking the bytes.  The only read-ahead is data kept
+ * after a raw read raised (see buffered_unread()), which reads, and peek(),
+ * return first; readline() returns a line from it when all of it is there.
  */
 
 typedef struct {
@@ -847,8 +847,7 @@ buffered_readline(buffered *self, Py_ssize_t limit)
     PyBytesWriter *writer = NULL;
     for (;;) {
         if (buffered_readahead(self) == 0) {
-            /* Unbuffered, a byte at a time: nothing past the line. */
-            Py_ssize_t r = buffered_fill(self, 1);
+            Py_ssize_t r = buffered_fill(self, 0);
             if (r == -1) {
                 if (writer != NULL) {
                     buffered_unread(self, PyBytesWriter_GetData(writer),
@@ -1526,6 +1525,15 @@ _io__Buffered_readline_impl(buffered *self, Py_ssize_t size)
     if (buffered_enter(self, "readline of closed file",
                        size == 0 ? KEEP_DIRECTION : READING) < 0)
     {
+        return NULL;
+    }
+    if (self->nib.capacity == 0) {
+        /* Unbuffered: it can't find the end of the line without reading
+           past it. */
+        _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
+        PyErr_SetString(state->unsupported_operation,
+                        "readline() needs a buffer (buffer_size is 0)");
+        buffered_unlock(self);
         return NULL;
     }
     PyObject *res = buffered_readline(self, size);

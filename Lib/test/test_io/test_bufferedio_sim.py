@@ -682,23 +682,21 @@ class SlowDeviceTest:
         # Nothing read ahead: the device position matches the logical one.
         self.assertEqual(raw.pos, len(data))
 
-    def test_size_zero_readline_is_exact(self):
+    def test_size_zero_readline_unsupported(self):
         self.check_buffer_size_zero()
-        data = sample_data(3_000)
-        raw = self.scripted_reader(data, self.trickle_plan(14, 10_000, 7))
+        data = sample_data(100)
+        raw = self.scripted_reader(data)
         f = self.BufferedReader(raw, 0)
-        pos = 0
-        for i in range(100):
-            limit = (-1, 3, 50)[i % 3]
-            end = data.index(b"\n", pos) + 1
-            if limit >= 0:
-                end = min(end, pos + limit)
-            self.assertEqual(f.readline(limit), data[pos:end])
-            pos = end
-            # Nothing read past the line.
-            self.assertEqual(raw.pos, pos)
-        self.assertEqual(b"".join(f), data[pos:])
-        self.assertEqual(raw.pos, len(data))
+        # Finding the end of the line would mean reading past it.
+        self.assertRaises(self.UnsupportedOperation, f.readline)
+        self.assertRaises(self.UnsupportedOperation, f.readline, 10)
+        self.assertRaises(self.UnsupportedOperation, next, f)
+        with self.assertRaises(self.UnsupportedOperation):
+            for line in f:
+                pass
+        self.assertRaises(self.UnsupportedOperation, f.readlines)
+        self.assertEqual(raw.calls, 0)
+        self.assertEqual(f.read(), data)
 
     def test_size_zero_read1(self):
         self.check_buffer_size_zero()
@@ -755,8 +753,8 @@ class SlowDeviceTest:
         self.assertEqual(f.seek(5), 5)
         self.assertEqual(f.read(30), bytes(expected[5:35]))
         self.assertEqual(f.seek(-3, 1), 32)
-        end = expected.index(b"\n", 32) + 1
-        self.assertEqual(f.readline(), bytes(expected[32:end]))
+        self.assertRaises(self.UnsupportedOperation, f.readline)
+        self.assertEqual(f.read(10), bytes(expected[32:42]))
         self.assertEqual(f.tell(), raw.pos)
         self.assertEqual(f.seek(-5, 2), 495)
         self.assertEqual(f.write(b"YYYYYYY"), 7)
