@@ -1,13 +1,15 @@
 /*
  * A nibbler: data queued as morsels, and the threads using it.
  *
- * Data to write is a list of morsels: runs of bytes inside bytes objects,
- * which keep them alive.  Data appended is either kept by reference (large
- * exact bytes objects) or copied into `block`, a bytes object of `capacity`
- * bytes filled in order.  Data read is a window over the block a read filled,
- * which readers take bytes from without the lock (see "The read window"
- * below).  A block is only written into while nothing else references it,
- * so a bytes object never changes once it was handed out.
+ * Data is a list of morsels: runs of bytes inside bytes objects, which
+ * keep them alive.  Writing, they are the pending writes: data appended is
+ * either kept by reference (large exact bytes objects) or copied into
+ * `block`, a bytes object of `capacity` bytes filled in order.  Reading,
+ * they are the unread bytes a read filled into the block.  Readers take
+ * from the front, and small appends that fit after the copies in the block
+ * go at the back, without the lock (see "The open end" below).  A block is only written into
+ * while nothing else references it, so a bytes object never changes once it
+ * was handed out.
  *
  * Threads coordinate with two things, both taken over (not waited for) when
  * their holder is gone, see nibbler_lock_wait().  Threads waiting for either
@@ -24,7 +26,7 @@
  *
  * The owner (bufferedio.c) does the raw I/O and decides what the data
  * means.  Functions are called with the lock held unless their section or
- * their comment says otherwise (locking itself, and reading the window).
+ * their comment says otherwise (locking itself, and the open end).
  * Included only by bufferedio.c.
  */
 
@@ -55,13 +57,10 @@
    of being copied, when the owner asks for it. */
 #define NIBBLER_REF_MIN 512
 
-/* A run of bytes inside the bytes object obj, which keeps them alive.  obj
-   is NULL only for data borrowed for the duration of a call. */
-typedef struct {
-    PyObject *obj;
-    const char *ptr;
-    Py_ssize_t len;
-} morsel;
+/* A run of bytes inside the bytes object obj, which keeps them alive (see
+   _iomodule.h).  obj is NULL only for data borrowed for the duration of a
+   call. */
+typedef _PyIO_Morsel morsel;
 
 /* Morsels in order, with their total length. */
 typedef struct {
@@ -92,11 +91,8 @@ typedef struct {
     /* NULL until needed.  Also read without the lock (FT_ATOMIC relaxed),
        so stored atomically. */
     PyObject *block;
-    /* What the last read filled; NULL for none.  Also read without the
-       lock, see "The read window". */
-    struct nibbler_window *window;
-    /* The position in the window while the lock holder holds it. */
-    Py_ssize_t held;
+    /* NULL for none.  Also read without the lock, see "The open end". */
+    struct nibbler_end *end;
 } nibbler;
 
 /*
@@ -149,6 +145,17 @@ morsels_push(morsel_list *list, PyObject *obj, const char *ptr,
     return 0;
 }
 
+/* m->ptr[0:k] as a bytes object: m->obj itself, without a copy, when that
+   is all of it. */
+static inline PyObject *
+morsel_bytes(const morsel *m, Py_ssize_t k)
+{
+    if (m->ptr == PyBytes_AS_STRING(m->obj) && k == PyBytes_GET_SIZE(m->obj)) {
+        return Py_NewRef(m->obj);
+    }
+    return PyBytes_FromStringAndSize(m->ptr, k);
+}
+
 /* Drop n bytes from the front.  Returns how many there were (up to n). */
 static Py_ssize_t
 morsels_consume(morsel_list *list, Py_ssize_t n)
@@ -174,76 +181,209 @@ morsels_consume(morsel_list *list, Py_ssize_t n)
 }
 
 /*
- * The read window
+ * The open end
  *
- * A read fills a block and publishes a window over the bytes it read,
- * block[0:filled], which never change afterwards.  Readers take bytes by
- * advancing the window's cursor with a compare-and-swap, without the lock,
- * then copy them out (or take the whole block, without a copy).  Only reads
- * needing more than the window holds take the lock.
+ * Threads without the lock use the data through the open end: a run
+ * block[pos:limit] of one block that they move `pos` over with a
+ * compare-and-swap.  Reading, the end is the bytes the last read filled,
+ * block[0:limit] (they never change afterwards), and readers take bytes at
+ * `pos`, then copy them out (or take the whole block, without a copy).
+ * Writing, the end is the room after the morsels when the last one is
+ * copies in the block: appends reserve bytes at `pos`, copy their data
+ * there, then add its length to `done`.  Reservation order is append order,
+ * so each thread's appends stay in its order.  Only what the end can't do
+ * takes the lock.
  *
- * Whoever holds the lock also holds the window: taking the lock swaps the
- * cursor for NIBBLER_HELD and keeps it in `held` (so the lock holder uses
- * plain loads and stores, and its operations are atomic with respect to
- * lock-free readers, which see no bytes and wait for the lock); releasing
- * the lock puts the cursor back.  A window is closed (NIBBLER_CLOSED) before
- * the raw position moves, and freed, with its reference to the block, once
- * no lock-free reader can still be using them: delayed with QSBR on
- * free-threaded builds; on GIL builds no reader is between loading the
- * window and using it while another thread runs, so plain loads and stores
- * do (the FT_ATOMIC convention).
+ * Whoever holds the lock holds the end: taking the lock swaps `pos` for
+ * ~pos (negative, so everything without the lock fails and takes the
+ * lock).  Writing, it then waits until every append that reserved has
+ * committed and adds what was appended to the last morsel; reading, it
+ * drops what readers took from the front morsel.  So code holding the lock
+ * sees plain morsels.  Releasing the lock opens the end again: reading, at
+ * the front morsel (or `limit` when all was read); writing, after them if
+ * they still end in its block, with `limit` keeping everything appended
+ * within the capacity.  An end that is replaced or dropped stays held, so
+ * lock-free users that loaded it fail; it is freed, with its reference to
+ * the block, once none can still be using it: delayed with QSBR on
+ * free-threaded builds.
+ *
+ * Nothing that waits (or lets the thread be stopped, or detached) comes
+ * between reserving and committing, so a waiting holder only ever waits for
+ * a thread that is running its copy: fork and finalization stop threads
+ * only where they can detach.  With the GIL nobody is ever between loading
+ * the end and using it while another thread runs, so plain loads and
+ * stores do (the FT_ATOMIC convention).
+ *
+ * Writing, within one end `pos` (held or not) only grows, and `limit` only
+ * grows for a given `pos`; so an append that loaded an outdated limit
+ * before its compare-and-swap succeeded never goes past the current one.
+ * The block is never written over from its start while it has an end: that
+ * needs a fresh block, which drops the end.  Bytes past the morsels are
+ * never handed out, so appends there never change memory anyone else uses.
  */
 
-#define NIBBLER_CLOSED (-1)
-#define NIBBLER_HELD (-2)
-
-typedef struct nibbler_window {
+typedef struct nibbler_end {
     PyObject *block;
-    Py_ssize_t filled;
-    Py_ssize_t cursor;
-} nibbler_window;
+    Py_ssize_t pos;
+    Py_ssize_t limit;
+    /* Writing: bytes committed, up to pos. */
+    Py_ssize_t done;
+    int writing;
+} nibbler_end;
 
-/* The window if it is held, else NULL.  With the lock, a window is
-   always held; without (in dealloc), it isn't. */
-static inline nibbler_window *
-nibbler_held_window(nibbler *n)
+/* Without the lock: the end, if it goes in the direction given. */
+static inline nibbler_end *
+nibbler_end_get(nibbler *n, int writing)
 {
-    nibbler_window *w = n->window;
-    if (w != NULL && FT_ATOMIC_LOAD_SSIZE_RELAXED(w->cursor) == NIBBLER_HELD) {
-        return w;
-    }
-    return NULL;
+    nibbler_end *e = FT_ATOMIC_LOAD_PTR_ACQUIRE(n->end);
+    return e != NULL && e->writing == writing ? e : NULL;
 }
 
-/* With the lock just taken: hold the window.  It is held already when the
-   lock was taken over from a gone holder, at the position it left. */
+/* With the lock just taken: hold the end.  It is held already when it
+   wasn't opened again, or the lock was taken over from a gone holder. */
 static inline void
 nibbler_hold(nibbler *n)
 {
-    nibbler_window *w = n->window;
-    if (w != NULL) {
-        Py_ssize_t c = FT_ATOMIC_LOAD_SSIZE_RELAXED(w->cursor);
-        while (c >= 0
-               && !FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(w->cursor, &c,
-                                                    NIBBLER_HELD))
-        {
-            /* retry */
-        }
-        if (c >= 0) {
-            n->held = c;
-        }
-        assert(c >= 0 || c == NIBBLER_HELD);
+    nibbler_end *e = n->end;
+    if (e == NULL) {
+        return;
     }
+    Py_ssize_t p = FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
+    while (p >= 0 && !FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(e->pos, &p, ~p)) {
+        /* retry */
+    }
+    if (p < 0) {
+        return;
+    }
+    if (!e->writing) {
+        /* Readers took the bytes before p: drop them from the front. */
+        Py_ssize_t k = (n->list.count == 0 ? 0 : p - (
+            n->list.items[0].ptr - PyBytes_AS_STRING(e->block)));
+        if (k > 0) {
+            morsels_consume(&n->list, k);
+        }
+        return;
+    }
+#ifdef Py_GIL_DISABLED
+    while (_Py_atomic_load_ssize_acquire(&e->done) != p) {
+        _Py_yield();
+    }
+#else
+    assert(e->done == p);
+#endif
+    /* Appends wrote up to p: add those bytes to the last morsel. */
+    morsel *last = &n->list.items[n->list.count - 1];
+    Py_ssize_t end = last->ptr + last->len - PyBytes_AS_STRING(e->block);
+    assert(last->obj == e->block && p >= end);
+    last->len += p - end;
+    n->list.nbytes += p - end;
 }
 
-/* Before releasing the lock: let lock-free readers at the window again. */
+/* Before releasing the lock: open the end again (see above). */
 static inline void
 nibbler_open(nibbler *n)
 {
-    nibbler_window *w = nibbler_held_window(n);
-    if (w != NULL) {
-        FT_ATOMIC_STORE_SSIZE_RELEASE(w->cursor, n->held);
+    nibbler_end *e = n->end;
+    if (e == NULL) {
+        return;
     }
+    const char *base = PyBytes_AS_STRING(e->block);
+    Py_ssize_t p;
+    if (!e->writing) {
+        /* At the front morsel, the unread bytes. */
+        p = n->list.count > 0 ? n->list.items[0].ptr - base : e->limit;
+    }
+    else {
+        /* After the last morsel, if it is in the block. */
+        morsel *last = (n->list.count > 0
+                        ? &n->list.items[n->list.count - 1] : NULL);
+        if (last == NULL || last->obj != e->block) {
+            return;
+        }
+        p = last->ptr + last->len - base;
+        FT_ATOMIC_STORE_SSIZE_RELAXED(e->done, p);
+        FT_ATOMIC_STORE_SSIZE_RELAXED(
+            e->limit, p + Py_MIN(n->capacity - n->list.nbytes,
+                                 PyBytes_GET_SIZE(e->block) - p));
+    }
+    FT_ATOMIC_STORE_SSIZE_RELEASE(e->pos, p);
+}
+
+/* Drop the end (held, or without the lock in dealloc). */
+static void
+nibbler_drop_end(nibbler *n)
+{
+    nibbler_end *e = n->end;
+    if (e != NULL) {
+        FT_ATOMIC_STORE_PTR_RELEASE(n->end, NULL);
+        _PyObject_XDecRefDelayed(e->block);
+        _PyMem_FreeDelayed(e, sizeof(*e));
+    }
+}
+
+/* Publish a new end over block, held at pos until the lock is released,
+   replacing any. */
+static int
+nibbler_new_end(nibbler *n, PyObject *block, Py_ssize_t pos,
+                Py_ssize_t limit, int writing)
+{
+    nibbler_end *e = PyMem_Malloc(sizeof(*e));
+    if (e == NULL) {
+        return -1;
+    }
+    *e = (nibbler_end){Py_NewRef(block), ~pos, limit, pos, writing};
+    nibbler_drop_end(n);
+    FT_ATOMIC_STORE_PTR_RELEASE(n->end, e);
+    return 0;
+}
+
+/* Let appends go after the morsels without the lock from now on, if they
+   end in the block.  Without memory for it, they just don't. */
+static void
+nibbler_start_appending(nibbler *n)
+{
+    if (n->end != NULL || n->list.count == 0
+        || n->list.items[n->list.count - 1].obj != n->block)
+    {
+        return;
+    }
+    /* Opened, after the morsels, when the lock is released. */
+    (void)nibbler_new_end(n, n->block, 0, 0, 1);
+}
+
+/* No more appends without the lock (dropping a writing end). */
+static void
+nibbler_stop_appending(nibbler *n)
+{
+    if (n->end != NULL && n->end->writing) {
+        nibbler_drop_end(n);
+    }
+}
+
+/* Without the lock: reserve len bytes of the writing end e.  Returns their
+   offset in the block, or -1 when e is held or they don't fit.
+   nibbler_commit() must follow, with nothing that can wait in between. */
+static inline Py_ssize_t
+nibbler_reserve(nibbler_end *e, Py_ssize_t len)
+{
+    Py_ssize_t r = FT_ATOMIC_LOAD_SSIZE_ACQUIRE(e->pos);
+    for (;;) {
+        if (r < 0 || len > FT_ATOMIC_LOAD_SSIZE_RELAXED(e->limit) - r) {
+            return -1;
+        }
+        if (FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(e->pos, &r, r + len)) {
+            return r;
+        }
+    }
+}
+
+/* Copy data[0:len] to the bytes reserved at offset r. */
+static inline void
+nibbler_commit(nibbler_end *e, Py_ssize_t r, const char *data,
+               Py_ssize_t len)
+{
+    memcpy(PyBytes_AS_STRING(e->block) + r, data, len);
+    FT_ATOMIC_ADD_SSIZE(e->done, len);
 }
 
 /*
@@ -503,33 +643,25 @@ nibbler_written(nibbler *n, Py_ssize_t written)
 }
 
 /*
- * Reading the window (see above)
+ * Reading (see "The open end")
  */
 
-/* Without the lock: the window, or NULL. */
-static inline nibbler_window *
-nibbler_window_get(nibbler *n)
-{
-    return FT_ATOMIC_LOAD_PTR_ACQUIRE(n->window);
-}
-
-/* Without the lock: claim up to `want` bytes of w (with exact, exactly
-   `want` or none).  Returns how many, starting at *start, or -1 (nothing
-   claimed) when w is closed or held or, with exact, has fewer. */
+/* Without the lock: claim up to `want` bytes of the reading end e (with
+   exact, exactly `want` or none).  Returns how many, starting at *start, or
+   -1 (nothing claimed) when e is held or, with exact, has fewer. */
 static inline Py_ssize_t
-nibbler_claim(nibbler_window *w, Py_ssize_t want, int exact,
-              Py_ssize_t *start)
+nibbler_claim(nibbler_end *e, Py_ssize_t want, int exact, Py_ssize_t *start)
 {
-    Py_ssize_t c = FT_ATOMIC_LOAD_SSIZE_RELAXED(w->cursor);
+    Py_ssize_t c = FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
     for (;;) {
         if (c < 0) {
             return -1;
         }
-        Py_ssize_t k = Py_MIN(want, w->filled - c);
+        Py_ssize_t k = Py_MIN(want, e->limit - c);
         if (exact && k < want) {
             return -1;
         }
-        if (FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(w->cursor, &c, c + k)) {
+        if (FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(e->pos, &c, c + k)) {
             *start = c;
             return k;
         }
@@ -556,105 +688,107 @@ nibbler_line_length(const char *base, Py_ssize_t c, Py_ssize_t end,
     return -1;
 }
 
-/* Without the lock: claim the line at the cursor of w, like
+/* Without the lock: claim the line at the position of e, like
    nibbler_claim().  Returns its length, or -1 (nothing claimed) when it may
-   go on past w, or w is closed or held. */
+   go on past e, or e is held. */
 static inline Py_ssize_t
-nibbler_claim_line(nibbler_window *w, Py_ssize_t limit, Py_ssize_t *start)
+nibbler_claim_line(nibbler_end *e, Py_ssize_t limit, Py_ssize_t *start)
 {
-    const char *base = PyBytes_AS_STRING(w->block);
-    Py_ssize_t c = FT_ATOMIC_LOAD_SSIZE_RELAXED(w->cursor);
+    const char *base = PyBytes_AS_STRING(e->block);
+    Py_ssize_t c = FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
     for (;;) {
         if (c < 0) {
             return -1;
         }
-        Py_ssize_t k = nibbler_line_length(base, c, w->filled, limit);
+        Py_ssize_t k = nibbler_line_length(base, c, e->limit, limit);
         if (k < 0) {
             return -1;
         }
-        if (FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(w->cursor, &c, c + k)) {
+        if (FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(e->pos, &c, c + k)) {
             *start = c;
             return k;
         }
     }
 }
 
-/* w->block[start:start+k] as a bytes object: the block itself, without a
-   copy, when that is all of it. */
+/* e->block[start:start+k] as a bytes object, like morsel_bytes(). */
 static inline PyObject *
-nibbler_window_bytes(nibbler_window *w, Py_ssize_t start, Py_ssize_t k)
+nibbler_end_bytes(nibbler_end *e, Py_ssize_t start, Py_ssize_t k)
 {
-    if (start == 0 && k == PyBytes_GET_SIZE(w->block)) {
-        return Py_NewRef(w->block);
-    }
-    return PyBytes_FromStringAndSize(PyBytes_AS_STRING(w->block) + start, k);
+    morsel m = {e->block, PyBytes_AS_STRING(e->block) + start, k};
+    return morsel_bytes(&m, k);
 }
 
-/* Without the lock: the unread bytes of the window, without taking them
-   (for peek()); b"" when there are none or the window is held. */
+/* Without the lock: the unread bytes, without taking them (for peek());
+   b"" when there are none or the end is held. */
 static PyObject *
 nibbler_peek(nibbler *n)
 {
-    nibbler_window *w = nibbler_window_get(n);
-    Py_ssize_t c = w == NULL ? -1 : FT_ATOMIC_LOAD_SSIZE_RELAXED(w->cursor);
-    if (c < 0 || c == w->filled) {
+    nibbler_end *e = nibbler_end_get(n, 0);
+    Py_ssize_t c = e == NULL ? -1 : FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
+    if (c < 0 || c == e->limit) {
         return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     }
-    return nibbler_window_bytes(w, c, w->filled - c);
+    return nibbler_end_bytes(e, c, e->limit - c);
 }
 
-/* The functions below are called with the lock held. */
+/* The functions below are called with the lock held.  While reading, the
+   morsels are the unread bytes: one, at the end of the reading end's block
+   (held, see "The open end"), or none. */
 
-/* How many bytes of the window are unread. */
+/* The reading end, or NULL. */
+static inline nibbler_end *
+nibbler_reading(nibbler *n)
+{
+    nibbler_end *e = n->end;
+    return e != NULL && !e->writing ? e : NULL;
+}
+
+/* How many bytes are unread. */
 static inline Py_ssize_t
 nibbler_unread(nibbler *n)
 {
-    nibbler_window *w = nibbler_held_window(n);
-    return w != NULL ? w->filled - n->held : 0;
+    return nibbler_reading(n) != NULL ? n->list.nbytes : 0;
 }
 
-/* Take up to `want` bytes of the window as a bytes object, like
-   nibbler_window_bytes(); b"" when there is none. */
+/* Take up to `want` unread bytes as a bytes object, like morsel_bytes();
+   b"" when there is none. */
 static inline PyObject *
 nibbler_take_bytes(nibbler *n, Py_ssize_t want)
 {
-    nibbler_window *w = nibbler_held_window(n);
-    if (w == NULL) {
+    if (nibbler_unread(n) == 0) {
         return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     }
-    Py_ssize_t start = n->held;
-    Py_ssize_t k = Py_MIN(want, w->filled - start);
-    n->held += k;
-    return nibbler_window_bytes(w, start, k);
+    Py_ssize_t k = Py_MIN(want, n->list.items[0].len);
+    PyObject *res = morsel_bytes(&n->list.items[0], k);
+    morsels_consume(&n->list, k);
+    return res;
 }
 
-/* Take up to len bytes of the window, copying them to dst.  Returns how
-   many. */
+/* Take up to len unread bytes, copying them to dst.  Returns how many. */
 static inline Py_ssize_t
 nibbler_take_into(nibbler *n, char *dst, Py_ssize_t len)
 {
-    nibbler_window *w = nibbler_held_window(n);
-    if (w == NULL) {
+    if (nibbler_unread(n) == 0) {
         return 0;
     }
-    Py_ssize_t k = Py_MIN(len, w->filled - n->held);
-    memcpy(dst, PyBytes_AS_STRING(w->block) + n->held, k);
-    n->held += k;
+    Py_ssize_t k = Py_MIN(len, n->list.items[0].len);
+    memcpy(dst, n->list.items[0].ptr, k);
+    morsels_consume(&n->list, k);
     return k;
 }
 
-/* The length of the line at the position in the window, without taking
-   it, like nibbler_claim_line(): -1 when it may go on past the window, or
-   there is none. */
+/* The length of the unread line, without taking it, like
+   nibbler_claim_line(): -1 when it may go on past the unread bytes, or
+   there are none. */
 static inline Py_ssize_t
 nibbler_line(nibbler *n, Py_ssize_t limit)
 {
-    nibbler_window *w = nibbler_held_window(n);
-    if (w == NULL) {
+    if (nibbler_unread(n) == 0) {
         return -1;
     }
-    return nibbler_line_length(PyBytes_AS_STRING(w->block), n->held,
-                               w->filled, limit);
+    const morsel *head = &n->list.items[0];
+    return nibbler_line_length(head->ptr, 0, head->len, limit);
 }
 
 /* Like nibbler_peek(). */
@@ -665,65 +799,60 @@ nibbler_peek_held(nibbler *n)
     if (unread == 0) {
         return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     }
-    return nibbler_window_bytes(n->window, n->held, unread);
+    return morsel_bytes(&n->list.items[0], unread);
 }
 
-static void
-nibbler_retire(nibbler_window *w)
-{
-    _PyObject_XDecRefDelayed(w->block);
-    _PyMem_FreeDelayed(w, sizeof(*w));
-}
-
-/* Stop reads from the window and drop it.  Returns how many of its bytes
-   were unread. */
+/* Drop the unread bytes (and any writing end).  Returns how many there
+   were. */
 static Py_ssize_t
-nibbler_close_window(nibbler *n)
+nibbler_drop_unread(nibbler *n)
 {
-    nibbler_window *w = n->window;
-    if (w == NULL) {
-        return 0;
-    }
-    /* Not held only in dealloc, without the lock. */
     Py_ssize_t unread = nibbler_unread(n);
-    FT_ATOMIC_STORE_SSIZE_RELEASE(w->cursor, NIBBLER_CLOSED);
-    FT_ATOMIC_STORE_PTR_RELEASE(n->window, NULL);
-    nibbler_retire(w);
+    if (nibbler_reading(n) != NULL) {
+        morsels_clear(&n->list);
+    }
+    nibbler_drop_end(n);
     return unread;
 }
 
-/* Publish a window over block[0:filled], replacing any; it is held until
-   the lock is released. */
+/* Make block[0:filled] the unread bytes, replacing any. */
 static int
 nibbler_publish(nibbler *n, PyObject *block, Py_ssize_t filled)
 {
-    nibbler_window *w = PyMem_Malloc(sizeof(*w));
-    if (w == NULL) {
+    (void)nibbler_drop_unread(n);
+    if (morsels_push(&n->list, block, PyBytes_AS_STRING(block), filled) < 0
+        || nibbler_new_end(n, block, 0, filled, 0) < 0)
+    {
+        morsels_clear(&n->list);
         PyErr_NoMemory();
         return -1;
     }
-    w->block = Py_NewRef(block);
-    w->filled = filled;
-    w->cursor = NIBBLER_HELD;
-    (void)nibbler_close_window(n);
-    FT_ATOMIC_STORE_PTR_RELEASE(n->window, w);
-    n->held = 0;
     return 0;
 }
 
-/* Move the position in the window by `offset` bytes, forward over unread
-   bytes or back over read ones, if the result stays inside it.  Returns the
-   number of bytes unread before the move, or -1 (unchanged) when it would
-   leave the window, or there is none. */
+/* Move the position in the reading end by `offset` bytes, forward over
+   unread bytes or back over read ones, if the result stays inside it.
+   Returns the number of bytes unread before the move, or -1 (unchanged)
+   when it would leave the end, or there is none. */
 static Py_ssize_t
-nibbler_window_move(nibbler *n, Py_off_t offset)
+nibbler_move(nibbler *n, Py_off_t offset)
 {
-    nibbler_window *w = nibbler_held_window(n);
-    if (w == NULL || offset < -n->held || offset > w->filled - n->held) {
+    nibbler_end *e = nibbler_reading(n);
+    if (e == NULL) {
         return -1;
     }
-    Py_ssize_t unread = nibbler_unread(n);
-    n->held += (Py_ssize_t)offset;
+    Py_ssize_t unread = n->list.nbytes;
+    Py_ssize_t pos = e->limit - unread;
+    if (offset < -pos || offset > unread) {
+        return -1;
+    }
+    pos += (Py_ssize_t)offset;
+    morsels_clear(&n->list);
+    if (pos < e->limit) {
+        /* Never fails: nibbler_publish() made room for one morsel. */
+        (void)morsels_push(&n->list, e->block,
+                           PyBytes_AS_STRING(e->block) + pos, e->limit - pos);
+    }
     return unread;
 }
 
@@ -746,7 +875,7 @@ nibbler_set_block(nibbler *n, PyObject *block)
 static void
 nibbler_free(nibbler *n)
 {
-    (void)nibbler_close_window(n);
+    nibbler_drop_end(n);
     morsels_free(&n->list);
     nibbler_set_block(n, NULL);
 }
@@ -758,11 +887,12 @@ nibbler_nbytes(nibbler *n)
 }
 
 /* The block, when nothing but this nibbler references it (then all of it
-   can be overwritten); else a new one. */
+   can be overwritten); else a new one.  Either way, the end is dropped. */
 static PyObject *
 nibbler_fresh_block(nibbler *n)
 {
     assert(n->capacity > 0);
+    nibbler_drop_end(n);
     if (n->block == NULL || !_PyObject_IsUniquelyReferenced(n->block)) {
         PyObject *block = PyBytes_FromStringAndSize(NULL, n->capacity);
         if (block == NULL) {

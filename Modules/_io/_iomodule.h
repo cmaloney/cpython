@@ -80,6 +80,47 @@ extern int _PyFileIO_check_access(PyObject *self, int reading, int writing);
 /* Was the FileIO (or subclass) opened in append mode? */
 extern int _PyFileIO_appending(PyObject *self);
 
+/* Byte-level access to an exact _io._nibbler buffered object, for
+   TextIOWrapper: it decodes straight from the read-ahead and appends
+   encoded text without method calls (see "Bytes for TextIOWrapper" in
+   _nibbler/bufferedio.c).  Functions returning int return 0 on success,
+   -1 with an exception set, or _PyIO_NIBBLER_NO (nothing done) when the
+   object must be used through its methods instead. */
+#define _PyIO_NIBBLER_NO (-3)
+
+/* A run of bytes inside the bytes object obj, which keeps them alive. */
+typedef struct {
+    PyObject *obj;
+    const char *ptr;
+    Py_ssize_t len;
+} _PyIO_Morsel;
+
+/* The unread bytes, without taking them: at least `need` (reading more,
+   after them, when fewer are unread) unless the raw stream reached EOF or
+   would block.  *m gets a new reference (obj is NULL when len is 0). */
+extern int _PyIONibbler_peek(PyObject *buffered, Py_ssize_t need,
+                             _PyIO_Morsel *m);
+/* Take the first n bytes of what _PyIONibbler_peek() gave in *m.  Returns
+   1, or 0 (nothing taken) if they are no longer the unread bytes. */
+extern int _PyIONibbler_consume(PyObject *buffered, const _PyIO_Morsel *m,
+                                Py_ssize_t n);
+/* A copy of the n bytes read last (before the unread ones), or NULL
+   without an exception when they are no longer buffered. */
+extern PyObject *_PyIONibbler_lookback(PyObject *buffered, Py_ssize_t n);
+/* Like write(obj), for data[0:len] owned by obj.  buffered may be a
+   borrowed reference.  closed_checked: the caller just found its
+   raw FileIO open (so it need not be checked again). */
+extern int _PyIONibbler_write(PyObject *buffered, PyObject *obj,
+                              const char *data, Py_ssize_t len,
+                              int closed_checked);
+/* Without the lock, room for len bytes at the end of the buffer, if there
+   is: where to put them, and *end for _PyIONibbler_commit(end, len), which
+   must follow without running any Python code.  NULL: nothing reserved
+   (closed_checked as for _PyIONibbler_write()). */
+extern char *_PyIONibbler_reserve(PyObject *buffered, Py_ssize_t len,
+                                  int closed_checked, void **end);
+extern void _PyIONibbler_commit(void *end, Py_ssize_t len);
+
 /* Shortcut to the core of the IncrementalNewlineDecoder.decode method */
 extern PyObject *_PyIncrementalNewlineDecoder_decode(
     PyObject *self, PyObject *input, int final);

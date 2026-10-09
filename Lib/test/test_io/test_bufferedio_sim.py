@@ -528,6 +528,33 @@ class SlowDeviceTest:
         with self.assertRaisesRegex(ValueError, msg):
             f.write(b"y")
 
+    def test_write_after_raw_closed(self):
+        # Also once small writes went to the buffer without checks that
+        # need the lock.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        raw = self.FileIO(os_helper.TESTFN, "w")
+        f = self.BufferedWriter(raw, 16)
+        f.write(b"a")
+        f.write(b"b")
+        raw.close()
+        msg = "write to closed file" if self.is_C else "closed file"
+        with self.assertRaisesRegex(ValueError, msg):
+            f.write(b"c")
+
+    def test_write_after_other_raw_closed(self):
+        # Raw streams other than FileIO say whether they are closed when
+        # asked with the lock: from then on, writes queued without it raise
+        # too.
+        raw = self.MockRawIO()
+        f = self.BufferedWriter(raw, 16)
+        f.write(b"a")
+        f.write(b"b")
+        raw.close()
+        with self.assertRaises(ValueError):
+            f.flush()
+        with self.assertRaises(ValueError):
+            f.write(b"c")
+
     def test_closed_follows_raw(self):
         # close() keeps the raw stream, which says whether it is closed:
         # closing it directly closes the buffered object, and close() after
@@ -1298,6 +1325,36 @@ class WriteOutTest:
                                  b"a" * (20 if op == "write" else 10)
                                  + b"c" * 40)
 
+    def test_fileio_write_while_other_thread_in_raw_write(self):
+        # With a FileIO raw stream (where writes may be queued without the
+        # lock), writes that fit are queued while another thread's write out
+        # blocks on a full pipe, and written after it.
+        r, w = os.pipe()
+        self.addCleanup(os.close, r)
+        f = self.open(w, "wb", buffering=64)
+        self.addCleanup(f.close)
+        big = b"a" * (1 << 20)
+        t = threading.Thread(target=f.write, args=(big,))
+        t.start()
+        self.addCleanup(t.join)
+        received = bytearray(os.read(r, 1))
+        records = [b"rec%d\n" % i for i in range(8)]
+        writer = threading.Thread(target=lambda: [f.write(rec)
+                                                  for rec in records])
+        writer.start()
+        writer.join(support.SHORT_TIMEOUT)
+        self.assertFalse(writer.is_alive())
+        expected = big + b"".join(records)
+        def drain():
+            while chunk := os.read(r, 1 << 16):
+                received.extend(chunk)
+        reader = threading.Thread(target=drain)
+        reader.start()
+        t.join()
+        f.close()
+        reader.join()
+        self.assertEqual(bytes(received), expected)
+
     def test_raw_write_calling_flush(self):
         f, raw = self.gated()
         raw.on_write = f.flush
@@ -1608,8 +1665,11 @@ class LockReleaseTest:
 
     def check_shutdown(self, daemon_op, waiters=0):
         # A daemon thread blocks in a raw call holding the lock (others
-        # wait for it), so at shutdown it can never release it.  The main
-        # thread's write is flushed while finalizing.
+        # wait for it), so at shutdown it can never release it: flushing
+        # sys.stdout while finalizing takes it over.  (The main thread
+        # writes first: a text write now waits for the lock, so made at
+        # exit before finalizing it would wait forever, like a buffered
+        # write.)
         code = f"""
             import atexit, sys
             from threading import Thread
@@ -1625,12 +1685,13 @@ class LockReleaseTest:
                 f.buffer.flush()
 
             @atexit.register
-            def write_while_blocked():
+            def block_at_exit():
+                f.write('!')
+                f.flush()
                 Thread(target=holder, daemon=True).start()
                 entered.wait()
                 for _ in range({waiters}):
                     Thread(target=waiter, daemon=True).start()
-                f.write('!')
             """
         self.assertEqual(self.run_child(code), (0, b"!", ""))
 
@@ -1763,6 +1824,129 @@ class ConcurrentAccessTest:
             prefix = b"%02d:" % t
             mine = [line for line in lines if line.startswith(prefix)]
             self.assertEqual(mine, sorted(mine))
+
+    def test_text_write_waits_for_raw_read(self):
+        # A text write while another thread is in a raw read of the
+        # buffered object below may wait for it, then goes through.
+        import io
+        in_read = threading.Event()
+        release = threading.Event()
+
+        class Raw(io.RawIOBase):
+            out = b""
+            def readable(self):
+                return True
+            def writable(self):
+                return True
+            def seekable(self):
+                return True
+            def seek(self, pos, whence=0):
+                return 0
+            def readinto(self, b):
+                in_read.set()
+                release.wait(support.SHORT_TIMEOUT)
+                return 0
+            def write(self, b):
+                self.out += bytes(b)
+                return len(b)
+
+        raw = Raw()
+        f = self.BufferedRandom(raw)
+        t = io.TextIOWrapper(f, encoding="ascii")
+
+        def write():
+            t.write("text")
+            t.flush()
+
+        reader = threading.Thread(target=f.read, args=(1,))
+        writer = threading.Thread(target=write)
+        with threading_helper.start_threads([reader]):
+            self.assertTrue(in_read.wait(support.SHORT_TIMEOUT))
+            with threading_helper.start_threads([writer]):
+                writer.join(0.05)
+                release.set()
+        self.assertEqual(raw.out, b"text")
+
+    def test_small_writes_racing_other_calls(self):
+        # Small writes stay whole and in order per thread while other
+        # threads flush(), tell(), seek(), read() and close(); every write
+        # that returned is in the file, and none that raised.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        for mode in ("wb", "w+b"):
+            with self.subTest(mode=mode):
+                self.check_small_writes_racing(mode)
+
+    def check_small_writes_racing(self, mode):
+        f = self.open(os_helper.TESTFN, mode, buffering=256)
+        written = [[] for _ in range(self.nthreads)]
+        halfway = threading.Event()
+        closing = threading.Event()
+        errors = []
+        # (_pyio's raw calls can fail on the file descriptor being closed.)
+        closed_errors = ValueError if self.tells_are_atomic else (
+            ValueError, OSError)
+
+        def writer(tid):
+            for i in range(self.records_per_thread):
+                rec = b"%02d:%06d|" % (tid, i) + b"." * (i % 40) + b"\n"
+                try:
+                    f.write(rec)
+                except closed_errors:
+                    if not closing.is_set():
+                        raise
+                    return
+                written[tid].append(rec)
+                if tid == 0 and i == self.records_per_thread // 2:
+                    halfway.set()
+
+        def other(op):
+            last = 0
+            while not closing.is_set():
+                try:
+                    if op == "flush":
+                        f.flush()
+                    elif op == "tell":
+                        pos = f.tell()
+                        if pos < last and self.tells_are_atomic:
+                            errors.append((last, pos))
+                        last = pos
+                    elif op == "seek":
+                        f.seek(0, os.SEEK_END)
+                        f.seek(0, os.SEEK_CUR)
+                    elif op == "read":
+                        if f.read(1) != b"":
+                            errors.append("read past the end")
+                except closed_errors:
+                    if not closing.is_set():
+                        raise
+                    return
+
+        def closer():
+            halfway.wait(support.SHORT_TIMEOUT)
+            closing.set()
+            f.close()
+
+        ops = ["flush", "tell", "seek"] + (["read"] if "+" in mode else [])
+        threads = ([threading.Thread(target=writer, args=(t,))
+                    for t in range(self.nthreads)]
+                   + [threading.Thread(target=other, args=(op,))
+                      for op in ops]
+                   + [threading.Thread(target=closer)])
+        with threading_helper.start_threads(threads):
+            pass
+        self.assertEqual(errors, [])
+        with open(os_helper.TESTFN, "rb") as result:
+            lines = result.read().splitlines(keepends=True)
+        everything = [r for w in written for r in w]
+        if self.is_C:
+            self.assertEqual(sorted(lines), sorted(everything))
+        else:
+            # _pyio's close() can drop writes racing with it.
+            self.assertLessEqual(set(lines), set(everything))
+        for t in range(self.nthreads):
+            prefix = b"%02d:" % t
+            mine = [r for r in lines if r.startswith(prefix)]
+            self.assertEqual(mine, written[t] if self.is_C else sorted(mine))
 
     def check_concurrent_readers(self, read_record, buffering):
         # Each record is read whole, by one reader, even when it spans a

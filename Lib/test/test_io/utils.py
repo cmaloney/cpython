@@ -309,6 +309,9 @@ class CTestCase(unittest.TestCase):
     # Does each readline() and readinto() take whole lines or records when
     # threads read concurrently?  (_pyio's readline() and readinto() don't.)
     reads_are_atomic = True
+    # Is tell() atomic with respect to writes in other threads (so it never
+    # goes back while they append)?  (_io and _pyio's tell() don't lock.)
+    tells_are_atomic = is_nibbler
     # Does a method stay safe when code it calls (such as the __index__()
     # of its argument) closes the object?  (gh-143375)
     survives_reentrant_close = is_nibbler
@@ -352,6 +355,7 @@ class PyTestCase(unittest.TestCase):
     isolates_raw_views = False
     queues_writes_during_io = False
     reads_are_atomic = False
+    tells_are_atomic = False
     survives_reentrant_close = False
     keeps_reads_on_append = True
     tells_append_position = False

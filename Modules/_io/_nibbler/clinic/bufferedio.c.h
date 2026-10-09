@@ -702,37 +702,6 @@ exit:
     return return_value;
 }
 
-PyDoc_STRVAR(_io_BufferedWriter_write__doc__,
-"write($self, buffer, /)\n"
-"--\n"
-"\n");
-
-#define _IO_BUFFEREDWRITER_WRITE_METHODDEF    \
-    {"write", (PyCFunction)_io_BufferedWriter_write, METH_O, _io_BufferedWriter_write__doc__},
-
-static PyObject *
-_io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer);
-
-static PyObject *
-_io_BufferedWriter_write(PyObject *self, PyObject *arg)
-{
-    PyObject *return_value = NULL;
-    Py_buffer buffer = {NULL, NULL};
-
-    if (PyObject_GetBuffer(arg, &buffer, PyBUF_SIMPLE) != 0) {
-        goto exit;
-    }
-    return_value = _io_BufferedWriter_write_impl((buffered *)self, &buffer);
-
-exit:
-    /* Cleanup for buffer */
-    if (buffer.obj) {
-       PyBuffer_Release(&buffer);
-    }
-
-    return return_value;
-}
-
 PyDoc_STRVAR(_io_BufferedWriter_readall__doc__,
 "readall($self, /)\n"
 "--\n"
@@ -749,6 +718,27 @@ static PyObject *
 _io_BufferedWriter_readall(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
     return _io_BufferedWriter_readall_impl((buffered *)self);
+}
+
+PyDoc_STRVAR(_io_BufferedWriter_write__doc__,
+"write($self, buffer, /)\n"
+"--\n"
+"\n");
+
+#define _IO_BUFFEREDWRITER_WRITE_METHODDEF    \
+    {"write", (PyCFunction)_io_BufferedWriter_write, METH_O, _io_BufferedWriter_write__doc__},
+
+static PyObject *
+_io_BufferedWriter_write_impl(buffered *self, PyObject *obj);
+
+static PyObject *
+_io_BufferedWriter_write(PyObject *self, PyObject *obj)
+{
+    PyObject *return_value = NULL;
+
+    return_value = _io_BufferedWriter_write_impl((buffered *)self, obj);
+
+    return return_value;
 }
 
 PyDoc_STRVAR(_io_BufferedRandom___init____doc__,
@@ -1164,4 +1154,4 @@ _io_BufferedRWPair_closed_get(PyObject *self, void *Py_UNUSED(context))
 
 #define _IO_BUFFEREDRWPAIR_CLOSED_GETSETDEF {"closed", (getter)_io_BufferedRWPair_closed_get, (setter)NULL, NULL},
 
-/*[clinic end generated code: output=121b8de7dbc77e36 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=8f9e9eb55886dcbc input=a9049054013a1b77]*/

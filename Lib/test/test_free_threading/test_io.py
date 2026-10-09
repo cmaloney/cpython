@@ -383,6 +383,37 @@ class BufferedWriterTest(TestCase):
             with threading_helper.start_threads(threads):
                 go.set()
 
+    def test_small_writes_with_flush_and_tell(self):
+        # Small writes from many threads, racing flush() and tell(), each
+        # land whole and in their thread's order.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        nthreads, count = 6, 3000
+        stop = threading.Event()
+        with open(os_helper.TESTFN, "wb", buffering=512) as f:
+            def writer(tid):
+                for i in range(count):
+                    f.write(b"%d:%05d%s\n" % (tid, i, b"." * (i % 30)))
+
+            def other():
+                while not stop.is_set():
+                    f.flush()
+                    f.tell()
+
+            others = [threading.Thread(target=other) for _ in range(2)]
+            with threading_helper.start_threads(others):
+                try:
+                    run_concurrently([lambda t=t: writer(t)
+                                      for t in range(nthreads)])
+                finally:
+                    stop.set()
+        with open(os_helper.TESTFN, "rb") as f:
+            lines = f.read().splitlines()
+        self.assertEqual(len(lines), nthreads * count)
+        for t in range(nthreads):
+            mine = [line for line in lines if line.startswith(b"%d:" % t)]
+            self.assertEqual(mine, [b"%d:%05d%s" % (t, i, b"." * (i % 30))
+                                    for i in range(count)])
+
 
 class SetOpenImplTest(TestCase):
     def test_open_set_open_impl_race(self):
