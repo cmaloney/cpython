@@ -317,10 +317,10 @@ class CTestCase(unittest.TestCase):
     survives_reentrant_close = is_nibbler
     # Does writing to a raw stream in append mode keep data read before
     # the write as it is in the file?  (gh-64281)
-    keeps_reads_on_append = is_nibbler
+    keeps_reads_on_append = True
     # Does tell() count writes to a raw file in append mode at the end of
     # the file?  (gh-80592)
-    tells_append_position = is_nibbler
+    tells_append_position = True
     # Does write() called from code a raw write runs (as a signal handler
     # can) buffer data that doesn't fit instead of raising?  (gh-118143)
     buffers_reentrant_writes = is_nibbler
