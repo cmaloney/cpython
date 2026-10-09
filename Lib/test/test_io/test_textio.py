@@ -1262,6 +1262,23 @@ class TextIOWrapperTest:
             with self.open(filename, 'rb') as f:
                 self.assertEqual(f.read(), 'aaaxxx'.encode(charset))
 
+    def test_read_write_bom(self):
+        # Same test, but writing after reading to the end: the encoder
+        # isn't at the start of the stream any more.
+        filename = os_helper.TESTFN
+        for charset in ('utf-8-sig', 'utf-16', 'utf-32'):
+            with self.subTest(charset):
+                with self.open(filename, 'w', encoding=charset) as f:
+                    f.write('aaa')
+                with self.open(filename, 'r+', encoding=charset) as f:
+                    self.assertEqual(f.read(), 'aaa')
+                    f.write('xxx')
+                    f.seek(0)
+                    self.assertEqual(f.read(), 'aaaxxx')
+                    f.write('yyy')
+                with self.open(filename, 'rb') as f:
+                    self.assertEqual(f.read(), 'aaaxxxyyy'.encode(charset))
+
     def test_errors_property(self):
         with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
             self.assertEqual(f.errors, "strict")
