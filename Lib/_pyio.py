@@ -2812,14 +2812,12 @@ class TextIOWrapper(TextIOBase):
                 size = size_index()
 
         # Grab all the decoded text (we will rewind any extra bits later).
-        line_start = self._decoded_chars_used
         line = self._get_decoded_chars()
         # While the line spans chunks, the tell() snapshot of where it
         # started: if the stream would block before the line ends, the line
         # is kept for the next call, so the position must stay at its
         # start.
         line_snapshot = None
-        first_chunk = True
 
         start = 0
         # Make the decoder if it doesn't already exist.
@@ -2880,11 +2878,14 @@ class TextIOWrapper(TextIOBase):
                 break
 
             # No line ending seen yet - get more data'
-            if first_chunk and self._telling and self._snapshot is not None:
-                dec_flags, next_input = self._snapshot
-                line_snapshot = (self._decoded_chars, line_start, dec_flags,
-                                 [next_input])
-            first_chunk = False
+            if len(line) <= self._decoded_chars_used:
+                # The line started in the current chunk.
+                line_snapshot = None
+                if self._telling and self._snapshot is not None:
+                    dec_flags, next_input = self._snapshot
+                    line_snapshot = (self._decoded_chars,
+                                     self._decoded_chars_used - len(line),
+                                     dec_flags, [next_input])
             while True:
                 more = self._read_chunk()
                 if line_snapshot is not None:
@@ -2905,9 +2906,13 @@ class TextIOWrapper(TextIOBase):
                 raise BlockingIOError(
                     errno.EAGAIN, "read could not complete without blocking")
             else:
-                # end of file
+                # End of file, or would block with a partial line too long
+                # to keep, which is returned.  If it would block, keep the
+                # snapshot: the decoder may hold a partial character or a
+                # pending \r, which tell() must count as unread.
                 self._set_decoded_chars('')
-                self._snapshot = None
+                if more is not None:
+                    self._snapshot = None
                 return line
 
         if size >= 0 and endpos > size:

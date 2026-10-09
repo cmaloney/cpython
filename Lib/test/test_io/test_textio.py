@@ -960,6 +960,69 @@ class TextIOWrapperTest:
         self.assertRaises(BlockingIOError, t.readline)
         self.assertEqual(t.readline(), "x" * 63 + "y\n")
 
+    def test_tell_after_readline_would_block(self):
+        # A readline() that would block after a partial line keeps the
+        # decoder's held bytes (a partial character) or pending \r in the
+        # tell() position, so seek(tell()) then read() loses nothing.
+        class BlockOnce(self.RawIOBase):
+            def __init__(self, data, at):
+                self.data, self.at, self.pos = data, at, 0
+            def readable(self): return True
+            def seekable(self): return True
+            def tell(self): return self.pos
+            def seek(self, pos, whence=0):
+                self.pos = pos
+                return pos
+            def readinto(self, b):
+                if self.pos == self.at:
+                    self.at = None
+                    return None
+                end = len(self.data) if self.at is None else self.at
+                n = min(len(b), end - self.pos)
+                b[:n] = self.data[self.pos:self.pos + n]
+                self.pos += n
+                return n
+        cases = [
+            ("utf-8", None, "ab\u20accd", 3),
+            ("utf-16", None, "abcd", 5),
+            ("utf-16-le", None, "a\U0001f600b", 4),
+            ("utf-7", None, "a\u20ac\u20acb", 4),
+            ("utf-8", None, "ab\rcd", 3),
+            ("utf-8", "", "ab\rcd", 3),
+        ]
+        # A readline() that would block keeps the partial line and raises;
+        # one that has grown too long to keep (64 times the chunk size)
+        # returns it.
+        prefix = "x" * 70
+        for encoding, newline, text, at in cases:
+            for long in (False, True):
+                with self.subTest(encoding=encoding, newline=newline,
+                                  text=text, long=long):
+                    if long:
+                        at += (len((prefix + text).encode(encoding))
+                               - len(text.encode(encoding)))
+                        text = prefix + text
+                    data = text.encode(encoding)
+                    expected = self.TextIOWrapper(
+                        self.BytesIO(data), encoding=encoding,
+                        newline=newline).read()
+                    for seek in (False, True):
+                        raw = BlockOnce(data, at)
+                        t = self.TextIOWrapper(self.BufferedReader(raw),
+                                               encoding=encoding,
+                                               newline=newline)
+                        if long:
+                            t._CHUNK_SIZE = 1
+                            line = t.readline()
+                            self.assertNotEqual(line, expected)
+                        else:
+                            self.assertRaises(BlockingIOError, t.readline)
+                            line = ""
+                        pos = t.tell()
+                        if seek:
+                            t.seek(pos)
+                        self.assertEqual(line + t.read(), expected)
+
     def test_read_by_chunk(self):
         # make sure "\r\n" straddles 128 char boundary.
         txt = self.TextIOWrapper(self.BytesIO(b"A" * 127 + b"\r\nB"), encoding="utf-8")

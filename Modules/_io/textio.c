@@ -2985,9 +2985,14 @@ _textiowrapper_readline(textio *self, Py_ssize_t limit)
             {
                 goto error;
             }
-            /* end of file, or would block */
+            /* End of file, or would block with a partial line too long to
+               keep, which is returned.  If it would block, keep the
+               snapshot: the decoder may hold a partial character or a
+               pending \r, which tell() must count as unread. */
             textiowrapper_set_decoded_chars(self, NULL);
-            textiowrapper_clear_snapshot(self);
+            if (res != TEXTIO_BLOCKED) {
+                textiowrapper_clear_snapshot(self);
+            }
             start = endpos = offset_to_buffer = 0;
             break;
         }
