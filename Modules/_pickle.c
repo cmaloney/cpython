@@ -1447,6 +1447,12 @@ _Unpickler_ReadFromFile(PickleState *state, UnpicklerObject *self, Py_ssize_t n)
                 PyErr_Clear();
                 Py_CLEAR(self->peek);
             }
+            else if (data == Py_None) {
+                /* Nothing peeked (a non-blocking stream that would block):
+                   read() below deals with it.  peek() is kept, as it may
+                   return data next time. */
+                Py_DECREF(data);
+            }
             else {
                 read_size = _Unpickler_SetStringInput(self, data);
                 Py_DECREF(data);

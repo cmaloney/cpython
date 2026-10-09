@@ -110,6 +110,13 @@ class PeekUnsupportedIO(io.BytesIO):
         raise io.UnsupportedOperation("peek")
 
 
+class PeekNoneIO(io.BytesIO):
+    """A file-like object whose peek() returns None, like a buffered object
+    over a non-blocking stream that would block."""
+    def peek(self, *args):
+        return None
+
+
 class MinimalIO(object):
     """
     A file-like object that doesn't support readinto().
@@ -5308,6 +5315,9 @@ class AbstractPicklerUnpicklerObjectTests:
 
     def test_multiple_unpicklings_peek_unsupported(self):
         self._check_multiple_unpicklings(PeekUnsupportedIO)
+
+    def test_multiple_unpicklings_peek_none(self):
+        self._check_multiple_unpicklings(PeekNoneIO)
 
     def test_multiple_unpicklings_minimal(self):
         # File-like object that doesn't support peek() and readinto()
