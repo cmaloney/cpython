@@ -1853,9 +1853,10 @@ buffered_write_locked(buffered *self, Py_buffer *buffer, Py_ssize_t *done)
 {
     const char *data = buffer->buf;
     Py_ssize_t len = buffer->len;
-    /* Open.  Unbuffered, the loop writes out everything, then stops. */
+    /* Open: the loop below makes progress (unbuffered, until everything is
+       written). */
     assert(self->nib.capacity >= 0);
-    while ((len - *done >= self->nib.capacity && len - *done > 0)
+    while (len - *done >= self->nib.capacity
            || nibbler_nbytes(&self->nib) + (len - *done) > self->nib.capacity)
     {
         if (nibbler_io_busy(&self->nib)) {
@@ -1894,6 +1895,10 @@ buffered_write_locked(buffered *self, Py_buffer *buffer, Py_ssize_t *done)
                 return -1;
             }
             break;
+        }
+        if (*done == len && nibbler_nbytes(&self->nib) == 0) {
+            /* Everything was written (unbuffered, nothing ever fits). */
+            return 0;
         }
     }
     /* Buffer the rest of data. */
