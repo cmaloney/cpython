@@ -971,20 +971,40 @@ nibbler_fresh_block(nibbler *n)
     return n->block;
 }
 
-/* Append data[0:len], owned by obj (or NULL), at most a block (capacity):
-   by reference when by_ref allows it, else copied into the block. */
+/* Append a copy of data[0:len] in a bytes object of its own, past the
+   capacity if need be. */
+static int
+nibbler_append_copy(nibbler *n, const char *data, Py_ssize_t len)
+{
+    PyObject *obj = PyBytes_FromStringAndSize(data, len);
+    if (obj == NULL) {
+        return -1;
+    }
+    int r = morsels_push(&n->list, obj, PyBytes_AS_STRING(obj), len);
+    Py_DECREF(obj);
+    return r;
+}
+
+/* Append data[0:len], owned by obj (or NULL): by reference when by_ref
+   allows it or it is larger than a block (exact bytes only), else copied
+   into the block, or into a bytes object of its own when larger. */
 static int
 nibbler_append(nibbler *n, PyObject *obj, const char *data, Py_ssize_t len,
                int by_ref)
 {
-    assert(len <= n->capacity);
     if (len == 0) {
         return 0;
     }
-    if (by_ref && len >= NIBBLER_REF_MIN && obj != NULL
+    /* Data larger than a block (the owner may let pending writes pass the
+       block size) is never copied into one. */
+    int large = len > n->capacity;
+    if ((by_ref || large) && len >= NIBBLER_REF_MIN && obj != NULL
         && PyBytes_CheckExact(obj))
     {
         return morsels_push(&n->list, obj, data, len);
+    }
+    if (large) {
+        return nibbler_append_copy(n, data, len);
     }
 
     /* Copy into the block after the last morsel in it, or into a fresh
@@ -1006,20 +1026,6 @@ nibbler_append(nibbler *n, PyObject *obj, const char *data, Py_ssize_t len,
     char *dst = PyBytes_AS_STRING(n->block) + used;
     memcpy(dst, data, len);
     return morsels_push(&n->list, n->block, dst, len);
-}
-
-/* Append a copy of data[0:len] in a bytes object of its own, past the
-   capacity if need be. */
-static int
-nibbler_append_copy(nibbler *n, const char *data, Py_ssize_t len)
-{
-    PyObject *obj = PyBytes_FromStringAndSize(data, len);
-    if (obj == NULL) {
-        return -1;
-    }
-    int r = morsels_push(&n->list, obj, PyBytes_AS_STRING(obj), len);
-    Py_DECREF(obj);
-    return r;
 }
 
 #endif  // !Py_IO_NIBBLER_NIBBLER_H

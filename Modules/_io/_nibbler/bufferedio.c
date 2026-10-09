@@ -9,6 +9,7 @@
 */
 
 #include "Python.h"
+#include "pycore_abstract.h"            // _PyNumber_Index()
 #include "pycore_fileutils.h"           // _PyFile_Flush()
 #include "pycore_import.h"              // _PyImport_SetModuleString()
 #include "pycore_object.h"              // _PyObject_GC_UNTRACK()
@@ -100,6 +101,17 @@ find_nibblermodule_state_by_def(PyTypeObject *type)
  * look ahead without taking the bytes.  The only read-ahead is data kept
  * after a raw read raised (see buffered_unread()), which reads, and peek(),
  * return first; readline() returns a line from it when all of it is there.
+ *
+ * With buffer size None (BufferedWriter and BufferedRandom), writes are
+ * buffered without limit: the write-out threshold is PY_SSIZE_T_MAX, so
+ * write() only queues its data (large exact bytes by reference, the rest
+ * copied into blocks of DEFAULT_BUFFER_SIZE, or into a bytes object of its
+ * own when larger) and never writes out.  Pending writes reach the raw
+ * stream only through flush() and what has to write them out: close()
+ * (and dealloc), detach(), seek(), truncate(), reads of BufferedRandom and
+ * tell() in append mode.  Reads use blocks of DEFAULT_BUFFER_SIZE.  This
+ * is what a gather() block (see "Gathering") without a limit does, for all
+ * writes, and in the pending writes themselves.
  */
 
 typedef struct {
@@ -127,8 +139,9 @@ typedef struct {
     /* The buffered data and the lock.  Its capacity is the block size,
        which reads fill and small writes are copied into, and its threshold
        the number of pending bytes past which writes are written out; both
-       are the buffer size (0: unbuffered, see above; the capacity is also
-       read without the lock, by __sizeof__()).
+       are the buffer size (0: unbuffered; with buffer size None the
+       threshold is PY_SSIZE_T_MAX, see above; the capacity is also read
+       without the lock, by __sizeof__()).
        Whether the object is closed is up to raw: close() keeps it, so that
        name, mode and raw still work. */
     nibbler nib;
@@ -2677,10 +2690,11 @@ buffered_check_raw(_PyIO_State *state, PyObject *raw, int raw_fileio,
 }
 
 /* Shared constructor: check raw supports the needed operations, then set
-   the object up for it. */
+   the object up for it, with blocks of buffer_size bytes and pending
+   writes written out past threshold bytes. */
 static int
 buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
-              int readable, int writable)
+              Py_ssize_t threshold, int readable, int writable)
 {
     _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
     int raw_fileio = Py_IS_TYPE(raw, state->PyFileIO_Type);
@@ -2699,7 +2713,7 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
     nibbler_free(&self->nib);
     FT_ATOMIC_STORE_SSIZE_RELAXED(self->nib.capacity,
                                   err == 0 ? buffer_size : 0);
-    self->nib.threshold = err == 0 ? buffer_size : 0;
+    self->nib.threshold = err == 0 ? threshold : 0;
     if (err == 0) {
         self->raw_fileio = (uint8_t)raw_fileio;
         /* Use _writev() only where it can't bypass an overridden write():
@@ -2738,7 +2752,33 @@ _io_BufferedReader___init___impl(buffered *self, PyObject *raw,
                                  Py_ssize_t buffer_size)
 /*[clinic end generated code: output=cddcfefa0ed294c4 input=fb887e06f11b4e48]*/
 {
-    return buffered_init(self, raw, buffer_size, 1, 0);
+    return buffered_init(self, raw, buffer_size, buffer_size, 1, 0);
+}
+
+/* The constructor of BufferedWriter and BufferedRandom: buffer_size is an
+   int (or NULL for the default) or None to buffer writes without limit. */
+static int
+buffered_init_writer(buffered *self, PyObject *raw, PyObject *buffer_size,
+                     int readable)
+{
+    Py_ssize_t size = DEFAULT_BUFFER_SIZE;
+    Py_ssize_t threshold = PY_SSIZE_T_MAX;
+    if (buffer_size != Py_None) {
+        if (buffer_size != NULL) {
+            /* As the Py_ssize_t converter of Argument Clinic does. */
+            PyObject *index = _PyNumber_Index(buffer_size);
+            if (index == NULL) {
+                return -1;
+            }
+            size = PyLong_AsSsize_t(index);
+            Py_DECREF(index);
+            if (size == -1 && PyErr_Occurred()) {
+                return -1;
+            }
+        }
+        threshold = size;
+    }
+    return buffered_init(self, raw, size, threshold, readable, 1);
 }
 
 /*
@@ -2748,21 +2788,23 @@ _io_BufferedReader___init___impl(buffered *self, PyObject *raw,
 /*[clinic input]
 _io.BufferedWriter.__init__
     raw: object
-    buffer_size: Py_ssize_t(c_default="DEFAULT_BUFFER_SIZE") = DEFAULT_BUFFER_SIZE
+    buffer_size: object(c_default="NULL") = DEFAULT_BUFFER_SIZE
 
 A buffer for a writeable sequential RawIO object.
 
 The constructor creates a BufferedWriter for the given writeable raw
 stream. If the buffer_size is not given, it defaults to
-DEFAULT_BUFFER_SIZE.
+DEFAULT_BUFFER_SIZE.  With buffer_size None, writes are buffered
+without limit: they reach the raw stream only through flush(), and
+operations that need it, such as close(), seek() and detach().
 [clinic start generated code]*/
 
 static int
 _io_BufferedWriter___init___impl(buffered *self, PyObject *raw,
-                                 Py_ssize_t buffer_size)
-/*[clinic end generated code: output=c8942a020c0dee64 input=914be9b95e16007b]*/
+                                 PyObject *buffer_size)
+/*[clinic end generated code: output=8d9fb8a003624cb5 input=8c1ff83965bd109e]*/
 {
-    return buffered_init(self, raw, buffer_size, 0, 1);
+    return buffered_init_writer(self, raw, buffer_size, 0);
 }
 
 /* buffered_write_locked() returns this when another thread is writing out
@@ -3245,21 +3287,24 @@ _PyIONibbler_commit(void *end, Py_ssize_t len)
 /*[clinic input]
 _io.BufferedRandom.__init__
     raw: object
-    buffer_size: Py_ssize_t(c_default="DEFAULT_BUFFER_SIZE") = DEFAULT_BUFFER_SIZE
+    buffer_size: object(c_default="NULL") = DEFAULT_BUFFER_SIZE
 
 A buffered interface to random access streams.
 
 The constructor creates a reader and writer for a seekable stream,
 raw, given in the first argument. If the buffer_size is omitted it
-defaults to DEFAULT_BUFFER_SIZE.
+defaults to DEFAULT_BUFFER_SIZE.  With buffer_size None, writes are
+buffered without limit: they reach the raw stream only through flush(),
+and operations that need it, such as close(), seek(), reads and
+detach(); reads still fill blocks of DEFAULT_BUFFER_SIZE.
 [clinic start generated code]*/
 
 static int
 _io_BufferedRandom___init___impl(buffered *self, PyObject *raw,
-                                 Py_ssize_t buffer_size)
-/*[clinic end generated code: output=d3d64eb0f64e64a3 input=a4e818fb86d0e50c]*/
+                                 PyObject *buffer_size)
+/*[clinic end generated code: output=294b8035a5222c1c input=df212a8fc78925b5]*/
 {
-    return buffered_init(self, raw, buffer_size, 1, 1);
+    return buffered_init_writer(self, raw, buffer_size, 1);
 }
 
 /*
