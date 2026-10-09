@@ -1373,6 +1373,33 @@ _Unpickler_ReadIntoFromFile(PickleState *state, UnpicklerObject *self, char *buf
     return n;
 }
 
+/* After peek() raised: is it a sign that peek() isn't supported?  That is
+   NotImplementedError, or io.UnsupportedOperation (as raised by a buffered
+   object that can't look ahead).  Returns 1 or 0 with the exception kept,
+   or -1 on another error. */
+static int
+_Unpickler_PeekUnsupported(void)
+{
+    if (PyErr_ExceptionMatches(PyExc_NotImplementedError)) {
+        return 1;
+    }
+    /* io.UnsupportedOperation is an OSError: only then look it up. */
+    if (!PyErr_ExceptionMatches(PyExc_OSError)) {
+        return 0;
+    }
+    PyObject *exc = PyErr_GetRaisedException();
+    PyObject *cls = PyImport_ImportModuleAttrString("io",
+                                                    "UnsupportedOperation");
+    if (cls == NULL) {
+        _PyErr_ChainExceptions1(exc);
+        return -1;
+    }
+    int res = PyErr_GivenExceptionMatches(exc, cls);
+    Py_DECREF(cls);
+    PyErr_SetRaisedException(exc);
+    return res;
+}
+
 /* If reading from a file, we need to only pull the bytes we need, since there
    may be multiple pickle objects arranged contiguously in the same input
    buffer.
@@ -1413,7 +1440,8 @@ _Unpickler_ReadFromFile(PickleState *state, UnpicklerObject *self, Py_ssize_t n)
                 return -1;
             data = _Pickle_FastCall(self->peek, len);
             if (data == NULL) {
-                if (!PyErr_ExceptionMatches(PyExc_NotImplementedError))
+                int unsupported = _Unpickler_PeekUnsupported();
+                if (unsupported <= 0)
                     return -1;
                 /* peek() is probably not supported by the given file object */
                 PyErr_Clear();
