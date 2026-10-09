@@ -528,6 +528,40 @@ class SlowDeviceTest:
         with self.assertRaisesRegex(ValueError, msg):
             f.write(b"y")
 
+    def test_closed_follows_raw(self):
+        # close() keeps the raw stream, which says whether it is closed:
+        # closing it directly closes the buffered object, and close() after
+        # that or twice is a no-op.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        for unbuffered in (False, True):
+            if unbuffered and not self.supports_buffer_size_zero:
+                continue
+            size = 0 if unbuffered else 16
+            with self.subTest(buffer_size=size):
+                raw = self.FileIO(os_helper.TESTFN, "w+b")
+                f = self.BufferedRandom(raw, size)
+                f.write(b"abc")
+                f.close()
+                self.assertTrue(f.closed)
+                self.assertIs(f.raw, raw)
+                self.assertEqual(f.name, os_helper.TESTFN)
+                self.assertEqual(f.mode, "wb+")
+                f.close()
+                with self.assertRaises(ValueError):
+                    f.write(b"x")
+                with self.assertRaises(ValueError):
+                    f.read(1)
+
+                raw = self.FileIO(os_helper.TESTFN, "r+b")
+                f = self.BufferedRandom(raw, size)
+                self.assertEqual(f.read(1), b"a")
+                raw.close()
+                self.assertTrue(f.closed)
+                with self.assertRaises(ValueError):
+                    f.write(b"x")
+                f.close()
+                self.assertTrue(f.closed)
+
     def test_fileio_subclass_write_is_used(self):
         # Vectored writes must not bypass a write() override.
         written = []

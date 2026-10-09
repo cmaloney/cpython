@@ -111,16 +111,14 @@ typedef struct {
     uint8_t raw_appending;
 
     /* The buffered data and the lock.  Its capacity is the buffer size (0:
-       unbuffered, see above), BUFFERED_CLOSED once closed, or 0 without a
-       raw stream (also read without the lock, by __sizeof__()). */
+       unbuffered, see above; also read without the lock, by __sizeof__()).
+       Whether the object is closed is up to raw: close() keeps it, so that
+       name, mode and raw still work. */
     nibbler nib;
 
     PyObject *dict;
     PyObject *weakreflist;
 } buffered;
-
-/* The capacity once closed. */
-#define BUFFERED_CLOSED (-1)
 
 static inline buffered *
 buffered_cast(PyObject *op)
@@ -247,13 +245,11 @@ buffered_readahead(buffered *self)
     return nibbler_unread(&self->nib);
 }
 
-/* Returns 1 if closed, 0 if open, -1 on error. */
+/* Is raw (which must be set) closed?  Returns 1 if closed, 0 if open, -1
+   on error. */
 static int
 buffered_is_closed(buffered *self)
 {
-    if (self->nib.capacity == BUFFERED_CLOSED) {
-        return 1;
-    }
     if (self->raw_fileio) {
         return _PyFileIO_closed(self->raw);
     }
@@ -970,7 +966,7 @@ buffered_enter(buffered *self, const char *closed_msg, int direction)
     }
     if (direction == WRITING && self->raw_fileio
         && buffered_window(self) == NULL && buffered_raw_usable(self->raw)
-        && self->nib.capacity >= 0 && !_PyFileIO_closed(self->raw))
+        && !_PyFileIO_closed(self->raw))
     {
         return 0;
     }
@@ -1024,9 +1020,10 @@ _io__Buffered___sizeof___impl(buffered *self)
 /*[clinic end generated code: output=0231ef7f5053134e input=753c782d808d34df]*/
 {
     size_t res = _PyObject_SIZE(Py_TYPE(self));
-    Py_ssize_t capacity = FT_ATOMIC_LOAD_SSIZE_RELAXED(self->nib.capacity);
-    if (capacity > 0) {
-        res += (size_t)capacity;
+    /* The buffer counts while it is allocated: it is allocated when first
+       needed, and freed by close() and detach(). */
+    if (FT_ATOMIC_LOAD_PTR_RELAXED(self->nib.block) != NULL) {
+        res += (size_t)FT_ATOMIC_LOAD_SSIZE_RELAXED(self->nib.capacity);
     }
     return PyLong_FromSize_t(res);
 }
@@ -1216,12 +1213,9 @@ _io__Buffered_close_impl(buffered *self)
     res = self->raw_fileio ? _PyFileIO_close(self->raw)
                            : PyObject_CallMethodNoArgs(self->raw,
                                                        &_Py_ID(close));
+    /* Whether raw.close() succeeded or not, raw now says whether the
+       object is closed. */
     nibbler_free(&self->nib);
-    if (res != NULL) {
-        /* Closed.  If raw.close() failed, the raw stream says whether it
-           is closed, as it does for the closed attribute. */
-        FT_ATOMIC_STORE_SSIZE_RELAXED(self->nib.capacity, BUFFERED_CLOSED);
-    }
 
     if (exc != NULL) {
         _PyErr_ChainExceptions1(exc);
@@ -1256,7 +1250,6 @@ _io__Buffered_detach_impl(buffered *self)
     }
     PyObject *raw = buffered_swap_raw(self, NULL);
     nibbler_free(&self->nib);
-    FT_ATOMIC_STORE_SSIZE_RELAXED(self->nib.capacity, 0);
     buffered_unlock(self);
     return raw;
 }
@@ -1861,8 +1854,8 @@ buffered_write_locked(buffered *self, Py_buffer *buffer, Py_ssize_t *done)
 {
     const char *data = buffer->buf;
     Py_ssize_t len = buffer->len;
-    /* Open: the loop below makes progress (unbuffered, until everything is
-       written). */
+    /* The loop below makes progress; unbuffered, it stops once everything
+       is written. */
     assert(self->nib.capacity >= 0);
     while (len - *done >= self->nib.capacity
            || nibbler_nbytes(&self->nib) + (len - *done) > self->nib.capacity)

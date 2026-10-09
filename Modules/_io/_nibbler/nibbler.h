@@ -89,7 +89,8 @@ typedef struct {
     /* Also read without the lock (FT_ATOMIC relaxed). */
     Py_ssize_t capacity;
     morsel_list list;
-    /* NULL until needed. */
+    /* NULL until needed.  Also read without the lock (FT_ATOMIC relaxed),
+       so stored atomically. */
     PyObject *block;
     /* What the last read filled; NULL for none.  Also read without the
        lock, see "The read window". */
@@ -736,7 +737,9 @@ nibbler_free(nibbler *n)
 {
     (void)nibbler_close_window(n);
     morsels_free(&n->list);
-    Py_CLEAR(n->block);
+    PyObject *block = n->block;
+    FT_ATOMIC_STORE_PTR_RELAXED(n->block, NULL);
+    Py_XDECREF(block);
 }
 
 static inline Py_ssize_t
@@ -756,7 +759,9 @@ nibbler_fresh_block(nibbler *n)
         if (block == NULL) {
             return NULL;
         }
-        Py_XSETREF(n->block, block);
+        PyObject *old = n->block;
+        FT_ATOMIC_STORE_PTR_RELAXED(n->block, block);
+        Py_XDECREF(old);
     }
     return n->block;
 }

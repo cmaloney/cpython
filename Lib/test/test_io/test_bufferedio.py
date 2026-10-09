@@ -210,22 +210,29 @@ class CommonBufferedTests:
 
 class SizeofTest:
 
+    def make_used(self, buffer_size):
+        # A buffered object that used its buffer once (some implementations
+        # only allocate it when first needed).
+        bufio = self.tp(self.MockRawIO(), buffer_size=buffer_size)
+        if bufio.readable():
+            bufio.read(1)
+        else:
+            bufio.write(b"x")
+        return bufio
+
     @support.cpython_only
     def test_sizeof(self):
         bufsize1 = 4096
         bufsize2 = 8192
-        rawio = self.MockRawIO()
-        bufio = self.tp(rawio, buffer_size=bufsize1)
+        bufio = self.make_used(bufsize1)
         size = sys.getsizeof(bufio) - bufsize1
-        rawio = self.MockRawIO()
-        bufio = self.tp(rawio, buffer_size=bufsize2)
+        bufio = self.make_used(bufsize2)
         self.assertEqual(sys.getsizeof(bufio), size + bufsize2)
 
     @support.cpython_only
     def test_buffer_freeing(self) :
         bufsize = 4096
-        rawio = self.MockRawIO()
-        bufio = self.tp(rawio, buffer_size=bufsize)
+        bufio = self.make_used(bufsize)
         size = sys.getsizeof(bufio) - bufsize
         bufio.close()
         self.assertEqual(sys.getsizeof(bufio), size)
@@ -235,9 +242,9 @@ class SizeofTest:
         if not self.supports_buffer_size_zero:
             self.skipTest("buffer_size=0 not supported")
         bufsize = 4096
-        bufio = self.tp(self.MockRawIO(), buffer_size=bufsize)
+        bufio = self.make_used(bufsize)
         size = sys.getsizeof(bufio) - bufsize
-        bufio = self.tp(self.MockRawIO(), buffer_size=0)
+        bufio = self.make_used(0)
         self.assertEqual(sys.getsizeof(bufio), size)
         bufio.close()
         self.assertEqual(sys.getsizeof(bufio), size)
