@@ -573,6 +573,55 @@ done:
     return res;
 }
 
+/* Unbuffered write() to a FileIO with nothing pending: write data[0:len]
+   straight to the raw stream, retrying partial writes, with the I/O role
+   and without the lock, like buffered_write_out() but without its pending
+   writes.  Signal handlers run only before retrying (and in the raw call
+   on EINTR); writes they make are left pending.  Returns how much was
+   written (all of it unless the raw stream would block, with *blocked
+   set), or -1 on error. */
+static Py_ssize_t
+buffered_write_direct(buffered *self, const char *data, Py_ssize_t len,
+                      int *blocked)
+{
+    assert(self->raw_fileio && !buffered_writing(self));
+    Py_ssize_t done = 0;
+    *blocked = 0;
+    nibbler_begin_io(&self->nib);
+    buffered_unlock_for_raw(self, 1);
+    for (;;) {
+        _PyIO_Span span = {data + done, len - done};
+        Py_ssize_t n = _PyFileIO_writev(self->raw, &span, 1);
+        if (n < 0) {
+            if (n == -2) {
+                *blocked = 1;
+                break;
+            }
+            done = -1;
+            break;
+        }
+        done += n;
+        /* A partial write may have been interrupted by a signal (see
+           write(2)): run signal handlers before blocking again. */
+        if (done == len) {
+            break;
+        }
+        if (PyErr_CheckSignals() < 0) {
+            done = -1;
+            break;
+        }
+    }
+    if (done == len) {
+        nibbler_relock(&self->nib, (PyObject *)self);
+    }
+    else {
+        /* Keep errno for the BlockingIOError, and the exception. */
+        buffered_relock_after_raw(self, 1);
+    }
+    nibbler_end_io(&self->nib);
+    return done;
+}
+
 /* Write out everything pending (with unlocked, what was pending at the
    start); BlockingIOError if the raw stream would block, keeping what is
    unwritten. */
@@ -1876,6 +1925,26 @@ buffered_write_locked(buffered *self, Py_buffer *buffer, Py_ssize_t *done)
     /* The loop below makes progress; unbuffered, it stops once everything
        is written. */
     assert(self->nib.capacity >= 0);
+    if (self->nib.capacity == 0 && self->raw_fileio && len > *done
+        && !buffered_writing(self))
+    {
+        /* Unbuffered: one raw write, without queueing.  Writes made
+           meanwhile by signal handlers are written out below. */
+        int blocked;
+        Py_ssize_t n = buffered_write_direct(self, data + *done,
+                                             len - *done, &blocked);
+        if (n < 0) {
+            return -1;
+        }
+        *done += n;
+        if (blocked) {
+            buffered_set_blocking_error(*done);
+            return -1;
+        }
+        if (nibbler_nbytes(&self->nib) == 0) {
+            return 0;
+        }
+    }
     while (len - *done >= self->nib.capacity
            || nibbler_nbytes(&self->nib) + (len - *done) > self->nib.capacity)
     {

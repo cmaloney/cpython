@@ -1468,6 +1468,37 @@ class UnbufferedImplTest(unittest.TestCase):
             with open(os_helper.TESTFN, "rb") as g:
                 self.assertEqual(g.read(), b"new")
 
+    @unittest.skipUnless(hasattr(os, "pipe") and hasattr(os, "set_blocking"),
+                         "requires os.pipe() and os.set_blocking()")
+    def test_nonblocking_write(self):
+        # Each write() goes straight to the raw stream: what doesn't fit in
+        # the pipe is reported, not kept.
+        r, w = os.pipe()
+        self.addCleanup(os.close, r)
+        os.set_blocking(w, False)
+        with io.open(w, "wb", buffering=0) as f:
+            self.assertEqual(f.write(b"abc"), 3)
+            self.assertEqual(os.read(r, 10), b"abc")
+            data = b"x" * (1 << 20)
+            with self.assertRaises(BlockingIOError) as cm:
+                f.write(data)
+            written = cm.exception.characters_written
+            self.assertGreater(written, 0)
+            self.assertLess(written, len(data))
+            got = 0
+            while chunk := os.read(r, 1 << 16):
+                got += len(chunk)
+                if got >= written:
+                    break
+            self.assertEqual(got, written)
+            # Nothing was kept for later.
+            f.flush()
+            os.set_blocking(r, False)
+            self.assertRaises(BlockingIOError, os.read, r, 1)
+            os.set_blocking(r, True)
+            self.assertEqual(f.write(b"end"), 3)
+            self.assertEqual(os.read(r, 10), b"end")
+
     def test_text_mode_raises(self):
         for mode in ("r", "w", "r+", "a"):
             with self.subTest(mode=mode):
