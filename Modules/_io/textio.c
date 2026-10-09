@@ -739,10 +739,15 @@ struct textio
      * dec_flags is the second (integer) item of the decoder state and
      * next_input is the chunk of input bytes that comes next after the
      * snapshot point.  We use this to reconstruct decoder states in tell().
-     * With nibbler, next_input may be its length instead: the bytes are
-     * still in the buffer, just before its position.
      */
     PyObject *snapshot;
+    /* With nibbler, the snapshot is kept without objects, which makes it
+       cheap enough to keep while iterating (gh-81217): when snap_len is not
+       -1, snapshot is NULL and the snapshot is (snap_flags, the snap_len
+       bytes just before the buffer's position), looked back at by tell().
+       The functions below keep the two forms apart. */
+    int snap_flags;
+    Py_ssize_t snap_len;
     /* Bytes-to-characters ratio for the current chunk. Serves as input for
        the heuristic in tell(). */
     double b2cratio;
@@ -755,6 +760,26 @@ struct textio
 
     _PyIO_State *state;
 };
+
+static inline int
+textiowrapper_has_snapshot(textio *self)
+{
+    return self->snapshot != NULL || self->snap_len >= 0;
+}
+
+static inline void
+textiowrapper_clear_snapshot(textio *self)
+{
+    Py_CLEAR(self->snapshot);
+    self->snap_len = -1;
+}
+
+static inline void
+textiowrapper_set_snapshot(textio *self, PyObject *snapshot)
+{
+    Py_XSETREF(self->snapshot, snapshot);
+    self->snap_len = -1;
+}
 
 #define textio_CAST(op) ((textio *)(op))
 
@@ -1323,7 +1348,7 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
     Py_CLEAR(self->readnl);
     Py_CLEAR(self->decoded_chars);
     Py_CLEAR(self->pending_bytes);
-    Py_CLEAR(self->snapshot);
+    textiowrapper_clear_snapshot(self);
     Py_CLEAR(self->errors);
     Py_CLEAR(self->raw);
     self->decoded_chars_used = 0;
@@ -1633,7 +1658,7 @@ textiowrapper_clear(PyObject *op)
     Py_CLEAR(self->readnl);
     Py_CLEAR(self->decoded_chars);
     Py_CLEAR(self->pending_bytes);
-    Py_CLEAR(self->snapshot);
+    textiowrapper_clear_snapshot(self);
     Py_CLEAR(self->errors);
     Py_CLEAR(self->raw);
 
@@ -2031,9 +2056,9 @@ _io_TextIOWrapper_write_impl(textio *self, PyObject *text)
         }
     }
 
-    if (self->snapshot != NULL) {
+    if (textiowrapper_has_snapshot(self)) {
         textiowrapper_set_decoded_chars(self, NULL);
-        Py_CLEAR(self->snapshot);
+        textiowrapper_clear_snapshot(self);
     }
 
     if (self->decoder) {
@@ -2201,29 +2226,21 @@ textiowrapper_read_chunk_nibbler(textio *self, Py_ssize_t size_hint)
     textiowrapper_set_decoded_chars(self, chars);
     Py_ssize_t nchars = PyUnicode_GET_LENGTH(chars);
     self->b2cratio = nchars > 0 ? (double)used / nchars : 0.0;
-    if (self->telling) {
-        PyObject *snapshot = Py_BuildValue("in", dec_flags, used);
-        if (snapshot == NULL) {
-            return -1;
-        }
-        Py_XSETREF(self->snapshot, snapshot);
-    }
+    /* Kept even while iterating: it costs no more than this. */
+    Py_CLEAR(self->snapshot);
+    self->snap_flags = dec_flags;
+    self->snap_len = used;
     return used > 0 || nchars > 0;
 }
 
-/* With a snapshot from textiowrapper_read_chunk_nibbler(), replace the
-   length of its next input with the bytes, looked back at in the buffer. */
+/* With a snapshot from textiowrapper_read_chunk_nibbler() (snap_len),
+   make it a tuple: look back at its next input in the buffer. */
 static int
 textiowrapper_snapshot_input(textio *self)
 {
-    PyObject *len = PyTuple_GET_ITEM(self->snapshot, 1);
-    if (!PyLong_CheckExact(len)) {
-        return 0;
-    }
-    Py_ssize_t n = PyLong_AsSsize_t(len);
+    Py_ssize_t n = self->snap_len;
     PyObject *buffer = buffer_access_safe(self);
-    if (n < 0 || buffer == NULL) {
-        Py_XDECREF(buffer);
+    if (buffer == NULL) {
         return -1;
     }
     PyObject *input = _PyIONibbler_lookback(buffer, n);
@@ -2236,13 +2253,11 @@ textiowrapper_snapshot_input(textio *self)
         }
         return -1;
     }
-    PyObject *snapshot = PyTuple_Pack(2, PyTuple_GET_ITEM(self->snapshot, 0),
-                                      input);
-    Py_DECREF(input);
+    PyObject *snapshot = Py_BuildValue("iN", self->snap_flags, input);
     if (snapshot == NULL) {
         return -1;
     }
-    Py_SETREF(self->snapshot, snapshot);
+    textiowrapper_set_snapshot(self, snapshot);
     return 0;
 }
 
@@ -2378,7 +2393,7 @@ textiowrapper_read_chunk(textio *self, Py_ssize_t size_hint)
             dec_flags = NULL;
             goto fail;
         }
-        Py_XSETREF(self->snapshot, snapshot);
+        textiowrapper_set_snapshot(self, snapshot);
     }
     Py_DECREF(input_chunk);
 
@@ -2465,9 +2480,9 @@ _io_TextIOWrapper_read_impl(textio *self, Py_ssize_t n)
         if (result == NULL)
             goto fail;
 
-        if (self->snapshot != NULL) {
+        if (textiowrapper_has_snapshot(self)) {
             textiowrapper_set_decoded_chars(self, NULL);
-            Py_CLEAR(self->snapshot);
+            textiowrapper_clear_snapshot(self);
         }
         return result;
     }
@@ -2671,7 +2686,7 @@ _textiowrapper_readline(textio *self, Py_ssize_t limit)
         if (res == 0) {
             /* end of file */
             textiowrapper_set_decoded_chars(self, NULL);
-            Py_CLEAR(self->snapshot);
+            textiowrapper_clear_snapshot(self);
             start = endpos = offset_to_buffer = 0;
             break;
         }
@@ -3030,7 +3045,7 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
         }
 
         textiowrapper_set_decoded_chars(self, NULL);
-        Py_CLEAR(self->snapshot);
+        textiowrapper_clear_snapshot(self);
         if (self->decoder) {
             res = PyObject_CallMethodNoArgs(self->decoder, &_Py_ID(reset));
             if (res == NULL)
@@ -3107,7 +3122,7 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
     Py_DECREF(res);
 
     textiowrapper_set_decoded_chars(self, NULL);
-    Py_CLEAR(self->snapshot);
+    textiowrapper_clear_snapshot(self);
 
     /* Restore the decoder to its state from the safe start point. */
     if (self->decoder) {
@@ -3145,7 +3160,7 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
         if (snapshot == NULL) {
             goto fail;
         }
-        Py_XSETREF(self->snapshot, snapshot);
+        textiowrapper_set_snapshot(self, snapshot);
 
         self->dec_fed = 1;
         decoded = PyObject_CallMethodObjArgs(self->decoder, &_Py_ID(decode),
@@ -3176,7 +3191,7 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
         snapshot = Py_BuildValue("iy", cookie.dec_flags, "");
         if (snapshot == NULL)
             goto fail;
-        Py_XSETREF(self->snapshot, snapshot);
+        textiowrapper_set_snapshot(self, snapshot);
     }
 
     /* Finally, reset the encoder (merely useful for proper BOM handling) */
@@ -3230,7 +3245,7 @@ _io_TextIOWrapper_tell_impl(textio *self)
     }
 
     /* Before flush(), which can drop the buffer's read-ahead. */
-    if (self->snapshot != NULL && textiowrapper_snapshot_input(self) < 0) {
+    if (self->snap_len >= 0 && textiowrapper_snapshot_input(self) < 0) {
         goto fail;
     }
     if (_textiowrapper_writeflush(self) < 0)
@@ -3667,7 +3682,11 @@ textiowrapper_iternext_lock_held(PyObject *op)
 
     CHECK_ATTACHED(self);
 
-    self->telling = 0;
+    /* Building snapshots for tell() costs too much while iterating, except
+       with nibbler (gh-81217). */
+    if (!(self->nibbler && self->decode_utf8)) {
+        self->telling = 0;
+    }
     if (Py_IS_TYPE(self, self->state->PyTextIOWrapper_Type)) {
         /* Skip method call overhead for speed */
         line = _textiowrapper_readline(self, -1);
@@ -3689,7 +3708,7 @@ textiowrapper_iternext_lock_held(PyObject *op)
     if (PyUnicode_GET_LENGTH(line) == 0) {
         /* Reached EOF or would have blocked */
         Py_DECREF(line);
-        Py_CLEAR(self->snapshot);
+        textiowrapper_clear_snapshot(self);
         self->telling = self->seekable;
         return NULL;
     }

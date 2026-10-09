@@ -590,11 +590,32 @@ class TextIOWrapperTest:
         self.assertEqual(f.readline(), "\xff\n")
         self.assertEqual(f.tell(), p2)
         f.seek(0)
-        for line in f:
+        for i, line in enumerate(f):
             self.assertEqual(line, "\xff\n")
-            self.assertRaises(OSError, f.tell)
+            if self.tells_while_iterating:
+                # gh-81217
+                self.assertEqual(f.tell(), (p1, p2)[i])
+            else:
+                self.assertRaises(OSError, f.tell)
         self.assertEqual(f.tell(), p2)
         f.close()
+
+    def test_tell_while_iterating(self):
+        if not self.tells_while_iterating:
+            self.skipTest("next() disables tell()")
+        # gh-81217: tell() inside a for loop gives positions that seek()
+        # goes back to.
+        lines = ["a\n", "b\xe9\n", "\u20ac" * 3000 + "\n", "d\n"]
+        with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        with self.open(os_helper.TESTFN, encoding="utf-8") as f:
+            positions = []
+            for line in f:
+                positions.append(f.tell())
+            self.assertEqual(positions[-1], f.tell())
+            for i, pos in enumerate(positions[:-1]):
+                f.seek(pos)
+                self.assertEqual(f.readline(), lines[i + 1])
 
     def test_seeking(self):
         chunk_size = _default_chunk_size()

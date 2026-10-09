@@ -337,6 +337,8 @@ class CTestCase(unittest.TestCase):
     # Does peek(n) return min(n, buffer size) bytes when the raw stream has
     # them, reading after the read-ahead?  (gh-50061)
     peek_reads_to_size = is_nibbler
+    # Does TextIOWrapper.tell() work while iterating?  (gh-81217)
+    tells_while_iterating = is_nibbler
 
     MockRawIO = CMockRawIO
     MisbehavedRawIO = CMisbehavedRawIO
@@ -371,6 +373,7 @@ class PyTestCase(unittest.TestCase):
     has_readall = False
     keeps_writes_racing_close = False
     peek_reads_to_size = True
+    tells_while_iterating = False
 
     MockRawIO = PyMockRawIO
     MisbehavedRawIO = PyMisbehavedRawIO
