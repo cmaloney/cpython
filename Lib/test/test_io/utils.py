@@ -330,6 +330,10 @@ class CTestCase(unittest.TestCase):
     # Do the buffered classes have readall(), like raw streams (so that
     # open(buffering=0) can return one)?
     has_readall = is_nibbler
+    # Is every write() that returned while close() races it in the file?
+    # (_io and _pyio's close() flush, release the lock, then close the raw
+    # stream, so a write in between can be dropped.)
+    keeps_writes_racing_close = is_nibbler
 
     MockRawIO = CMockRawIO
     MisbehavedRawIO = CMisbehavedRawIO
@@ -362,6 +366,7 @@ class PyTestCase(unittest.TestCase):
     buffers_reentrant_writes = False
     keeps_data_on_raw_error = False
     has_readall = False
+    keeps_writes_racing_close = False
 
     MockRawIO = PyMockRawIO
     MisbehavedRawIO = PyMisbehavedRawIO

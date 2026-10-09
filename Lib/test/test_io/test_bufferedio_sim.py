@@ -1869,8 +1869,9 @@ class ConcurrentAccessTest:
 
     def test_small_writes_racing_other_calls(self):
         # Small writes stay whole and in order per thread while other
-        # threads flush(), tell(), seek(), read() and close(); every write
-        # that returned is in the file, and none that raised.
+        # threads flush(), tell(), seek(), read() and close(); none that
+        # raised is in the file, and every write that returned is, where
+        # close() can't drop a write racing it.
         self.addCleanup(os_helper.unlink, os_helper.TESTFN)
         for mode in ("wb", "w+b"):
             with self.subTest(mode=mode):
@@ -1938,15 +1939,22 @@ class ConcurrentAccessTest:
         with open(os_helper.TESTFN, "rb") as result:
             lines = result.read().splitlines(keepends=True)
         everything = [r for w in written for r in w]
-        if self.is_C:
+        if self.keeps_writes_racing_close:
             self.assertEqual(sorted(lines), sorted(everything))
         else:
-            # _pyio's close() can drop writes racing with it.
+            # A write racing close() can't be shown to come before it, so
+            # it may be dropped.
             self.assertLessEqual(set(lines), set(everything))
         for t in range(self.nthreads):
             prefix = b"%02d:" % t
             mine = [r for r in lines if r.startswith(prefix)]
-            self.assertEqual(mine, written[t] if self.is_C else sorted(mine))
+            if not self.is_C:
+                self.assertEqual(mine, sorted(mine))
+            elif self.keeps_writes_racing_close:
+                self.assertEqual(mine, written[t])
+            else:
+                # Only the last writes, those racing close(), can be lost.
+                self.assertEqual(mine, written[t][:len(mine)])
 
     def check_concurrent_readers(self, read_record, buffering):
         # Each record is read whole, by one reader, even when it spans a
