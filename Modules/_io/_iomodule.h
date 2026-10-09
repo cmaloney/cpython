@@ -114,6 +114,13 @@ extern PyObject *_PyIONibbler_lookback(PyObject *buffered, Py_ssize_t n);
 extern int _PyIONibbler_write(PyObject *buffered, PyObject *obj,
                               const char *data, Py_ssize_t len,
                               int closed_checked);
+/* Without the lock, room for len bytes at the end of the buffer, if there
+   is: where to put them, and *end for _PyIONibbler_commit(end, len), which
+   must follow without running any Python code.  NULL: nothing reserved
+   (closed_checked as for _PyIONibbler_write()). */
+extern char *_PyIONibbler_reserve(PyObject *buffered, Py_ssize_t len,
+                                  int closed_checked, void **end);
+extern void _PyIONibbler_commit(void *end, Py_ssize_t len);
 
 /* Shortcut to the core of the IncrementalNewlineDecoder.decode method */
 extern PyObject *_PyIncrementalNewlineDecoder_decode(

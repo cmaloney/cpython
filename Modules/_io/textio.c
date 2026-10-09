@@ -915,6 +915,58 @@ is_asciicompat_encoding(encodefunc_t f)
     return f == ascii_encode || f == latin1_encode || f == utf8_encode;
 }
 
+/* With fastwrite and UTF-8: encode text (not ASCII) straight into the
+   buffer, without a bytes object.  Returns 0, or _PyIO_NIBBLER_NO (nothing
+   written: no room, or a character for the codec's error handler). */
+static int
+textiowrapper_write_utf8(textio *self, PyObject *text)
+{
+    int kind = PyUnicode_KIND(text);
+    const void *data = PyUnicode_DATA(text);
+    Py_ssize_t n = PyUnicode_GET_LENGTH(text);
+    Py_ssize_t size = n;
+    if (kind == PyUnicode_1BYTE_KIND) {
+        for (Py_ssize_t i = 0; i < n; i++) {
+            size += ((const Py_UCS1 *)data)[i] >> 7;
+        }
+    }
+    else if (kind == PyUnicode_2BYTE_KIND) {
+        for (Py_ssize_t i = 0; i < n; i++) {
+            Py_UCS2 c = ((const Py_UCS2 *)data)[i];
+            if (Py_UNICODE_IS_SURROGATE(c)) {
+                return _PyIO_NIBBLER_NO;
+            }
+            size += (c >= 0x80) + (c >= 0x800);
+        }
+    }
+    else {
+        return _PyIO_NIBBLER_NO;
+    }
+    void *end;
+    char *p = _PyIONibbler_reserve(self->buffer, size, self->raw != NULL,
+                                   &end);
+    if (p == NULL) {
+        return _PyIO_NIBBLER_NO;
+    }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        Py_UCS4 c = PyUnicode_READ(kind, data, i);
+        if (c < 0x80) {
+            *p++ = (char)c;
+        }
+        else if (c < 0x800) {
+            *p++ = (char)(0xc0 | (c >> 6));
+            *p++ = (char)(0x80 | (c & 0x3f));
+        }
+        else {
+            *p++ = (char)(0xe0 | (c >> 12));
+            *p++ = (char)(0x80 | ((c >> 6) & 0x3f));
+            *p++ = (char)(0x80 | (c & 0x3f));
+        }
+    }
+    _PyIONibbler_commit(end, size);
+    return 0;
+}
+
 /* Once the settings changed: may write() append ASCII text to a nibbler
    buffer as it is?  Not when the text must be encoded, translated or
    flushed, or a decoder must be reset (the file is also read). */
@@ -1802,13 +1854,19 @@ _io_TextIOWrapper_write_impl(textio *self, PyObject *text)
     CHECK_ATTACHED(self);
     CHECK_CLOSED(self);
 
-    if (self->fastwrite && PyUnicode_IS_ASCII(text)
-        && self->pending_bytes == NULL && self->buffer != NULL)
+    if (self->fastwrite && self->pending_bytes == NULL
+        && self->buffer != NULL)
     {
         /* self->raw: CHECK_CLOSED found it open. */
         textlen = PyUnicode_GET_LENGTH(text);
-        int r = _PyIONibbler_write(self->buffer, text, PyUnicode_DATA(text),
+        int r = _PyIO_NIBBLER_NO;
+        if (PyUnicode_IS_ASCII(text)) {
+            r = _PyIONibbler_write(self->buffer, text, PyUnicode_DATA(text),
                                    textlen, self->raw != NULL);
+        }
+        else if (self->encodefunc == utf8_encode) {
+            r = textiowrapper_write_utf8(self, text);
+        }
         if (r != _PyIO_NIBBLER_NO) {
             self->encoding_start_of_stream = 0;
             return r < 0 ? NULL : PyLong_FromSsize_t(textlen);

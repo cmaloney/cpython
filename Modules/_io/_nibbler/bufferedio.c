@@ -2208,6 +2208,29 @@ _PyIONibbler_write(PyObject *op, PyObject *obj, const char *data,
     return nibbler_text_write(self, obj, data, len, closed_checked);
 }
 
+char *
+_PyIONibbler_reserve(PyObject *op, Py_ssize_t len, int closed_checked,
+                     void **end)
+{
+    buffered *self = buffered_cast(op);
+    nibbler_end *e;
+    Py_ssize_t r;
+    if (closed_checked && self->dict == NULL && len < NIBBLER_REF_MIN
+        && (e = nibbler_end_get(&self->nib, 1)) != NULL
+        && (r = nibbler_reserve(e, len)) >= 0)
+    {
+        *end = e;
+        return PyBytes_AS_STRING(e->block) + r;
+    }
+    return NULL;
+}
+
+void
+_PyIONibbler_commit(void *end, Py_ssize_t len)
+{
+    FT_ATOMIC_ADD_SSIZE(((nibbler_end *)end)->done, len);
+}
+
 /*
  * class BufferedRandom
  */
