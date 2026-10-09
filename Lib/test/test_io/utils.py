@@ -371,7 +371,7 @@ class PyTestCase(unittest.TestCase):
     tells_are_atomic = False
     survives_reentrant_close = False
     keeps_reads_on_append = True
-    tells_append_position = False
+    tells_append_position = True
     buffers_reentrant_writes = False
     keeps_data_on_raw_error = False
     has_readall = False
