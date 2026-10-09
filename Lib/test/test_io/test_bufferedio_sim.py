@@ -1229,6 +1229,62 @@ class PositionTest:
         for view, copy in raw.kept:
             self.assertEqual(bytes(view), copy)
 
+    def test_raw_keeping_read_view(self):
+        if not self.isolates_raw_views:
+            self.skipTest("buffer memory is reused under raw views")
+        # gh-60198, gh-157075: a raw stream that keeps the views given to
+        # readinto(), and views made from them, and writes through them
+        # later, crashes nothing and changes no bytes already returned.
+        class StashingRaw(self.RawIOBase):
+            def __init__(self, data):
+                self.data = data
+                self.pos = 0
+                self.views = []
+
+            def readable(self):
+                return True
+
+            def readinto(self, b):
+                self.views.append(b)
+                if len(self.views) % 2:
+                    self.views.append(b[:])
+                n = min(len(b), len(self.data) - self.pos)
+                b[:n] = self.data[self.pos:self.pos + n]
+                self.pos += n
+                return n
+
+            def scribble(self):
+                for view in self.views:
+                    try:
+                        view[:] = b"\xff" * len(view)
+                    except ValueError:
+                        pass  # released
+
+        data = sample_data(5_000)
+        raw = StashingRaw(data)
+        f = self.BufferedReader(raw, 64)
+        got = []
+        for read in (lambda: f.read(10), lambda: f.read1(30),
+                     lambda: f.read(200), lambda: f.peek(5)[:5],
+                     lambda: f.read(5), lambda: f.read1(100)):
+            got.append(read())
+            copies = [bytes(b) for b in got]
+            raw.scribble()
+            self.assertEqual(got, copies)
+        read = got[:3] + got[4:]  # peek() doesn't consume
+        pos = sum(map(len, read))
+        self.assertEqual(b"".join(read), data[:pos])
+        buf = bytearray(300)
+        n = f.readinto(buf)
+        raw.scribble()
+        self.assertEqual(bytes(buf[:n]), data[pos:pos + n])
+        rest = f.read()
+        raw.scribble()
+        self.assertEqual(rest, data[pos + n:])
+        del f, buf
+        support.gc_collect()
+        raw.scribble()
+
     def test_overflow_keeps_small_write_buffered(self):
         # Without vectored writes, a small write that doesn't fit after
         # the pending data writes out the pending data and buffers itself.
