@@ -2482,10 +2482,15 @@ Py_NO_INLINE static int
 buffered_text_peek_locked(buffered *self, Py_ssize_t need, morsel *m,
                           uint64_t *key)
 {
-    if (buffered_enter(self, "read of closed file", READING) < 0) {
+    if (buffered_enter(self, NULL, READING) < 0) {
         return -1;
     }
-    int r = 0;
+    /* Not even what is read ahead after close() (unlike reads). */
+    int r = buffered_check_closed(self, "I/O operation on closed file.");
+    if (r < 0) {
+        buffered_unlock(self);
+        return -1;
+    }
     if (need > self->nib.capacity) {
         /* The unread bytes and more can't fit in a block. */
         r = _PyIO_NIBBLER_FULL;
@@ -2513,7 +2518,9 @@ _PyIONibbler_peek(PyObject *op, Py_ssize_t need, _PyIO_Morsel *m,
     if (self->dict != NULL) {
         return _PyIO_NIBBLER_NO;
     }
-    /* Without the lock, at the reading end's position. */
+    /* Without the lock, at the reading end's position.  (close() drops
+       it; after the raw stream alone was closed, what was read ahead can
+       still be read, as with read().) */
     nibbler_end *e = nibbler_end_get(&self->nib, 0);
     Py_ssize_t c = e == NULL ? -1 : FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
     if (c >= 0 && e->limit - c >= need) {
@@ -2525,18 +2532,23 @@ _PyIONibbler_peek(PyObject *op, Py_ssize_t need, _PyIO_Morsel *m,
     return buffered_text_peek_locked(self, need, m, key);
 }
 
-/* consume with the lock: out of line, so that the lock-free path stays
+/* advance with the lock: out of line, so that the lock-free path stays
    small. */
 Py_NO_INLINE static int
-buffered_text_consume_locked(buffered *self, _PyIO_Morsel *m, Py_ssize_t n)
+buffered_text_advance_locked(buffered *self, uint64_t key, Py_ssize_t off,
+                             Py_ssize_t n)
 {
     /* The caller's reference may be borrowed, and other threads run while
        this waits for the lock. */
     Py_INCREF(self);
     int r = buffered_lock(self);
     if (r == 0) {
-        if (nibbler_unread(&self->nib) >= n
-            && self->nib.list.items[0].ptr == m->ptr)
+        r = buffered_check_closed(self, "I/O operation on closed file.");
+        nibbler_end *e = nibbler_reading(&self->nib);
+        if (r == 0 && e != NULL && e->id == key
+            && nibbler_unread(&self->nib) >= n
+            && self->nib.list.items[0].ptr
+               == PyBytes_AS_STRING(e->block) + off)
         {
             (void)morsels_consume(&self->nib.list, n);
             r = 1;
@@ -2548,28 +2560,24 @@ buffered_text_consume_locked(buffered *self, _PyIO_Morsel *m, Py_ssize_t n)
 }
 
 int
-_PyIONibbler_consume(PyObject *op, _PyIO_Morsel *m, Py_ssize_t n)
+_PyIONibbler_advance(PyObject *op, uint64_t key, Py_ssize_t off,
+                     Py_ssize_t n)
 {
     buffered *self = buffered_cast(op);
-    assert(n <= m->len);
-    if (n == 0) {
-        return 1;
-    }
-    /* Without the lock: move the reading end's position from where m
-       starts, if it is still there.  (m keeps the block alive, so it can't
-       be reused for other bytes.) */
+    /* Without the lock: move the reading end's position from off, if it
+       is still there (see _PyIONibbler_peek()). */
     nibbler_end *e = nibbler_end_get(&self->nib, 0);
-    if (e != NULL && e->block == m->obj) {
-        Py_ssize_t c = m->ptr - PyBytes_AS_STRING(e->block);
-        if (FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(e->pos, &c, c + n)) {
+    if (e != NULL && e->id == key && n <= e->limit - off) {
+        Py_ssize_t c = off;
+        if (FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(e->pos, &c, off + n)) {
             return 1;
         }
         if (c >= 0) {
             return 0;
         }
     }
-    /* The end is held, or gone: check the front morsel with the lock. */
-    return buffered_text_consume_locked(self, m, n);
+    /* The end is held, or gone, or the raw stream must be asked. */
+    return buffered_text_advance_locked(self, key, off, n);
 }
 
 /* Is the raw stream an exact FileIO that is closed?  Then nothing is

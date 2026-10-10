@@ -98,8 +98,10 @@ typedef struct {
 } _PyIO_Morsel;
 
 /* *m = the unread bytes, without taking them (a new reference to obj, or
-   NULL when there are none): at least `need` (reading more after them when
-   fewer are unread) unless the stream ends first (then 0 with fewer), or
+   NULL when there are none), or ValueError if closed (but bytes read ahead
+   before the raw stream alone was closed): at least `need` (reading more
+   after them when fewer are unread) unless the stream ends first (then 0
+   with fewer), or
    _PyIO_NIBBLER_BLOCKED when it would block first, or _PyIO_NIBBLER_FULL
    when `need` is more than the buffer holds.  *key and the offset of
    m->ptr in m->obj always name the same bytes: a later peek with both the
@@ -108,10 +110,12 @@ typedef struct {
 #define _PyIO_NIBBLER_FULL 2
 extern int _PyIONibbler_peek(PyObject *buffered, Py_ssize_t need,
                              _PyIO_Morsel *m, uint64_t *key);
-/* Take the first n bytes of *m from _PyIONibbler_peek().  Returns 1, or 0
-   (nothing taken) if they are no longer the unread bytes. */
-extern int _PyIONibbler_consume(PyObject *buffered, _PyIO_Morsel *m,
-                                Py_ssize_t n);
+/* Take n bytes from the position named by key and off (see
+   _PyIONibbler_peek()).  Returns 1, 0 (nothing taken) if the unread bytes
+   don't start there any more, or -1 (ValueError if the raw stream is
+   closed). */
+extern int _PyIONibbler_advance(PyObject *buffered, uint64_t key,
+                                Py_ssize_t off, Py_ssize_t n);
 /* Like write(obj), for data[0:len] owned by obj.  buffered may be a
    borrowed reference. */
 extern int _PyIONibbler_write(PyObject *buffered, PyObject *obj,
