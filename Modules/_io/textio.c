@@ -2545,7 +2545,8 @@ native_nonascii_str(textio *self, const char *s, Py_ssize_t len,
 static inline int
 native_after_cr(const _PyIO_Morsel *m)
 {
-    return m->ptr > PyBytes_AS_STRING(m->obj) && m->ptr[-1] == '\r';
+    return (m->obj != NULL && m->ptr > PyBytes_AS_STRING(m->obj)
+            && m->ptr[-1] == '\r');
 }
 
 /* Move over up to *n characters of s[0:len]: returns the offset reached,
@@ -3004,23 +3005,31 @@ native_readline(textio *self, Py_ssize_t limit)
     return line;
 }
 
-/* Universal newlines without translation: note the newlines in m[0:len].
-   A "\r" there is followed by its next byte in m, but at EOF; a "\n" at
-   its start may end a "\r\n" noted before. */
+/* Universal newlines without translation: note the newlines in s[0:len].
+   A "\r" there is followed by its next byte in s[0:avail], but at EOF; a
+   "\n" at its start ends a "\r\n" noted before if after_cr. */
 static void
-native_seennl(textio *self, const _PyIO_Morsel *m, Py_ssize_t len)
+native_seennl(textio *self, const char *s, Py_ssize_t len, Py_ssize_t avail,
+              int after_cr)
 {
     nldecoder_object *dec = nldecoder_object_CAST(self->decoder);
     int seen = dec->seennl;
-    const char *s = m->ptr;
+    if (memchr(s, '\r', len) == NULL) {
+        /* Only "\n" can be there. */
+        Py_ssize_t skip = after_cr && len > 0 && s[0] == '\n';
+        if (!(seen & SEEN_LF) && memchr(s + skip, '\n', len - skip)) {
+            dec->seennl |= SEEN_LF;
+        }
+        return;
+    }
     for (Py_ssize_t i = 0; i < len && seen != SEEN_ALL; i++) {
         if (s[i] == '\n') {
-            if (i > 0 || !native_after_cr(m)) {
+            if (i > 0 || !after_cr) {
                 seen |= SEEN_LF;
             }
         }
         else if (s[i] == '\r') {
-            if (i + 1 < m->len && s[i + 1] == '\n') {
+            if (i + 1 < avail && s[i + 1] == '\n') {
                 seen |= SEEN_CRLF;
                 i++;
             }
@@ -3075,7 +3084,7 @@ native_read_str(textio *self, const _PyIO_Morsel *m, Py_ssize_t end,
         return res;
     }
     if (!self->readtranslate) {
-        native_seennl(self, m, *used);
+        native_seennl(self, m->ptr, *used, m->len, native_after_cr(m));
         return res;
     }
     if (memchr(m->ptr, '\r', *used) != NULL) {
@@ -3412,7 +3421,13 @@ _io_TextIOWrapper_read_impl(textio *self, Py_ssize_t n)
         return NULL;
 
     if (n < 0) {
-        /* Read everything */
+        /* Read everything.  Universal newlines, not translated: a "\n"
+           first may end a "\r\n" noted before. */
+        int after_cr = (self->native == NATIVE_ON && self->readuniversal
+                        && !self->readtranslate && self->buffer != NULL
+                        && native_fast_view(self, self->buffer)
+                        && *self->view.ptr == '\n'
+                        && native_after_cr(&self->view));
         PyObject *bytes = buffer_callmethod_noargs(self, &_Py_ID(read));
         PyObject *decoded;
         if (bytes == NULL)
@@ -3433,7 +3448,16 @@ _io_TextIOWrapper_read_impl(textio *self, Py_ssize_t n)
                 goto fail;
             }
         }
-        if (native) {
+        if (native && self->readuniversal && !self->readtranslate) {
+            decoded = native_decode(self, PyBytes_AS_STRING(bytes),
+                                    PyBytes_GET_SIZE(bytes), NULL);
+            if (decoded != NULL) {
+                native_seennl(self, PyBytes_AS_STRING(bytes),
+                              PyBytes_GET_SIZE(bytes),
+                              PyBytes_GET_SIZE(bytes), after_cr);
+            }
+        }
+        else if (native) {
             decoded = native_newlines(self, native_decode(
                 self, PyBytes_AS_STRING(bytes), PyBytes_GET_SIZE(bytes),
                 NULL));

@@ -693,6 +693,23 @@ class TextIOWrapperTest:
                     if newline != "\r\n":
                         self.assertEqual(f.newlines, expected.newlines)
 
+    def test_newlines_crlf_split_by_reads(self):
+        # newline="": a "\r\n" is one newline in newlines, also when a
+        # read stops between its "\r" and "\n".
+        for enc in ("utf-8", "latin-1"):
+            with self.subTest(encoding=enc):
+                with self.open(os_helper.TESTFN, "w", encoding=enc,
+                               newline="") as f:
+                    f.write("ab\r\ncd\r\nef")
+                for rest in (lambda f: f.read(), lambda f: f.read(4),
+                             lambda f: f.readline()):
+                    with self.open(os_helper.TESTFN, encoding=enc,
+                                   newline="") as f:
+                        self.assertEqual(f.read(3), "ab\r")
+                        rest(f)
+                        f.read()
+                        self.assertEqual(f.newlines, "\r\n")
+
     def test_truncate_below_position(self):
         # As for binary files, the position is not changed: reads return
         # nothing, and a write lands at the position, after a gap of zero
