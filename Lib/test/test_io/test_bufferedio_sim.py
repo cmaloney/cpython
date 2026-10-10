@@ -2317,6 +2317,70 @@ class LockReleaseTest:
         self.check_fork('write', "f.write(b'.'); f.flush()")
 
     @threading_helper.requires_working_threading()
+    @support.requires_fork()
+    def test_fork_while_other_thread_takes_lock(self):
+        # A thread waiting for the lock is handed it while detached, and
+        # waits to attach again (for the GIL, or for the world stopped by
+        # the fork) when the main thread forks: it never got to record
+        # itself as the holder, and is gone in the child.  The timing is
+        # not controlled, so try many times.
+        code = """
+            import sys, threading, time, warnings
+            warnings.simplefilter('ignore', DeprecationWarning)
+
+            GATED = set()
+
+            class Raw(GatedRaw):
+                gate = None
+
+                def write(self, b):
+                    return len(b)
+
+                def seek(self, pos, whence=0):
+                    gate, self.gate = self.gate, None
+                    if gate is not None:
+                        entered.set()
+                        gate.wait()
+                    return 0
+
+            hangs = 0
+            for _ in range(50):
+                if hangs:
+                    break
+                raw = Raw()
+                gate = raw.gate = threading.Event()
+                entered.clear()
+                f = BufferedRandom(raw)
+                holder = threading.Thread(target=f.seek, args=(1,))
+                holder.start()
+                entered.wait()
+                waiter = threading.Thread(target=f.tell)
+                waiter.start()
+                time.sleep(0.002)
+                # The holder releases the lock, which the waiter takes.
+                gate.set()
+                for _ in range(5):
+                    time.sleep(0)
+                pid = os.fork()
+                if pid == 0:
+                    f.write(b'.')
+                    f.flush()
+                    os._exit(0)
+                deadline = time.monotonic() + 5
+                while not os.waitpid(pid, os.WNOHANG)[0]:
+                    if time.monotonic() > deadline:
+                        os.kill(pid, 9)
+                        os.waitpid(pid, 0)
+                        hangs += 1
+                        break
+                    time.sleep(0.001)
+                holder.join()
+                waiter.join()
+            sys.stdout.write(f'hangs {hangs}')
+            """
+        self.assertEqual(self.run_child(code), (0, b"hangs 0", ""))
+
+    @threading_helper.requires_working_threading()
     @unittest.skipUnless(hasattr(signal, "pthread_kill"),
                          "requires signal.pthread_kill")
     def test_signal_interrupts_lock_wait(self):
@@ -2402,6 +2466,28 @@ class ConcurrentAccessTest:
             prefix = b"%02d:" % t
             mine = [line for line in lines if line.startswith(prefix)]
             self.assertEqual(mine, sorted(mine))
+
+    def test_many_writers_overflowing_buffer(self):
+        # Writers that don't fit wait for the one writing out: each must
+        # get its turn (letting the turn go after waiting, and trying
+        # again, could leave every writer handing it to the next forever).
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        nthreads = 16
+        with self.open(os_helper.TESTFN, "wb", buffering=1000) as f:
+            def writer():
+                for i in range(1000):
+                    f.write(b"x" * (i % 100) + b"\n")
+
+            threads = [threading.Thread(target=writer)
+                       for _ in range(nthreads)]
+            for t in threads:
+                t.start()
+            deadline = time.monotonic() + support.SHORT_TIMEOUT
+            for t in threads:
+                t.join(max(0, deadline - time.monotonic()))
+            self.assertFalse(any(t.is_alive() for t in threads))
+        self.assertEqual(os.path.getsize(os_helper.TESTFN),
+                         nthreads * sum(i % 100 + 1 for i in range(1000)))
 
     def test_text_write_waits_for_raw_read(self):
         # A text write while another thread is in a raw read of the

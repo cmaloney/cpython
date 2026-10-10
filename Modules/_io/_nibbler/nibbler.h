@@ -11,22 +11,17 @@
  * while nothing else references it, so a bytes object never changes once it
  * was handed out.
  *
- * Threads coordinate with two things, both taken over (not waited for) when
- * their holder is gone, see nibbler_lock_wait().  Threads waiting for either
- * hold nothing, so only a gone holder ever needs taking over.  Waits are
- * timed: only when one times out does the waiter look for a gone holder,
- * so contended waits don't scan the thread states.
+ * Threads coordinate with two mutexes (see "Locking" below):
  *
- * - The lock guards all of the state.  Its owner (the id of the holding
- *   thread state) detects reentrant calls, which raise instead of
- *   deadlocking.
+ * - The lock guards all of the state.
  *
- * - The I/O role: the thread writing out the front of the queue with the
- *   lock released around its raw calls (`io`, with the `inflight` bytes it
- *   was given).  Meanwhile other threads may only append; everything else
- *   waits for the role, parked in the parking lot (see nibbler_wait_io()).
+ * - The I/O role gives a thread the use of the data to itself: every
+ *   operation but appending holds it, taken before the lock.  Writing out
+ *   holds it too, and releases the lock around its raw calls (with the
+ *   `inflight` bytes it gave them), so that other threads can append
+ *   meanwhile.
  *
- * The owner (bufferedio.c) does the raw I/O and decides what the data
+ * The caller (bufferedio.c) does the raw I/O and decides what the data
  * means.  Functions are called with the lock held unless their section or
  * their comment says otherwise (locking itself, and the open end).
  * Included only by bufferedio.c.
@@ -37,11 +32,10 @@
 
 #include "pycore_lock.h"                // PyMutex_LockFast()
 #include "pycore_object.h"              // _PyObject_XDecRefDelayed()
-#include "pycore_parking_lot.h"         // _PyParkingLot_Park()
 #include "pycore_pyatomic_ft_wrappers.h" // FT_ATOMIC_LOAD_PTR_ACQUIRE()
 #include "pycore_pymem.h"               // _PyMem_FreeDelayed()
 #include "pycore_pylifecycle.h"         // _Py_IsInterpreterFinalizing()
-#include "pycore_pystate.h"             // _Py_FOR_EACH_TSTATE_BEGIN()
+#include "pycore_pystate.h"             // _PyThreadState_GET()
 
 /* Compare-and-swap in the style of pycore_pyatomic_ft_wrappers.h (which
    has none): atomic on free-threaded builds, a plain compare and store
@@ -78,19 +72,19 @@ typedef struct {
     Py_ssize_t dropped;
 } morsel_list;
 
+/* A PyMutex, and the id of the thread state holding it (see "Locking"). */
+typedef struct {
+    PyMutex mutex;
+    uint64_t holder;
+} nibbler_mutex;
+
 /* Fields are used with the lock held, with plain loads and stores, unless
    noted. */
-typedef struct {
-    PyMutex lock;
-    /* Part of the lock: read, and swapped when taken over, by threads
-       without it, so always atomic like the mutex. */
-    uint64_t owner;
-    /* See the I/O role above.  `io` is 0 while nobody has the role, else
-       the holder's thread state id shifted left by one, with
-       NIBBLER_IO_PARKED set once a thread parked waiting for it.  Changed
-       only with the lock held, but always atomically: the parking lot
-       compares it without the lock (and without the GIL). */
-    uint64_t io;
+typedef struct nibbler {
+    nibbler_mutex lock;
+    /* The I/O role (see above); with it, while writing out, the bytes at
+       the front given to a raw call. */
+    nibbler_mutex io;
     Py_ssize_t inflight;
 
     /* The block size, which reads fill and small appends are copied into.
@@ -107,6 +101,11 @@ typedef struct {
     struct nibbler_end *end;
     /* How many ends were made (see nibbler_end.id). */
     uint64_t ends;
+    /* The nibbler_set it is in (NULL for none); in it, the next one and
+       the pointer to it.  Changed with the set's mutex held. */
+    struct nibbler_set *set;
+    struct nibbler *next;
+    struct nibbler **pprev;
 } nibbler;
 
 /*
@@ -319,7 +318,8 @@ nibbler_end_get(nibbler *n, int writing)
 }
 
 /* With the lock just taken: hold the end.  It is held already when it
-   wasn't opened again, or the lock was taken over from a gone holder. */
+   wasn't opened again, as when a holder that could never release the lock
+   held it (see "Locking"). */
 static inline void
 nibbler_hold(nibbler *n)
 {
@@ -474,97 +474,36 @@ nibbler_commit(nibbler_end *e, Py_ssize_t r, const char *data,
 }
 
 /*
- * Locking and the I/O role
+ * Locking
+ *
+ * The lock and the I/O role are PyMutexes that record the id of the thread
+ * state holding them: a thread trying to take one it holds raises (a
+ * reentrant call, from a signal handler or a raw stream calling back)
+ * instead of deadlocking.  (_PyRecursiveMutex records its holder too, but
+ * lets it in again, and finds the thread with calls that would cost an
+ * unbuffered write a few percent.)  The holder is 0 while a mutex is free,
+ * and for a moment after a thread took it.
+ *
+ * A thread holding the lock never waits for the I/O role: it releases the
+ * lock first (see nibbler_take_io()).  Waits detach (release the GIL), and a
+ * signal handler raising interrupts them, except where a raw call returned
+ * and its result must be kept.
+ *
+ * A holder that can never release a mutex is not waited for:
+ *
+ * - In the child of a fork only the forking thread is left: the mutexes
+ *   other threads held are reset, see nibbler_set_after_fork().
+ *
+ * - While finalizing, every other thread was detached when finalizing
+ *   began and hangs as soon as it attaches again: the finalizing thread
+ *   takes a mutex such a thread holds over.
+ *
+ * Such a holder is in a raw call, or about to attach after taking a mutex,
+ * when the state is consistent; its raw call keeps references to the
+ * memory it uses.  It may or may not have written the data it was given
+ * (the parent process still will, after a fork), so that is dropped (see
+ * nibbler_drop_inflight()).
  */
-
-/* How long a thread waits for the lock or the I/O role before it checks
-   whether their holder is gone (see nibbler_lock_wait()): taking over after
-   a fork waits this long, and contended waits check at most once per
-   period. */
-#define NIBBLER_WAIT_NS (20 * 1000 * 1000)
-
-/* Is there no thread state with this id in the interpreter any more?  Its
-   thread exited, or was removed by a fork or by finalization.  Scans the
-   thread states with the runtime's lock held: only done after a wait timed
-   out. */
-static int
-nibbler_thread_gone(PyInterpreterState *interp, uint64_t id)
-{
-    int found = 0;
-    _Py_FOR_EACH_TSTATE_BEGIN(interp, t) {
-        if (t->id == id) {
-            found = 1;
-            break;
-        }
-    }
-    _Py_FOR_EACH_TSTATE_END(interp);
-    return !found;
-}
-
-/* Set in `io` by a thread parking until the role is released. */
-#define NIBBLER_IO_PARKED 1
-
-/* The thread state id of the I/O role holder, or 0. */
-static inline uint64_t
-nibbler_io_holder(nibbler *n)
-{
-    return n->io >> 1;
-}
-
-/* Is another thread writing out?  Then only appending is allowed. */
-static inline int
-nibbler_io_busy(nibbler *n)
-{
-    return n->io != 0;
-}
-
-/* Is this thread writing out? */
-static inline int
-nibbler_io_is_mine(nibbler *n)
-{
-    return nibbler_io_holder(n) == _PyThreadState_GET()->id;
-}
-
-/* Is the lock held by this thread? */
-static inline int
-nibbler_lock_is_mine(nibbler *n)
-{
-    return (_Py_atomic_load_uint64_relaxed(&n->owner)
-            == _PyThreadState_GET()->id);
-}
-
-/* Take the I/O role, which must be free. */
-static void
-nibbler_begin_io(nibbler *n)
-{
-    uint64_t id = _PyThreadState_GET()->id;
-    assert(nibbler_lock_is_mine(n));
-    assert(n->io == 0);
-    /* Shifting left loses no bit. */
-    assert((id >> 63) == 0);
-    /* Relaxed: see nibbler_wait_io(). */
-    _Py_atomic_store_uint64_relaxed(&n->io, id << 1);
-}
-
-/* Release the I/O role, waking the threads parked waiting for it. */
-static void
-nibbler_end_io(nibbler *n)
-{
-    assert(nibbler_lock_is_mine(n));
-    n->inflight = 0;
-    if (_Py_atomic_exchange_uint64(&n->io, 0) & NIBBLER_IO_PARKED) {
-        _PyParkingLot_UnparkAll(&n->io);
-    }
-}
-
-/* Release the I/O role of a gone thread, giving up on the data it was
-   writing out. */
-static void
-nibbler_abandon_io(nibbler *n)
-{
-    morsels_consume(&n->list, n->inflight);
-    nibbler_end_io(n);
-}
 
 static int
 nibbler_reentrant(PyObject *obj)
@@ -573,70 +512,71 @@ nibbler_reentrant(PyObject *obj)
     return -1;
 }
 
-/* Slow path of nibbler_lock(): another thread, or this one reentering,
-   holds the lock.
-
-   A holder that can never release the lock is taken over instead of
-   waited for: after a fork, a thread that held it doesn't exist in the
-   child; while finalizing, every other thread hangs as soon as it attaches
-   again (before it can release the lock, perhaps having just taken it).
-   Such a holder is in a raw call or has just taken the lock, when the state
-   is consistent, and its raw call keeps references to the memory it uses.
-   It may or may not have written the data it was given (the parent
-   process still will, after a fork), so that is dropped.  A thread exits
-   only after releasing the lock, so a gone thread still recorded as owner
-   never released it.
-
-   Waiting is timed, and only after a wait of NIBBLER_WAIT_NS timed out is
-   the owner looked for among the thread states (once per period), so that
-   contended waits don't take the runtime's lock to scan them.  Finalizing
-   is a cheap check, made before each wait. */
-static int
-nibbler_lock_wait(nibbler *n, PyObject *obj, PyThreadState *tstate,
-                  int interruptible)
+/* Does this thread hold m?  Also without m: only this thread can have
+   stored its own id. */
+static inline int
+nibbler_mutex_is_mine(nibbler_mutex *m, PyThreadState *tstate)
 {
-    _PyLockFlags flags = _PY_LOCK_DETACH;
-    if (interruptible) {
-        flags |= _PY_LOCK_HANDLE_SIGNALS;
+    return _Py_atomic_load_uint64_relaxed(&m->holder) == tstate->id;
+}
+
+/* Take m if that needs no wait. */
+static inline int
+nibbler_mutex_trylock(nibbler_mutex *m, PyThreadState *tstate)
+{
+    if (!PyMutex_LockFast(&m->mutex)) {
+        return 0;
     }
-    int timed_out = 0;
-    for (;;) {
-        uint64_t owner = _Py_atomic_load_uint64_relaxed(&n->owner);
-        if (owner == tstate->id) {
-            return nibbler_reentrant(obj);
+    _Py_atomic_store_uint64_relaxed(&m->holder, tstate->id);
+    return 1;
+}
+
+/* Slow path of nibbler_mutex_lock(): m is held, or threads wait for it.
+   Returns 1 when it was taken over. */
+Py_NO_INLINE static int
+nibbler_mutex_wait(nibbler_mutex *m, PyObject *obj, PyThreadState *tstate,
+                   int interruptible)
+{
+    if (nibbler_mutex_is_mine(m, tstate)) {
+        return nibbler_reentrant(obj);
+    }
+    int taken_over = 0;
+    if (_Py_IsInterpreterFinalizing(tstate->interp)) {
+        /* Take it, or take it over from a holder that can never release
+           it (see "Locking"). */
+        taken_over = _PyMutex_LockTimed(&m->mutex, 0, 0) != PY_LOCK_ACQUIRED;
+    }
+    else {
+        _PyLockFlags flags = _PY_LOCK_DETACH;
+        if (interruptible) {
+            flags |= _PY_LOCK_HANDLE_SIGNALS;
         }
-        int take_over = _Py_IsInterpreterFinalizing(tstate->interp);
-        if (!take_over && timed_out && owner != 0) {
-            take_over = nibbler_thread_gone(tstate->interp, owner);
-            timed_out = 0;
-        }
-        if (!take_over) {
-            PyLockStatus st = _PyMutex_LockTimed(&n->lock, NIBBLER_WAIT_NS,
-                                                 flags);
-            if (st == PY_LOCK_ACQUIRED) {
-                return 0;
-            }
-            if (st == PY_LOCK_INTR) {
-                return -1;
-            }
-            timed_out = 1;
-            continue;
-        }
-        /* Unlocked after all (PyMutex_LockFast() also fails while
-           threads are parked)? */
-        if (_PyMutex_LockTimed(&n->lock, 0, 0) == PY_LOCK_ACQUIRED) {
-            return 0;
-        }
-        /* Take over, unless another thread just did. */
-        if (_Py_atomic_compare_exchange_uint64(&n->owner, &owner,
-                                               tstate->id))
-        {
-            if (owner != 0 && nibbler_io_holder(n) == owner) {
-                nibbler_abandon_io(n);
-            }
-            return 0;
+        if (_PyMutex_LockTimed(&m->mutex, -1, flags) != PY_LOCK_ACQUIRED) {
+            return -1;
         }
     }
+    _Py_atomic_store_uint64_relaxed(&m->holder, tstate->id);
+    return taken_over;
+}
+
+/* Take m.  With interruptible, a signal handler raising interrupts the
+   wait.  obj names the object in errors.  Returns 0, 1 when m was taken
+   over (see "Locking"), or -1. */
+static inline int
+nibbler_mutex_lock(nibbler_mutex *m, PyObject *obj, int interruptible)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    if (nibbler_mutex_trylock(m, tstate)) {
+        return 0;
+    }
+    return nibbler_mutex_wait(m, obj, tstate, interruptible);
+}
+
+static inline void
+nibbler_mutex_unlock(nibbler_mutex *m)
+{
+    _Py_atomic_store_uint64_relaxed(&m->holder, 0);
+    PyMutex_Unlock(&m->mutex);
 }
 
 /* Lock; a signal handler raising interrupts the wait.  obj names the
@@ -644,13 +584,9 @@ nibbler_lock_wait(nibbler *n, PyObject *obj, PyThreadState *tstate,
 static inline int
 nibbler_lock(nibbler *n, PyObject *obj)
 {
-    PyThreadState *tstate = _PyThreadState_GET();
-    if (!PyMutex_LockFast(&n->lock)
-        && nibbler_lock_wait(n, obj, tstate, 1) < 0)
-    {
+    if (nibbler_mutex_lock(&n->lock, obj, 1) < 0) {
         return -1;
     }
-    _Py_atomic_store_uint64_relaxed(&n->owner, tstate->id);
     nibbler_hold(n);
     return 0;
 }
@@ -660,14 +596,10 @@ nibbler_lock(nibbler *n, PyObject *obj)
 static void
 nibbler_relock(nibbler *n, PyObject *obj)
 {
-    PyThreadState *tstate = _PyThreadState_GET();
-    if (!PyMutex_LockFast(&n->lock)) {
-        /* Fails only on a reentrant call, which this thread just left. */
-        int r = nibbler_lock_wait(n, obj, tstate, 0);
-        assert(r == 0);
-        (void)r;
-    }
-    _Py_atomic_store_uint64_relaxed(&n->owner, tstate->id);
+    /* Fails only on a reentrant call, which this thread just left. */
+    int r = nibbler_mutex_lock(&n->lock, obj, 0);
+    assert(r == 0);
+    (void)r;
     nibbler_hold(n);
 }
 
@@ -675,58 +607,101 @@ static inline void
 nibbler_unlock(nibbler *n)
 {
     nibbler_open(n);
-    _Py_atomic_store_uint64_relaxed(&n->owner, 0);
-    PyMutex_Unlock(&n->lock);
+    nibbler_mutex_unlock(&n->lock);
 }
 
-/* Wait until the I/O role is free, parked rather than holding the lock.
-   A gone holder is taken over the same way as a gone lock holder, also
-   looked for only once a wait timed out.  Returns 0 with the lock held, or
-   -1 with it released.
-
-   Parking expects `io` to still be the value with NIBBLER_IO_PARKED set
-   here.  Every release sets it to 0 and every take to a value without the
-   bit, so any release after it was set either makes parking return at once
-   or wakes the parked thread: none is missed, even when the same thread
-   takes the role again.
-
-   Stores to `io` need not be sequentially consistent: they are made with
-   the lock held, which orders them for the next holder (so the releasing
-   exchange sees NIBBLER_IO_PARKED), and the parking lot compares under the
-   bucket lock that _PyParkingLot_UnparkAll() takes after that exchange. */
-static int
-nibbler_wait_io(nibbler *n, PyObject *obj)
+/* Does this thread hold the I/O role? */
+static inline int
+nibbler_io_is_mine(nibbler *n)
 {
-    PyThreadState *tstate = _PyThreadState_GET();
-    int timed_out = 0;
-    while (nibbler_io_busy(n)) {
-        uint64_t holder = nibbler_io_holder(n);
-        if (holder == tstate->id) {
-            nibbler_unlock(n);
-            return nibbler_reentrant(obj);
-        }
-        if (_Py_IsInterpreterFinalizing(tstate->interp)
-            || (timed_out && nibbler_thread_gone(tstate->interp, holder)))
-        {
-            nibbler_abandon_io(n);
-            break;
-        }
-        /* `io` only changes with the lock held, which this thread has. */
-        assert(nibbler_lock_is_mine(n));
-        uint64_t io = n->io | NIBBLER_IO_PARKED;
-        _Py_atomic_store_uint64_relaxed(&n->io, io);
-        nibbler_unlock(n);
-        int r = _PyParkingLot_Park(&n->io, &io, sizeof(io), NIBBLER_WAIT_NS,
-                                   NULL, 1);
-        if (r == Py_PARK_INTR && PyErr_CheckSignals() < 0) {
-            return -1;
-        }
-        timed_out = r == Py_PARK_TIMEOUT;
-        if (nibbler_lock(n, obj) < 0) {
-            return -1;
-        }
+    return nibbler_mutex_is_mine(&n->io, _PyThreadState_GET());
+}
+
+/* The I/O role was taken from a holder that will never return from its raw
+   call: drop what it had given it (see "Locking").  A holder releases the
+   role only once its raw calls returned, so otherwise nothing is in
+   flight. */
+static void
+nibbler_drop_inflight(nibbler *n)
+{
+    (void)morsels_consume(&n->list, n->inflight);
+    n->inflight = 0;
+}
+
+/* Take the I/O role, then the lock; a signal handler raising interrupts
+   the waits.  obj names the object in errors. */
+static Py_ALWAYS_INLINE int
+nibbler_lock_io(nibbler *n, PyObject *obj)
+{
+    int taken_over = nibbler_mutex_lock(&n->io, obj, 1);
+    if (taken_over < 0) {
+        return -1;
+    }
+    if (nibbler_lock(n, obj) < 0) {
+        nibbler_mutex_unlock(&n->io);
+        return -1;
+    }
+    if (taken_over) {
+        nibbler_drop_inflight(n);
     }
     return 0;
+}
+
+/* Release the I/O role (keeping the lock, if held). */
+static inline void
+nibbler_end_io(nibbler *n)
+{
+    assert(n->inflight == 0);
+    nibbler_mutex_unlock(&n->io);
+}
+
+/* Release the I/O role and the lock. */
+static inline void
+nibbler_unlock_io(nibbler *n)
+{
+    nibbler_end_io(n);
+    nibbler_unlock(n);
+}
+
+/* What nibbler_take_io() did (or -1 on error, with nothing held). */
+enum {
+    /* Took the I/O role. */
+    NIBBLER_IO_TAKEN,
+    /* Took it after waiting, with the lock released meanwhile (anything may
+       have changed).  Keeping it, rather than waiting only until it is
+       free, makes progress: a release hands it to a waiting thread, so
+       waiters that let it go and retried could each find it taken by the
+       next one, forever. */
+    NIBBLER_IO_WAITED,
+    /* This thread has it: it is writing out further up its stack (as when
+       a signal handler writes). */
+    NIBBLER_IO_MINE,
+};
+
+/* Slow path of nibbler_take_io(). */
+Py_NO_INLINE static int
+nibbler_take_io_wait(nibbler *n, PyObject *obj, PyThreadState *tstate)
+{
+    if (nibbler_mutex_is_mine(&n->io, tstate)) {
+        return NIBBLER_IO_MINE;
+    }
+    nibbler_unlock(n);
+    if (nibbler_lock_io(n, obj) < 0) {
+        return -1;
+    }
+    return NIBBLER_IO_WAITED;
+}
+
+/* With the lock held, to write out: take the I/O role too, waiting for it
+   if need be (a signal handler raising interrupts the wait). */
+static inline int
+nibbler_take_io(nibbler *n, PyObject *obj)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    if (nibbler_mutex_trylock(&n->io, tstate)) {
+        return NIBBLER_IO_TAKEN;
+    }
+    return nibbler_take_io_wait(n, obj, tstate);
 }
 
 /* A raw write took `written` bytes, starting with those in flight: drop
@@ -1106,6 +1081,81 @@ nibbler_append(nibbler *n, PyObject *obj, const char *data, Py_ssize_t len,
     char *dst = PyBytes_AS_STRING(n->block) + used;
     memcpy(dst, data, len);
     return morsels_push(&n->list, n->block, dst, len);
+}
+
+/*
+ * Fork
+ */
+
+/* Nibblers whose mutexes the child of a fork releases: a list, with a
+   mutex held only for a few pointer updates.  Never across a detach, so
+   never across a fork either. */
+typedef struct nibbler_set {
+    PyMutex mutex;
+    nibbler *first;
+} nibbler_set;
+
+/* Add n to s, unless it is in it already. */
+static void
+nibbler_set_add(nibbler_set *s, nibbler *n)
+{
+    PyMutex_LockFlags(&s->mutex, _Py_LOCK_DONT_DETACH);
+    if (n->set == NULL) {
+        n->set = s;
+        n->next = s->first;
+        if (n->next != NULL) {
+            n->next->pprev = &n->next;
+        }
+        s->first = n;
+        n->pprev = &s->first;
+    }
+    PyMutex_Unlock(&s->mutex);
+}
+
+/* Remove n from its set, if it is in one.  Only for n's last user. */
+static void
+nibbler_set_remove(nibbler *n)
+{
+    nibbler_set *s = n->set;
+    if (s == NULL) {
+        return;
+    }
+    PyMutex_LockFlags(&s->mutex, _Py_LOCK_DONT_DETACH);
+    *n->pprev = n->next;
+    if (n->next != NULL) {
+        n->next->pprev = n->pprev;
+    }
+    n->set = NULL;
+    n->next = NULL;
+    n->pprev = NULL;
+    PyMutex_Unlock(&s->mutex);
+}
+
+/* Release m if a thread other than this one held it.  Returns 1 if so. */
+static int
+nibbler_mutex_after_fork(nibbler_mutex *m, PyThreadState *tstate)
+{
+    if (nibbler_mutex_is_mine(m, tstate)) {
+        return 0;
+    }
+    _PyMutex_at_fork_reinit(&m->mutex);
+    m->holder = 0;
+    return 1;
+}
+
+/* In the child of a fork, where only this thread is left: release the
+   mutexes that other threads held, dropping what a gone holder of the I/O
+   role was writing out (see "Locking"). */
+static void
+nibbler_set_after_fork(nibbler_set *s)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    for (nibbler *n = s->first; n != NULL; n = n->next) {
+        (void)nibbler_mutex_after_fork(&n->lock, tstate);
+        if (nibbler_mutex_after_fork(&n->io, tstate)) {
+            nibbler_drop_inflight(n);
+        }
+    }
 }
 
 #endif  // !Py_IO_NIBBLER_NIBBLER_H
