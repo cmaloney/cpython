@@ -2899,6 +2899,15 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
     if (buffered_lock(self) < 0 || buffered_wait_io(self) < 0) {
         return -1;
     }
+    /* Pending writes first go to the raw stream they were written to, as
+       FileIO.__init__() first closes the file it had open: if that fails,
+       raise, leaving the object as it is. */
+    if (buffered_raw_usable(self->raw) && buffered_writing(self)
+        && buffered_flush_writes(self, 0) < 0)
+    {
+        buffered_unlock(self);
+        return -1;
+    }
     nibbler_free(&self->nib);
     (void)buffered_drop_stash(self);
     FT_ATOMIC_STORE_SSIZE_RELAXED(self->nib.capacity,

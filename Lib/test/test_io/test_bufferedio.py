@@ -832,6 +832,39 @@ class BufferedWriterTest(CommonBufferedTests):
         bufio.__init__(self.MockRawIO())
         self.assertEqual(bufio.write(b''), 0)
 
+    def test_reinit_writes_pending(self):
+        # __init__() again writes what is pending to the raw stream it was
+        # written to, as FileIO.__init__() closes the file it had, instead
+        # of dropping it.
+        if not self.is_nibbler:
+            self.skipTest("__init__() drops pending writes")
+        rawio = self.MockRawIO()
+        bufio = self.tp(rawio, 16)
+        bufio.write(b"abc")
+        rawio2 = self.MockRawIO()
+        bufio.__init__(rawio2, 16)
+        self.assertEqual(b"".join(rawio._write_stack), b"abc")
+        self.assertIs(bufio.raw, rawio2)
+        bufio.write(b"def")
+        bufio.flush()
+        self.assertEqual(b"".join(rawio2._write_stack), b"def")
+
+    def test_reinit_write_error(self):
+        # If they can't be written, __init__() raises and leaves the object
+        # as it was, with its raw stream and what is pending.
+        if not self.is_nibbler:
+            self.skipTest("__init__() drops pending writes")
+        rawio = self.MockRawIO()
+        bufio = self.tp(rawio, 16)
+        bufio.write(b"abc")
+        rawio.write = lambda b: 1 / 0
+        self.assertRaises(ZeroDivisionError, bufio.__init__,
+                          self.MockRawIO(), 16)
+        self.assertIs(bufio.raw, rawio)
+        del rawio.write
+        bufio.flush()
+        self.assertEqual(b"".join(rawio._write_stack), b"abc")
+
     def test_detach_flush(self):
         raw = self.MockRawIO()
         buf = self.tp(raw)
