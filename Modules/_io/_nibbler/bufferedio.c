@@ -2165,6 +2165,9 @@ static int
 buffered_clear(PyObject *op)
 {
     buffered *self = buffered_cast(op);
+    /* Writes without the lock use raw: there must be no writing end
+       without it.  (No other thread can use the object any more.) */
+    nibbler_stop_appending(&self->nib);
     Py_XDECREF(buffered_swap_raw(self, NULL));
     (void)buffered_drop_stash(self);
     Py_CLEAR(self->dict);
