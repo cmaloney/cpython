@@ -2392,15 +2392,18 @@ textiowrapper_get_decoded_chars(textio *self, Py_ssize_t n)
  * time.  The codec's decoder is bypassed, and of the newline decoder only
  * seennl is used.
  *
- * The fast paths take a whole line, or n characters, that are there
- * already and need no newline translation, without the lock.  Otherwise
- * native_readline() and native_read() peek, reading more as needed.  A
+ * The fast paths take a whole line, or n characters, of ASCII text (or
+ * Latin-1, or other text a line of which ends with "\n") that is there
+ * already, without the lock, translating newlines as they go; what they
+ * learn of the bytes (which are ASCII, where the next "\r" is) is kept
+ * while the view keeps its block.  Otherwise native_readline() and
+ * native_read() peek, reading more as needed.  A
  * call that can't be done this way returns _PyIO_NIBBLER_NO (or NULL
  * without an exception) having taken nothing, and the generic path does it
  * (see textiowrapper_native_pause()).
  */
 
-/* How far native_clean() scans ahead; also what native_decode() calls
+/* How far native_first() scans ahead; also what native_decode() calls
    short. */
 #define NATIVE_SCAN 8192
 
@@ -2769,9 +2772,9 @@ native_read_translated(textio *self, PyObject *buffer, Py_ssize_t n)
 }
 
 /* The fast path of read(n): up to n characters there in the buffer
-   already, with no "\r" for universal newlines, and ASCII but for
-   Latin-1.  Returns them, or NULL, with an exception set or not (then
-   native_read()). */
+   already, ASCII (newlines translated by native_read_translated()), or
+   not ASCII without "\r".  Returns them, or NULL, with an exception set or
+   not (then native_read()). */
 static inline PyObject *
 native_read_fast(textio *self, PyObject *buffer, Py_ssize_t n)
 {
