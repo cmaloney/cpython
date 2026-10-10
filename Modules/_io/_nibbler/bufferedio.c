@@ -523,10 +523,13 @@ buffered_release_view(PyObject *view)
 }
 
 /* A memoryview of mem[0:len] for Python code (writable with PyBUF_WRITE),
-   inside memobj: a bytes object of ours, or the object whose buffer the
-   caller passed (whose export the view holds, so that a view made from it
-   keeps that memory valid like any other).  Without memobj, the memory must
-   stay valid otherwise. */
+   inside memobj: a bytes object of ours, the object whose buffer the
+   caller passed, or the object holding the data of the current write()
+   (bytes, str, or an exporter).  The view holds memobj, and an export of
+   it when it has a buffer that can change, so that a view made from it
+   keeps that memory valid like any other (also after the call, when the
+   raw stream kept one).  Without memobj, the memory must stay valid
+   otherwise. */
 static PyObject *
 buffered_memory_view(char *mem, Py_ssize_t len, int flags, PyObject *memobj)
 {
@@ -536,8 +539,8 @@ buffered_memory_view(char *mem, Py_ssize_t len, int flags, PyObject *memobj)
     }
     PyMemoryViewObject *mv = (PyMemoryViewObject *)view;
     Py_buffer *master = &mv->mbuf->master;
-    if (PyBytes_CheckExact(memobj)) {
-        /* Released with the managed buffer; bytes have no
+    if (PyBytes_CheckExact(memobj) || PyUnicode_CheckExact(memobj)) {
+        /* Immutable: released with the managed buffer, without
            bf_releasebuffer. */
         master->obj = Py_NewRef(memobj);
         return view;
@@ -545,7 +548,10 @@ buffered_memory_view(char *mem, Py_ssize_t len, int flags, PyObject *memobj)
     /* The view keeps its own shape; the managed buffer releases the export
        when the last view made from it goes. */
     Py_buffer whole;
-    if (PyObject_GetBuffer(memobj, &whole, PyBUF_WRITABLE) < 0) {
+    if (PyObject_GetBuffer(memobj, &whole, (flags == PyBUF_WRITE
+                                            ? PyBUF_WRITABLE
+                                            : PyBUF_SIMPLE)) < 0)
+    {
         Py_DECREF(view);
         return NULL;
     }
@@ -592,14 +598,16 @@ buffered_raw_read(buffered *self, char *dst, Py_ssize_t len, PyObject *memobj,
     return buffered_raw_result(res, len, "readinto");
 }
 
-/* A read-only memoryview of the morsel, which keeps its bytes alive; or,
-   without obj (data of the current write() call), of memory only valid
-   during the call. */
+/* A read-only memoryview of the morsel, which keeps its bytes alive.  Its
+   obj may also be the object holding the data of the current write() call
+   (see buffered_memory_view()), or NULL for memory only valid during the
+   call. */
 static PyObject *
 buffered_view(const morsel *m)
 {
-    if (m->obj == NULL) {
-        return PyMemoryView_FromMemory((char *)m->ptr, m->len, PyBUF_READ);
+    if (m->obj == NULL || !PyBytes_CheckExact(m->obj)) {
+        return buffered_memory_view((char *)m->ptr, m->len, PyBUF_READ,
+                                    m->obj);
     }
     PyObject *whole = PyMemoryView_FromObject(m->obj);
     if (whole == NULL) {
@@ -624,9 +632,10 @@ buffered_check_progress(Py_ssize_t n, Py_ssize_t len, const char *method)
 }
 
 /* One raw write, without the lock, of spans[0:cnt] (total bytes), which
-   are inside objs[0:cnt] (NULL: data of the current write() call, only
-   valid during it): one vectored write to an exact FileIO; else write() of
-   one span, or _writev() of memoryviews of them when the raw stream has it.
+   are inside objs[0:cnt] (bytes of the morsels, or the object holding the
+   data of the current write() call, see buffered_view()): one vectored
+   write to an exact FileIO; else write() of one span, or _writev() of
+   memoryviews of them when the raw stream has it.
    Returns the count, WOULD_BLOCK if the raw stream would block (errno set
    for the BlockingIOError), or -1 on error. */
 Py_NO_INLINE static Py_ssize_t
@@ -661,11 +670,12 @@ buffered_raw_writev_py(buffered *self, const _PyIO_Span *spans,
         res = PyObject_CallMethodOneArg(self->raw, name, arg);
         errnum = errno;
     } while (res == NULL && _PyIO_trap_eintr());
-    /* Views of the data of the current write() call have no exporter:
-       release them, so that they give no access to it later.  (The others
-       keep their bytes alive.) */
+    /* Views of the data of the current write() call are released, so that
+       the raw stream can't use them after the call (views it made from
+       them keep the data valid, through its object).  The others keep
+       their bytes alive. */
     if (cnt == 1) {
-        if (objs[0] == NULL) {
+        if (objs[0] == NULL || !PyBytes_CheckExact(objs[0])) {
             (void)buffered_release_view(arg);
         }
         else {
@@ -674,7 +684,7 @@ buffered_raw_writev_py(buffered *self, const _PyIO_Span *spans,
     }
     else {
         for (Py_ssize_t i = 0; i < cnt; i++) {
-            if (objs[i] == NULL) {
+            if (objs[i] == NULL || !PyBytes_CheckExact(objs[i])) {
                 (void)buffered_release_view(
                     Py_NewRef(PyList_GET_ITEM(arg, i)));
             }
@@ -846,8 +856,9 @@ buffered_write_spans(buffered *self, _PyIO_Span *spans, PyObject **objs,
    written, and dropped once written.  Out of line, so that writing data
    with nothing pending stays small. */
 Py_NO_INLINE static int
-buffered_write_batches(buffered *self, Py_ssize_t target, const char *data,
-                       Py_ssize_t len, int unlocked, Py_ssize_t *done)
+buffered_write_batches(buffered *self, Py_ssize_t target, PyObject *obj,
+                       const char *data, Py_ssize_t len, int unlocked,
+                       Py_ssize_t *done)
 {
     nibbler *n = &self->nib;
     _PyIO_Span stack_spans[_PyIO_WRITEV_MAX];
@@ -894,7 +905,7 @@ buffered_write_batches(buffered *self, Py_ssize_t target, const char *data,
         n->inflight = total;
         if (*done < len && cnt < limit && total == target) {
             spans[cnt] = (_PyIO_Span){data + *done, len - *done};
-            objs[cnt++] = NULL;
+            objs[cnt++] = obj;
             total += len - *done;
         }
         assert(cnt > 0);
@@ -917,7 +928,7 @@ end:
 }
 
 /* Write the first `target` bytes of the pending writes followed by
-   data[0:len] until all of it is written, the raw stream would block or
+   data[0:len] (inside obj, which the caller keeps alive) until all of it is written, the raw stream would block or
    an error is raised; *status says which.  Called with the lock and the
    I/O role.  Written bytes are dropped as they go, so on error the
    unwritten rest is still pending.  With unlocked, the lock is released
@@ -926,19 +937,19 @@ end:
    error.  With nothing pending (as when writing without buffering), data
    goes out as one span. */
 static Py_ssize_t
-buffered_write_out(buffered *self, Py_ssize_t target, const char *data,
-                   Py_ssize_t len, int *status, int unlocked)
+buffered_write_out(buffered *self, Py_ssize_t target, PyObject *obj,
+                   const char *data, Py_ssize_t len, int *status,
+                   int unlocked)
 {
     assert(nibbler_io_is_mine(&self->nib));
     Py_ssize_t done = 0;
     int st = WRITE_DONE;
     if (target > 0) {
-        st = buffered_write_batches(self, target, data, len, unlocked,
+        st = buffered_write_batches(self, target, obj, data, len, unlocked,
                                     &done);
     }
     else if (len > 0) {
         _PyIO_Span span = {data, len};
-        PyObject *obj = NULL;
         st = buffered_write_spans(self, &span, &obj, 1, len, unlocked,
                                   &done);
     }
@@ -953,8 +964,8 @@ static int
 buffered_flush_writes(buffered *self, int unlocked)
 {
     int status;
-    (void)buffered_write_out(self, nibbler_nbytes(&self->nib), NULL, 0,
-                             &status, unlocked);
+    (void)buffered_write_out(self, nibbler_nbytes(&self->nib), NULL, NULL,
+                             0, &status, unlocked);
     if (status == WOULD_BLOCK) {
         buffered_set_blocking_error(0);
     }
@@ -1765,7 +1776,7 @@ gather_commit(gather *g, int flush)
             }
         }
         int status;
-        (void)buffered_write_out(self, pending, NULL, 0, &status, 1);
+        (void)buffered_write_out(self, pending, NULL, NULL, 0, &status, 1);
         if (status == WRITE_ERROR) {
             r = -1;
         }
@@ -3314,7 +3325,7 @@ buffered_write_data(buffered *self, PyObject *obj, const char *data,
         int vectored = (self->raw_vectored
                         && (self->raw_fileio || rest >= self->ref_min));
         Py_ssize_t direct = rest >= threshold || vectored ? rest : 0;
-        done += buffered_write_out(self, pending, data + done, direct,
+        done += buffered_write_out(self, pending, obj, data + done, direct,
                                    &status, 1);
         rest = len - done;
         if (status == WRITE_DONE) {

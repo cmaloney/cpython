@@ -1834,6 +1834,44 @@ class NibblerBufferedReaderTest(NibblerMixin, CBufferedReaderTest):
 class NibblerBufferedWriterTest(NibblerMixin, CBufferedWriterTest):
     tp = _nibbler.BufferedWriter
 
+    def test_raw_keeps_view_of_written_data(self):
+        # A raw stream keeping a view made from the one it is given keeps
+        # the data of the write() valid, through the caller's object.
+        kept = []
+        class Raw(self.MockRawIO):
+            def write(self, b):
+                kept.append(b[1:])
+                return len(b)
+        for size in (16, 0):
+            kept.clear()
+            data = bytearray(b'A' * 100000)
+            bufio = self.tp(Raw(), size)
+            bufio.write(data)
+            self.assertEqual(len(kept), 1)
+            view = kept[0]
+            self.assertIs(view.obj, data)
+            # The bytearray can't be resized while the view is kept.
+            with self.assertRaises(BufferError):
+                del data[:]
+            self.assertEqual(view.tobytes(), b'A' * 99999)
+            kept.clear()
+            view.release()
+            del data[:]
+
+    def test_raw_keeps_view_of_written_text(self):
+        kept = []
+        class Raw(self.MockRawIO):
+            def write(self, b):
+                kept.append(b[1:])
+                return len(b)
+        text = self.TextIOWrapper(self.tp(Raw(), 16), encoding='ascii')
+        n = 100000
+        text.write('A' * n)
+        text.flush()
+        del text
+        junk = [bytes(100000) for _ in range(5)]
+        self.assertEqual(b''.join(kept), b'A' * 99999)
+
 
 class NibblerBufferedRWPairTest(NibblerMixin, CBufferedRWPairTest):
     tp = _nibbler.BufferedRWPair
