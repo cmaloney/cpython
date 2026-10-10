@@ -1834,6 +1834,18 @@ class NibblerBufferedReaderTest(NibblerMixin, CBufferedReaderTest):
 class NibblerBufferedWriterTest(NibblerMixin, CBufferedWriterTest):
     tp = _nibbler.BufferedWriter
 
+    def test_failed_reinit_writes_pending_data(self):
+        # __init__() with a raw stream it can't use writes what is pending
+        # to the old one first, then raises.
+        old = self.MockRawIO()
+        bufio = self.tp(old, 16)
+        bufio.write(b'abc')
+        new = self.MockRawIO()
+        new.writable = lambda: False
+        self.assertRaises(self.UnsupportedOperation, bufio.__init__, new)
+        self.assertEqual(old._write_stack, [b'abc'])
+        self.assertRaises(ValueError, bufio.write, b'x')
+
     def test_raw_keeps_view_of_written_data(self):
         # A raw stream keeping a view made from the one it is given keeps
         # the data of the write() valid, through the caller's object.

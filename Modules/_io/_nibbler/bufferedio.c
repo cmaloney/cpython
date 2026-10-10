@@ -3057,9 +3057,13 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
         err = -1;
     }
 
-    /* (Re)initialize; a failed __init__() leaves the object uninitialized. */
+    /* (Re)initialize; a failed __init__() leaves the object uninitialized.
+       Its exception is put aside meanwhile, and is the context of any
+       raised here. */
+    PyObject *exc = err < 0 ? PyErr_GetRaisedException() : NULL;
     buffered_track(self);
     if (nibbler_lock_io(&self->nib, (PyObject *)self) < 0) {
+        _PyErr_ChainExceptions1(exc);
         return -1;
     }
     /* Pending writes first go to the raw stream they were written to, as
@@ -3069,6 +3073,7 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
         && buffered_flush_writes(self, 0) < 0)
     {
         buffered_leave(self);
+        _PyErr_ChainExceptions1(exc);
         return -1;
     }
     nibbler_free(&self->nib);
@@ -3117,6 +3122,9 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
     buffered_leave(self);
     /* Releasing the old raw stream can run arbitrary code. */
     Py_XDECREF(old);
+    if (exc != NULL) {
+        _PyErr_ChainExceptions1(exc);
+    }
     return err;
 }
 
