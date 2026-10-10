@@ -482,6 +482,14 @@ io
   written again by a later :meth:`!close` or the finalizer.
   (Contributed by Cody Maloney in :gh:`83973`.)
 
+* On a non-blocking raw stream with nothing buffered,
+  :meth:`~io.BufferedReader.read1`, :meth:`~io.BufferedIOBase.readinto1`
+  and :meth:`~io.BufferedReader.peek` of :class:`io.BufferedReader` and
+  :class:`io.BufferedRandom` now return ``None`` when the raw stream would
+  block, as :meth:`~io.BufferedIOBase.read` already did, instead of ``b""``
+  or ``0``, which mean end of file.
+  (Contributed by Cody Maloney in :gh:`57531`.)
+
 
 ipaddress
 ---------

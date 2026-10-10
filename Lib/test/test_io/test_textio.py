@@ -18,6 +18,9 @@ from .utils import CTestCase, PyTestCase
 import io  # C implementation of io
 import _pyio as pyio # Python implementation of io
 
+# Skip reason for tests of _pyio TextIOWrapper fixes that _io lacks.
+C_TEXT_GAP = "_io.TextIOWrapper lacks this _pyio fix"
+
 
 def _default_chunk_size():
     """Get the default TextIOWrapper chunk size"""
@@ -764,6 +767,19 @@ class TextIOWrapperTest:
         self.assertEqual(txt.readlines(5), ["AA\n", "BB\n"])
 
     # read in amounts equal to TextIOWrapper._CHUNK_SIZE which is 128.
+    def test_read_would_block_keeps_partial_char(self):
+        if self.is_C:
+            self.skipTest(C_TEXT_GAP)
+        # gh-57531: a raw stream that would block in the middle of a
+        # multibyte character: its first bytes are kept for the next read,
+        # instead of being decoded as if at EOF.
+        raw = self.MockRawIO((b"a\xc3", None, b"\xa9\xe2", None, b"\x82\xacb"))
+        t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
+        self.assertEqual(t.read(10), "a")
+        self.assertEqual(t.read(10), "\xe9")
+        self.assertEqual(t.read(10), "\u20acb")
+        self.assertEqual(t.read(10), "")
+
     def test_read_by_chunk(self):
         # make sure "\r\n" straddles 128 char boundary.
         txt = self.TextIOWrapper(self.BytesIO(b"A" * 127 + b"\r\nB"), encoding="utf-8")

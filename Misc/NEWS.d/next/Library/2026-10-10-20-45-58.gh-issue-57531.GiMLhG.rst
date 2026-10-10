@@ -1,0 +1,9 @@
+:meth:`~io.BufferedReader.read1`, :meth:`~io.BufferedIOBase.readinto1` and
+:meth:`~io.BufferedReader.peek` of :class:`io.BufferedReader` and
+:class:`io.BufferedRandom` now return ``None`` when the raw stream would
+block with nothing buffered, as :meth:`~io.BufferedIOBase.read` does,
+instead of ``b""`` or ``0``, which mean end of file. The default
+:meth:`io.BufferedIOBase.readinto` and :meth:`~io.BufferedIOBase.readinto1`
+pass ``None`` on instead of raising :exc:`TypeError`. The
+:class:`!TextIOWrapper` of :mod:`!_pyio` no longer decodes a partial
+character as if at end of file when the stream would block.

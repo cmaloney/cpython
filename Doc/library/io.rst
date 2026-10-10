@@ -623,6 +623,10 @@ I/O base classes
          either raise :exc:`BlockingIOError` or return ``None`` if no data is
          available. :mod:`!io` implementations return ``None``.
 
+      .. versionchanged:: next
+         :class:`BufferedReader` and :class:`BufferedRandom` return ``None``
+         instead of ``b""`` when the raw stream would block.
+
    .. method:: readinto(b, /)
 
       Read bytes into a pre-allocated, writable
@@ -632,8 +636,12 @@ I/O base classes
       Like :meth:`read`, multiple reads may be issued to the underlying raw
       stream, unless the latter is interactive.
 
-      A :exc:`BlockingIOError` is raised if the underlying raw stream is in non
-      blocking-mode, and has no data available at the moment.
+      If the underlying raw stream is in non-blocking mode and has no data
+      available at the moment, ``None`` is returned.
+
+      .. versionchanged:: next
+         The default implementation returns ``None`` when :meth:`read`
+         does, instead of raising :exc:`TypeError`.
 
    .. method:: readinto1(b, /)
 
@@ -642,10 +650,15 @@ I/O base classes
       the underlying raw stream's :meth:`~RawIOBase.read` (or
       :meth:`~RawIOBase.readinto`) method. Return the number of bytes read.
 
-      A :exc:`BlockingIOError` is raised if the underlying raw stream is in non
-      blocking-mode, and has no data available at the moment.
+      If the underlying raw stream is in non-blocking mode and has no data
+      available at the moment, ``None`` is returned.
 
       .. versionadded:: 3.5
+
+      .. versionchanged:: next
+         Return ``None`` instead of ``0`` (:mod:`!_pyio`) or raising
+         :exc:`TypeError` (the default implementation) when the raw stream
+         would block.
 
    .. method:: write(b, /)
 
@@ -837,7 +850,12 @@ than raw I/O does.
 
       Return bytes from the stream without advancing the position. The number of
       bytes returned may be less or more than requested. If the underlying raw
-      stream is non-blocking and the operation would block, returns empty bytes.
+      stream is non-blocking and the operation would block, returns ``None``
+      (empty bytes mean end of file).
+
+      .. versionchanged:: next
+         Return ``None`` instead of empty bytes when the operation would
+         block.
 
    .. method:: read(size=-1, /)
 

@@ -32,6 +32,33 @@ def _next_step(plan):
     return plan.pop(0) if plan else -1
 
 
+def make_scripted_reader(base):
+    class ScriptedReader(base):
+        def __init__(self, data, plan=()):
+            self.data = bytes(data)
+            self.pos = 0
+            self.plan = list(plan)
+            self.calls = 0
+
+        def readable(self):
+            return True
+
+        def readinto(self, b):
+            self.calls += 1
+            step = _next_step(self.plan)
+            if step is None:
+                return None
+            if isinstance(step, BaseException):
+                raise step
+            n = len(b) if step < 0 else min(step, len(b))
+            chunk = self.data[self.pos:self.pos + n]
+            b[:len(chunk)] = chunk
+            self.pos += len(chunk)
+            return len(chunk)
+
+    return ScriptedReader
+
+
 def make_scripted_writer(base):
     class ScriptedWriter(base):
         def __init__(self, plan=()):
@@ -72,8 +99,27 @@ def sample_data(size, seed=0):
 class SlowDeviceTest:
     """Buffered objects over raw devices that transfer a little at a time."""
 
+    def scripted_reader(self, data, plan=()):
+        return make_scripted_reader(self.RawIOBase)(data, plan)
+
     def scripted_writer(self, plan=()):
         return make_scripted_writer(self.RawIOBase)(plan)
+
+    # Reading
+
+    def test_text_read_would_block_keeps_partial_char(self):
+        if self.is_C:
+            self.skipTest(C_TEXT_GAP)
+        # A raw stream that would block in the middle of a multibyte
+        # character: its first bytes stay buffered for the next read,
+        # instead of being decoded as if at EOF.
+        data = "a\xe9€b".encode()
+        raw = self.scripted_reader(data, [2, None, 2, None])
+        f = self.TextIOWrapper(self.BufferedReader(raw, 16), encoding="utf-8")
+        self.assertEqual(f.read(10), "a")
+        self.assertEqual(f.read(10), "\xe9")
+        self.assertEqual(f.read(10), "€b")
+        self.assertEqual(f.read(10), "")
 
     # Writing
 
