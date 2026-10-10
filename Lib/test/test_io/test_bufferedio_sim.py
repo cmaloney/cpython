@@ -1198,12 +1198,7 @@ class CSlowDeviceTest(SlowDeviceTest, CTestCase):
 
 
 class PySlowDeviceTest(SlowDeviceTest, PyTestCase):
-    # _pyio BufferedReader._readinto() sizes the copy from its buffer with
-    # len(buf) instead of len(buf) - written, so a readinto() that needs
-    # more than one refill raises ValueError (memoryview assignment).
-    @unittest.expectedFailure
-    def test_trickle_readinto_is_exact(self):
-        super().test_trickle_readinto_is_exact()
+    pass
 
 
 class NibblerSlowDeviceTest(NibblerMixin, SlowDeviceTest, CTestCase):
@@ -1697,21 +1692,7 @@ class CRandomOpsTest(RandomOpsTest, CTestCase):
 
 
 class PyRandomOpsTest(RandomOpsTest, PyTestCase):
-    # Known _pyio bugs these sequences hit (C gets them right):
-    # * readline(size) can return more than size bytes: IOBase.readline's
-    #   nreadahead() clamps each step to size, not to what is still needed
-    #   (BufferedRandom(raw, 16): readline(100); readline(10) -> 15 bytes).
-    # * truncate() keeps read-ahead data, so reads return bytes past the
-    #   new end (BufferedRandom(raw, 512): readinto(100); truncate(100);
-    #   read1(64) -> data instead of b"").
-    # * The _readinto() ValueError described on PySlowDeviceTest.
-    @unittest.expectedFailure
-    def test_file(self):
-        super().test_file()
-
-    @unittest.expectedFailure
-    def test_short_transfer_device(self):
-        super().test_short_transfer_device()
+    pass
 
 
 class NibblerRandomOpsTest(NibblerMixin, RandomOpsTest, CTestCase):
