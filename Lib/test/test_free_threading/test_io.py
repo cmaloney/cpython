@@ -517,6 +517,95 @@ class NibblerTextIOWrapperTest(TestCase):
             run_concurrently([lambda op=op: worker(op) for op in ops]
                              + [reconfigure, detach])
 
+    def test_reconfigure_encoding_race(self):
+        # reconfigure(encoding=...) racing the first reads: no crash (the
+        # codec used to be cleared under them), only the errors of reading
+        # with either codec, or of setting it too late.
+        data = ("abc\n" * 2000).encode("utf-16-le")
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(data)
+        for i in range(300):
+            f = self.open("r", "latin-1", buffer_size=64)
+
+            def reader():
+                try:
+                    for _ in range(20):
+                        f.readline()
+                except UnicodeDecodeError:
+                    pass
+
+            def reconfigure(encoding=("utf-16", "cp1252", "utf-8")[i % 3]):
+                try:
+                    f.reconfigure(encoding=encoding)
+                except io.UnsupportedOperation:
+                    pass
+
+            run_concurrently([reader] * 4 + [reconfigure])
+            f.close()
+
+    def test_reconfigure_newline_while_writing(self):
+        # reconfigure(newline=...) keeps the codec: writes racing it never
+        # find the stream unwritable, and each lands whole, with one of the
+        # newlines.
+        stop = threading.Event()
+        with self.open("w", buffer_size=1 << 16) as f:
+            def writer():
+                for _ in range(20000):
+                    f.write("ab\n")
+
+            def reconfigure():
+                newlines = ("\r\n", "\n", "\r", "")
+                i = 0
+                while not stop.is_set():
+                    f.reconfigure(newline=newlines[i % 4])
+                    i += 1
+
+            with threading_helper.start_threads(
+                    [threading.Thread(target=reconfigure)]):
+                try:
+                    run_concurrently([writer] * 4)
+                finally:
+                    stop.set()
+        with open(os_helper.TESTFN, "rb") as f:
+            data = f.read()
+        parts = data.split(b"ab")
+        self.assertEqual(parts[0], b"")
+        self.assertEqual(len(parts), 4 * 20000 + 1)
+        self.assertLessEqual(set(parts[1:]), {b"\n", b"\r", b"\r\n"})
+
+    def test_reinit_race(self):
+        # __init__() called again while other threads read, write and
+        # tell(): no crash (the old buffer and codec were freed under
+        # them).
+        with open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.writelines(self.lines(1000))
+        for _ in range(100):
+            f = self.open("r+", buffer_size=64)
+
+            def worker(k):
+                for _ in range(100):
+                    try:
+                        if k % 3 == 0:
+                            f.readline()
+                        elif k % 3 == 1:
+                            f.write("zz€\n")
+                        else:
+                            f.read(5)
+                            f.tell()
+                    except (ValueError, OSError, UnicodeError):
+                        # Not writable, or not initialized meanwhile, or
+                        # reading what a write cut.
+                        pass
+
+            def reinit():
+                f.__init__(self.nib.BufferedReader(
+                    io.FileIO(os_helper.TESTFN, "r"), 64),
+                    encoding="cp1252", errors="replace")
+
+            run_concurrently([lambda k=k: worker(k) for k in range(6)]
+                             + [reinit])
+            f.close()
+
     @support.requires_subprocess()
     def test_daemon_writers_at_exit(self):
         # Daemon threads still writing through sys.stdout when the process

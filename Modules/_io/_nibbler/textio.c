@@ -88,7 +88,7 @@ enum { SEEN_CR = 1, SEEN_LF = 2, SEEN_CRLF = 4 };
    skip_lf: the "\n" at the position ends a "\r\n" already seen.  nl: the
    kinds of newline in chars[ci:] were noted (see text_note_newlines()).  With
    free threading, a call's copy, of the span sp (see tspan) at pos and of
-   version ver; renew: chars are others now. */
+   version ver; renew: chars are others now; wide: the decoder's. */
 typedef struct tspan tspan;
 typedef struct {
     PyObject *chars;
@@ -101,6 +101,7 @@ typedef struct {
     uint8_t skip_lf;
     uint8_t nl;
     uint8_t renew;
+    uint8_t wide;
     tspan *sp;
     uint64_t pos;
 } tcache;
@@ -134,39 +135,50 @@ struct tspan {
 #define SPAN_BOFF(sp, pos) ((sp)->wide ? 0 : (Py_ssize_t)((pos) >> 32))
 #endif
 
+/* The settings that calls run by: set by __init__() and reconfigure()
+   (and detach(), and when the buffer can't be the store any more), and
+   never changed once published, but replaced whole (see "Locking").  A
+   call takes a reference to them once (textio_conf()), so that everything
+   it reads of them agrees, and lives while it runs. */
 typedef struct {
-    PyObject_HEAD
-    uint8_t ok;                 /* initialized? */
-    uint8_t detached;
-    char finalizing;
-    uint8_t line_buffering;
-    uint8_t write_through;
+    Py_ssize_t refs;            /* the object's, and calls' */
+    PyObject *buffer;           /* NULL once detached */
+    PyObject *encoding;
+    PyObject *errors;
+    const char *errors_str;     /* errors, or NULL for "strict" */
+    PyObject *encoder;          /* NULL if not writable */
+    PyObject *decoder;          /* CODEC_DECODER only, if readable */
+    PyObject *charmap;          /* CODEC_CHARMAP's decoding table */
+    PyObject *readnl;
+    const char *writenl;        /* ASCII; NULL stands for "\n" */
+    char codec;                 /* CODEC_* for reads */
+    char enc;                   /* CODEC_* for writes (CHARMAP: ASCII only) */
+    char escapes;               /* errors is "surrogateescape" */
     char readable;
+    char seekable;
+    char has_read1;             /* the buffer has read1() */
     char readuniversal;
     char readtranslate;
     char writetranslate;
-    char seekable;
-    char has_read1;             /* the buffer has read1() */
-    char nib;                   /* the store is the buffer itself */
-    char nib_ok;                /* the buffer can be the store */
-    char codec;                 /* CODEC_* for reads */
-    char escapes;               /* errors is "surrogateescape" */
-    char enc;                   /* CODEC_* for writes (CHARMAP: ASCII only) */
+    char nibbler;               /* the buffer is an exact _io._nibbler one */
+    char lockfree;              /* calls run without the critical section */
+} tconf;
+
+typedef struct {
+    PyObject_HEAD
+    tconf *conf;                /* NULL: not initialized */
+    char finalizing;
+    uint8_t line_buffering;
+    uint8_t write_through;
+    /* With the critical section only: the store is the buffer itself now
+       (not rbuf); the buffer can be the store (it has no instance dict). */
+    char nib;
+    char nib_ok;
     char encoding_start_of_stream;  /* the encoder may write a BOM */
     char encoder_used;          /* the encoder needs final=True at the end */
     uint8_t decoded;            /* read since the last seek or write */
     uint8_t seennl;             /* SEEN_* */
-    /* Calls run without the critical section (see "Locking"). */
-    uint8_t lockfree;
     Py_ssize_t chunk_size;
-    PyObject *buffer;
-    PyObject *encoding;
-    PyObject *errors;
-    PyObject *encoder;
-    PyObject *decoder;          /* CODEC_DECODER only */
-    PyObject *charmap;          /* CODEC_CHARMAP's decoding table */
-    PyObject *readnl;
-    const char *writenl;        /* ASCII; NULL stands for "\n" */
 
     /* What is known of the characters at the position (see tcache),
        shared by the calls that run without the critical section; with
@@ -220,58 +232,187 @@ textio_unsupported(textio *self, const char *message)
     return NULL;
 }
 
-/* Objects swapped while other threads may use them (see "Locking"): set
-   *slot to obj (a new reference). */
-static void
-text_swap(PyObject **slot, PyObject *obj)
+/*
+ * Settings
+ */
+
+/* New settings, with no references, or NULL with MemoryError. */
+static tconf *
+conf_new(void)
 {
-#ifdef Py_GIL_DISABLED
-    if (obj != NULL) {
-        /* Lets _Py_XGetRef() take references to it. */
-        _PyObject_SetMaybeWeakref(obj);
+    tconf *cf = PyMem_Calloc(1, sizeof(*cf));
+    if (cf == NULL) {
+        PyErr_NoMemory();
+        return NULL;
     }
-    TEXT_DECREF_LATER(_Py_atomic_exchange_ptr(slot, obj));
+    cf->refs = 1;
+    return cf;
+}
+
+/* A copy of cf to change before it is published. */
+static tconf *
+conf_copy(const tconf *cf)
+{
+    tconf *n = conf_new();
+    if (n != NULL) {
+        *n = *cf;
+        n->refs = 1;
+        Py_XINCREF(n->buffer);
+        Py_XINCREF(n->encoding);
+        Py_XINCREF(n->errors);
+        Py_XINCREF(n->encoder);
+        Py_XINCREF(n->decoder);
+        Py_XINCREF(n->charmap);
+        Py_XINCREF(n->readnl);
+    }
+    return n;
+}
+
+/* Drop a reference to cf.  The last one frees it: its memory once no
+   thread can be in conf_get() with it (see conf_set() for text_quick(),
+   which borrows the rest). */
+static void
+conf_put(tconf *cf)
+{
+    if (cf == NULL) {
+        return;
+    }
+#ifdef Py_GIL_DISABLED
+    if (_Py_atomic_add_ssize(&cf->refs, -1) != 1) {
+        return;
+    }
 #else
-    Py_XSETREF(*slot, obj);
+    if (--cf->refs != 0) {
+        return;
+    }
+#endif
+    Py_XDECREF(cf->buffer);
+    Py_XDECREF(cf->encoding);
+    Py_XDECREF(cf->errors);
+    Py_XDECREF(cf->encoder);
+    Py_XDECREF(cf->decoder);
+    Py_XDECREF(cf->charmap);
+    Py_XDECREF(cf->readnl);
+#ifdef Py_GIL_DISABLED
+    _PyMem_FreeDelayed(cf, sizeof(*cf));
+#else
+    PyMem_Free(cf);
 #endif
 }
 
-static inline PyObject *
-text_get(PyObject **slot)
+/* The settings, borrowed: alive until this thread waits or runs other
+   code (see conf_put()). */
+static inline tconf *
+conf_peek(textio *self)
+{
+    return FT_ATOMIC_LOAD_PTR_ACQUIRE(self->conf);
+}
+
+/* A new reference to the settings, or NULL if there are none. */
+static inline tconf *
+conf_get(textio *self)
 {
 #ifdef Py_GIL_DISABLED
-    return _Py_XGetRef(slot);
+    for (;;) {
+        tconf *cf = _Py_atomic_load_ptr_acquire(&self->conf);
+        if (cf == NULL) {
+            return NULL;
+        }
+        /* Freed only after a delay this thread is inside (see
+           conf_put()): unless its last reference is gone. */
+        Py_ssize_t refs = _Py_atomic_load_ssize_relaxed(&cf->refs);
+        while (refs > 0) {
+            if (_Py_atomic_compare_exchange_ssize(&cf->refs, &refs,
+                                                  refs + 1))
+            {
+                return cf;
+            }
+        }
+    }
 #else
-    return Py_XNewRef(*slot);
+    tconf *cf = self->conf;
+    if (cf != NULL) {
+        cf->refs++;
+    }
+    return cf;
 #endif
+}
+
+/* Publish cf (stolen; NULL: uninitialized), with the critical section.
+   Settings with lockfree may be borrowed by text_quick() in other threads:
+   with free threading, those swapped out are kept until every thread is
+   past it (stopping the world: lockfree settings are rarely swapped out),
+   but by tp_clear and dealloc, where no thread can be using self.  (The
+   objects a borrower uses can't be freed later instead: the buffer's
+   deallocator frees more later, which _PyMem_AbandonDelayed() can't take
+   while it frees what a thread left.) */
+static void
+conf_set(textio *self, tconf *cf, int clearing)
+{
+#ifdef Py_GIL_DISABLED
+    tconf *old = _Py_atomic_exchange_ptr(&self->conf, cf);
+    if (old != NULL && old->lockfree && !clearing) {
+        PyInterpreterState *interp = _PyInterpreterState_GET();
+        _PyEval_StopTheWorld(interp);
+        _PyEval_StartTheWorld(interp);
+    }
+    conf_put(old);
+#else
+    (void)clearing;
+    tconf *old = self->conf;
+    self->conf = cf;
+    conf_put(old);
+#endif
+}
+
+/* A new reference to the settings, with a buffer: else NULL with
+   ValueError. */
+static tconf *
+textio_conf(textio *self)
+{
+    tconf *cf = conf_get(self);
+    if (cf == NULL || cf->buffer == NULL) {
+        PyErr_SetString(PyExc_ValueError,
+                        cf ? "underlying buffer has been detached"
+                           : "I/O operation on uninitialized object");
+        conf_put(cf);
+        return NULL;
+    }
+    return cf;
 }
 
 /* A new reference to the buffer, or NULL with ValueError. */
 static PyObject *
-textio_buffer(textio *self)
+textio_buffer_get(textio *self)
 {
-    PyObject *buffer = (FT_ATOMIC_LOAD_UINT8_RELAXED(self->ok)
-                        ? text_get(&self->buffer) : NULL);
-    if (buffer == NULL) {
-        PyErr_SetString(PyExc_ValueError,
-                        FT_ATOMIC_LOAD_UINT8_RELAXED(self->ok)
-                        && FT_ATOMIC_LOAD_UINT8_RELAXED(self->detached)
-                        ? "underlying buffer has been detached"
-                        : "I/O operation on uninitialized object");
-    }
+    tconf *cf = textio_conf(self);
+    PyObject *buffer = cf ? Py_NewRef(cf->buffer) : NULL;
+    conf_put(cf);
     return buffer;
 }
 
 static PyObject *
 textio_call(textio *self, PyObject *name, PyObject *arg)
 {
-    PyObject *buffer = textio_buffer(self);
-    if (buffer == NULL) {
+    tconf *cf = textio_conf(self);
+    if (cf == NULL) {
         return NULL;
     }
-    PyObject *res = (arg == NULL ? PyObject_CallMethodNoArgs(buffer, name)
-                     : PyObject_CallMethodOneArg(buffer, name, arg));
-    Py_DECREF(buffer);
+    PyObject *res = (arg == NULL ? PyObject_CallMethodNoArgs(cf->buffer, name)
+                     : PyObject_CallMethodOneArg(cf->buffer, name, arg));
+    conf_put(cf);
+    return res;
+}
+
+static PyObject *
+textio_call_getattr(textio *self, PyObject *name)
+{
+    tconf *cf = textio_conf(self);
+    if (cf == NULL) {
+        return NULL;
+    }
+    PyObject *res = PyObject_GetAttr(cf->buffer, name);
+    conf_put(cf);
     return res;
 }
 
@@ -298,7 +439,7 @@ textio_exact(textio *self)
 /* Raise ValueError if the stream is closed.  A subclass may override
    closed. */
 static int
-textio_check_closed(textio *self, PyObject *buffer)
+textio_check_closed(textio *self, tconf *cf)
 {
     if (!textio_exact(self)) {
         PyObject *res = _PyIOBase_check_closed((PyObject *)self, Py_True);
@@ -306,11 +447,11 @@ textio_check_closed(textio *self, PyObject *buffer)
         return res == NULL ? -1 : 0;
     }
     int r;
-    if (self->nib_ok) {
-        r = _PyIONibbler_closed(buffer);
+    if (cf->nibbler) {
+        r = _PyIONibbler_closed(cf->buffer);
     }
     else {
-        PyObject *res = PyObject_GetAttr(buffer, &_Py_ID(closed));
+        PyObject *res = PyObject_GetAttr(cf->buffer, &_Py_ID(closed));
         r = res == NULL ? -1 : PyObject_IsTrue(res);
         Py_XDECREF(res);
     }
@@ -320,15 +461,16 @@ textio_check_closed(textio *self, PyObject *buffer)
     return r == 0 ? 0 : -1;
 }
 
-/* The buffer, attached and open, as a new reference. */
-static PyObject *
+/* The settings, with the buffer attached and open, as a new reference. */
+static tconf *
 textio_ready(textio *self)
 {
-    PyObject *buffer = textio_buffer(self);
-    if (buffer != NULL && textio_check_closed(self, buffer) < 0) {
-        Py_CLEAR(buffer);
+    tconf *cf = textio_conf(self);
+    if (cf != NULL && textio_check_closed(self, cf) < 0) {
+        conf_put(cf);
+        cf = NULL;
     }
-    return buffer;
+    return cf;
 }
 
 /*
@@ -337,7 +479,8 @@ textio_ready(textio *self)
 
 /* The store's unread bytes at the position (see _PyIONibbler_peek()). */
 typedef struct {
-    PyObject *buffer;
+    tconf *cf;          /* the call's settings */
+    PyObject *buffer;   /* cf's */
     _PyIO_Morsel m;
     uint64_t key;
     int status;         /* of the last peek: 0 or _PyIO_NIBBLER_* */
@@ -378,19 +521,24 @@ store_forget(store *st)
 /*
  * Locking
  *
- * With a native codec over an exact _io._nibbler buffer (lockfree), reads,
- * write(), tell(), flush() and the attributes run without the object's
- * critical section: the bytes are the buffer's, which takes them
+ * With a native codec over an exact _io._nibbler buffer (conf's lockfree),
+ * reads, write(), tell(), flush() and the attributes run without the
+ * object's critical section: the bytes are the buffer's, which takes them
  * atomically (advance() by key and offset), and what each call knows of
  * the characters is its own copy of the cache, taken from a span and
  * published by swapping the span's position, or the span (see tspan).  A
  * copy that is no longer of the buffer's bytes is found out when its
- * bytes are taken, and decoded again.  The other
- * methods, and everything with other codecs or buffers (the codec's
- * decoder and encoder, and rbuf, aren't thread-safe), keep the critical
- * section.  The buffer is swapped atomically (detach()), and objects that
- * calls use without a reference are freed only once no thread can still
- * use them (delayed, on free-threaded builds).
+ * bytes are taken, and decoded again.  Such calls use the buffer as the
+ * store, never rbuf.  The other methods, and everything with other codecs
+ * or buffers (the codec's decoder and encoder, and rbuf, aren't
+ * thread-safe), keep the critical section.
+ *
+ * What calls run by (the buffer, codec, newline and the lockfree flag) is
+ * the settings, tconf, which are replaced whole: each call takes them once,
+ * so that a reconfigure(), __init__() or detach() meanwhile changes nothing
+ * under it.  Settings, spans and the objects in them that calls use without
+ * a reference are freed only once no thread can still use them (delayed,
+ * on free-threaded builds).
  */
 
 /* The cache as st's call knows it, st->c: with free threading, a copy,
@@ -418,7 +566,7 @@ cache_get(textio *self, tcache *copy)
         _Py_atomic_load_ssize_relaxed(&sp->cr_at),
         sp->key, sp->koff + boff, sp->kbytes - boff, sp->ver,
         (uint8_t)(pos & 1), _Py_atomic_load_uint8_relaxed(&sp->nl), 0,
-        sp, pos,
+        (uint8_t)sp->wide, sp, pos,
     };
     return copy;
 #else
@@ -503,7 +651,7 @@ cache_put(textio *self, tcache *c)
             PyErr_NoMemory();
             return -1;
         }
-        int wide = self->codec == CODEC_DECODER;
+        int wide = c->wide;
         assert(wide || c->ci == 0);
         *n = (tspan){Py_NewRef(c->chars), wide ? 0 : c->key,
                      _Py_atomic_add_uint64(&self->spans, 1) + 1,
@@ -565,39 +713,64 @@ textio_drop_chars(textio *self)
 #  define SEENNL_ADD(self, seen) ((self)->seennl |= (seen))
 #endif
 
+/* The buffer can't be the store any more (it got an instance dict): with
+   the critical section, settings by which calls keep it.  Returns 0 or
+   -1. */
+static int
+text_no_nib(textio *self)
+{
+    self->nib = self->nib_ok = 0;
+    tconf *cf = conf_peek(self);
+    if (cf != NULL && cf->lockfree) {
+        tconf *n = conf_copy(cf);
+        if (n == NULL) {
+            return -1;
+        }
+        n->lockfree = 0;
+        conf_set(self, n, 0);
+    }
+    return 0;
+}
+
 /* Use the buffer through its methods: for good (it got an instance dict),
    or while it can't hold the bytes needed (keeping read-ahead in rbuf). */
-static void
+static int
 store_use_methods(textio *self, store *st, int for_good)
 {
     self->nib = 0;
-    self->nib_ok &= !for_good;
-    FT_ATOMIC_STORE_UINT8_RELAXED(self->lockfree, 0);
-    if (self->codec != CODEC_DECODER) {
+    if (for_good && text_no_nib(self) < 0) {
+        return -1;
+    }
+    if (st->cf->codec != CODEC_DECODER) {
         cache_clear(st->c);
         cache_put(self, st->c);
     }
+    return 0;
 }
 
 static int store_peek_methods(textio *self, store *st, Py_ssize_t need);
 
-/* Peek at least need bytes (see _PyIONibbler_peek()); -1 on error. */
+/* Peek at least need bytes (see _PyIONibbler_peek()); -1 on error.
+   Calls without the critical section (st->lockfree) use only the buffer:
+   rbuf and nib are the critical section's. */
 static inline int
 store_peek(textio *self, store *st, Py_ssize_t need)
 {
-    if (!self->nib && self->nib_ok
+    if (!st->lockfree && !self->nib && self->nib_ok
         && (self->rbuf == NULL || self->rpos == PyBytes_GET_SIZE(self->rbuf)))
     {
         /* Nothing read ahead here any more: back to the buffer itself. */
         Py_CLEAR(self->rbuf);
         self->nib = 1;
     }
-    if (self->nib) {
+    if (st->lockfree || self->nib) {
         Py_XDECREF(st->m.obj);
         int r = _PyIONibbler_peek(st->buffer, need, &st->m, &st->key);
         st->peeked = 1;
+        /* Nothing goes to rbuf while calls may run without the critical
+           section: what doesn't fit the buffer is taken in parts. */
         if (r != _PyIO_NIBBLER_NO
-            && (r != _PyIO_NIBBLER_FULL || st->lockfree))
+            && (r != _PyIO_NIBBLER_FULL || st->cf->lockfree))
         {
             st->status = r;
             st->eof = r == 0 && st->m.len < need;
@@ -607,11 +780,12 @@ store_peek(textio *self, store *st, Py_ssize_t need)
             /* A dict on the buffer: the methods, with the critical
                section (see text_read()). */
             assert(r == _PyIO_NIBBLER_NO);
-            FT_ATOMIC_STORE_UINT8_RELAXED(self->lockfree, 0);
             st->retry = 1;
             return -1;
         }
-        store_use_methods(self, st, r == _PyIO_NIBBLER_NO);
+        if (store_use_methods(self, st, r == _PyIO_NIBBLER_NO) < 0) {
+            return -1;
+        }
     }
     return store_peek_methods(self, st, need);
 }
@@ -635,7 +809,8 @@ store_peek_methods(textio *self, store *st, Py_ssize_t need)
             return -1;
         }
         PyObject *res = PyObject_CallMethodOneArg(
-            st->buffer, self->has_read1 ? &_Py_ID(read1) : &_Py_ID(read),
+            st->buffer,
+            st->cf->has_read1 ? &_Py_ID(read1) : &_Py_ID(read),
             size);
         Py_DECREF(size);
         if (res == NULL) {
@@ -654,7 +829,7 @@ store_peek_methods(textio *self, store *st, Py_ssize_t need)
             PyErr_Format(PyExc_TypeError,
                          "underlying %s() should have returned a bytes-like "
                          "object, not '%.200s'",
-                         self->has_read1 ? "read1": "read",
+                         st->cf->has_read1 ? "read1": "read",
                          Py_TYPE(res)->tp_name);
             Py_DECREF(res);
             return -1;
@@ -714,7 +889,7 @@ store_advance(textio *self, store *st, uint64_t key, Py_ssize_t off,
               Py_ssize_t n)
 {
     int r = 1;
-    if (self->nib) {
+    if (st->lockfree || self->nib) {
         r = _PyIONibbler_advance(st->buffer, key, off, n);
     }
     else if (self->rbuf != NULL && key == STORE_KEY(self->rgen)
@@ -731,13 +906,14 @@ store_advance(textio *self, store *st, uint64_t key, Py_ssize_t off,
             st->m.ptr += n;
             st->m.len -= n;
         }
-        if (self->enc == CODEC_DECODER && self->encoding_start_of_stream
-            && self->encoder != NULL)
+        if (st->cf->enc == CODEC_DECODER && self->encoding_start_of_stream
+            && st->cf->encoder != NULL)
         {
-            /* Not at the start any more: no BOM. */
+            /* Not at the start any more: no BOM.  (Not lockfree: the
+               codec's decoder is used.) */
             self->encoding_start_of_stream = 0;
             PyObject *res = PyObject_CallMethodOneArg(
-                self->encoder, &_Py_ID(setstate), _PyLong_GetZero());
+                st->cf->encoder, &_Py_ID(setstate), _PyLong_GetZero());
             Py_XDECREF(res);
             return res == NULL ? -1 : 1;
         }
@@ -748,15 +924,15 @@ store_advance(textio *self, store *st, uint64_t key, Py_ssize_t off,
 /* Hand the read-ahead in rbuf back to the buffer, so that its position is
    the text position (the buffer as the store has none to hand back). */
 static int
-store_rewind(textio *self, PyObject *buffer)
+store_rewind(textio *self, tconf *cf)
 {
     Py_ssize_t unread = self->rbuf ? PyBytes_GET_SIZE(self->rbuf) - self->rpos
                                    : 0;
-    if (unread == 0 || !self->seekable) {
+    if (unread == 0 || !cf->seekable) {
         /* Not seekable: reads and writes are separate streams. */
         return 0;
     }
-    PyObject *res = _PyObject_CallMethod(buffer, &_Py_ID(seek), "ni",
+    PyObject *res = _PyObject_CallMethod(cf->buffer, &_Py_ID(seek), "ni",
                                          -unread, SEEK_CUR);
     if (res == NULL) {
         return -1;
@@ -782,28 +958,29 @@ store_tell(textio *self, PyObject *buffer)
     return pos;
 }
 
-/* store_write() past its first case: rbuf handed back first, or through
-   the buffer's write(). */
+/* store_write() past its first case, with the critical section: rbuf
+   handed back first, or through the buffer's write(). */
 Py_NO_INLINE static int
-store_write_methods(textio *self, PyObject *buffer, PyObject *obj,
-                    const char *data, Py_ssize_t len)
+store_write_methods(textio *self, tconf *cf, PyObject *obj, const char *data,
+                    Py_ssize_t len)
 {
     if (len == 0) {
         return 0;
     }
-    if (self->rbuf != NULL && store_rewind(self, buffer) < 0) {
+    if (self->rbuf != NULL && store_rewind(self, cf) < 0) {
         return -1;
     }
     if (!self->nib && self->nib_ok && self->rbuf == NULL) {
         self->nib = 1;
     }
     if (self->nib) {
-        int r = _PyIONibbler_write(buffer, obj, data, len);
+        int r = _PyIONibbler_write(cf->buffer, obj, data, len);
         if (r != _PyIO_NIBBLER_NO) {
             return r;
         }
-        self->nib = self->nib_ok = 0;
-        FT_ATOMIC_STORE_UINT8_RELAXED(self->lockfree, 0);
+        if (text_no_nib(self) < 0) {
+            return -1;
+        }
     }
     PyObject *b = (PyBytes_CheckExact(obj) ? Py_NewRef(obj)
                    : PyBytes_FromStringAndSize(data, len));
@@ -812,24 +989,27 @@ store_write_methods(textio *self, PyObject *buffer, PyObject *obj,
     }
     PyObject *res;
     do {
-        res = PyObject_CallMethodOneArg(buffer, &_Py_ID(write), b);
+        res = PyObject_CallMethodOneArg(cf->buffer, &_Py_ID(write), b);
     } while (res == NULL && _PyIO_trap_eintr());
     Py_DECREF(b);
     Py_XDECREF(res);
     return res == NULL ? -1 : 0;
 }
 
+/* Store data[0:len] (owned by obj).  Without the critical section
+   (lockfree), only into the buffer itself: _PyIO_NIBBLER_NO if it has to
+   be done with it. */
 static inline int
-store_write(textio *self, PyObject *buffer, PyObject *obj, const char *data,
-            Py_ssize_t len)
+store_write(textio *self, tconf *cf, int lockfree, PyObject *obj,
+            const char *data, Py_ssize_t len)
 {
-    if (self->nib && len > 0) {
-        int r = _PyIONibbler_write(buffer, obj, data, len);
-        if (r != _PyIO_NIBBLER_NO) {
+    if ((lockfree || self->nib) && len > 0) {
+        int r = _PyIONibbler_write(cf->buffer, obj, data, len);
+        if (r != _PyIO_NIBBLER_NO || lockfree) {
             return r;
         }
     }
-    return store_write_methods(self, buffer, obj, data, len);
+    return store_write_methods(self, cf, obj, data, len);
 }
 
 /*
@@ -1016,24 +1196,23 @@ utf8_bytes(PyObject *chars, int escapes, Py_ssize_t i, Py_ssize_t k)
 
 /* The UTF-8 bytes of chars[i:i+k] (kbytes those of chars[i:]). */
 static Py_ssize_t
-text_bytes(textio *self, PyObject *chars, Py_ssize_t kbytes, Py_ssize_t i,
+text_bytes(tconf *cf, PyObject *chars, Py_ssize_t kbytes, Py_ssize_t i,
            Py_ssize_t k)
 {
     return (i + k == PyUnicode_GET_LENGTH(chars) ? kbytes
-            : utf8_bytes(chars, self->escapes, i, k));
+            : utf8_bytes(chars, cf->escapes, i, k));
 }
 
 /* A native codec's decoding of s[0:len] (but a partial character at the
    end, unless final): *used gets the bytes decoded. */
 static PyObject *
-native_decode(textio *self, const char *s, Py_ssize_t len, int final,
+native_decode(tconf *cf, const char *s, Py_ssize_t len, int final,
               Py_ssize_t *used)
 {
     /* NULL is "strict", which the UTF-8 decoder does fastest. */
-    const char *errors = (self->errors == &_Py_ID(strict) ? NULL
-                          : PyUnicode_AsUTF8(self->errors));
+    const char *errors = cf->errors_str;
     *used = len;
-    switch (self->codec) {
+    switch (cf->codec) {
     case CODEC_UTF8: {
         /* Not final, so as not to count the characters first (as the
            decoder does when final), which costs more than it saves; but
@@ -1055,15 +1234,15 @@ native_decode(textio *self, const char *s, Py_ssize_t len, int final,
         if (_Py_bytes_isascii(s, len) == Py_True) {
             return PyUnicode_DecodeASCII(s, len, errors);
         }
-        return PyUnicode_DecodeCharmap(s, len, self->charmap, errors);
+        return PyUnicode_DecodeCharmap(s, len, cf->charmap, errors);
     }
 }
 
 /* The decoder's flags. */
 static int
-decoder_flags(textio *self, int *flags, Py_ssize_t *held)
+decoder_flags(PyObject *decoder, int *flags, Py_ssize_t *held)
 {
-    PyObject *state = PyObject_CallMethodNoArgs(self->decoder,
+    PyObject *state = PyObject_CallMethodNoArgs(decoder,
                                                 &_Py_ID(getstate));
     PyObject *buf;
     int ok = (state != NULL && PyTuple_Check(state)
@@ -1082,11 +1261,11 @@ decoder_flags(textio *self, int *flags, Py_ssize_t *held)
 
 /* Set the decoder to (b"", flags), or reset it (FLAGS_FRESH). */
 static int
-decoder_setstate(textio *self, int flags)
+decoder_setstate(PyObject *decoder, int flags)
 {
     PyObject *res = (flags == FLAGS_FRESH
-                     ? PyObject_CallMethodNoArgs(self->decoder, &_Py_ID(reset))
-                     : _PyObject_CallMethod(self->decoder, &_Py_ID(setstate),
+                     ? PyObject_CallMethodNoArgs(decoder, &_Py_ID(reset))
+                     : _PyObject_CallMethod(decoder, &_Py_ID(setstate),
                                             "((yi))", "", flags));
     Py_XDECREF(res);
     return res == NULL ? -1 : 0;
@@ -1096,10 +1275,10 @@ decoder_setstate(textio *self, int flags)
    bytes it decoded (not those it holds, which it is made to forget),
    *flags its flags after them. */
 static PyObject *
-decoder_decode(textio *self, const char *s, Py_ssize_t len, int final,
+decoder_decode(PyObject *decoder, const char *s, Py_ssize_t len, int final,
                Py_ssize_t *used, int *flags)
 {
-    if (decoder_setstate(self, *flags) < 0) {
+    if (decoder_setstate(decoder, *flags) < 0) {
         return NULL;
     }
     PyObject *input = PyBytes_FromStringAndSize(s, len);
@@ -1107,8 +1286,7 @@ decoder_decode(textio *self, const char *s, Py_ssize_t len, int final,
         return NULL;
     }
     PyObject *chars = PyObject_CallMethodObjArgs(
-        self->decoder, &_Py_ID(decode), input, final ? Py_True : Py_False,
-        NULL);
+        decoder, &_Py_ID(decode), input, final ? Py_True : Py_False, NULL);
     Py_DECREF(input);
     if (chars != NULL && !PyUnicode_Check(chars)) {
         PyErr_Format(PyExc_TypeError,
@@ -1117,8 +1295,8 @@ decoder_decode(textio *self, const char *s, Py_ssize_t len, int final,
         Py_CLEAR(chars);
     }
     Py_ssize_t held = 0;
-    if (chars == NULL || decoder_flags(self, flags, &held) < 0
-        || (held > 0 && decoder_setstate(self, *flags) < 0))
+    if (chars == NULL || decoder_flags(decoder, flags, &held) < 0
+        || (held > 0 && decoder_setstate(decoder, *flags) < 0))
     {
         Py_XDECREF(chars);
         return NULL;
@@ -1133,7 +1311,8 @@ decoder_decode(textio *self, const char *s, Py_ssize_t len, int final,
    its flags there.  Returns 1 if exactly there, 0 if past characters a
    byte decoded to as a group, or -1. */
 static int
-decoder_offset(textio *self, Py_ssize_t ci, Py_ssize_t *off, int *flags)
+decoder_offset(textio *self, PyObject *decoder, Py_ssize_t ci,
+               Py_ssize_t *off, int *flags)
 {
     /* The decoder runs Python code, which may use self. */
     PyObject *span = Py_NewRef(self->dspan);
@@ -1143,8 +1322,8 @@ decoder_offset(textio *self, Py_ssize_t ci, Py_ssize_t *off, int *flags)
     while (lo <= hi) {
         Py_ssize_t mid = lo + (hi - lo) / 2;
         *flags = dflags;
-        PyObject *chars = decoder_decode(self, PyBytes_AS_STRING(span), mid,
-                                         0, &used, flags);
+        PyObject *chars = decoder_decode(decoder, PyBytes_AS_STRING(span),
+                                         mid, 0, &used, flags);
         if (chars == NULL) {
             goto done;
         }
@@ -1173,8 +1352,9 @@ static int
 text_valid(textio *self, store *st)
 {
     /* Not looked at the store yet: assumed (text_commit() finds out). */
+    (void)self;
     return (st->c->chars != NULL
-            && (self->codec == CODEC_DECODER || !st->peeked
+            && (st->cf->codec == CODEC_DECODER || !st->peeked
                 || (st->m.obj != NULL && st->key == st->c->key
                     && st->m.ptr - PyBytes_AS_STRING(st->m.obj)
                        == st->c->koff)));
@@ -1223,7 +1403,8 @@ native_more(textio *self, store *st)
         span = Py_MIN(st->all ? st->m.len : span, SPAN_MAX);
         int final = st->eof && span == st->m.len;
         Py_ssize_t used;
-        PyObject *chars = native_decode(self, st->m.ptr, span, final, &used);
+        PyObject *chars = native_decode(st->cf, st->m.ptr, span, final,
+                                        &used);
         Py_ssize_t start, end;
         if (chars == NULL && PyErr_ExceptionMatches(PyExc_UnicodeDecodeError)
             && text_decode_error(&start, &end) == 0)
@@ -1232,7 +1413,7 @@ native_more(textio *self, store *st)
                the error is raised once (as _io's does). */
             if (start > 0) {
                 PyErr_Clear();
-                chars = native_decode(self, st->m.ptr, start, 0, &used);
+                chars = native_decode(st->cf, st->m.ptr, start, 0, &used);
             }
             else {
                 PyObject *exc = PyErr_GetRaisedException();
@@ -1255,6 +1436,7 @@ native_more(textio *self, store *st)
         st->c->skip_lf = 0;
         st->c->nl = 0;
         st->c->renew = 1;
+        st->c->wide = 0;
         if (cache_put(self, st->c) < 0) {
             return -1;
         }
@@ -1290,25 +1472,28 @@ decoder_more(textio *self, store *st)
             return 0;
         }
     }
-    /* As for native codecs, more than twice what the decoder held. */
+    /* As for native codecs, more than twice what the decoder held.  (dspan
+       is gone if reconfigure() ran while this call waited.) */
     Py_ssize_t avail = text_avail(self, st);
+    Py_ssize_t dspan = (avail && self->dspan ? PyBytes_GET_SIZE(self->dspan)
+                        : 0);
     Py_ssize_t span = Py_MIN(st->m.len,
-                             Py_MAX(Py_MAX(self->chunk_size,
-                                           avail ? PyBytes_GET_SIZE(self->dspan)
-                                                 : 0),
+                             Py_MAX(Py_MAX(FT_ATOMIC_LOAD_SSIZE_RELAXED(
+                                               self->chunk_size), dspan),
                                     2 * st->held + 4));
     span = st->all ? st->m.len : span;
     int final = st->eof && span == st->m.len;
     Py_ssize_t used;
     /* From the store's position (another thread may have used the decoder
        while this one waited): the flags there. */
+    PyObject *decoder = st->cf->decoder;
     if (self->flags == FLAGS_FRESH
-        && decoder_flags(self, &self->flags, NULL) < 0)
+        && decoder_flags(decoder, &self->flags, NULL) < 0)
     {
         return -1;
     }
     int flags = self->flags;
-    PyObject *chars = decoder_decode(self, st->m.ptr, span, final, &used,
+    PyObject *chars = decoder_decode(decoder, st->m.ptr, span, final, &used,
                                      &flags);
     PyObject *bytes = chars ? PyBytes_FromStringAndSize(st->m.ptr, used)
                             : NULL;
@@ -1348,6 +1533,7 @@ decoder_more(textio *self, store *st)
     }
     self->flags = flags;
     st->c->renew = 1;
+    st->c->wide = 1;
     if (cache_put(self, st->c) < 0) {
         textio_drop_chars(self);
         return -1;
@@ -1361,7 +1547,8 @@ decoder_more(textio *self, store *st)
 static inline int
 text_at_end(textio *self, store *st, Py_ssize_t avail)
 {
-    return st->eof && (self->codec == CODEC_DECODER ? st->m.len == 0
+    (void)self;
+    return st->eof && (st->cf->codec == CODEC_DECODER ? st->m.len == 0
                        : avail == 0 || st->c->kbytes == st->m.len);
 }
 
@@ -1378,7 +1565,7 @@ text_more(textio *self, store *st, Py_ssize_t have)
         Py_ssize_t avail = text_avail(self, st);
         int r = 0;
         if (avail <= have) {
-            r = (self->codec == CODEC_DECODER ? decoder_more(self, st)
+            r = (st->cf->codec == CODEC_DECODER ? decoder_more(self, st)
                  : native_more(self, st));
             if (r < 0) {
                 return -1;
@@ -1399,9 +1586,10 @@ static int
 text_commit(textio *self, store *st, Py_ssize_t k)
 {
     Py_ssize_t ci = st->c->ci;
-    if (self->codec != CODEC_DECODER) {
-        Py_ssize_t b = (self->codec == CODEC_UTF8
-                        ? text_bytes(self, st->c->chars, st->c->kbytes, ci, k)
+    if (st->cf->codec != CODEC_DECODER) {
+        Py_ssize_t b = (st->cf->codec == CODEC_UTF8
+                        ? text_bytes(st->cf, st->c->chars, st->c->kbytes, ci,
+                                     k)
                         : k);
 #ifndef Py_GIL_DISABLED
         /* With the GIL, the cache is the call's own (see cache_get()), but
@@ -1569,10 +1757,10 @@ text_note_newlines(textio *self, PyObject *chars, Py_ssize_t ci,
    none ends there (a "\r" at the end may begin a "\r\n"): then *resume
    is where to look on from. */
 static Py_ssize_t
-find_line(textio *self, tcache *c, int kind, const char *s, const char *end,
+find_line(tconf *cf, tcache *c, int kind, const char *s, const char *end,
           Py_ssize_t *resume)
 {
-    if (self->readuniversal) {
+    if (cf->readuniversal) {
         const char *lf = find_char(kind, s, end, '\n');
         const char *cr = find_cr(c->chars, &c->cr_at, kind, s, lf ? lf : end);
         if (cr == NULL && lf != NULL) {
@@ -1586,7 +1774,7 @@ find_line(textio *self, tcache *c, int kind, const char *s, const char *end,
         return -1;
     }
     /* "\n", "\r" or "\r\n" */
-    Py_ssize_t e = _PyIO_find_line_ending(0, 0, self->readnl, kind, s, end,
+    Py_ssize_t e = _PyIO_find_line_ending(0, 0, cf->readnl, kind, s, end,
                                           resume);
     return e;
 }
@@ -1638,6 +1826,7 @@ static PyObject *
 text_take(textio *self, store *st, Py_ssize_t avail, Py_ssize_t want, int line,
           int eof, Py_ssize_t *scanned, Py_ssize_t *k, int *found)
 {
+    tconf *cf = st->cf;
     PyObject *chars = st->c->chars;
     Py_ssize_t i = st->c->ci;
     int kind = PyUnicode_KIND(chars);
@@ -1649,7 +1838,7 @@ text_take(textio *self, store *st, Py_ssize_t avail, Py_ssize_t want, int line,
     *found = 0;
     if (line) {
         Py_ssize_t resume = 0;
-        Py_ssize_t e = find_line(self, st->c, kind, s + *scanned * kind, end,
+        Py_ssize_t e = find_line(cf, st->c, kind, s + *scanned * kind, end,
                                  &resume);
         if (e >= 0) {
             n = *scanned + e;
@@ -1659,26 +1848,26 @@ text_take(textio *self, store *st, Py_ssize_t avail, Py_ssize_t want, int line,
             *scanned += resume;
             /* The rest ends at eof, or is limited by want (unless it ends
                with a "\r" that may be part of the line's end). */
-            int cr_last = (self->readuniversal && !eof
+            int cr_last = (cf->readuniversal && !eof
                            && AT(avail - 1) == '\r');
             n = (want >= 0 && avail - cr_last >= want ? want
                  : eof ? avail : 0);
             *found = n > 0;
         }
         out = n;
-        if (self->readuniversal && n > 0) {
+        if (cf->readuniversal && n > 0) {
             Py_UCS4 c = AT(n - 1);
             if (c == '\n') {
                 seen = (n > 1 && AT(n - 2) == '\r') ? SEEN_CRLF
                        : (n == 1 && st->c->skip_lf) ? 0 : SEEN_LF;
-                if (seen == SEEN_CRLF && self->readtranslate) {
+                if (seen == SEEN_CRLF && cf->readtranslate) {
                     out--;
                     translate = 1;
                 }
             }
             else if (c == '\r') {
                 seen = (n < avail && AT(n) == '\n') ? SEEN_CRLF : SEEN_CR;
-                translate = self->readtranslate;
+                translate = cf->readtranslate;
             }
         }
         if (want >= 0 && out > want) {
@@ -1686,7 +1875,7 @@ text_take(textio *self, store *st, Py_ssize_t avail, Py_ssize_t want, int line,
                not translated). */
             n = out = want;
             translate = 0;
-            seen = (n > 0 && self->readuniversal && AT(n - 1) == '\r')
+            seen = (n > 0 && cf->readuniversal && AT(n - 1) == '\r')
                    ? SEEN_CRLF : 0;
             *found = 1;
         }
@@ -1694,12 +1883,12 @@ text_take(textio *self, store *st, Py_ssize_t avail, Py_ssize_t want, int line,
     }
     else {
         Py_ssize_t lim = want < 0 ? avail : Py_MIN(avail, want);
-        const char *cr = (self->readuniversal
+        const char *cr = (cf->readuniversal
                           ? find_cr(st->c->chars, &st->c->cr_at, kind, s,
                                     s + lim * kind)
                           : NULL);
         n = out = cr ? (cr - s) / kind : lim;
-        if (self->readuniversal
+        if (cf->readuniversal
             && !(FT_ATOMIC_LOAD_UINT8_RELAXED(self->seennl) & SEEN_LF))
         {
             Py_ssize_t from = st->c->skip_lf && n > 0 && AT(0) == '\n';
@@ -1714,10 +1903,10 @@ text_take(textio *self, store *st, Py_ssize_t avail, Py_ssize_t want, int line,
             }
             int crlf = n + 1 < avail && AT(n + 1) == '\n';
             seen |= crlf ? SEEN_CRLF : SEEN_CR;
-            translate |= self->readtranslate;
-            if (self->readtranslate || (crlf && (want < 0 || out + 1 < want))) {
+            translate |= cf->readtranslate;
+            if (cf->readtranslate || (crlf && (want < 0 || out + 1 < want))) {
                 n += 1 + crlf;
-                out += 1 + (crlf && !self->readtranslate);
+                out += 1 + (crlf && !cf->readtranslate);
             }
             else {
                 n++;
@@ -1867,7 +2056,7 @@ text_quick_translate(PyObject *chars, Py_ssize_t ci, Py_ssize_t k,
    of text_take()'s work.  Returns the text, or NULL, with an exception set
    or not (then text_read_impl() goes on as if this wasn't tried). */
 static inline PyObject *
-text_quick(textio *self, PyObject *buffer, Py_ssize_t n, int line)
+text_quick(textio *self, tconf *cf, PyObject *buffer, Py_ssize_t n, int line)
 {
     /* What is known of the characters: with the GIL, the cache, which
        other threads may change while this one waits to take the bytes;
@@ -1914,7 +2103,7 @@ text_quick(textio *self, PyObject *buffer, Py_ssize_t n, int line)
     Py_ssize_t cr_at = -1;
     if (line) {
         const char *lf, *cr;
-        if (n >= 0 || !self->readuniversal
+        if (n >= 0 || !cf->readuniversal
             || (lf = find_char(kind, s, base + (len << shift), '\n')) == NULL)
         {
             goto done;
@@ -1926,7 +2115,7 @@ text_quick(textio *self, PyObject *buffer, Py_ssize_t n, int line)
         else if (cr + kind == lf) {
             /* Ends with its only "\r", in "\r\n". */
             seen = SEEN_CRLF;
-            crlf = self->readtranslate;
+            crlf = cf->readtranslate;
         }
         else {
             goto done;
@@ -1937,18 +2126,18 @@ text_quick(textio *self, PyObject *buffer, Py_ssize_t n, int line)
         if (n <= 0 || len - ci < n) {
             goto done;
         }
-        if (self->readuniversal && !FT_ATOMIC_LOAD_UINT8_RELAXED(C->nl)) {
+        if (cf->readuniversal && !FT_ATOMIC_LOAD_UINT8_RELAXED(C->nl)) {
             text_note_newlines(self, chars, ci, skip_lf, &C->cr_at);
             FT_ATOMIC_STORE_UINT8_RELAXED(C->nl, 1);
         }
-        const char *cr = (self->readuniversal
+        const char *cr = (cf->readuniversal
                           ? find_cr(chars, &C->cr_at, kind, s,
                                     s + (k << shift))
                           : NULL);
         if (cr != NULL) {
             /* Translated, n characters from more. */
             cr_at = FT_ATOMIC_LOAD_SSIZE_RELAXED(C->cr_at);
-            if (!self->readtranslate || skip_lf
+            if (!cf->readtranslate || skip_lf
                 || (k = text_quick_crs(chars, &cr_at, kind, s, len - ci, n,
                                        cr, crs, &ncr)) < 0)
             {
@@ -1965,15 +2154,15 @@ text_quick(textio *self, PyObject *buffer, Py_ssize_t n, int line)
     if (high < 0 && kind == PyUnicode_1BYTE_KIND) {
         /* (Counted for the str with any codec.) */
         Py_ssize_t extra = utf8_extra_ucs1((const Py_UCS1 *)s, k);
-        b += self->codec == CODEC_UTF8 ? extra : 0;
+        b += cf->codec == CODEC_UTF8 ? extra : 0;
         high = extra != 0;
     }
-    else if (high < 0 && self->codec == CODEC_UTF8) {
-        if (kind == PyUnicode_2BYTE_KIND && !self->escapes) {
+    else if (high < 0 && cf->codec == CODEC_UTF8) {
+        if (kind == PyUnicode_2BYTE_KIND && !cf->escapes) {
             b += utf8_extra_ucs2((const Py_UCS2 *)s, k, &high);
         }
         else {
-            b = text_bytes(self, chars, KBYTES, ci, k);
+            b = text_bytes(cf, chars, KBYTES, ci, k);
         }
     }
     int known = high > 0 || (high == 0 && kind == PyUnicode_1BYTE_KIND);
@@ -2031,9 +2220,9 @@ done:
    once.  The characters decoded but not taken yet came from bytes still
    in the buffer, so the cache is dropped. */
 static PyObject *
-text_read_all(textio *self, PyObject *buffer)
+text_read_all(textio *self, tconf *cf)
 {
-    PyObject *b = PyObject_CallMethodNoArgs(buffer, &_Py_ID(read));
+    PyObject *b = PyObject_CallMethodNoArgs(cf->buffer, &_Py_ID(read));
     if (b == NULL) {
         return NULL;
     }
@@ -2056,13 +2245,13 @@ text_read_all(textio *self, PyObject *buffer)
     cache_put(self, c);
     cache_release(c);
     Py_ssize_t used;
-    t.chars = native_decode(self, PyBytes_AS_STRING(b), PyBytes_GET_SIZE(b),
+    t.chars = native_decode(cf, PyBytes_AS_STRING(b), PyBytes_GET_SIZE(b),
                             1, &used);
     Py_DECREF(b);
     if (t.chars == NULL) {
         return NULL;
     }
-    store st = {.buffer = buffer, .c = &t};
+    store st = {.cf = cf, .buffer = cf->buffer, .c = &t};
     Py_ssize_t avail = PyUnicode_GET_LENGTH(t.chars), scanned = 0, k = 0;
     int found;
     PyObject *text = (avail == 0 ? NULL
@@ -2081,41 +2270,43 @@ static PyObject *
 text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
                int *retry)
 {
+    tconf *cf = textio_conf(self);
+    if (cf == NULL) {
+        return NULL;
+    }
+    if (lockfree && !cf->lockfree) {
+        /* Not any more (see store_peek()). */
+        conf_put(cf);
+        *retry = 1;
+        return NULL;
+    }
     /* With native codecs the buffer checks that it is open when the bytes
        are looked at or taken. */
     int peeks = lockfree || (textio_exact(self) && self->nib_ok
-                             && self->codec != CODEC_DECODER);
-    PyObject *buffer = peeks ? textio_buffer(self) : textio_ready(self);
-    if (buffer == NULL) {
-        return NULL;
-    }
-    if (!lockfree && peeks && self->nib && self->codec != CODEC_DECODER
-        && n != 0)
-    {
-        PyObject *text = text_quick(self, buffer, n, line);
-        if (text != NULL || PyErr_Occurred()) {
-            Py_DECREF(buffer);
-            return text;
-        }
-    }
-    store st = {.buffer = buffer, .all = n < 0 && !line,
-                .lockfree = lockfree};
-    if (!self->readable) {
-        Py_DECREF(st.buffer);
-        return textio_unsupported(self, "not readable");
-    }
-    if (peeks && n == 0) {
-        /* No peek or commit to find whether it is closed. */
-        Py_SETREF(st.buffer, textio_ready(self));
-        if (st.buffer == NULL) {
+                             && cf->codec != CODEC_DECODER);
+    if (!peeks || n == 0) {
+        /* (No peek or commit to find whether it is closed.) */
+        if (textio_check_closed(self, cf) < 0) {
+            conf_put(cf);
             return NULL;
         }
     }
-    if (st.all && peeks && self->codec != CODEC_DECODER
-        && self->rbuf == NULL)
-    {
-        PyObject *text = text_read_all(self, st.buffer);
-        Py_DECREF(st.buffer);
+    if (!lockfree && peeks && self->nib && n != 0) {
+        PyObject *text = text_quick(self, cf, cf->buffer, n, line);
+        if (text != NULL || PyErr_Occurred()) {
+            conf_put(cf);
+            return text;
+        }
+    }
+    store st = {.cf = cf, .buffer = cf->buffer, .all = n < 0 && !line,
+                .lockfree = lockfree};
+    if (!cf->readable) {
+        conf_put(cf);
+        return textio_unsupported(self, "not readable");
+    }
+    if (st.all && peeks && (lockfree || self->rbuf == NULL)) {
+        PyObject *text = text_read_all(self, cf);
+        conf_put(cf);
         return text;
     }
     st.c = cache_get(self, STORE_COPY(&st));
@@ -2172,8 +2363,8 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
                keep for the next call: take it so far, but a last "\r"
                (that may begin a "\r\n", universal or the newline: the
                buffer holds 8 bytes or more, so that there are others). */
-            k = avail - ((self->readuniversal
-                          || PyUnicode_GET_LENGTH(self->readnl) == 2)
+            k = avail - ((cf->readuniversal
+                          || PyUnicode_GET_LENGTH(cf->readnl) == 2)
                          && avail > 1
                          && PyUnicode_READ_CHAR(st.c->chars,
                                                 st.c->ci + avail - 1) == '\r');
@@ -2226,15 +2417,15 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
         have = scanned = 0;
     }
     store_release(&st);
-    Py_DECREF(st.buffer);
     cache_release(st.c);
+    conf_put(cf);
     return (pieces > 1 ? _PyUnicodeWriter_Finish(&writer)
             : res ? res : Py_GetConstant(Py_CONSTANT_EMPTY_STR));
 
 error:
     store_release(&st);
-    Py_DECREF(st.buffer);
     cache_release(st.c);
+    conf_put(cf);
     Py_XDECREF(res);
     if (pieces > 1) {
         _PyUnicodeWriter_Dealloc(&writer);
@@ -2266,20 +2457,16 @@ text_read_more(textio *self, Py_ssize_t n, int line, int lockfree)
 static inline PyObject *
 text_read(textio *self, Py_ssize_t n, int line)
 {
-    int lockfree = FT_ATOMIC_LOAD_UINT8_RELAXED(self->lockfree);
-    if (lockfree) {
-        /* (Without it, text_read_impl() raises.)  Borrowed: nothing
-           text_quick() does before it is done with the buffer lets other
-           code run, or this thread wait (with free threading, a buffer
-           swapped out is freed only once it has). */
-        PyObject *buffer = (n != 0 && FT_ATOMIC_LOAD_UINT8_RELAXED(self->ok)
-                            ? FT_ATOMIC_LOAD_PTR_ACQUIRE(self->buffer)
-                            : NULL);
-        if (buffer != NULL) {
-            PyObject *res = text_quick(self, buffer, n, line);
-            if (res != NULL || PyErr_Occurred()) {
-                return res;
-            }
+    /* The settings borrowed: nothing text_quick() does before it is done
+       with them (and the buffer) lets other code run, or this thread wait
+       (with free threading, settings replaced are freed only once it has).
+       (Without the buffer, text_read_impl() raises.) */
+    tconf *cf = conf_peek(self);
+    int lockfree = cf != NULL && cf->lockfree;
+    if (lockfree && n != 0 && cf->buffer != NULL) {
+        PyObject *res = text_quick(self, cf, cf->buffer, n, line);
+        if (res != NULL || PyErr_Occurred()) {
+            return res;
         }
     }
     return text_read_more(self, n, line, lockfree);
@@ -2334,29 +2521,31 @@ utf8_write_direct(PyObject *buffer, PyObject *text)
 }
 
 /* Encode and store text.  The fast encoders hold no state; the codec's
-   encoder must be given final=True at the end (gh-79792). */
+   encoder must be given final=True at the end (gh-79792).  Without the
+   critical section (lockfree), _PyIO_NIBBLER_NO if it has to be done with
+   it (nothing done). */
 static int
-text_write(textio *self, PyObject *buffer, PyObject *text)
+text_write(textio *self, tconf *cf, int lockfree, PyObject *text)
 {
     PyObject *b;
-    int enc = self->enc;
+    int enc = cf->enc;
     if (enc != CODEC_DECODER
         && (PyUnicode_IS_ASCII(text)
             || (enc == CODEC_LATIN1
                 && PyUnicode_KIND(text) == PyUnicode_1BYTE_KIND)))
     {
         /* The str's data is its encoding. */
-        return store_write(self, buffer, text, PyUnicode_DATA(text),
+        return store_write(self, cf, lockfree, text, PyUnicode_DATA(text),
                            PyUnicode_GET_LENGTH(text));
     }
-    if (enc == CODEC_UTF8 && self->nib) {
-        int r = utf8_write_direct(buffer, text);
+    if (enc == CODEC_UTF8 && (lockfree || self->nib)) {
+        int r = utf8_write_direct(cf->buffer, text);
         if (r != _PyIO_NIBBLER_NO) {
             return r;
         }
     }
     const char *errors = (enc == CODEC_DECODER || enc == CODEC_CHARMAP ? NULL
-                          : PyUnicode_AsUTF8(self->errors));
+                          : cf->errors_str);
     if (enc == CODEC_UTF8) {
         b = _PyUnicode_AsUTF8String(text, errors);
     }
@@ -2367,20 +2556,26 @@ text_write(textio *self, PyObject *buffer, PyObject *text)
         b = _PyUnicode_AsASCIIString(text, errors);
     }
     else {
-        self->encoding_start_of_stream = 0;
-        b = PyObject_CallMethodOneArg(self->encoder, &_Py_ID(encode), text);
+        /* The charmap encoder (lockfree too) holds no state: nothing to
+           note of it. */
+        if (enc == CODEC_DECODER) {
+            self->encoding_start_of_stream = 0;
+        }
+        b = PyObject_CallMethodOneArg(cf->encoder, &_Py_ID(encode), text);
         if (b != NULL && !PyBytes_Check(b)) {
             PyErr_Format(PyExc_TypeError,
                          "encoder should return a bytes object, not '%.200s'",
                          Py_TYPE(b)->tp_name);
             Py_CLEAR(b);
         }
-        self->encoder_used |= b != NULL;
+        if (enc == CODEC_DECODER && b != NULL) {
+            self->encoder_used = 1;
+        }
     }
     if (b == NULL) {
         return -1;
     }
-    int r = store_write(self, buffer, b, PyBytes_AS_STRING(b),
+    int r = store_write(self, cf, lockfree, b, PyBytes_AS_STRING(b),
                         PyBytes_GET_SIZE(b));
     Py_DECREF(b);
     return r;
@@ -2389,14 +2584,14 @@ text_write(textio *self, PyObject *buffer, PyObject *text)
 /* Give the codec's encoder the end of the text, and store what it still
    held (gh-79792). */
 static int
-text_finish_encoder(textio *self, PyObject *buffer)
+text_finish_encoder(textio *self, tconf *cf)
 {
     if (!self->encoder_used) {
         return 0;
     }
     self->encoder_used = 0;
     PyObject *b = PyObject_CallMethodObjArgs(
-        self->encoder, &_Py_ID(encode), &_Py_STR(empty), Py_True, NULL);
+        cf->encoder, &_Py_ID(encode), &_Py_STR(empty), Py_True, NULL);
     if (b != NULL && !PyBytes_Check(b)) {
         PyErr_Format(PyExc_TypeError,
                      "encoder should return a bytes object, not '%.200s'",
@@ -2406,7 +2601,7 @@ text_finish_encoder(textio *self, PyObject *buffer)
     if (b == NULL) {
         return -1;
     }
-    int r = store_write(self, buffer, b, PyBytes_AS_STRING(b),
+    int r = store_write(self, cf, 0, b, PyBytes_AS_STRING(b),
                         PyBytes_GET_SIZE(b));
     Py_DECREF(b);
     return r;
@@ -2416,16 +2611,18 @@ text_finish_encoder(textio *self, PyObject *buffer)
    move the buffer back to the text position (past characters a byte
    decoded to as a group, if it is among them). */
 static int
-decoder_sync(textio *self, PyObject *buffer)
+decoder_sync(textio *self, tconf *cf)
 {
     Py_ssize_t off, ci;
     int flags;
     (void)cache_chars(self, &ci);
-    if (!self->seekable || decoder_offset(self, ci, &off, &flags) < 0) {
+    if (!cf->seekable
+        || decoder_offset(self, cf->decoder, ci, &off, &flags) < 0)
+    {
         textio_drop_chars(self);
-        return self->seekable ? -1 : 0;
+        return cf->seekable ? -1 : 0;
     }
-    PyObject *pos = store_tell(self, buffer);
+    PyObject *pos = store_tell(self, cf->buffer);
     Py_off_t p = pos ? PyLong_AsOff_t(pos) : -1;
     Py_XDECREF(pos);
     if (p == -1 && PyErr_Occurred()) {
@@ -2434,7 +2631,7 @@ decoder_sync(textio *self, PyObject *buffer)
     p += off;
     textio_drop_chars(self);
     Py_CLEAR(self->rbuf);
-    PyObject *res = _PyObject_CallMethod(buffer, &_Py_ID(seek), "(O&)",
+    PyObject *res = _PyObject_CallMethod(cf->buffer, &_Py_ID(seek), "(O&)",
                                          PyLong_FromOff_t, p);
     Py_XDECREF(res);
     self->flags = flags;
@@ -2442,62 +2639,84 @@ decoder_sync(textio *self, PyObject *buffer)
 }
 
 /* Before a write, truncate() or detach(): make the buffer's position the
-   text position, dropping what was read ahead. */
+   text position, dropping what was read ahead.  (Without the critical
+   section, only the cache is dropped: the codec is native and the buffer
+   is the store.) */
 static int
-text_sync(textio *self, PyObject *buffer)
+text_sync(textio *self, tconf *cf, int lockfree)
 {
     FT_ATOMIC_STORE_UINT8_RELAXED(self->decoded, 0);
     Py_ssize_t ci;
-    if (self->codec == CODEC_DECODER && cache_chars(self, &ci) != NULL) {
-        if (decoder_sync(self, buffer) < 0) {
+    if (cf->codec == CODEC_DECODER && cf->decoder != NULL
+        && cache_chars(self, &ci) != NULL)
+    {
+        if (decoder_sync(self, cf) < 0) {
             return -1;
         }
     }
     else {
         textio_drop_chars(self);
     }
-    return self->rbuf ? store_rewind(self, buffer) : 0;
+    return !lockfree && self->rbuf ? store_rewind(self, cf) : 0;
 }
 
+/* write(); with lockfree, without the critical section (*retry: do it with
+   it after all, nothing done). */
 static PyObject *
-text_write_call(textio *self, PyObject *text)
+text_write_call(textio *self, PyObject *text, int lockfree, int *retry)
 {
+    tconf *cf = textio_conf(self);
+    if (cf == NULL) {
+        return NULL;
+    }
+    if (lockfree && !cf->lockfree) {
+        conf_put(cf);
+        *retry = 1;
+        return NULL;
+    }
     /* Over the buffer as the store, which checks that it is open when the
        bytes are stored, if any (and then there is nothing to sync but the
        cache: see text_sync()). */
-    int stores = (self->nib && self->codec != CODEC_DECODER
-                  && self->encoder != NULL && PyUnicode_GET_LENGTH(text) > 0
+    int stores = ((lockfree || self->nib) && cf->codec != CODEC_DECODER
+                  && cf->encoder != NULL && PyUnicode_GET_LENGTH(text) > 0
                   && textio_exact(self));
-    PyObject *buffer = stores ? textio_buffer(self) : textio_ready(self);
-    if (buffer == NULL) {
+    if (!stores && textio_check_closed(self, cf) < 0) {
+        conf_put(cf);
         return NULL;
     }
-    if (self->encoder == NULL) {
-        Py_DECREF(buffer);
+    if (cf->encoder == NULL) {
+        conf_put(cf);
         return textio_unsupported(self, "not writable");
     }
     Py_ssize_t textlen = PyUnicode_GET_LENGTH(text);
     int line_buffering = FT_ATOMIC_LOAD_UINT8_RELAXED(self->line_buffering);
-    int haslf = ((self->writetranslate && self->writenl != NULL)
-                 || line_buffering)
+    const char *writenl = cf->writetranslate ? cf->writenl : NULL;
+    int haslf = (writenl != NULL || line_buffering)
                 && PyUnicode_FindChar(text, '\n', 0, textlen, 1) != -1;
     int needflush = line_buffering
                     && (haslf || PyUnicode_FindChar(text, '\r', 0, textlen,
                                                     1) != -1);
     Py_INCREF(text);
-    if (haslf && self->writetranslate && self->writenl != NULL) {
+    if (haslf && writenl != NULL) {
         Py_SETREF(text, _PyObject_CallMethod(text, &_Py_ID(replace), "ss",
-                                             "\n", self->writenl));
+                                             "\n", writenl));
     }
-    int r = (text == NULL || ((self->rbuf
-                               || FT_ATOMIC_LOAD_UINT8_RELAXED(self->decoded))
-                              && text_sync(self, buffer) < 0)
-             ? -1 : text_write(self, buffer, text));
+    int r = (text == NULL
+             || ((FT_ATOMIC_LOAD_UINT8_RELAXED(self->decoded)
+                  || (!lockfree && self->rbuf))
+                 && text_sync(self, cf, lockfree) < 0)
+             ? -1 : text_write(self, cf, lockfree, text));
     Py_XDECREF(text);
-    if (r == 0 && needflush) {
-        r = _PyFile_Flush(buffer);
+    if (r == _PyIO_NIBBLER_NO) {
+        assert(lockfree);
+        conf_put(cf);
+        *retry = 1;
+        return NULL;
     }
-    Py_DECREF(buffer);
+    if (r == 0 && needflush) {
+        r = _PyFile_Flush(cf->buffer);
+    }
+    conf_put(cf);
     return r < 0 ? NULL : PyLong_FromSsize_t(textlen);
 }
 
@@ -2511,12 +2730,17 @@ static PyObject *
 _io_TextIOWrapper_write_impl(textio *self, PyObject *text)
 /*[clinic end generated code: output=d2deb0d50771fcec input=fdf19153584a0e44]*/
 {
-    if (FT_ATOMIC_LOAD_UINT8_RELAXED(self->lockfree)) {
-        return text_write_call(self, text);
+    tconf *cf = conf_peek(self);
+    if (cf != NULL && cf->lockfree) {
+        int retry = 0;
+        PyObject *res = text_write_call(self, text, 1, &retry);
+        if (!retry) {
+            return res;
+        }
     }
     PyObject *res;
     Py_BEGIN_CRITICAL_SECTION(self);
-    res = text_write_call(self, text);
+    res = text_write_call(self, text, 0, NULL);
     Py_END_CRITICAL_SECTION();
     return res;
 }
@@ -2635,7 +2859,7 @@ cookie_parse(cookie_type *c, PyObject *cookie)
     return 0;
 }
 
-static PyObject *text_tell(textio *self);
+static PyObject *text_tell(textio *self, tconf *cf);
 
 /*[clinic input]
 _io.TextIOWrapper.tell
@@ -2650,45 +2874,54 @@ static PyObject *
 _io_TextIOWrapper_tell_impl(textio *self)
 /*[clinic end generated code: output=4f168c08bf34ad5f input=006277a23840acfc]*/
 {
-    /* With lockfree, the buffer's tell() is all there is to it. */
-    if (FT_ATOMIC_LOAD_UINT8_RELAXED(self->lockfree)) {
-        return text_tell(self);
-    }
     PyObject *res;
+    tconf *cf = textio_conf(self);
+    if (cf == NULL) {
+        return NULL;
+    }
+    if (cf->lockfree) {
+        /* The buffer's tell() is all there is to it. */
+        res = text_tell(self, cf);
+        conf_put(cf);
+        return res;
+    }
+    conf_put(cf);
     Py_BEGIN_CRITICAL_SECTION(self);
-    res = text_tell(self);
+    cf = textio_conf(self);
+    res = cf ? text_tell(self, cf) : NULL;
+    conf_put(cf);
     Py_END_CRITICAL_SECTION();
     return res;
 }
 
 static PyObject *
-text_tell(textio *self)
+text_tell(textio *self, tconf *cf)
 {
     /* Over other buffers, flush first, as _io's does (their tell() might
        not count what they hold). */
-    if (!self->nib_ok && FT_ATOMIC_LOAD_UINT8_RELAXED(self->ok)
-        && FT_ATOMIC_LOAD_PTR_RELAXED(self->buffer) != NULL
+    if (!cf->lockfree && !self->nib_ok
         && _PyFile_Flush((PyObject *)self) < 0)
     {
         return NULL;
     }
-    PyObject *buffer = textio_ready(self);
-    if (buffer == NULL) {
+    if (textio_check_closed(self, cf) < 0) {
         return NULL;
     }
-    PyObject *pos = NULL;
-    if (!self->seekable) {
-        textio_unsupported(self, "underlying stream is not seekable");
-        goto done;
+    if (!cf->seekable) {
+        return textio_unsupported(self, "underlying stream is not seekable");
     }
-    pos = store_tell(self, buffer);
-    if (pos == NULL || self->decoder == NULL) {
-        goto done;
+    PyObject *buffer = cf->buffer;
+    if (cf->lockfree) {
+        return PyObject_CallMethodNoArgs(buffer, &_Py_ID(tell));
+    }
+    PyObject *pos = store_tell(self, buffer);
+    if (pos == NULL || cf->decoder == NULL) {
+        return pos;
     }
     Py_off_t p = PyLong_AsOff_t(pos);
     if (p == -1 && PyErr_Occurred()) {
-        Py_CLEAR(pos);
-        goto done;
+        Py_DECREF(pos);
+        return NULL;
     }
     Py_ssize_t ci;
     PyObject *chars = cache_chars(self, &ci);
@@ -2698,10 +2931,10 @@ text_tell(textio *self)
            where the characters were decoded from, and how many to skip. */
         Py_ssize_t off, start = -PyBytes_GET_SIZE(self->dspan);
         int dflags = self->dflags;
-        int r = decoder_offset(self, ci, &off, &flags);
+        int r = decoder_offset(self, cf->decoder, ci, &off, &flags);
         if (r < 0) {
-            Py_CLEAR(pos);
-            goto done;
+            Py_DECREF(pos);
+            return NULL;
         }
         Py_SETREF(pos, r > 0 ? cookie_build(p + off, flags, 0)
                              : cookie_build(p + start, dflags, ci));
@@ -2709,22 +2942,20 @@ text_tell(textio *self)
     else if (p != 0 && flags != FLAGS_FRESH && flags != 0) {
         Py_SETREF(pos, cookie_build(p, flags, 0));
     }
-done:
-    Py_DECREF(buffer);
     return pos;
 }
 
 /* Reset the encoder to the stream's start, or past it (no BOM). */
 static int
-text_encoder_reset(textio *self, int start)
+text_encoder_reset(textio *self, tconf *cf, int start)
 {
     self->encoding_start_of_stream = start;
-    if (self->encoder == NULL) {
+    if (cf->encoder == NULL) {
         return 0;
     }
     PyObject *res = (start
-                     ? PyObject_CallMethodNoArgs(self->encoder, &_Py_ID(reset))
-                     : PyObject_CallMethodOneArg(self->encoder,
+                     ? PyObject_CallMethodNoArgs(cf->encoder, &_Py_ID(reset))
+                     : PyObject_CallMethodOneArg(cf->encoder,
                                                  &_Py_ID(setstate),
                                                  _PyLong_GetZero()));
     Py_XDECREF(res);
@@ -2734,13 +2965,13 @@ text_encoder_reset(textio *self, int start)
 /* The decoder at a position: reset at the stream's start (pos and flags
    0), else with flags. */
 static int
-text_decoder_reset(textio *self, Py_off_t pos, int flags)
+text_decoder_reset(textio *self, tconf *cf, Py_off_t pos, int flags)
 {
-    if (self->decoder == NULL) {
+    if (cf->decoder == NULL) {
         return 0;
     }
     self->flags = pos == 0 && flags == 0 ? FLAGS_FRESH : flags;
-    return decoder_setstate(self, self->flags);
+    return decoder_setstate(cf->decoder, self->flags);
 }
 
 /* Drop what was read: the position moves. */
@@ -2756,9 +2987,9 @@ text_drop_reads(textio *self)
 /* Decode again the n characters that the decoder's flags at the position
    are followed by (before newlines are translated). */
 static int
-text_skip(textio *self, PyObject *buffer, Py_ssize_t n)
+text_skip(textio *self, tconf *cf, Py_ssize_t n)
 {
-    store st = {.buffer = buffer};
+    store st = {.cf = cf, .buffer = cf->buffer};
     st.c = cache_get(self, STORE_COPY(&st));
     while (n > 0) {
         Py_ssize_t avail = text_more(self, &st, 0);
@@ -2808,13 +3039,14 @@ static PyObject *
 _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
 /*[clinic end generated code: output=0a15679764e2d04d input=4bea78698be23d7e]*/
 {
-    PyObject *buffer = textio_ready(self);
-    if (buffer == NULL) {
+    tconf *cf = textio_ready(self);
+    if (cf == NULL) {
         return NULL;
     }
+    PyObject *buffer = cf->buffer;
     PyObject *res = NULL;
     Py_INCREF(cookieObj);
-    if (!self->seekable) {
+    if (!cf->seekable) {
         textio_unsupported(self, "underlying stream is not seekable");
         goto done;
     }
@@ -2832,7 +3064,7 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
     }
     if (whence == SEEK_CUR) {
         /* Sync the buffer with the current position. */
-        Py_SETREF(cookieObj, text_tell(self));
+        Py_SETREF(cookieObj, text_tell(self, cf));
         if (cookieObj == NULL) {
             goto done;
         }
@@ -2847,8 +3079,8 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
         if (pos == -1 && PyErr_Occurred()) {
             Py_CLEAR(res);
         }
-        else if (text_decoder_reset(self, 0, 0) < 0
-                 || text_encoder_reset(self, pos == 0) < 0)
+        else if (text_decoder_reset(self, cf, 0, 0) < 0
+                 || text_encoder_reset(self, cf, pos == 0) < 0)
         {
             Py_CLEAR(res);
         }
@@ -2875,7 +3107,7 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
     /* gh-91112: a cookie tell() can't have returned is an error, not
        another position. */
     if (c.start_pos < 0 || c.chars_to_skip < 0 || c.bytes_to_feed < 0
-        || (!self->readable && (c.dec_flags || c.bytes_to_feed
+        || (!cf->readable && (c.dec_flags || c.bytes_to_feed
                                 || c.chars_to_skip || c.need_eof)))
     {
         PyErr_SetString(PyExc_OSError, "can't restore logical file position");
@@ -2892,18 +3124,18 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
     }
     Py_CLEAR(res);
     int start = c.start_pos == 0 && c.dec_flags == 0;
-    if (text_decoder_reset(self, c.start_pos, c.dec_flags) < 0
-        || text_encoder_reset(self, start) < 0)
+    if (text_decoder_reset(self, cf, c.start_pos, c.dec_flags) < 0
+        || text_encoder_reset(self, cf, start) < 0)
     {
         goto done;
     }
-    if (c.chars_to_skip > 0 && text_skip(self, buffer, c.chars_to_skip) < 0) {
+    if (c.chars_to_skip > 0 && text_skip(self, cf, c.chars_to_skip) < 0) {
         goto done;
     }
     res = Py_NewRef(cookieObj);
 done:
     Py_DECREF(cookieObj);
-    Py_DECREF(buffer);
+    conf_put(cf);
     return res;
 }
 
@@ -2918,19 +3150,19 @@ static PyObject *
 _io_TextIOWrapper_truncate_impl(textio *self, PyObject *pos)
 /*[clinic end generated code: output=90ec2afb9bb7745f input=8bddb320834c93ee]*/
 {
-    PyObject *buffer = textio_buffer(self);
-    if (buffer == NULL) {
+    tconf *cf = textio_conf(self);
+    if (cf == NULL) {
         return NULL;
     }
     /* At the text position (gh-70346): pos is a byte count, not a tell()
        cookie. */
     PyObject *res = NULL;
-    if (text_sync(self, buffer) == 0
+    if (text_sync(self, cf, 0) == 0
         && _PyFile_Flush((PyObject *)self) == 0)
     {
-        res = PyObject_CallMethodOneArg(buffer, &_Py_ID(truncate), pos);
+        res = PyObject_CallMethodOneArg(cf->buffer, &_Py_ID(truncate), pos);
     }
-    Py_DECREF(buffer);
+    conf_put(cf);
     return res;
 }
 
@@ -2946,12 +3178,12 @@ static PyObject *
 _io_TextIOWrapper_flush_impl(textio *self)
 /*[clinic end generated code: output=59de9165f9c2e4d2 input=928c60590694ab85]*/
 {
-    PyObject *buffer = textio_ready(self);
-    if (buffer == NULL) {
+    tconf *cf = textio_ready(self);
+    if (cf == NULL) {
         return NULL;
     }
-    PyObject *res = PyObject_CallMethodNoArgs(buffer, &_Py_ID(flush));
-    Py_DECREF(buffer);
+    PyObject *res = PyObject_CallMethodNoArgs(cf->buffer, &_Py_ID(flush));
+    conf_put(cf);
     return res;
 }
 
@@ -2993,17 +3225,19 @@ static PyObject *
 _io_TextIOWrapper_close_impl(textio *self)
 /*[clinic end generated code: output=056ccf8b4876e4f4 input=8e12d7079d5ac5c1]*/
 {
-    PyObject *buffer = textio_buffer(self);
-    if (buffer == NULL) {
+    tconf *cf = textio_conf(self);
+    if (cf == NULL) {
         return NULL;
     }
     PyObject *res = _io_TextIOWrapper_closed_get_impl(self);
     int r = res ? PyObject_IsTrue(res) : -1;
     Py_XDECREF(res);
-    if (r != 0 || FT_ATOMIC_LOAD_PTR_RELAXED(self->buffer) == NULL) {
-        Py_DECREF(buffer);
+    if (r != 0 || conf_peek(self) != cf) {
+        /* Closed, or detached or set up again meanwhile. */
+        conf_put(cf);
         return r < 0 ? NULL : Py_None;
     }
+    PyObject *buffer = cf->buffer;
     if (self->finalizing) {
         res = PyObject_CallMethodOneArg(buffer, &_Py_ID(_dealloc_warn),
                                         (PyObject *)self);
@@ -3013,7 +3247,7 @@ _io_TextIOWrapper_close_impl(textio *self)
         Py_XDECREF(res);
     }
     PyObject *exc = NULL;
-    if (text_finish_encoder(self, buffer) < 0) {
+    if (text_finish_encoder(self, cf) < 0) {
         exc = PyErr_GetRaisedException();
     }
     else if (_PyFile_Flush((PyObject *)self) < 0) {
@@ -3021,7 +3255,7 @@ _io_TextIOWrapper_close_impl(textio *self)
     }
     text_drop_reads(self);
     res = PyObject_CallMethodNoArgs(buffer, &_Py_ID(close));
-    Py_DECREF(buffer);
+    conf_put(cf);
     if (exc != NULL) {
         _PyErr_ChainExceptions1(exc);
         Py_CLEAR(res);
@@ -3038,25 +3272,35 @@ static PyObject *
 _io_TextIOWrapper_detach_impl(textio *self)
 /*[clinic end generated code: output=7ba3715cd032d5f2 input=c908a3b4ef203b0f]*/
 {
-    PyObject *buffer = textio_buffer(self);
-    if (buffer == NULL) {
+    tconf *cf = textio_conf(self);
+    if (cf == NULL) {
         return NULL;
     }
-    if ((self->encoder_used && text_finish_encoder(self, buffer) < 0)
+    if ((self->encoder_used && text_finish_encoder(self, cf) < 0)
         || _PyFile_Flush((PyObject *)self) < 0
-        || text_sync(self, buffer) < 0)
+        || text_sync(self, cf, 0) < 0)
     {
-        Py_DECREF(buffer);
+        conf_put(cf);
         return NULL;
     }
-    /* Something called meanwhile may have detached it. */
-    if (FT_ATOMIC_LOAD_PTR_RELAXED(self->buffer) == NULL) {
-        Py_DECREF(buffer);
-        return textio_buffer(self);
+    /* Something called meanwhile may have detached it, or set it up
+       again. */
+    if (conf_peek(self) != cf) {
+        conf_put(cf);
+        return textio_buffer_get(self);
     }
+    /* The same settings without the buffer: the attributes stay. */
+    tconf *n = conf_copy(cf);
+    if (n == NULL) {
+        conf_put(cf);
+        return NULL;
+    }
+    PyObject *buffer = Py_NewRef(cf->buffer);
+    conf_put(cf);
+    Py_CLEAR(n->buffer);
+    n->lockfree = 0;
+    conf_set(self, n, 0);
     text_drop_reads(self);
-    FT_ATOMIC_STORE_UINT8_RELAXED(self->detached, 1);
-    text_swap(&self->buffer, NULL);
     return buffer;
 }
 
@@ -3124,10 +3368,7 @@ static PyObject *
 _io_TextIOWrapper_name_get_impl(textio *self)
 /*[clinic end generated code: output=8c2f1d6d8756af40 input=1459cfc515493c6b]*/
 {
-    PyObject *buffer = textio_buffer(self);
-    PyObject *res = buffer ? PyObject_GetAttr(buffer, &_Py_ID(name)) : NULL;
-    Py_XDECREF(buffer);
-    return res;
+    return textio_call_getattr(self, &_Py_ID(name));
 }
 
 /*[clinic input]
@@ -3140,13 +3381,10 @@ _io_TextIOWrapper_closed_get_impl(textio *self)
 /*[clinic end generated code: output=b49b68f443a85e3c input=3cfbb89d5815ed29]*/
 {
     /* Partially constructed or deconstructed: closed (see _io's). */
-    if (!FT_ATOMIC_LOAD_UINT8_RELAXED(self->ok)) {
+    if (conf_peek(self) == NULL) {
         Py_RETURN_TRUE;
     }
-    PyObject *buffer = textio_buffer(self);
-    PyObject *res = buffer ? PyObject_GetAttr(buffer, &_Py_ID(closed)) : NULL;
-    Py_XDECREF(buffer);
-    return res;
+    return textio_call_getattr(self, &_Py_ID(closed));
 }
 
 /*[clinic input]
@@ -3158,13 +3396,13 @@ static PyObject *
 _io_TextIOWrapper_newlines_get_impl(textio *self)
 /*[clinic end generated code: output=53aa03ac35573180 input=26b177526b166427]*/
 {
-    if (!FT_ATOMIC_LOAD_UINT8_RELAXED(self->ok)
-        || FT_ATOMIC_LOAD_UINT8_RELAXED(self->detached))
-    {
-        Py_XDECREF(textio_buffer(self));
+    tconf *cf = textio_conf(self);
+    if (cf == NULL) {
         return NULL;
     }
-    if (!self->readuniversal || !self->readable) {
+    int universal = cf->readuniversal && cf->readable;
+    conf_put(cf);
+    if (!universal) {
         Py_RETURN_NONE;
     }
     switch (FT_ATOMIC_LOAD_UINT8_RELAXED(self->seennl)) {
@@ -3189,17 +3427,22 @@ static PyObject *
 _io_TextIOWrapper_errors_get_impl(textio *self)
 /*[clinic end generated code: output=dca3a3ef21b09484 input=f5c39940cc10e47c]*/
 {
-    if (!FT_ATOMIC_LOAD_UINT8_RELAXED(self->ok)) {
-        return textio_buffer(self);
+    tconf *cf = conf_get(self);
+    if (cf == NULL) {
+        return textio_buffer_get(self);
     }
-    return text_get(&self->errors);
+    PyObject *errors = Py_NewRef(cf->errors);
+    conf_put(cf);
+    return errors;
 }
 
 static PyObject *
 textio_encoding_get(PyObject *op, void *Py_UNUSED(closure))
 {
-    PyObject *encoding = text_get(&textio_CAST(op)->encoding);
-    return encoding ? encoding : Py_NewRef(Py_None);
+    tconf *cf = conf_get(textio_CAST(op));
+    PyObject *encoding = Py_NewRef(cf ? cf->encoding : Py_None);
+    conf_put(cf);
+    return encoding;
 }
 
 /*[clinic input]
@@ -3211,7 +3454,7 @@ static Py_ssize_t
 _io_TextIOWrapper__CHUNK_SIZE_get_impl(textio *self)
 /*[clinic end generated code: output=3fe34b873b6b2c8c input=7e8abe69bf1cd463]*/
 {
-    PyObject *buffer = textio_buffer(self);
+    PyObject *buffer = textio_buffer_get(self);
     if (buffer == NULL) {
         return -1;
     }
@@ -3230,7 +3473,7 @@ static int
 _io_TextIOWrapper__CHUNK_SIZE_set_impl(textio *self, Py_ssize_t value)
 /*[clinic end generated code: output=5170a93dd4d74917 input=ede7bae6145f941b]*/
 {
-    PyObject *buffer = textio_buffer(self);
+    PyObject *buffer = textio_buffer_get(self);
     if (buffer == NULL) {
         return -1;
     }
@@ -3253,16 +3496,18 @@ static PyObject *
 _io_TextIOWrapper_buffer_get_impl(textio *self)
 /*[clinic end generated code: output=d265a34555aa5d4b input=1a1c8210c4ebb224]*/
 {
-    return textio_buffer(self);
+    return textio_buffer_get(self);
 }
+
+static PyObject *textio_encoding_get(PyObject *op, void *closure);
 
 static PyObject *
 textiowrapper_repr(PyObject *op)
 {
     textio *self = textio_CAST(op);
     const char *type_name = Py_TYPE(self)->tp_name;
-    if (!FT_ATOMIC_LOAD_UINT8_RELAXED(self->ok)) {
-        return textio_buffer(self);
+    if (conf_peek(self) == NULL) {
+        return textio_buffer_get(self);
     }
     int status = Py_ReprEnter(op);
     if (status != 0) {
@@ -3291,8 +3536,11 @@ textiowrapper_repr(PyObject *op)
         }
     }
     if (res != NULL) {
-        Py_SETREF(res, PyUnicode_FromFormat("%U encoding=%R>", res,
-                                            self->encoding));
+        PyObject *encoding = textio_encoding_get(op, NULL);
+        Py_SETREF(res, encoding == NULL ? NULL
+                       : PyUnicode_FromFormat("%U encoding=%R>", res,
+                                              encoding));
+        Py_XDECREF(encoding);
     }
     Py_ReprLeave(op);
     return res;
@@ -3316,29 +3564,44 @@ validate_newline(const char *newline)
     return 0;
 }
 
+/* Set up cf (not published yet) for newline. */
 static int
-set_newline(textio *self, const char *newline)
+set_newline(tconf *cf, const char *newline)
 {
     PyObject *readnl = newline ? PyUnicode_FromString(newline) : NULL;
     if (newline && readnl == NULL) {
         return -1;
     }
-    text_swap(&self->readnl, readnl);
-    self->readuniversal = (newline == NULL || newline[0] == '\0');
-    self->readtranslate = (newline == NULL);
-    self->writetranslate = (newline == NULL || newline[0] != '\0');
-    self->writenl = NULL;
-    if (!self->readuniversal && readnl != NULL) {
-        self->writenl = (const char *)PyUnicode_1BYTE_DATA(readnl);
-        if (strcmp(self->writenl, "\n") == 0) {
-            self->writenl = NULL;
+    Py_XSETREF(cf->readnl, readnl);
+    cf->readuniversal = (newline == NULL || newline[0] == '\0');
+    cf->readtranslate = (newline == NULL);
+    cf->writetranslate = (newline == NULL || newline[0] != '\0');
+    cf->writenl = NULL;
+    if (!cf->readuniversal && readnl != NULL) {
+        cf->writenl = (const char *)PyUnicode_1BYTE_DATA(readnl);
+        if (strcmp(cf->writenl, "\n") == 0) {
+            cf->writenl = NULL;
         }
     }
 #ifdef MS_WINDOWS
     else {
-        self->writenl = "\r\n";
+        cf->writenl = "\r\n";
     }
 #endif
+    return 0;
+}
+
+/* Set cf's errors (not published yet). */
+static int
+set_errors(tconf *cf, PyObject *errors)
+{
+    const char *s = PyUnicode_AsUTF8(errors);
+    if (s == NULL) {
+        return -1;
+    }
+    Py_XSETREF(cf->errors, Py_NewRef(errors));
+    /* NULL is "strict", which the UTF-8 codec does fastest. */
+    cf->errors_str = strcmp(s, "strict") == 0 ? NULL : s;
     return 0;
 }
 
@@ -3382,18 +3645,19 @@ done:
     return table;
 }
 
-/* Set up the codec: the decoder (if readable) and encoder (if writable),
-   and how bytes map to characters. */
+/* Set up the codec in cf (not published yet), with cf's errors: the
+   decoder (if readable) and encoder (if writable), and how bytes map to
+   characters. */
 static int
-text_set_codec(textio *self, PyObject *buffer, PyObject *codec_info,
-               const char *errors)
+text_set_codec(tconf *cf, PyObject *buffer, PyObject *codec_info)
 {
-    Py_CLEAR(self->decoder);
-    Py_CLEAR(self->encoder);
-    text_swap(&self->charmap, NULL);
-    textio_drop_chars(self);
-    self->encoder_used = 0;
-    self->flags = FLAGS_FRESH;
+    Py_CLEAR(cf->decoder);
+    Py_CLEAR(cf->encoder);
+    Py_CLEAR(cf->charmap);
+    const char *errors = PyUnicode_AsUTF8(cf->errors);
+    if (errors == NULL) {
+        return -1;
+    }
     PyObject *name;
     if (PyObject_GetOptionalAttr(codec_info, &_Py_ID(name), &name) < 0) {
         return -1;
@@ -3408,31 +3672,26 @@ text_set_codec(textio *self, PyObject *buffer, PyObject *codec_info,
     }
     Py_XDECREF(name);
     if (codec == CODEC_DECODER) {
-        PyObject *charmap = codec_charmap(codec_info);
-        if (charmap == NULL && PyErr_Occurred()) {
+        cf->charmap = codec_charmap(codec_info);
+        if (cf->charmap == NULL && PyErr_Occurred()) {
             return -1;
         }
-        codec = charmap ? CODEC_CHARMAP : CODEC_DECODER;
-        text_swap(&self->charmap, charmap);
+        codec = cf->charmap ? CODEC_CHARMAP : CODEC_DECODER;
     }
-    self->enc = codec;
+    cf->enc = codec;
     /* Error handlers that keep one character per byte (or valid UTF-8
        sequence) keep the bytes of characters known. */
-    int same = (PyUnicode_CompareWithASCIIString(self->errors, "strict") == 0
-                || PyUnicode_CompareWithASCIIString(self->errors,
-                                                    "surrogateescape") == 0
-                || (codec != CODEC_UTF8
-                    && PyUnicode_CompareWithASCIIString(self->errors,
-                                                        "replace") == 0));
-    self->codec = codec == CODEC_LATIN1 || same ? codec : CODEC_DECODER;
-    self->escapes = PyUnicode_CompareWithASCIIString(self->errors,
-                                                     "surrogateescape") == 0;
+    int same = (strcmp(errors, "strict") == 0
+                || strcmp(errors, "surrogateescape") == 0
+                || (codec != CODEC_UTF8 && strcmp(errors, "replace") == 0));
+    cf->codec = codec == CODEC_LATIN1 || same ? codec : CODEC_DECODER;
+    cf->escapes = strcmp(errors, "surrogateescape") == 0;
 
     int r = textio_call_bool(buffer, &_Py_ID(readable));
-    self->readable = r > 0;
-    if (r > 0 && self->codec == CODEC_DECODER) {
-        self->decoder = _PyCodecInfo_GetIncrementalDecoder(codec_info, errors);
-        if (self->decoder == NULL) {
+    cf->readable = r > 0;
+    if (r > 0 && cf->codec == CODEC_DECODER) {
+        cf->decoder = _PyCodecInfo_GetIncrementalDecoder(codec_info, errors);
+        if (cf->decoder == NULL) {
             return -1;
         }
     }
@@ -3440,38 +3699,39 @@ text_set_codec(textio *self, PyObject *buffer, PyObject *codec_info,
         r = textio_call_bool(buffer, &_Py_ID(writable));
     }
     if (r > 0) {
-        self->encoder = _PyCodecInfo_GetIncrementalEncoder(codec_info, errors);
-        if (self->encoder == NULL) {
+        cf->encoder = _PyCodecInfo_GetIncrementalEncoder(codec_info, errors);
+        if (cf->encoder == NULL) {
             return -1;
         }
     }
     return r < 0 ? -1 : 0;
 }
 
-/* Can calls run without the critical section (see "Locking")?  Only over
-   a buffer that can hold a few characters more than a "\r". */
+/* Can calls by cf run without the critical section (see "Locking")?  Only
+   over a buffer that can hold a few characters more than a "\r", and is
+   the store (nothing in rbuf). */
 static void
-text_set_lockfree(textio *self, PyObject *buffer)
+text_set_lockfree(textio *self, tconf *cf)
 {
-    FT_ATOMIC_STORE_UINT8_RELAXED(
-        self->lockfree,
-        textio_exact(self) && self->nib_ok && self->codec != CODEC_DECODER
-        && _PyIONibbler_capacity(buffer) >= 8);
+    cf->lockfree = (textio_exact(self) && cf->nibbler && self->nib_ok
+                    && self->nib && self->rbuf == NULL
+                    && cf->codec != CODEC_DECODER
+                    && _PyIONibbler_capacity(cf->buffer) >= 8);
 }
 
 /* The encoder writes a BOM only at the start of the stream. */
 static int
-text_fix_encoder_state(textio *self, PyObject *buffer)
+text_fix_encoder_state(textio *self, tconf *cf)
 {
     self->encoding_start_of_stream = 0;
-    if (!self->seekable || self->encoder == NULL) {
+    if (!cf->seekable || cf->encoder == NULL) {
         return 0;
     }
-    PyObject *pos = PyObject_CallMethodNoArgs(buffer, &_Py_ID(tell));
+    PyObject *pos = PyObject_CallMethodNoArgs(cf->buffer, &_Py_ID(tell));
     int cmp = pos ? PyObject_RichCompareBool(pos, _PyLong_GetZero(), Py_EQ)
                   : -1;
     Py_XDECREF(pos);
-    return cmp < 0 ? -1 : text_encoder_reset(self, cmp);
+    return cmp < 0 ? -1 : text_encoder_reset(self, cf, cmp);
 }
 
 static int
@@ -3511,24 +3771,27 @@ text_encoding(const char *encoding)
     return PyUnicode_FromString(encoding);
 }
 
+/* Forget the characters decoded, with the critical section: what calls in
+   progress know of them too (see cache_put()). */
+static void
+text_drop_cache(textio *self)
+{
+#ifdef Py_GIL_DISABLED
+    span_free(_Py_atomic_exchange_ptr(&self->span, NULL));
+    (void)_Py_atomic_add_uint64(&self->spans, 1);
+#else
+    Py_CLEAR(self->cache.chars);
+    self->cache = (tcache){.cr_at = -1};
+#endif
+    Py_CLEAR(self->dspan);
+}
+
 static int
 textiowrapper_clear(PyObject *op)
 {
     textio *self = textio_CAST(op);
-    FT_ATOMIC_STORE_UINT8_RELAXED(self->ok, 0);
-    Py_CLEAR(self->buffer);
-    Py_CLEAR(self->encoding);
-    Py_CLEAR(self->errors);
-    Py_CLEAR(self->encoder);
-    Py_CLEAR(self->decoder);
-    Py_CLEAR(self->charmap);
-    Py_CLEAR(self->readnl);
-#ifdef Py_GIL_DISABLED
-    span_free(_Py_atomic_exchange_ptr(&self->span, NULL));
-#else
-    Py_CLEAR(self->cache.chars);
-#endif
-    Py_CLEAR(self->dspan);
+    conf_set(self, NULL, 1);
+    text_drop_cache(self);
     Py_CLEAR(self->rbuf);
     Py_CLEAR(self->dict);
     return 0;
@@ -3581,8 +3844,9 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
                                 int write_through)
 /*[clinic end generated code: output=72267c0c01032ed2 input=0f077220214c40a4]*/
 {
-    FT_ATOMIC_STORE_UINT8_RELAXED(self->ok, 0);
-    FT_ATOMIC_STORE_UINT8_RELAXED(self->detached, 0);
+    /* Not set up meanwhile (as _io's): calls in progress keep the settings
+       they took. */
+    conf_set(self, NULL, 0);
     if (encoding == NULL) {
         PyInterpreterState *interp = _PyInterpreterState_GET();
         if (_PyInterpreterState_GetConfig(interp)->warn_default_encoding
@@ -3605,44 +3869,48 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
     else if (io_check_errors(errors)) {
         return -1;
     }
-    const char *errors_str = _PyUnicode_AsUTF8NoNUL(errors);
-    if (errors_str == NULL || validate_newline(newline) < 0) {
+    if (_PyUnicode_AsUTF8NoNUL(errors) == NULL
+        || validate_newline(newline) < 0)
+    {
         return -1;
     }
 
-    (void)textiowrapper_clear((PyObject *)self);
+    text_drop_cache(self);
+    Py_CLEAR(self->rbuf);
     self->rpos = 0;
-#ifdef Py_GIL_DISABLED
-    /* Calls that took the cache before can't put it back. */
-    (void)_Py_atomic_add_uint64(&self->spans, 1);
-#else
-    self->cache = (tcache){.cr_at = -1};
-#endif
-    self->seennl = self->decoded = 0;
-    text_swap(&self->encoding, text_encoding(encoding));
-    if (self->encoding == NULL) {
+    self->flags = FLAGS_FRESH;
+    self->encoder_used = 0;
+    FT_ATOMIC_STORE_UINT8_RELAXED(self->seennl, 0);
+    FT_ATOMIC_STORE_UINT8_RELAXED(self->decoded, 0);
+    FT_ATOMIC_STORE_SSIZE_RELAXED(self->chunk_size, 8192);
+    FT_ATOMIC_STORE_UINT8_RELAXED(self->line_buffering, line_buffering);
+    FT_ATOMIC_STORE_UINT8_RELAXED(self->write_through, write_through);
+
+    tconf *cf = conf_new();
+    if (cf == NULL) {
         return -1;
     }
-    const char *enc = PyUnicode_AsUTF8(self->encoding);
+    PyObject *codec_info = NULL;
+    int r = -1;
+    cf->encoding = text_encoding(encoding);
+    if (cf->encoding == NULL) {
+        goto done;
+    }
+    const char *enc = PyUnicode_AsUTF8(cf->encoding);
     if (enc == NULL) {
-        return -1;
+        goto done;
     }
     /* Check we have been asked for a real text encoding */
-    PyObject *codec_info = _PyCodec_LookupTextEncoding(enc, NULL);
+    codec_info = _PyCodec_LookupTextEncoding(enc, NULL);
     if (codec_info == NULL) {
-        Py_CLEAR(self->encoding);
-        return -1;
+        goto done;
     }
-    text_swap(&self->errors, Py_NewRef(errors));
-    self->chunk_size = 8192;
-    self->line_buffering = line_buffering;
-    self->write_through = write_through;
-    text_swap(&self->buffer, Py_NewRef(buffer));
-    self->nib = self->nib_ok =
-        (char)_PyIO_is_nibbler_buffered_type(Py_TYPE(buffer));
-    int r = -1;
-    if (set_newline(self, newline) < 0
-        || text_set_codec(self, buffer, codec_info, errors_str) < 0)
+    cf->buffer = Py_NewRef(buffer);
+    cf->nibbler = (char)_PyIO_is_nibbler_buffered_type(Py_TYPE(buffer));
+    self->nib = self->nib_ok = cf->nibbler;
+    if (set_errors(cf, errors) < 0
+        || set_newline(cf, newline) < 0
+        || text_set_codec(cf, buffer, codec_info) < 0)
     {
         goto done;
     }
@@ -3650,19 +3918,21 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
     if (r < 0) {
         goto done;
     }
-    self->seekable = (char)r;
+    cf->seekable = (char)r;
     r = PyObject_HasAttrWithError(buffer, &_Py_ID(read1));
     if (r < 0) {
         goto done;
     }
-    self->has_read1 = (char)r;
-    r = text_fix_encoder_state(self, buffer);
+    cf->has_read1 = (char)r;
+    r = text_fix_encoder_state(self, cf);
     if (r == 0) {
-        text_set_lockfree(self, buffer);
-        FT_ATOMIC_STORE_UINT8_RELAXED(self->ok, 1);
+        text_set_lockfree(self, cf);
+        conf_set(self, cf, 0);
+        cf = NULL;
     }
 done:
-    Py_DECREF(codec_info);
+    conf_put(cf);
+    Py_XDECREF(codec_info);
     return r;
 }
 
@@ -3716,8 +3986,8 @@ _io_TextIOWrapper_reconfigure_impl(textio *self, PyObject *encoding,
             return NULL;
         }
     }
-    int change = encoding != Py_None || errors != Py_None
-                 || newline_obj != NULL;
+    int codec_change = encoding != Py_None || errors != Py_None;
+    int change = codec_change || newline_obj != NULL;
     if (FT_ATOMIC_LOAD_UINT8_RELAXED(self->decoded) && change) {
         return textio_unsupported(self,
                                   "It is not possible to set the encoding "
@@ -3740,21 +4010,25 @@ _io_TextIOWrapper_reconfigure_impl(textio *self, PyObject *encoding,
     {
         return NULL;
     }
-    PyObject *buffer = textio_buffer(self);
-    if (buffer == NULL) {
+    tconf *cf = textio_conf(self);
+    if (cf == NULL) {
         return NULL;
     }
-    if (newline_obj != NULL && set_newline(self, newline) < 0) {
+    /* New settings, published at once (see "Locking"): the codec is kept
+       unless it changes. */
+    tconf *n = conf_copy(cf);
+    if (n == NULL
+        || (newline_obj != NULL && set_newline(n, newline) < 0))
+    {
         goto error;
     }
-    if (change) {
+    if (codec_change) {
         /* Use the current settings where new ones are not given. */
         if (encoding == Py_None) {
-            encoding = self->encoding;
+            encoding = Py_NewRef(cf->encoding);
             if (errors == Py_None) {
-                errors = self->errors;
+                errors = cf->errors;
             }
-            Py_INCREF(encoding);
         }
         else {
             encoding = (PyUnicode_CompareWithASCIIString(encoding, "locale")
@@ -3767,31 +4041,39 @@ _io_TextIOWrapper_reconfigure_impl(textio *self, PyObject *encoding,
                 errors = &_Py_ID(strict);
             }
         }
+        Py_SETREF(n->encoding, encoding);
         const char *c_encoding = PyUnicode_AsUTF8(encoding);
-        const char *c_errors = PyUnicode_AsUTF8(errors);
-        PyObject *codec_info = (c_encoding && c_errors
+        PyObject *codec_info = (c_encoding && set_errors(n, errors) == 0
                                 ? _PyCodec_LookupTextEncoding(c_encoding, NULL)
                                 : NULL);
         if (codec_info == NULL) {
-            Py_DECREF(encoding);
             goto error;
         }
-        text_swap(&self->encoding, encoding);
-        text_swap(&self->errors, Py_NewRef(errors));
-        int r = text_set_codec(self, buffer, codec_info, c_errors);
+        int r = text_set_codec(n, cf->buffer, codec_info);
         Py_DECREF(codec_info);
-        if (r < 0 || text_fix_encoder_state(self, buffer) < 0) {
+        if (r < 0 || text_fix_encoder_state(self, n) < 0) {
             goto error;
         }
     }
     FT_ATOMIC_STORE_UINT8_RELAXED(self->line_buffering, line_buffering);
     FT_ATOMIC_STORE_UINT8_RELAXED(self->write_through, write_through);
-    text_set_lockfree(self, buffer);
-    Py_DECREF(buffer);
+    if (change) {
+        text_set_lockfree(self, n);
+        conf_set(self, n, 0);
+        n = NULL;
+        if (codec_change) {
+            self->encoder_used = 0;
+            self->flags = FLAGS_FRESH;
+        }
+        text_drop_cache(self);
+    }
+    conf_put(n);
+    conf_put(cf);
     Py_RETURN_NONE;
 
 error:
-    Py_DECREF(buffer);
+    conf_put(n);
+    conf_put(cf);
     return NULL;
 }
 
@@ -3804,7 +4086,6 @@ textiowrapper_dealloc(PyObject *op)
     if (_PyIOBase_finalize(op) < 0) {
         return;
     }
-    self->ok = 0;
     _PyObject_GC_UNTRACK(self);
     FT_CLEAR_WEAKREFS(op, self->weakreflist);
     (void)textiowrapper_clear(op);
@@ -3817,13 +4098,18 @@ textiowrapper_traverse(PyObject *op, visitproc visit, void *arg)
 {
     textio *self = textio_CAST(op);
     Py_VISIT(Py_TYPE(self));
-    Py_VISIT(self->buffer);
-    Py_VISIT(self->encoding);
-    Py_VISIT(self->errors);
-    Py_VISIT(self->encoder);
-    Py_VISIT(self->decoder);
-    Py_VISIT(self->charmap);
-    Py_VISIT(self->readnl);
+    /* The settings' references are the object's (calls' references to
+       them are to the settings). */
+    tconf *cf = FT_ATOMIC_LOAD_PTR_RELAXED(self->conf);
+    if (cf != NULL) {
+        Py_VISIT(cf->buffer);
+        Py_VISIT(cf->encoding);
+        Py_VISIT(cf->errors);
+        Py_VISIT(cf->encoder);
+        Py_VISIT(cf->decoder);
+        Py_VISIT(cf->charmap);
+        Py_VISIT(cf->readnl);
+    }
 #ifdef Py_GIL_DISABLED
     tspan *sp = _Py_atomic_load_ptr_relaxed(&self->span);
     Py_VISIT(sp ? sp->chars : NULL);

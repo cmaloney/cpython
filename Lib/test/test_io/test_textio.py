@@ -2315,7 +2315,47 @@ class CTextIOWrapperTest(TextIOWrapperTest, CTestCase):
 
 
 class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
-    pass
+
+    def open_nibbler(self, cls, mode, buffer_size, **kwargs):
+        f = self.TextIOWrapper(cls(self.FileIO(os_helper.TESTFN, mode),
+                                   buffer_size), **kwargs)
+        self.addCleanup(f.close)
+        return f
+
+    @threading_helper.requires_working_threading()
+    def test_reconfigure_newline_while_threads_write(self):
+        # reconfigure(newline=...) keeps the codec: writes racing it never
+        # find the stream unwritable.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        self.addCleanup(sys.setswitchinterval, sys.getswitchinterval())
+        sys.setswitchinterval(1e-6)
+        t = self.open_nibbler(self.BufferedWriter, "w", 1 << 16,
+                              encoding="utf-8")
+        stop = threading.Event()
+        errors = []
+
+        def writer():
+            try:
+                for _ in range(20000):
+                    t.write("ab\n")
+            except Exception as e:
+                errors.append(e)
+
+        def reconfigure():
+            i = 0
+            while not stop.is_set():
+                t.reconfigure(newline=("\r\n", "\n", "\r", "")[i % 4])
+                i += 1
+
+        r = threading.Thread(target=reconfigure)
+        with threading_helper.start_threads([r]):
+            try:
+                with threading_helper.start_threads(
+                        threading.Thread(target=writer) for _ in range(4)):
+                    pass
+            finally:
+                stop.set()
+        self.assertEqual(errors, [])
 
 
 class PyTextIOWrapperTest(TextIOWrapperTest, PyTestCase):
