@@ -145,6 +145,31 @@ morsels_push(morsel_list *list, PyObject *obj, const char *ptr,
     return 0;
 }
 
+/* Move all of src's morsels, with their references, to the end of dst,
+   leaving src empty. */
+static int
+morsels_splice(morsel_list *dst, morsel_list *src)
+{
+    if (dst->count + src->count > dst->capacity) {
+        Py_ssize_t capacity = Py_MAX(2 * dst->capacity,
+                                     dst->count + src->count);
+        morsel *items = PyMem_Realloc(dst->items, capacity * sizeof(morsel));
+        if (items == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+        dst->items = items;
+        dst->capacity = capacity;
+    }
+    memcpy(dst->items + dst->count, src->items,
+           (size_t)src->count * sizeof(morsel));
+    dst->count += src->count;
+    dst->nbytes += src->nbytes;
+    src->count = 0;
+    src->nbytes = 0;
+    return 0;
+}
+
 /* m->ptr[0:k] as a bytes object: m->obj itself, without a copy, when that
    is all of it. */
 static inline PyObject *
