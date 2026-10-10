@@ -1187,6 +1187,37 @@ exit:
     return return_value;
 }
 
+PyDoc_STRVAR(_io_BufferedRWPair_readline__doc__,
+"readline($self, size=-1, /)\n"
+"--\n"
+"\n");
+
+#define _IO_BUFFEREDRWPAIR_READLINE_METHODDEF    \
+    {"readline", _PyCFunction_CAST(_io_BufferedRWPair_readline), METH_FASTCALL, _io_BufferedRWPair_readline__doc__},
+
+static PyObject *
+_io_BufferedRWPair_readline_impl(rwpair *self, PyObject *size);
+
+static PyObject *
+_io_BufferedRWPair_readline(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
+{
+    PyObject *return_value = NULL;
+    PyObject *size = NULL;
+
+    if (!_PyArg_CheckPositional("readline", nargs, 0, 1)) {
+        goto exit;
+    }
+    if (nargs < 1) {
+        goto skip_optional;
+    }
+    size = args[0];
+skip_optional:
+    return_value = _io_BufferedRWPair_readline_impl((rwpair *)self, size);
+
+exit:
+    return return_value;
+}
+
 PyDoc_STRVAR(_io_BufferedRWPair_read1__doc__,
 "read1($self, size=-1, /)\n"
 "--\n"
@@ -1462,4 +1493,4 @@ exit:
 
 #define _IO_BUFFEREDRWPAIR_CLOSED_GETSETDEF {"closed", (getter)_io_BufferedRWPair_closed_get, (setter)NULL, NULL},
 
-/*[clinic end generated code: output=14983278efa16d92 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=89ac5249deb93b4d input=a9049054013a1b77]*/

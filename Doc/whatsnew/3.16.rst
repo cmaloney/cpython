@@ -490,6 +490,15 @@ io
   or ``0``, which mean end of file.
   (Contributed by Cody Maloney in :gh:`57531`.)
 
+* On a non-blocking stream, :meth:`~io.IOBase.readline` of a binary buffered
+  stream now returns ``None`` when the stream would block before the end of
+  the line, keeping what has arrived of the line for the next call, instead
+  of returning a partial line that the caller could not tell from the last
+  line of the file.  Iterating over such a stream raises
+  :exc:`BlockingIOError` instead of stopping, and
+  :meth:`~io.IOBase.readlines` returns the complete lines read so far.
+  (Contributed by Cody Maloney in :gh:`57531`.)
+
 
 ipaddress
 ---------

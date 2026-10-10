@@ -402,6 +402,20 @@ I/O base classes
       the *newline* argument to :func:`open` can be used to select the line
       terminator(s) recognized.
 
+      On a binary stream over a non-blocking raw stream that would block,
+      ``None`` is returned if nothing of the line has arrived (the default
+      implementation returns what has arrived otherwise).
+      :class:`BufferedReader`, :class:`BufferedRandom` and
+      :class:`BufferedRWPair` also return ``None`` if the end of the line (or
+      *size* bytes) has not arrived yet, and keep what has arrived of the
+      line for the next call, unless it is too long to keep: then it is
+      returned as it is.  Iteration raises :exc:`BlockingIOError` instead of
+      stopping when :meth:`!readline` returns ``None``.
+
+      .. versionchanged:: next
+         Return ``None`` and keep the partial line when a binary stream
+         would block, instead of returning what has arrived of the line.
+
    .. method:: readlines(hint=-1, /)
 
       Read and return a list of lines from the stream.  *hint* can be specified
@@ -413,6 +427,15 @@ I/O base classes
 
       Note that it's already possible to iterate on file objects using ``for
       line in file: ...`` without calling :meth:`!file.readlines`.
+
+      When the stream would block before the end of a line, the complete
+      lines read so far are returned; the partial last line is kept for the
+      next call where :meth:`readline` keeps it.  If there are none,
+      :meth:`!readlines` returns ``None`` for a binary stream and raises
+      :exc:`BlockingIOError` for a text stream.
+
+      .. versionchanged:: next
+         Return the lines read so far when the stream would block.
 
    .. method:: seek(offset, whence=os.SEEK_SET, /)
 
