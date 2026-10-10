@@ -714,6 +714,88 @@ exit:
     return return_value;
 }
 
+PyDoc_STRVAR(_io__Buffered_gather__doc__,
+"gather($self, /, limit=20971520)\n"
+"--\n"
+"\n"
+"Gather the writes of the current context in a with block.\n"
+"\n"
+"Returns a context manager.  Inside its with block, what the current\n"
+"context (thread, or asyncio task) writes is kept apart, also past\n"
+"the buffer size, and added to the buffered data in one piece when\n"
+"the block ends, so that no other output gets in between.  Once the\n"
+"block gathered limit bytes, they are added, and gathering goes on.\n"
+"flush() inside the block takes effect at its end; reads, seek(),\n"
+"truncate(), close() and detach() add what was gathered first.");
+
+#define _IO__BUFFERED_GATHER_METHODDEF    \
+    {"gather", _PyCFunction_CAST(_io__Buffered_gather), METH_FASTCALL|METH_KEYWORDS, _io__Buffered_gather__doc__},
+
+static PyObject *
+_io__Buffered_gather_impl(buffered *self, Py_ssize_t limit);
+
+static PyObject *
+_io__Buffered_gather(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
+
+    #define NUM_KEYWORDS 1
+    static struct {
+        PyGC_Head _this_is_not_used;
+        PyObject_VAR_HEAD
+        Py_hash_t ob_hash;
+        PyObject *ob_item[NUM_KEYWORDS];
+    } _kwtuple = {
+        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
+        .ob_hash = -1,
+        .ob_item = { &_Py_ID(limit), },
+    };
+    #undef NUM_KEYWORDS
+    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
+
+    #else  // !Py_BUILD_CORE
+    #  define KWTUPLE NULL
+    #endif  // !Py_BUILD_CORE
+
+    static const char * const _keywords[] = {"limit", NULL};
+    static _PyArg_Parser _parser = {
+        .keywords = _keywords,
+        .fname = "gather",
+        .kwtuple = KWTUPLE,
+    };
+    #undef KWTUPLE
+    PyObject *argsbuf[1];
+    Py_ssize_t noptargs = nargs + (kwnames ? PyTuple_GET_SIZE(kwnames) : 0) - 0;
+    Py_ssize_t limit = GATHER_LIMIT;
+
+    args = _PyArg_UnpackKeywords(args, nargs, NULL, kwnames, &_parser,
+            /*minpos*/ 0, /*maxpos*/ 1, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
+    if (!args) {
+        goto exit;
+    }
+    if (!noptargs) {
+        goto skip_optional_pos;
+    }
+    {
+        Py_ssize_t ival = -1;
+        PyObject *iobj = _PyNumber_Index(args[0]);
+        if (iobj != NULL) {
+            ival = PyLong_AsSsize_t(iobj);
+            Py_DECREF(iobj);
+        }
+        if (ival == -1 && PyErr_Occurred()) {
+            goto exit;
+        }
+        limit = ival;
+    }
+skip_optional_pos:
+    return_value = _io__Buffered_gather_impl((buffered *)self, limit);
+
+exit:
+    return return_value;
+}
+
 PyDoc_STRVAR(_io_BufferedWriter_readall__doc__,
 "readall($self, /)\n"
 "--\n"
@@ -1189,4 +1271,4 @@ _io_BufferedRWPair_closed_get(PyObject *self, void *Py_UNUSED(context))
 
 #define _IO_BUFFEREDRWPAIR_CLOSED_GETSETDEF {"closed", (getter)_io_BufferedRWPair_closed_get, (setter)NULL, NULL},
 
-/*[clinic end generated code: output=f81d37b8f3a43f73 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=0f0d1e3b97c53383 input=a9049054013a1b77]*/
