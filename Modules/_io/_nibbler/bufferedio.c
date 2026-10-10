@@ -529,20 +529,27 @@ buffered_release_view(PyObject *view)
    it when it has a buffer that can change, so that a view made from it
    keeps that memory valid like any other (also after the call, when the
    raw stream kept one).  Without memobj, the memory must stay valid
-   otherwise. */
+   otherwise.
+
+   When memobj exports no buffer, or one that doesn't hold mem (as the
+   wrapper of a class with __buffer__, PEP 688, or an exporter returning
+   other memory each time), the view can't be bound to it: then a
+   read-only view is of a copy, and NULL is returned with no exception set
+   for a writable one (see buffered_raw_read()). */
 static PyObject *
 buffered_memory_view(char *mem, Py_ssize_t len, int flags, PyObject *memobj)
 {
-    PyObject *view = PyMemoryView_FromMemory(mem, len, flags);
-    if (view == NULL || memobj == NULL) {
-        return view;
+    if (memobj == NULL) {
+        return PyMemoryView_FromMemory(mem, len, flags);
     }
-    PyMemoryViewObject *mv = (PyMemoryViewObject *)view;
-    Py_buffer *master = &mv->mbuf->master;
     if (PyBytes_CheckExact(memobj) || PyUnicode_CheckExact(memobj)) {
-        /* Immutable: released with the managed buffer, without
-           bf_releasebuffer. */
-        master->obj = Py_NewRef(memobj);
+        PyObject *view = PyMemoryView_FromMemory(mem, len, flags);
+        if (view != NULL) {
+            /* Immutable: released with the managed buffer, without
+               bf_releasebuffer. */
+            ((PyMemoryViewObject *)view)->mbuf->master.obj =
+                Py_NewRef(memobj);
+        }
         return view;
     }
     /* The view keeps its own shape; the managed buffer releases the export
@@ -552,16 +559,40 @@ buffered_memory_view(char *mem, Py_ssize_t len, int flags, PyObject *memobj)
                                             ? PyBUF_WRITABLE
                                             : PyBUF_SIMPLE)) < 0)
     {
-        Py_DECREF(view);
-        return NULL;
+        if (!PyErr_ExceptionMatches(PyExc_TypeError)
+            && !PyErr_ExceptionMatches(PyExc_BufferError))
+        {
+            return NULL;
+        }
+        PyErr_Clear();
+        whole.obj = NULL;
     }
-    char *start = whole.buf;
-    if (mem < start || mem + len > start + whole.len) {
+    else if (mem < (char *)whole.buf
+             || mem + len > (char *)whole.buf + whole.len)
+    {
         /* Not the memory the caller passed after all. */
         PyBuffer_Release(&whole);
+    }
+    if (whole.obj == NULL) {
+        if (flags == PyBUF_WRITE) {
+            return NULL;
+        }
+        PyObject *copy = PyBytes_FromStringAndSize(mem, len);
+        if (copy == NULL) {
+            return NULL;
+        }
+        PyObject *view = buffered_memory_view(PyBytes_AS_STRING(copy), len,
+                                              flags, copy);
+        Py_DECREF(copy);
         return view;
     }
-    *master = whole;
+    PyObject *view = PyMemoryView_FromMemory(mem, len, flags);
+    if (view == NULL) {
+        PyBuffer_Release(&whole);
+        return NULL;
+    }
+    PyMemoryViewObject *mv = (PyMemoryViewObject *)view;
+    mv->mbuf->master = whole;
     mv->view.obj = memobj;
     return view;
 }
@@ -584,7 +615,23 @@ buffered_raw_read(buffered *self, char *dst, Py_ssize_t len, PyObject *memobj,
     assert(memobj != NULL);
     PyObject *view = buffered_memory_view(dst, len, PyBUF_WRITE, memobj);
     if (view == NULL) {
-        return -1;
+        if (PyErr_Occurred()) {
+            return -1;
+        }
+        /* memobj can't hold a view of dst: read into a bytes object of our
+           own, which the view keeps alive, and copy. */
+        PyObject *tmp = PyBytes_FromStringAndSize(NULL, len);
+        if (tmp == NULL) {
+            return -1;
+        }
+        int tmp_shared = 0;
+        Py_ssize_t n = buffered_raw_read(self, PyBytes_AS_STRING(tmp), len,
+                                         tmp, &tmp_shared);
+        if (n > 0) {
+            memcpy(dst, PyBytes_AS_STRING(tmp), n);
+        }
+        Py_DECREF(tmp);
+        return n;
     }
     /* PyErr_SetFromErrno() runs signal handlers on EINTR; retry if none
        raised (see issue #10956). */
@@ -2719,8 +2766,10 @@ buffered_readinto_common(buffered *self, Py_buffer *buffer, int readinto1)
     if (buffered_enter(self, "readinto of closed file", READING) < 0) {
         return NULL;
     }
-    /* The raw stream reads into the caller's memory itself; what Python
-       code keeps of it stays valid through the caller's object. */
+    /* The raw stream reads into the caller's memory itself, through a
+       view bound to the caller's object (or into a copy, see
+       buffered_raw_read()): what Python code keeps of it stays valid
+       through that object, which is all `shared` would ask for. */
     int shared = 0;
     Py_ssize_t n = buffered_read_into(self, buffer->buf, buffer->len,
                                       readinto1, buffer->obj, &shared);

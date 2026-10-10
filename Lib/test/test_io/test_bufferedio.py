@@ -1830,6 +1830,25 @@ class PyBufferedRandomTest(BufferedRandomTest, PyTestCase):
 class NibblerBufferedReaderTest(NibblerMixin, CBufferedReaderTest):
     tp = _nibbler.BufferedReader
 
+    def test_readinto_python_buffer(self):
+        # readinto() into a class with __buffer__ (PEP 688), also when the
+        # read goes straight to a raw stream other than FileIO.
+        class Buf:
+            def __init__(self, size):
+                self.ba = bytearray(size)
+            def __buffer__(self, flags):
+                return memoryview(self.ba)
+            def __release_buffer__(self, view):
+                view.release()
+        for size in (8, 64):
+            with self.subTest(size=size):
+                rawio = self.MockRawIO([b'x' * 100])
+                bufio = self.tp(rawio, 16)
+                buf = Buf(size)
+                self.assertEqual(bufio.readinto(buf), size)
+                self.assertEqual(buf.ba, b'x' * size)
+                self.assertEqual(bufio.read(), b'x' * (100 - size))
+
 
 class NibblerBufferedWriterTest(NibblerMixin, CBufferedWriterTest):
     tp = _nibbler.BufferedWriter
