@@ -2366,6 +2366,28 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                 with self.assertRaises(UnicodeDecodeError):
                     list(t)
 
+    def test_invalid_bytes_codec_decoder(self):
+        # The same through the codec's incremental decoder: the bad bytes
+        # are taken, so that reading goes on past them.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        cases = [
+            ("utf-16-le", b"a\x00\x00\xd8b\x00c\x00\n\x00d\x00",
+             ["a", None, "bc\n", "d", ""]),
+            ("utf-32-le", "a\n".encode("utf-32-le") + b"\x00\x00\x11\x00"
+             + "b\n".encode("utf-32-le"), ["a\n", None, "b\n", ""]),
+        ]
+        for encoding, data, expected in cases:
+            with self.subTest(encoding=encoding):
+                with open(os_helper.TESTFN, "wb") as f:
+                    f.write(data)
+                t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                                      encoding=encoding)
+                for want in expected:
+                    if want is None:
+                        self.assertRaises(UnicodeDecodeError, t.readline)
+                    else:
+                        self.assertEqual(t.readline(), want)
+
     @threading_helper.requires_working_threading()
     @support.requires_resource("cpu")
     def test_buffer_dict_while_threads_read(self):

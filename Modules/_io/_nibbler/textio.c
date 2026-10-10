@@ -1506,6 +1506,9 @@ native_more(textio *self, store *st)
 static int
 decoder_more(textio *self, store *st)
 {
+    if (st->stop) {
+        return 0;
+    }
     if (st->m.obj == NULL || st->m.len <= st->held) {
         if (st->peeked && (st->eof || st->status)) {
             return 0;
@@ -1540,6 +1543,33 @@ decoder_more(textio *self, store *st)
     int flags = self->flags;
     PyObject *chars = decoder_decode(decoder, st->m.ptr, span, final, &used,
                                      &flags);
+    Py_ssize_t start, end;
+    if (chars == NULL && PyErr_ExceptionMatches(PyExc_UnicodeDecodeError)
+        && text_decode_error(&start, &end) == 0)
+    {
+        /* As native_more(): what is valid ends this call; invalid bytes
+           are taken, so that the error is raised once. */
+        if (start > 0 && start <= span) {
+            PyErr_Clear();
+            span = start;
+            final = 0;
+            flags = self->flags;
+            chars = decoder_decode(decoder, st->m.ptr, span, 0, &used,
+                                   &flags);
+            st->stop = 1;
+        }
+        else {
+            PyObject *exc = PyErr_GetRaisedException();
+            int r = store_take(self, st, Py_MIN(Py_MAX(end, 1), st->m.len));
+            if (r < 0 || decoder_setstate(decoder, self->flags) < 0) {
+                _PyErr_ChainExceptions1(exc);
+                return -1;
+            }
+            st->held = 0;
+            PyErr_SetRaisedException(exc);
+            return -1;
+        }
+    }
     PyObject *bytes = chars ? PyBytes_FromStringAndSize(st->m.ptr, used)
                             : NULL;
     int r = bytes ? store_take(self, st, used) : -1;
