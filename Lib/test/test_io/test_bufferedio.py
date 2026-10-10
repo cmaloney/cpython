@@ -11,12 +11,12 @@ from collections import deque, UserList
 from itertools import cycle, count
 from test import support
 from test.support import check_sanitizer, os_helper, threading_helper
-from .utils import byteslike, CTestCase, PyTestCase
+from .utils import byteslike, CTestCase, PyTestCase, NibblerMixin
 
 
 import io # C implementation.
 import _pyio as pyio # Python implementation.
-
+from _io import _nibbler # Nibbler C implementation.
 
 class CommonBufferedTests:
     # Tests common to BufferedReader, BufferedWriter and BufferedRandom
@@ -210,25 +210,45 @@ class CommonBufferedTests:
 
 class SizeofTest:
 
+    def make_used(self, buffer_size):
+        # A buffered object that used its buffer once (some implementations
+        # only allocate it when first needed).
+        bufio = self.tp(self.MockRawIO(), buffer_size=buffer_size)
+        if bufio.readable():
+            bufio.read(1)
+        else:
+            bufio.write(b"x")
+        return bufio
+
     @support.cpython_only
     def test_sizeof(self):
         bufsize1 = 4096
         bufsize2 = 8192
-        rawio = self.MockRawIO()
-        bufio = self.tp(rawio, buffer_size=bufsize1)
+        bufio = self.make_used(bufsize1)
         size = sys.getsizeof(bufio) - bufsize1
-        rawio = self.MockRawIO()
-        bufio = self.tp(rawio, buffer_size=bufsize2)
+        bufio = self.make_used(bufsize2)
         self.assertEqual(sys.getsizeof(bufio), size + bufsize2)
 
     @support.cpython_only
     def test_buffer_freeing(self) :
         bufsize = 4096
-        rawio = self.MockRawIO()
-        bufio = self.tp(rawio, buffer_size=bufsize)
+        bufio = self.make_used(bufsize)
         size = sys.getsizeof(bufio) - bufsize
         bufio.close()
         self.assertEqual(sys.getsizeof(bufio), size)
+
+    @support.cpython_only
+    def test_sizeof_buffer_size_zero(self):
+        if not self.is_nibbler:
+            self.skipTest("buffer_size=0 not supported")
+        bufsize = 4096
+        bufio = self.make_used(bufsize)
+        size = sys.getsizeof(bufio) - bufsize
+        bufio = self.make_used(0)
+        self.assertEqual(sys.getsizeof(bufio), size)
+        bufio.close()
+        self.assertEqual(sys.getsizeof(bufio), size)
+        self.assertTrue(bufio.closed)
 
 class BufferedReaderTest(CommonBufferedTests):
     read_mode = "rb"
@@ -240,7 +260,11 @@ class BufferedReaderTest(CommonBufferedTests):
         bufio.__init__(rawio, buffer_size=1024)
         bufio.__init__(rawio, buffer_size=16)
         self.assertEqual(b"abc", bufio.read())
-        self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
+        if self.is_nibbler:
+            bufio.__init__(rawio, buffer_size=0)
+        else:
+            self.assertRaises(ValueError, bufio.__init__, rawio,
+                              buffer_size=0)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-16)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-1)
         rawio = self.MockRawIO([b"abc"])
@@ -482,7 +506,7 @@ class BufferedReaderTest(CommonBufferedTests):
     def test_readline_would_block_long_partial_line(self):
         # A partial line longer than the buffer is kept too, up to 64 times
         # the buffer size; past that it is returned as it is.
-        if not self.is_C:
+        if not self.is_stock_C:
             rawio = self.MockRawIO((b"x" * 40, None, b"y\n"))
             bufio = self.tp(rawio, 16)
             self.assertIsNone(bufio.readline())
@@ -503,6 +527,28 @@ class BufferedReaderTest(CommonBufferedTests):
         bufio = self.tp(rawio)
 
         self.assertEqual(b"abcdefg", bufio.read())
+
+    def test_readall(self):
+        if not self.is_nibbler:
+            self.skipTest("no readall()")
+        sizes = [16, 4096]
+        if self.is_nibbler:
+            sizes.append(0)
+        for size in sizes:
+            with self.subTest(buffer_size=size):
+                rawio = self.MockRawIO((b"abc", b"d", b"efg"))
+                bufio = self.tp(rawio, buffer_size=size)
+                self.assertEqual(bufio.read(2), b"ab")
+                self.assertEqual(bufio.readall(), b"cdefg")
+                self.assertEqual(bufio.readall(), b"")
+                # Would block before any data: None, like read().
+                rawio = self.MockRawIO((b"abc", None, None, b"d"))
+                bufio = self.tp(rawio, buffer_size=size)
+                self.assertEqual(bufio.readall(), b"abc")
+                self.assertIsNone(bufio.readall())
+                self.assertEqual(bufio.readall(), b"d")
+                bufio.close()
+                self.assertRaises(ValueError, bufio.readall)
 
     @threading_helper.requires_working_threading()
     @support.requires_resource('cpu')
@@ -675,8 +721,10 @@ class CBufferedReaderTest(BufferedReaderTest, SizeofTest, CTestCase):
     def test_initialization(self):
         rawio = self.MockRawIO([b"abc"])
         bufio = self.tp(rawio)
-        self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
-        self.assertRaises(ValueError, bufio.read)
+        if not self.is_nibbler:
+            self.assertRaises(ValueError, bufio.__init__, rawio,
+                              buffer_size=0)
+            self.assertRaises(ValueError, bufio.read)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-16)
         self.assertRaises(ValueError, bufio.read)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-1)
@@ -762,7 +810,11 @@ class BufferedWriterTest(CommonBufferedTests):
         bufio.__init__(rawio, buffer_size=16)
         self.assertEqual(3, bufio.write(b"abc"))
         bufio.flush()
-        self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
+        if self.is_nibbler:
+            bufio.__init__(rawio, buffer_size=0)
+        else:
+            self.assertRaises(ValueError, bufio.__init__, rawio,
+                              buffer_size=0)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-16)
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-1)
         bufio.__init__(rawio)
@@ -779,6 +831,39 @@ class BufferedWriterTest(CommonBufferedTests):
                                bufio.write, b'')
         bufio.__init__(self.MockRawIO())
         self.assertEqual(bufio.write(b''), 0)
+
+    def test_reinit_writes_pending(self):
+        # __init__() again writes what is pending to the raw stream it was
+        # written to, as FileIO.__init__() closes the file it had, instead
+        # of dropping it.
+        if not self.is_nibbler:
+            self.skipTest("__init__() drops pending writes")
+        rawio = self.MockRawIO()
+        bufio = self.tp(rawio, 16)
+        bufio.write(b"abc")
+        rawio2 = self.MockRawIO()
+        bufio.__init__(rawio2, 16)
+        self.assertEqual(b"".join(rawio._write_stack), b"abc")
+        self.assertIs(bufio.raw, rawio2)
+        bufio.write(b"def")
+        bufio.flush()
+        self.assertEqual(b"".join(rawio2._write_stack), b"def")
+
+    def test_reinit_write_error(self):
+        # If they can't be written, __init__() raises and leaves the object
+        # as it was, with its raw stream and what is pending.
+        if not self.is_nibbler:
+            self.skipTest("__init__() drops pending writes")
+        rawio = self.MockRawIO()
+        bufio = self.tp(rawio, 16)
+        bufio.write(b"abc")
+        rawio.write = lambda b: 1 / 0
+        self.assertRaises(ZeroDivisionError, bufio.__init__,
+                          self.MockRawIO(), 16)
+        self.assertIs(bufio.raw, rawio)
+        del rawio.write
+        bufio.flush()
+        self.assertEqual(b"".join(rawio._write_stack), b"abc")
 
     def test_detach_flush(self):
         raw = self.MockRawIO()
@@ -1124,11 +1209,21 @@ class BufferedWriterTest(CommonBufferedTests):
 class CBufferedWriterTest(BufferedWriterTest, SizeofTest, CTestCase):
     tp = io.BufferedWriter
 
+    def test_readall(self):
+        if not self.is_nibbler:
+            self.skipTest("no readall()")
+        for size in (0, 16) if self.is_nibbler else (16,):
+            with self.subTest(buffer_size=size):
+                bufio = self.tp(self.MockRawIO(), buffer_size=size)
+                self.assertRaises(self.UnsupportedOperation, bufio.readall)
+
     def test_initialization(self):
         rawio = self.MockRawIO()
         bufio = self.tp(rawio)
-        self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=0)
-        self.assertRaises(ValueError, bufio.write, b"def")
+        if not self.is_nibbler:
+            self.assertRaises(ValueError, bufio.__init__, rawio,
+                              buffer_size=0)
+            self.assertRaises(ValueError, bufio.write, b"def")
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-16)
         self.assertRaises(ValueError, bufio.write, b"def")
         self.assertRaises(ValueError, bufio.__init__, rawio, buffer_size=-1)
@@ -1235,6 +1330,14 @@ class BufferedRWPairTest:
         self.assertEqual(pair.read(), b"ef")
         pair = self.tp(self.BytesIO(b"abc"), self.MockRawIO())
         self.assertEqual(pair.read(None), b"abc")
+
+    def test_readall(self):
+        if not self.is_nibbler:
+            self.skipTest("no readall()")
+        pair = self.tp(self.BytesIO(b"abcdef"), self.MockRawIO())
+        self.assertEqual(pair.read(2), b"ab")
+        self.assertEqual(pair.readall(), b"cdef")
+        self.assertEqual(pair.readall(), b"")
 
     def test_readlines(self):
         pair = lambda: self.tp(self.BytesIO(b"abc\ndef\nh"), self.MockRawIO())
@@ -1721,6 +1824,23 @@ class CBufferedRandomTest(BufferedRandomTest, SizeofTest, CTestCase):
 
 class PyBufferedRandomTest(BufferedRandomTest, PyTestCase):
     tp = pyio.BufferedRandom
+
+
+# _io._nibbler buffered classes, run through the full C test suites.
+class NibblerBufferedReaderTest(NibblerMixin, CBufferedReaderTest):
+    tp = _nibbler.BufferedReader
+
+
+class NibblerBufferedWriterTest(NibblerMixin, CBufferedWriterTest):
+    tp = _nibbler.BufferedWriter
+
+
+class NibblerBufferedRWPairTest(NibblerMixin, CBufferedRWPairTest):
+    tp = _nibbler.BufferedRWPair
+
+
+class NibblerBufferedRandomTest(NibblerMixin, CBufferedRandomTest):
+    tp = _nibbler.BufferedRandom
 
 
 # Simple test to ensure that optimizations in the IO library deliver the

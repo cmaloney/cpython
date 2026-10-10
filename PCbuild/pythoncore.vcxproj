@@ -404,6 +404,7 @@
     <ClInclude Include="..\Modules\_math.h" />
     <ClInclude Include="..\Modules\rotatingtree.h" />
     <ClInclude Include="..\Modules\_io\_iomodule.h" />
+    <ClInclude Include="..\Modules\_io\_nibbler\nibbler.h" />
     <ClInclude Include="..\Modules\cjkcodecs\alg_jisx0201.h" />
     <ClInclude Include="..\Modules\cjkcodecs\cjkcodecs.h" />
     <ClInclude Include="..\Modules\cjkcodecs\emu_jisx0213_2000.h" />
@@ -525,6 +526,7 @@
     <ClCompile Include="..\Modules\_io\bytesio.c" />
     <ClCompile Include="..\Modules\_io\stringio.c" />
     <ClCompile Include="..\Modules\_io\bufferedio.c" />
+    <ClCompile Include="..\Modules\_io\_nibbler\bufferedio.c" />
     <ClCompile Include="..\Modules\_io\iobase.c" />
     <ClCompile Include="..\Modules\_io\textio.c" />
     <ClCompile Include="..\Modules\_io\winconsoleio.c" />

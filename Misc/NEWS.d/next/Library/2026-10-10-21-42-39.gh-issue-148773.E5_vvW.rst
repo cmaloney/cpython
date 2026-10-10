@@ -1,0 +1,16 @@
+Add :mod:`!_io._nibbler`, an implementation of the buffered binary classes
+(:class:`!BufferedReader`, :class:`!BufferedWriter`,
+:class:`!BufferedRandom` and :class:`!BufferedRWPair`) for free threading.
+Small writes are queued and buffered data is read without taking the lock,
+and writing out doesn't hold the lock during the raw write, so threads
+sharing a file wait less on each other. It is not used by default:
+``_io._set_open_impl("_nibbler")`` or the environment variable
+``_PYTHON_IO_DEFAULT_IMPL=_nibbler`` make :func:`open`, the :mod:`io`
+classes and the standard streams use it. Its classes accept
+``buffer_size=0`` (unbuffered) and, for writing, ``buffer_size=None``
+(writes are buffered without limit until flushed); with them, :func:`open`
+accepts ``buffering=None``. ``_io._set_unbuffered_impl("_nibbler")`` or
+``_PYTHON_IO_UNBUFFERED_IMPL=_nibbler`` make binary ``open(buffering=0)``
+return such a buffered object with buffer size 0 over the raw file, which
+the unbuffered standard streams (:option:`-u`) then use as their buffer, and
+let ``open(buffering=0)`` open text files for writing (:gh:`61606`).

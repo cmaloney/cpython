@@ -98,6 +98,13 @@ extern int _PyFileIO_check_access(PyObject *self, int reading, int writing);
 /* Was the FileIO (or subclass) opened in append mode? */
 extern int _PyFileIO_appending(PyObject *self);
 
+/* A run of bytes inside the bytes object obj, which keeps them alive. */
+typedef struct {
+    PyObject *obj;
+    const char *ptr;
+    Py_ssize_t len;
+} _PyIO_Morsel;
+
 /* Shortcut to the core of the IncrementalNewlineDecoder.decode method */
 extern PyObject *_PyIncrementalNewlineDecoder_decode(
     PyObject *self, PyObject *input, int final);
@@ -216,6 +223,18 @@ struct _io_state {
 #ifdef HAVE_WINDOWS_CONSOLE_IO
     PyTypeObject *PyWindowsConsoleIO_Type;
 #endif
+
+    /* The buffered and text classes open() uses: _io's own, or
+       _io._nibbler's. */
+    PyTypeObject *open_reader_type;
+    PyTypeObject *open_writer_type;
+    PyTypeObject *open_random_type;
+    PyTypeObject *open_text_type;
+    /* The classes open(buffering=0) wraps the raw file in with buffer size
+       0 (_io._nibbler's), or NULL: it returns the raw file. */
+    PyTypeObject *open_unbuffered_reader_type;
+    PyTypeObject *open_unbuffered_writer_type;
+    PyTypeObject *open_unbuffered_random_type;
 };
 
 static inline _PyIO_State *
@@ -243,6 +262,12 @@ find_io_state_by_def(PyTypeObject *type)
 }
 
 extern PyObject *_PyIOBase_cannot_pickle(PyObject *self, PyObject *args);
+
+/* Create and register the _io._nibbler submodule. */
+extern PyObject *_PyIO_create_nibbler_submodule(PyObject *io_module,
+                                                int as_io);
+/* Is the type exactly one of the _io._nibbler buffered classes? */
+extern int _PyIO_is_nibbler_buffered_type(PyTypeObject *tp);
 
 #ifdef HAVE_WINDOWS_CONSOLE_IO
 extern char _PyIO_get_console_type(PyObject *);

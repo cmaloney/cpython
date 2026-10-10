@@ -382,3 +382,175 @@ class BufferedWriterTest(TestCase):
                        for func in [writer] * 3 + [reader] * 3 + [detacher]]
             with threading_helper.start_threads(threads):
                 go.set()
+
+    def test_small_writes_with_flush_and_tell(self):
+        # Small writes from many threads, racing flush() and tell(), each
+        # land whole and in their thread's order.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        nthreads, count = 6, 3000
+        stop = threading.Event()
+        with open(os_helper.TESTFN, "wb", buffering=512) as f:
+            def writer(tid):
+                for i in range(count):
+                    f.write(b"%d:%05d%s\n" % (tid, i, b"." * (i % 30)))
+
+            def other():
+                while not stop.is_set():
+                    f.flush()
+                    f.tell()
+
+            others = [threading.Thread(target=other) for _ in range(2)]
+            with threading_helper.start_threads(others):
+                try:
+                    run_concurrently([lambda t=t: writer(t)
+                                      for t in range(nthreads)])
+                finally:
+                    stop.set()
+        with open(os_helper.TESTFN, "rb") as f:
+            lines = f.read().splitlines()
+        self.assertEqual(len(lines), nthreads * count)
+        for t in range(nthreads):
+            mine = [line for line in lines if line.startswith(b"%d:" % t)]
+            self.assertEqual(mine, [b"%d:%05d%s" % (t, i, b"." * (i % 30))
+                                    for i in range(count)])
+
+
+class NibblerReinitTest(TestCase):
+    """_io._nibbler buffered objects re-initialized, or given an instance
+    dict, while other threads use them (for TSan, and crashes)."""
+
+    def setUp(self):
+        global _nibbler
+        from _io import _nibbler
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN + "2")
+
+    class PyRaw(io.RawIOBase):
+        # Not a FileIO, with a vectored write: re-initializing with it and
+        # with a FileIO changes every raw_* flag of the buffered object.
+        def __init__(self):
+            self.data = bytearray(b"line\n" * 1000)
+        def readable(self):
+            return True
+        def writable(self):
+            return True
+        def readinto(self, b):
+            n = min(len(b), len(self.data))
+            b[:n] = self.data[:n]
+            del self.data[:n]
+            return n
+        def write(self, b):
+            return len(b)
+        def _writev(self, buffers):
+            return sum(len(b) for b in buffers)
+
+    def raws(self):
+        # FileIO in append mode, FileIO, a Python raw stream.
+        return [lambda: io.FileIO(os_helper.TESTFN, "a"),
+                lambda: io.FileIO(os_helper.TESTFN + "2", "w"),
+                self.PyRaw]
+
+    def run_with_reinit(self, f, users, make_raws, rounds=500):
+        stop = threading.Event()
+
+        def reinit():
+            try:
+                for i in range(rounds):
+                    old = f.raw
+                    try:
+                        f.__init__(make_raws[i % len(make_raws)](), 64)
+                    except (OSError, ValueError):
+                        pass
+                    if isinstance(old, io.FileIO):
+                        old.close()
+            finally:
+                stop.set()
+
+        def use(func):
+            def run():
+                while not stop.is_set():
+                    try:
+                        func()
+                    except (OSError, ValueError, RuntimeError):
+                        pass
+            return run
+
+        run_concurrently([reinit] + [use(u) for u in users])
+
+    def close_text(self, f, t):
+        # Over an open raw stream.  (TextIOWrapper may still check the raw
+        # stream its buffer had when it was created, closed by now.)
+        f.__init__(self.PyRaw(), 64)
+        try:
+            t.close()
+        except ValueError:
+            pass
+
+    def test_reinit_while_writing(self):
+        f = _nibbler.BufferedWriter(self.raws()[1](), 64)
+        t = io.TextIOWrapper(f, encoding="utf-8", write_through=True)
+
+        users = [lambda: f.write(b"x" * 10),
+                 lambda: f.write(bytearray(b"z" * 10)),
+                 lambda: f.write(b"y" * 600),
+                 lambda: t.write("text\n"),
+                 lambda: t.write("\xe9t\xe9\n"),
+                 f.flush, f.tell]
+        self.run_with_reinit(f, users, self.raws())
+        self.close_text(f, t)
+
+    def test_reinit_while_reading(self):
+        with open(os_helper.TESTFN, "wb") as w:
+            w.write(b"line\n" * 10000)
+        make_raws = [lambda: io.FileIO(os_helper.TESTFN, "r"),
+                     self.PyRaw]
+        f = _nibbler.BufferedReader(make_raws[0](), 64)
+        t = io.TextIOWrapper(f, encoding="utf-8")
+        users = [lambda: f.read(3), f.readline, lambda: f.peek(1),
+                 lambda: f.read1(10), t.readline, lambda: t.read(5)]
+        self.run_with_reinit(f, users, make_raws)
+        self.close_text(f, t)
+
+
+class SetOpenImplTest(TestCase):
+    def test_open_set_open_impl_race(self):
+        # open() read the buffered classes _io._set_open_impl() replaces
+        # without synchronization or a reference of its own.
+        import _io
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(b"x")
+        prev = _io._set_open_impl("_io")
+        self.addCleanup(_io._set_open_impl, prev)
+
+        def opener():
+            for _ in range(200):
+                with open(os_helper.TESTFN, "rb") as f:
+                    self.assertEqual(f.read(), b"x")
+
+        def switcher():
+            for i in range(200):
+                _io._set_open_impl("_nibbler" if i % 2 else "_io")
+
+        run_concurrently([opener] * 3 + [switcher])
+
+    def test_open_set_unbuffered_impl_race(self):
+        # open(buffering=0) gets the class _io._set_unbuffered_impl()
+        # replaces (or unsets) as one reference.
+        import _io
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(b"x")
+        prev = _io._set_unbuffered_impl("_io")
+        self.addCleanup(_io._set_unbuffered_impl, prev)
+
+        def opener():
+            for _ in range(200):
+                with open(os_helper.TESTFN, "rb", buffering=0) as f:
+                    self.assertEqual(f.read(), b"x")
+
+        def switcher():
+            for i in range(200):
+                _io._set_unbuffered_impl("_nibbler" if i % 2 else "_io")
+
+        run_concurrently([opener] * 3 + [switcher])
