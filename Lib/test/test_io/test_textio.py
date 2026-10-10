@@ -1008,8 +1008,6 @@ class TextIOWrapperTest:
             self.assertEqual(remaining, "")
 
     def test_tell_after_seek_with_chars_to_skip(self):
-        if self.is_stock_C:
-            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # seek() to a cookie with characters to skip feeds the decoder a
         # new snapshot; tell() must not estimate positions inside it with
         # the bytes-per-char ratio of the previously read chunk.
