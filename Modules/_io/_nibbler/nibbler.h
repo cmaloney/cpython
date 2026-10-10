@@ -1233,15 +1233,27 @@ nibbler_mutex_after_fork(nibbler_mutex *m, PyThreadState *tstate)
 
 /* In the child of a fork, where only this thread is left: release the
    mutexes that other threads held, dropping what a gone holder of the I/O
-   role was writing out (see "Locking"). */
+   role was writing out (see "Locking").
+
+   Dropping morsels needs the end held: a gone thread writing out without
+   the lock left it open, and a lock-free append in the child would
+   otherwise go after morsels that are gone.  Unless this thread holds the
+   lock (then the end is held already), the lock is taken here, in effect:
+   hold the end, drop, and open it again as releasing the lock does. */
 static void
 nibbler_set_after_fork(nibbler_set *s)
 {
     PyThreadState *tstate = _PyThreadState_GET();
     for (nibbler *n = s->first; n != NULL; n = n->next) {
-        (void)nibbler_mutex_after_fork(&n->lock, tstate);
+        int locked = !nibbler_mutex_after_fork(&n->lock, tstate);
+        if (!locked) {
+            nibbler_hold(n);
+        }
         if (nibbler_mutex_after_fork(&n->io, tstate)) {
             nibbler_drop_inflight(n);
+        }
+        if (!locked) {
+            nibbler_open(n);
         }
     }
 }

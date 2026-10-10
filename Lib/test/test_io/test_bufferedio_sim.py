@@ -2352,6 +2352,55 @@ class LockReleaseTest:
 
     @threading_helper.requires_working_threading()
     @support.requires_fork()
+    def test_fork_while_other_thread_writes_out_to_fileio(self):
+        # The gone thread writes out to a FileIO without the lock, which
+        # leaves the writing end open: the child drops the bytes in flight
+        # with the end held, so that its lock-free writes and its next
+        # holds of the lock see consistent morsels.
+        code = """
+            import threading, time, warnings
+            from _io._nibbler import BufferedWriter
+            warnings.simplefilter('ignore', DeprecationWarning)
+
+            r, w = os.pipe()
+            f = BufferedWriter(io.FileIO(w, 'w', closefd=False), 8192)
+            f.write(b'a' * 100)     # opens the writing end
+            f.write(b'b' * 100)     # lock-free
+            os.set_blocking(w, False)
+            try:
+                while True:
+                    os.write(w, b'z' * 4096)
+            except BlockingIOError:
+                pass
+            os.set_blocking(w, True)
+            # Past the buffer size: writes out, and blocks on the full pipe.
+            threading.Thread(target=f.write, args=(b'x' * 10000,),
+                             daemon=True).start()
+            time.sleep(0.2)
+            pid = os.fork()
+            if pid == 0:
+                f.write(b'y' * 10)  # lock-free
+                os.set_blocking(r, False)
+                try:
+                    while os.read(r, 65536):
+                        pass
+                except BlockingIOError:
+                    pass
+                f.flush()
+                os._exit(0)
+            status = os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])
+            os.write(1, b'exit %d' % status)
+            os.set_blocking(r, False)
+            try:
+                while os.read(r, 65536):
+                    pass
+            except BlockingIOError:
+                pass
+            """
+        self.assertEqual(self.run_child(code), (0, b"exit 0", ""))
+
+    @threading_helper.requires_working_threading()
+    @support.requires_fork()
     def test_fork_while_other_thread_takes_lock(self):
         # A thread waiting for the lock is handed it while detached, and
         # waits to attach again (for the GIL, or for the world stopped by
