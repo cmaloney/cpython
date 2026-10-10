@@ -397,7 +397,7 @@ PyDoc_STRVAR(_io__set_open_impl__doc__,
 "_set_open_impl($module, name, /)\n"
 "--\n"
 "\n"
-"Make open() use the \"_io\" or \"_nibbler\" buffered classes.\n"
+"Make open() use the \"_io\" or \"_nibbler\" buffered and text classes.\n"
 "\n"
 "Returns the previous name.  For tests.");
 
@@ -456,4 +456,4 @@ _io__set_unbuffered_impl(PyObject *module, PyObject *arg)
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=b0139f7e8e652cde input=a9049054013a1b77]*/
+/*[clinic end generated code: output=cc9254bbfbc2b38a input=a9049054013a1b77]*/

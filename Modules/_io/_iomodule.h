@@ -83,12 +83,11 @@ extern int _PyFileIO_appending(PyObject *self);
    find "would block"? */
 extern int _PyFileIO_regular(PyObject *self);
 
-/* Byte-level access to an exact _io._nibbler buffered object, for
-   TextIOWrapper: it decodes straight from the read-ahead and appends
-   encoded text without method calls (see "Bytes for TextIOWrapper" in
-   _nibbler/bufferedio.c).  Functions returning int return 0 on success,
-   -1 with an exception set, or _PyIO_NIBBLER_NO (nothing done) when the
-   object must be used through its methods instead. */
+/* An exact _io._nibbler buffered object as the storage of
+   _io._nibbler.TextIOWrapper's bytes, without method calls (see "Bytes for
+   TextIOWrapper" in _nibbler/bufferedio.c).  Functions returning int
+   return 0 on success, -1 with an exception set, or _PyIO_NIBBLER_NO
+   (nothing done) when the object must be used through its methods. */
 #define _PyIO_NIBBLER_NO (-3)
 
 /* A run of bytes inside the bytes object obj, which keeps them alive. */
@@ -98,38 +97,33 @@ typedef struct {
     Py_ssize_t len;
 } _PyIO_Morsel;
 
-/* The unread bytes, without taking them: at least `need` (reading more,
-   after them, when fewer are unread) unless the raw stream reached EOF or
-   would block.  *m is the caller's view of them, kept between calls: a
-   reference (obj, or NULL when len is 0) the caller releases when done.
-   Returns _PyIO_NIBBLER_BLOCKED, with what is unread in *m, when the raw
-   stream would block before there were `need`; fewer than `need` with 0
-   means EOF. */
+/* *m = the unread bytes, without taking them (a new reference to obj, or
+   NULL when there are none): at least `need` (reading more after them when
+   fewer are unread) unless the stream ends first (then 0 with fewer), or
+   _PyIO_NIBBLER_BLOCKED when it would block first, or _PyIO_NIBBLER_FULL
+   when `need` is more than the buffer holds.  *key and the offset of
+   m->ptr in m->obj always name the same bytes: a later peek with both the
+   same returns them again. */
 #define _PyIO_NIBBLER_BLOCKED 1
+#define _PyIO_NIBBLER_FULL 2
 extern int _PyIONibbler_peek(PyObject *buffered, Py_ssize_t need,
-                             _PyIO_Morsel *m);
-/* Like _PyIONibbler_peek() of what is unread, without the lock, without
-   reading and without running any Python code: returns 1, or 0 (*m left
-   as it is) when nothing is unread or the lock is needed. */
-extern int _PyIONibbler_view(PyObject *buffered, _PyIO_Morsel *m);
-/* Take the first n bytes of the view *m from _PyIONibbler_peek(), moving
-   it past them.  Returns 1, or 0 (nothing taken) if they are no longer the
-   unread bytes. */
+                             _PyIO_Morsel *m, uint64_t *key);
+/* Take the first n bytes of *m from _PyIONibbler_peek().  Returns 1, or 0
+   (nothing taken) if they are no longer the unread bytes. */
 extern int _PyIONibbler_consume(PyObject *buffered, _PyIO_Morsel *m,
                                 Py_ssize_t n);
 /* Like write(obj), for data[0:len] owned by obj.  buffered may be a
-   borrowed reference.  closed_checked: the caller just found its
-   raw FileIO open (so it need not be checked again). */
+   borrowed reference. */
 extern int _PyIONibbler_write(PyObject *buffered, PyObject *obj,
-                              const char *data, Py_ssize_t len,
-                              int closed_checked);
+                              const char *data, Py_ssize_t len);
 /* Without the lock, room for len bytes at the end of the buffer, if there
    is: where to put them, and *end for _PyIONibbler_commit(end, len), which
-   must follow without running any Python code.  NULL: nothing reserved
-   (closed_checked as for _PyIONibbler_write()). */
+   must follow without running any Python code.  NULL: nothing reserved. */
 extern char *_PyIONibbler_reserve(PyObject *buffered, Py_ssize_t len,
-                                  int closed_checked, void **end);
+                                  void **end);
 extern void _PyIONibbler_commit(void *end, Py_ssize_t len);
+/* Is the raw stream closed?  1, 0, or -1 with an exception set. */
+extern int _PyIONibbler_closed(PyObject *buffered);
 
 /* Shortcut to the core of the IncrementalNewlineDecoder.decode method */
 extern PyObject *_PyIncrementalNewlineDecoder_decode(
@@ -250,10 +244,12 @@ struct _io_state {
     PyTypeObject *PyWindowsConsoleIO_Type;
 #endif
 
-    /* The buffered classes open() uses: _io's own, or _io._nibbler's. */
+    /* The buffered and text classes open() uses: _io's own, or
+       _io._nibbler's. */
     PyTypeObject *open_reader_type;
     PyTypeObject *open_writer_type;
     PyTypeObject *open_random_type;
+    PyTypeObject *open_text_type;
     /* The classes open(buffering=0) wraps the raw file in with buffer size
        0 (_io._nibbler's), or NULL: it returns the raw file. */
     PyTypeObject *open_unbuffered_reader_type;
@@ -292,6 +288,8 @@ extern PyObject *_PyIO_create_nibbler_submodule(PyObject *io_module,
                                                 int as_io);
 /* Is the type exactly one of the _io._nibbler buffered classes? */
 extern int _PyIO_is_nibbler_buffered_type(PyTypeObject *tp);
+/* _io._nibbler.TextIOWrapper (_nibbler/textio.c), based on _TextIOBase. */
+extern PyType_Spec _PyIONibbler_textiowrapper_spec;
 
 #ifdef HAVE_WINDOWS_CONSOLE_IO
 extern char _PyIO_get_console_type(PyObject *);

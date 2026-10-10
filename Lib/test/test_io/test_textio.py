@@ -14,7 +14,7 @@ from collections import UserList
 from test import support
 from test.support import os_helper, threading_helper
 from test.support.script_helper import assert_python_ok
-from .utils import CTestCase, PyTestCase
+from .utils import CTestCase, PyTestCase, NibblerMixin
 
 import io  # C implementation of io
 import _pyio as pyio # Python implementation of io
@@ -2084,6 +2084,8 @@ class CTextIOWrapperTest(TextIOWrapperTest, CTestCase):
             del t._CHUNK_SIZE
 
     def test_internal_buffer_size(self):
+        if self.text_uses_buffer_directly:
+            self.skipTest("text keeps no bytes of its own")
         # bpo-43260: TextIOWrapper's internal buffer should not store
         # data larger than chunk size.
         chunk_size = 8192  # default chunk size, updated later
@@ -2111,6 +2113,8 @@ class CTextIOWrapperTest(TextIOWrapperTest, CTestCase):
         self.assertEqual([b"abcdef", b"ghi", b"x"*chunk_size], buf._write_stack)
 
     def test_issue119506(self):
+        if self.text_uses_buffer_directly:
+            self.skipTest("text keeps no bytes of its own")
         chunk_size = 8192
 
         class MockIO(self.MockRawIO):
@@ -2192,8 +2196,11 @@ class CTextIOWrapperTest(TextIOWrapperTest, CTestCase):
                 make_text(DetachOnFlush(self.MockRawIO()))
                 self.assertRaisesRegex(ValueError, "detached", method)
 
-        # Should not crash.
+        # Should not crash.  (Where text goes to the buffer at once, the
+        # write detaches.)
         with self.subTest('read via writeflush'):
+            if self.text_uses_buffer_directly:
+                return
             make_text(DetachOnWrite(self.MockRawIO()))
             wrapper.write('x')
             self.assertRaisesRegex(ValueError, "detached", wrapper.read)
@@ -2270,6 +2277,10 @@ class CTextIOWrapperTest(TextIOWrapperTest, CTestCase):
         # must release next_input; exercise it too (leak-checked under -R).
         wrapper.seek(0)
         self.assertIsInstance(wrapper.tell(), int)
+
+
+class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
+    pass
 
 
 class PyTextIOWrapperTest(TextIOWrapperTest, PyTestCase):

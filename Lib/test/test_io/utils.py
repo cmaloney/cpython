@@ -427,11 +427,13 @@ _NIBBLER_BUFFERED = {
     "BufferedWriter": _nibbler.BufferedWriter,
     "BufferedRWPair": _nibbler.BufferedRWPair,
     "BufferedRandom": _nibbler.BufferedRandom,
+    "TextIOWrapper": _nibbler.TextIOWrapper,
 }
 
 
 class NibblerMixin:
-    """Route the buffered layer (self.* types and open()) to _io._nibbler.
+    """Route the buffered and text layers (self.* types and open()) to
+    _io._nibbler.
 
     CTestCase's capability properties follow (see is_nibbler)."""
 
