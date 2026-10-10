@@ -134,13 +134,15 @@ extern int _PyIONibbler_peek(PyObject *buffered, Py_ssize_t need,
    closed). */
 extern int _PyIONibbler_advance(PyObject *buffered, uint64_t key,
                                 Py_ssize_t off, Py_ssize_t n);
-/* Like write(obj), for data[0:len] owned by obj.  buffered may be a
-   borrowed reference. */
+/* Like write(obj), for data[0:len] owned by obj, but ValueError("I/O
+   operation on closed file.") if closed.  buffered may be a borrowed
+   reference. */
 extern int _PyIONibbler_write(PyObject *buffered, PyObject *obj,
                               const char *data, Py_ssize_t len);
 /* Without the lock, room for len bytes at the end of the buffer, if there
-   is: where to put them, and *end for _PyIONibbler_commit(end, len), which
-   must follow without running any Python code.  NULL: nothing reserved. */
+   is and it is open: where to put them, and *end for
+   _PyIONibbler_commit(end, len), which must follow without running any
+   Python code.  NULL: nothing reserved (_PyIONibbler_write() then). */
 extern char *_PyIONibbler_reserve(PyObject *buffered, Py_ssize_t len,
                                   void **end);
 extern void _PyIONibbler_commit(void *end, Py_ssize_t len);

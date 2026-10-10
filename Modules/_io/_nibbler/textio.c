@@ -704,9 +704,11 @@ store_tell(textio *self, PyObject *buffer)
     return pos;
 }
 
-static int
-store_write(textio *self, PyObject *buffer, PyObject *obj, const char *data,
-            Py_ssize_t len)
+/* store_write() past its first case: rbuf handed back first, or through
+   the buffer's write(). */
+Py_NO_INLINE static int
+store_write_methods(textio *self, PyObject *buffer, PyObject *obj,
+                    const char *data, Py_ssize_t len)
 {
     if (len == 0) {
         return 0;
@@ -737,6 +739,19 @@ store_write(textio *self, PyObject *buffer, PyObject *obj, const char *data,
     Py_DECREF(b);
     Py_XDECREF(res);
     return res == NULL ? -1 : 0;
+}
+
+static inline int
+store_write(textio *self, PyObject *buffer, PyObject *obj, const char *data,
+            Py_ssize_t len)
+{
+    if (self->nib && len > 0) {
+        int r = _PyIONibbler_write(buffer, obj, data, len);
+        if (r != _PyIO_NIBBLER_NO) {
+            return r;
+        }
+    }
+    return store_write_methods(self, buffer, obj, data, len);
 }
 
 /*
@@ -2208,7 +2223,13 @@ text_sync(textio *self, PyObject *buffer)
 static PyObject *
 text_write_call(textio *self, PyObject *text)
 {
-    PyObject *buffer = textio_ready(self);
+    /* Over the buffer as the store, which checks that it is open when the
+       bytes are stored, if any (and then there is nothing to sync but the
+       cache: see text_sync()). */
+    int stores = (self->nib && self->codec != CODEC_DECODER
+                  && self->encoder != NULL && PyUnicode_GET_LENGTH(text) > 0
+                  && textio_exact(self));
+    PyObject *buffer = stores ? textio_buffer(self) : textio_ready(self);
     if (buffer == NULL) {
         return NULL;
     }

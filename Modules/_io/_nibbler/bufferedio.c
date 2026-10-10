@@ -3217,10 +3217,10 @@ buffered_write_failed(buffered *self, PyObject *obj, const char *data,
 
 /* Without the lock: queue data[0:len] at the writing end, if there is one
    with room.  Returns 1 when done, 0 when the lock is needed, or -1 on
-   error. */
+   error (ValueError(closed_msg) if an exact FileIO is closed). */
 static inline int
 buffered_write_lockfree(buffered *self, const char *data, Py_ssize_t len,
-                        int closed_checked)
+                        const char *closed_msg)
 {
     nibbler_end *e = nibbler_end_get(&self->nib, 1);
     Py_ssize_t r;
@@ -3233,13 +3233,13 @@ buffered_write_lockfree(buffered *self, const char *data, Py_ssize_t len,
        nothing can write them out any more.  (Other raw streams: see
        buffered_check_closed().) */
     PyObject *raw = FT_ATOMIC_LOAD_PTR_RELAXED(self->raw);
-    if (!closed_checked && FT_ATOMIC_LOAD_UINT8_RELAXED(self->raw_fileio)
+    if (FT_ATOMIC_LOAD_UINT8_RELAXED(self->raw_fileio)
         && _PyFileIO_closed(raw))
     {
         if (!nibbler_unreserve(e, r, len)) {
             nibbler_commit(e, r, data, len);
         }
-        PyErr_SetString(PyExc_ValueError, "write to closed file");
+        PyErr_SetString(PyExc_ValueError, closed_msg);
         return -1;
     }
     nibbler_commit(e, r, data, len);
@@ -3404,7 +3404,8 @@ buffered_write_buffer(buffered *self, PyObject *obj)
     }
     int r = 0;
     if (view.len < NIBBLER_REF_MIN) {
-        r = buffered_write_lockfree(self, view.buf, view.len, 0);
+        r = buffered_write_lockfree(self, view.buf, view.len,
+                                    "write to closed file");
     }
     if (r == 0) {
         r = buffered_write_data(self, view.obj, view.buf, view.len);
@@ -3431,7 +3432,8 @@ _io_BufferedWriter_write_impl(buffered *self, PyObject *obj)
     const char *data = PyBytes_AS_STRING(obj);
     Py_ssize_t len = PyBytes_GET_SIZE(obj);
     int r = (len < NIBBLER_REF_MIN
-             ? buffered_write_lockfree(self, data, len, 0) : 0);
+             ? buffered_write_lockfree(self, data, len, "write to closed file")
+             : 0);
     if (r == 0) {
         r = buffered_write_data(self, obj, data, len);
     }
@@ -3554,6 +3556,8 @@ _PyIONibbler_advance(PyObject *op, uint64_t key, Py_ssize_t off,
     return buffered_text_advance_locked(self, key, off, n);
 }
 
+#define TEXT_CLOSED "I/O operation on closed file."
+
 int
 _PyIONibbler_write(PyObject *op, PyObject *obj, const char *data,
                    Py_ssize_t len)
@@ -3563,8 +3567,18 @@ _PyIONibbler_write(PyObject *op, PyObject *obj, const char *data,
     if (buffered_dict(self) != NULL) {
         return _PyIO_NIBBLER_NO;
     }
-    int r = (len < NIBBLER_REF_MIN
-             ? buffered_write_lockfree(self, data, len, 0) : 0);
+    /* An exact FileIO is checked once the bytes are reserved; other raw
+       streams, and writes that take the lock, first. */
+    int fileio = FT_ATOMIC_LOAD_UINT8_RELAXED(self->raw_fileio);
+    int r = (fileio && len < NIBBLER_REF_MIN
+             ? buffered_write_lockfree(self, data, len, TEXT_CLOSED) : 0);
+    if (r == 0 && (r = _PyIONibbler_closed(op)) > 0) {
+        PyErr_SetString(PyExc_ValueError, TEXT_CLOSED);
+        r = -1;
+    }
+    if (r == 0 && !fileio && len < NIBBLER_REF_MIN) {
+        r = buffered_write_lockfree(self, data, len, TEXT_CLOSED);
+    }
     if (r != 0) {
         return r < 0 ? -1 : 0;
     }
@@ -3581,18 +3595,23 @@ _PyIONibbler_reserve(PyObject *op, Py_ssize_t len, void **end)
     buffered *self = buffered_cast(op);
     nibbler_end *e;
     Py_ssize_t r;
-    /* (The caller checked that it is open: as with write(), data written
-       once an exact FileIO was closed by itself meanwhile is queued.  Its
-       raw_fileio can't be read before reserving, which keeps __init__()
-       from changing it.) */
-    if (buffered_dict(self) == NULL && len < NIBBLER_REF_MIN
-        && (e = nibbler_end_get(&self->nib, 1)) != NULL
-        && (r = nibbler_reserve(e, len)) >= 0)
+    /* Only over an exact FileIO (see _PyIONibbler_write()), which can only
+       be looked at once the bytes are reserved: then raw and raw_fileio
+       stay.  If it was closed by itself, the bytes are given back, unless
+       others were reserved after them: then they are queued, as with
+       write(), and can't be written out any more. */
+    if (buffered_dict(self) != NULL || len >= NIBBLER_REF_MIN
+        || !FT_ATOMIC_LOAD_UINT8_RELAXED(self->raw_fileio)
+        || (e = nibbler_end_get(&self->nib, 1)) == NULL
+        || (r = nibbler_reserve(e, len)) < 0
+        || (FT_ATOMIC_LOAD_UINT8_RELAXED(self->raw_fileio)
+            && _PyFileIO_closed(FT_ATOMIC_LOAD_PTR_RELAXED(self->raw))
+            && nibbler_unreserve(e, r, len)))
     {
-        *end = e;
-        return PyBytes_AS_STRING(e->block) + r;
+        return NULL;
     }
-    return NULL;
+    *end = e;
+    return PyBytes_AS_STRING(e->block) + r;
 }
 
 void
