@@ -500,7 +500,12 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
                                     : iomodule_get_open_type(slot));
         Py_CLEAR(unlimited_class);
         if (Buffered_class == NULL) {
-            assert(buffering == 0);
+            if (buffering != 0) {
+                /* Only after the module was cleared. */
+                PyErr_SetString(PyExc_RuntimeError,
+                                "open() is not available any more");
+                goto error;
+            }
             if (!binary) {
                 PyErr_SetString(PyExc_ValueError,
                                 "can't have unbuffered text I/O");
@@ -538,6 +543,9 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
     /* wraps into a TextIOWrapper; unbuffered, one that writes through */
     PyObject *Text_class = iomodule_get_open_type(&state->open_text_type);
     if (Text_class == NULL) {
+        /* Only after the module was cleared. */
+        PyErr_SetString(PyExc_RuntimeError,
+                        "open() is not available any more");
         goto error;
     }
     if (buffering == 0) {
