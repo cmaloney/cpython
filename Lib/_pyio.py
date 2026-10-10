@@ -2404,6 +2404,7 @@ class TextIOWrapper(TextIOBase):
     def close(self):
         if self.buffer is not None and not self.closed:
             try:
+                self._finish_encoder()
                 try:
                     self.flush()
                 except BaseException as exc:
@@ -2415,6 +2416,14 @@ class TextIOWrapper(TextIOBase):
                     raise
             finally:
                 self.buffer.close()
+
+    def _finish_encoder(self):
+        # gh-79792: give the encoder the end of the text, and write what
+        # it still held.
+        if self._encoder is not None:
+            b = self._encoder.encode("", final=True)
+            if b:
+                self.buffer.write(b)
 
     @property
     def closed(self):
@@ -2672,6 +2681,7 @@ class TextIOWrapper(TextIOBase):
     def detach(self):
         if self.buffer is None:
             raise ValueError("buffer is already detached")
+        self._finish_encoder()
         self.flush()
         buffer = self._buffer
         self._buffer = None

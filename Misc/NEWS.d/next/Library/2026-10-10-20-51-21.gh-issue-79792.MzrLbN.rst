@@ -1,0 +1,4 @@
+:meth:`!close` and :meth:`!detach` of the :class:`!TextIOWrapper` of
+:mod:`!_pyio` now call the incremental encoder with ``final=True`` and write
+what it returns, so that an encoder holding input until it knows more, such
+as the ``idna`` codec's, no longer loses the end of the text.
