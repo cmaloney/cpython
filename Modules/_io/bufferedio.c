@@ -522,6 +522,7 @@ _io__Buffered__dealloc_warn_impl(buffered *self, PyObject *source)
 }
 
 /*[clinic input]
+@critical_section
 _io._Buffered._discard_writes
 
 Drop the pending writes; return how many bytes they were.
@@ -532,7 +533,7 @@ close() of its buffer doesn't try to write them again.
 
 static PyObject *
 _io__Buffered__discard_writes_impl(buffered *self)
-/*[clinic end generated code: output=4a612257ab62b745 input=8c98a37d7a14ddfa]*/
+/*[clinic end generated code: output=4a612257ab62b745 input=95d405f3fdb05c2e]*/
 {
     CHECK_INITIALIZED(self)
     if (!ENTER_BUFFERED(self)) {
