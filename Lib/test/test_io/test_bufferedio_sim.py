@@ -360,25 +360,24 @@ class SlowDeviceTest:
             out += chunk
         self.assertEqual(out, data)
 
-    def test_peek_reads_to_size(self):
-        if self.is_stock_C:
-            self.skipTest("peek() returns the read-ahead, however short")
-        # gh-50061: peek(n) returns at least min(n, buffer size) bytes when
-        # the raw stream has them, with at most one raw read.
+    def test_peek_never_reads_with_readahead(self):
+        if not self.is_C:
+            self.skipTest("_pyio's peek(n) tops up to min(n, buffer size)")
+        # peek() returns the read-ahead when there is some, however short,
+        # without a raw read, which could block (on a pipe, pickle.load()
+        # peeks for more than is buffered); with none, one raw read.
         data = sample_data(1_000)
-        raw = self.scripted_reader(data)
+        raw = self.scripted_reader(data, [16, 16, 16])
         f = self.BufferedReader(raw, 16)
         self.assertEqual(f.read(10), data[:10])
         calls = raw.calls
+        self.assertEqual(f.peek(10), data[10:16])
+        self.assertEqual(f.peek(100), data[10:16])
+        self.assertEqual(raw.calls, calls)
+        self.assertEqual(f.read(6), data[10:16])
         peeked = f.peek(10)
         self.assertEqual(raw.calls, calls + 1)
-        self.assertGreaterEqual(len(peeked), 10)
-        self.assertLessEqual(len(peeked), 16)
-        self.assertEqual(peeked, data[10:10 + len(peeked)])
-        peeked = f.peek(100)
-        self.assertEqual(peeked, data[10:26])
-        self.assertEqual(raw.calls, calls + 1)
-        self.assertEqual(f.read(16), data[10:26])
+        self.assertEqual(peeked, data[16:32])
         # At EOF: what there is.
         f = self.BufferedReader(self.scripted_reader(data[:12]), 16)
         self.assertEqual(f.read(10), data[:10])
