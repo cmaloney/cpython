@@ -724,6 +724,9 @@ struct textio
        otherwise. */
     char native;
     char codec;
+    /* CODEC_CHARMAP: the codec's decoding table (see
+       textiowrapper_charmap()). */
+    PyObject *charmap;
     /* Native reading: the buffer's unread bytes when last seen (a
        reference to their block, released when not reading natively), and
        what is known of the bytes of that block (see native_clean()). */
@@ -784,7 +787,7 @@ struct textio
 };
 
 enum { NATIVE_NO = 0, NATIVE_ON, NATIVE_PAUSED };
-enum { CODEC_UTF8 = 1, CODEC_LATIN1, CODEC_ASCII };
+enum { CODEC_UTF8 = 1, CODEC_LATIN1, CODEC_ASCII, CODEC_CHARMAP };
 
 #define textio_CAST(op) ((textio *)(op))
 
@@ -1090,6 +1093,46 @@ set_newline(textio *self, const char *newline)
     return 0;
 }
 
+/* For native reading: the decoding table of a codec of the encodings
+   package that decodes byte by byte with one (cp1252, koi8-r and others),
+   if it decodes ASCII as ASCII and nothing else as "\r" or "\n" (not
+   EBCDIC, for example).  Returns a new reference, or NULL, with an
+   exception set or not. */
+static PyObject *
+textiowrapper_charmap(PyObject *codec_info)
+{
+    PyObject *cls, *name = NULL, *module = NULL, *table = NULL;
+    if (PyObject_GetOptionalAttrString(codec_info, "incrementaldecoder",
+                                       &cls) <= 0)
+    {
+        return NULL;
+    }
+    const char *s;
+    if (PyObject_GetOptionalAttr(cls, &_Py_ID(__module__), &name) <= 0
+        || !PyUnicode_Check(name)
+        || (s = PyUnicode_AsUTF8(name)) == NULL
+        || strncmp(s, "encodings.", 10) != 0
+        || (module = PyImport_GetModule(name)) == NULL
+        || PyObject_GetOptionalAttrString(module, "decoding_table",
+                                          &table) <= 0)
+    {
+        goto done;
+    }
+    int ok = PyUnicode_CheckExact(table) && PyUnicode_GET_LENGTH(table) == 256;
+    for (Py_UCS4 i = 0; ok && i < 256; i++) {
+        Py_UCS4 c = PyUnicode_READ_CHAR(table, i);
+        ok = i < 128 ? c == i : c != '\r' && c != '\n';
+    }
+    if (!ok) {
+        Py_CLEAR(table);
+    }
+done:
+    Py_DECREF(cls);
+    Py_XDECREF(name);
+    Py_XDECREF(module);
+    return table;
+}
+
 static int
 _textiowrapper_set_decoder(textio *self, PyObject *codec_info,
                            const char *errors)
@@ -1129,6 +1172,14 @@ _textiowrapper_set_decoder(textio *self, PyObject *codec_info,
             : 0;
     }
     Py_XDECREF(res);
+    Py_CLEAR(self->charmap);
+    if (self->nibbler && !self->codec) {
+        self->charmap = textiowrapper_charmap(codec_info);
+        if (self->charmap == NULL && PyErr_Occurred()) {
+            return -1;
+        }
+        self->codec = self->charmap != NULL ? CODEC_CHARMAP : 0;
+    }
     if (self->nibbler && self->codec) {
         self->native = NATIVE_ON;
     }
@@ -1376,6 +1427,7 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
     Py_CLEAR(self->snapshot);
     Py_CLEAR(self->line_snap);
     native_drop_view(self);
+    Py_CLEAR(self->charmap);
     Py_CLEAR(self->errors);
     Py_CLEAR(self->raw);
     self->regular = 0;
@@ -1692,6 +1744,7 @@ textiowrapper_clear(PyObject *op)
     Py_CLEAR(self->snapshot);
     Py_CLEAR(self->line_snap);
     native_drop_view(self);
+    Py_CLEAR(self->charmap);
     Py_CLEAR(self->errors);
     Py_CLEAR(self->raw);
 
@@ -1730,6 +1783,7 @@ textiowrapper_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->snapshot);
     Py_VISIT(self->line_snap);
     Py_VISIT(self->view.obj);
+    Py_VISIT(self->charmap);
     Py_VISIT(self->errors);
     Py_VISIT(self->raw);
 
@@ -2368,6 +2422,9 @@ native_decode(textio *self, const char *s, Py_ssize_t len, Py_ssize_t *used)
     }
     if (self->codec == CODEC_LATIN1) {
         return PyUnicode_DecodeLatin1(s, len, errors);
+    }
+    if (self->codec == CODEC_CHARMAP) {
+        return PyUnicode_DecodeCharmap(s, len, self->charmap, errors);
     }
     return PyUnicode_DecodeASCII(s, len, errors);
 }

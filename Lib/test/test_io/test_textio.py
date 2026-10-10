@@ -1,5 +1,6 @@
 import array
 import codecs
+import itertools
 import locale
 import os
 import pickle
@@ -631,7 +632,7 @@ class TextIOWrapperTest:
                 with self.open(os_helper.TESTFN, "r", encoding=enc,
                                newline="") as f:
                     self.assertEqual(f.read(), after)
-        for enc in ("utf-8", "latin-1", "ascii"):
+        for enc in ("utf-8", "latin-1", "ascii", "cp1252"):
             # A file larger than the chunks text was decoded in.
             check(enc, None, big, lambda f: f.readline(),
                   "line 00000\n", "line 00000\nXYne 00001\n" + big[22:],
@@ -646,6 +647,8 @@ class TextIOWrapperTest:
               "", "\xe9\u20ac\U0001f600XYc\n", "c\n")
         check("latin-1", None, "\xe9\xe8abc\n", lambda f: f.read(2),
               "", "\xe9\xe8XYc\n", "c\n")
+        check("cp1252", None, "\u20ac\u2019abc\n", lambda f: f.read(2),
+              "", "\u20ac\u2019XYc\n", "c\n")
         # Translated, "\r\n" is one character; not translated, the write
         # can go between "\r" and "\n".
         check("utf-8", None, "ab\r\ncd\r\nef", lambda f: f.read(3),
@@ -668,24 +671,25 @@ class TextIOWrapperTest:
         # Reads of a file give what reads of the same bytes in a BytesIO
         # give, also where error handlers drop or replace invalid bytes
         # (_io._nibbler counts characters in the bytes it reads from).
-        data = b"ab\xffcd\n\xc3(\x80x\r\n\xe2\x82\n" * 20
+        data = b"ab\xffcd\n\xc3(\x80x\r\n\xe2\x82\x81\n" * 20
         with self.open(os_helper.TESTFN, "wb") as f:
             f.write(data)
         ops = [("readline", 1), ("readline", 5), ("read", 3), ("readline", -1),
                ("read", 7), ("readline", 2), ("read", 1)] * 10
-        for errors in ("replace", "ignore", "surrogateescape",
-                       "backslashreplace"):
-            for newline in (None, "", "\r\n"):
-                with self.subTest(errors=errors, newline=newline):
-                    expected = self.TextIOWrapper(
-                        self.BytesIO(data), encoding="utf-8", errors=errors,
-                        newline=newline)
-                    with self.open(os_helper.TESTFN, encoding="utf-8",
-                                   errors=errors, newline=newline) as f:
-                        for name, n in ops:
-                            self.assertEqual(getattr(f, name)(n),
-                                             getattr(expected, name)(n))
-                        self.assertEqual(f.read(), expected.read())
+        for enc, errors, newline in itertools.product(
+                ("utf-8", "cp1252"),
+                ("replace", "ignore", "surrogateescape", "backslashreplace"),
+                (None, "", "\r\n")):
+            with self.subTest(encoding=enc, errors=errors, newline=newline):
+                expected = self.TextIOWrapper(
+                    self.BytesIO(data), encoding=enc, errors=errors,
+                    newline=newline)
+                with self.open(os_helper.TESTFN, encoding=enc,
+                               errors=errors, newline=newline) as f:
+                    for name, n in ops:
+                        self.assertEqual(getattr(f, name)(n),
+                                         getattr(expected, name)(n))
+                    self.assertEqual(f.read(), expected.read())
 
     def test_truncate_below_position(self):
         # As for binary files, the position is not changed: reads return
