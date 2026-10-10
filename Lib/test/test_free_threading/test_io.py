@@ -682,11 +682,16 @@ class NibblerReinitTest(TestCase):
         f = _nibbler.BufferedWriter(self.raws()[1](), 64)
         t = io.TextIOWrapper(f, encoding="utf-8", write_through=True)
 
+        def gather():
+            with f.gather():
+                f.write(b"g" * 600)
+
         users = [lambda: f.write(b"x" * 10),
                  lambda: f.write(bytearray(b"z" * 10)),
                  lambda: f.write(b"y" * 600),
                  lambda: t.write("text\n"),
                  lambda: t.write("\xe9t\xe9\n"),
+                 gather,
                  f.flush, f.tell]
         self.run_with_reinit(f, users, self.raws())
         self.close_text(f, t)

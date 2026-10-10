@@ -13,4 +13,9 @@ accepts ``buffering=None``. ``_io._set_unbuffered_impl("_nibbler")`` or
 ``_PYTHON_IO_UNBUFFERED_IMPL=_nibbler`` make binary ``open(buffering=0)``
 return such a buffered object with buffer size 0 over the raw file, which
 the unbuffered standard streams (:option:`-u`) then use as their buffer, and
-let ``open(buffering=0)`` open text files for writing (:gh:`61606`).
+let ``open(buffering=0)`` open text files for writing (:gh:`61606`). The
+:mod:`!_io._nibbler` :class:`!BufferedWriter` and :class:`!BufferedRandom`
+also have an experimental ``gather()`` context manager: the writes the
+current thread or :mod:`asyncio` task makes inside its ``with`` block are
+kept apart and added to the buffer in one piece, so that no other output
+gets between them.
