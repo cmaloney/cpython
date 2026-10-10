@@ -917,7 +917,7 @@ class SlowDeviceTest:
                 raw = self.scripted_writer([step])
                 f = self.BufferedWriter(raw, 64)
                 f.write(b"x" * 10)
-                with self.assertWarnsRegex(RuntimeWarning,
+                with self.assertWarnsRegex(ResourceWarning,
                                            "discarded 10 buffered bytes"):
                     with self.assertRaises(exc):
                         f.close()
@@ -936,7 +936,7 @@ class SlowDeviceTest:
         raw = self.scripted_writer([OSError(errno.EPIPE, "EPIPE")])
         f = self.TextIOWrapper(self.BufferedWriter(raw, 64), encoding="ascii")
         f.write("abc")
-        with self.assertWarnsRegex(RuntimeWarning,
+        with self.assertWarnsRegex(ResourceWarning,
                                    "discarded 3 buffered bytes"):
             with self.assertRaises(BrokenPipeError):
                 f.close()

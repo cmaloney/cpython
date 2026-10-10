@@ -1651,7 +1651,7 @@ def _warn_discarded(n, would_block):
     import warnings
     warnings.warn(f"close() discarded {n} buffered bytes: writing them "
                   f"{'would block' if would_block else 'failed'}",
-                  RuntimeWarning, stacklevel=3)
+                  ResourceWarning, stacklevel=3)
 
 
 # Without a size, a partial line that would block is kept for the next

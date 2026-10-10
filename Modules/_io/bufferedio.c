@@ -993,7 +993,7 @@ void
 _PyIO_warn_discarded(Py_ssize_t n, int would_block)
 {
     PyObject *exc = PyErr_GetRaisedException();
-    if (PyErr_WarnFormat(PyExc_RuntimeWarning, 1,
+    if (PyErr_WarnFormat(PyExc_ResourceWarning, 1,
                          "close() discarded %zd buffered bytes: writing them "
                          "%s", n, would_block ? "would block" : "failed") < 0)
     {

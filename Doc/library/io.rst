@@ -1264,7 +1264,7 @@ Closing: if the flush done by :meth:`~IOBase.close` of a buffered or text
 stream fails, because it would block or for any other reason (an error, or
 an exception such as :exc:`KeyboardInterrupt` raised while it waits), the
 stream is closed anyway, raw stream included, and the data still buffered
-is discarded.  A :exc:`RuntimeWarning` says how many bytes were lost, and
+is discarded.  A :exc:`ResourceWarning` says how many bytes were lost, and
 :meth:`!close` raises the exception.  Nothing tries to write the data again,
 neither a later :meth:`!close` nor the finalizer.  To avoid losing data,
 call :meth:`~IOBase.flush` until it succeeds before closing.

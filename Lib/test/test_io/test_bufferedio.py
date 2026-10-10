@@ -1176,7 +1176,7 @@ class BufferedWriterTest(CommonBufferedTests):
         bufio = self.tp(raw, 8)
         bufio.write(b"abc")
         raw.block_on(b"b")
-        with self.assertWarnsRegex(RuntimeWarning,
+        with self.assertWarnsRegex(ResourceWarning,
                                    "discarded 2 buffered bytes"):
             with self.assertRaises(self.BlockingIOError):
                 bufio.close()
