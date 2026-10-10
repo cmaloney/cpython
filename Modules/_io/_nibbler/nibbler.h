@@ -1,15 +1,16 @@
 /*
  * A nibbler: data queued as morsels, and the threads using it.
  *
- * Data is a list of morsels: runs of bytes inside bytes objects, which
- * keep them alive.  Writing, they are the pending writes: data appended is
+ * Writing, data is a list of morsels: runs of bytes inside bytes objects,
+ * which keep them alive.  They are the pending writes: data appended is
  * either kept by reference (large exact bytes objects) or copied into
  * `block`, a bytes object of `capacity` bytes filled in order.  Reading,
- * they are the unread bytes a read filled into the block.  Readers take
- * from the front, and small appends that fit after the copies in the block
- * go at the back, without the lock (see "The open end" below).  A block is only written into
- * while nothing else references it, so a bytes object never changes once it
- * was handed out.
+ * the unread bytes are what a read filled into the block, recorded by the
+ * reading end alone (see "The open end" below).  Readers take from the
+ * front, and small appends that fit after the copies in the block go at
+ * the back, without the lock.  A block is only written into while nothing
+ * else references it, so a bytes object never changes once it was handed
+ * out.
  *
  * Threads coordinate with two mutexes (see "Locking" below):
  *
@@ -335,16 +336,7 @@ nibbler_hold(nibbler *n)
     while (p >= 0 && !FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(e->pos, &p, ~p)) {
         /* retry */
     }
-    if (p < 0) {
-        return;
-    }
-    if (!e->writing) {
-        /* Readers took the bytes before p: drop them from the front. */
-        Py_ssize_t k = (n->list.count == 0 ? 0 : p - (
-            n->list.items[0].ptr - PyBytes_AS_STRING(e->block)));
-        if (k > 0) {
-            morsels_consume(&n->list, k);
-        }
+    if (p < 0 || !e->writing) {
         return;
     }
 #ifdef Py_GIL_DISABLED
@@ -370,11 +362,10 @@ nibbler_open(nibbler *n)
     if (e == NULL) {
         return;
     }
-    const char *base = PyBytes_AS_STRING(e->block);
     Py_ssize_t p;
     if (!e->writing) {
-        /* At the front morsel, the unread bytes. */
-        p = n->list.count > 0 ? n->list.items[0].ptr - base : e->limit;
+        /* At the unread bytes. */
+        p = ~FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
         if (e->done > p) {
             /* A readline() found no end of line in the unread bytes (see
                nibbler_noline()): stay held, so that reads without the lock
@@ -390,7 +381,7 @@ nibbler_open(nibbler *n)
         if (last == NULL || last->obj != e->block) {
             return;
         }
-        p = last->ptr + last->len - base;
+        p = last->ptr + last->len - PyBytes_AS_STRING(e->block);
         FT_ATOMIC_STORE_SSIZE_RELAXED(e->done, p);
         FT_ATOMIC_STORE_SSIZE_RELAXED(
             e->limit, p + Py_MIN(n->threshold - n->list.nbytes,
@@ -836,8 +827,8 @@ nibbler_peek(nibbler *n, Py_ssize_t want)
 }
 
 /* The functions below are called with the lock held.  While reading, the
-   morsels are the unread bytes: one, at the end of the reading end's block
-   (held, see "The open end"), or none. */
+   reading end alone records the read-ahead: held (see "The open end"), it
+   keeps its position as ~pos, and block[pos:limit] are the unread bytes. */
 
 /* The reading end, or NULL. */
 static inline nibbler_end *
@@ -847,11 +838,39 @@ nibbler_reading(nibbler *n)
     return e != NULL && !e->writing ? e : NULL;
 }
 
+/* The position of the reading end e.  (Threads without the lock load it
+   too, see it is held, and fail.) */
+static inline Py_ssize_t
+nibbler_reading_pos(nibbler_end *e)
+{
+    Py_ssize_t pos = FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
+    assert(pos < 0);
+    return ~pos;
+}
+
 /* How many bytes are unread. */
 static inline Py_ssize_t
 nibbler_unread(nibbler *n)
 {
-    return nibbler_reading(n) != NULL ? n->list.nbytes : 0;
+    nibbler_end *e = nibbler_reading(n);
+    return e != NULL ? e->limit - nibbler_reading_pos(e) : 0;
+}
+
+/* The first unread byte (there must be a reading end). */
+static inline const char *
+nibbler_unread_ptr(nibbler *n)
+{
+    nibbler_end *e = nibbler_reading(n);
+    return PyBytes_AS_STRING(e->block) + nibbler_reading_pos(e);
+}
+
+/* Take k of the unread bytes (without returning them). */
+static inline void
+nibbler_skip(nibbler *n, Py_ssize_t k)
+{
+    nibbler_end *e = nibbler_reading(n);
+    assert(k <= nibbler_unread(n));
+    FT_ATOMIC_STORE_SSIZE_RELAXED(e->pos, ~(nibbler_reading_pos(e) + k));
 }
 
 /* Take up to `want` unread bytes as a bytes object, like morsel_bytes();
@@ -859,25 +878,24 @@ nibbler_unread(nibbler *n)
 static inline PyObject *
 nibbler_take_bytes(nibbler *n, Py_ssize_t want)
 {
-    if (nibbler_unread(n) == 0) {
+    Py_ssize_t k = Py_MIN(want, nibbler_unread(n));
+    if (k == 0) {
         return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     }
-    Py_ssize_t k = Py_MIN(want, n->list.items[0].len);
-    PyObject *res = morsel_bytes(&n->list.items[0], k);
-    morsels_consume(&n->list, k);
-    return res;
+    morsel m = {n->end->block, nibbler_unread_ptr(n), k};
+    nibbler_skip(n, k);
+    return morsel_bytes(&m, k);
 }
 
 /* Take up to len unread bytes, copying them to dst.  Returns how many. */
 static inline Py_ssize_t
 nibbler_take_into(nibbler *n, char *dst, Py_ssize_t len)
 {
-    if (nibbler_unread(n) == 0) {
-        return 0;
+    Py_ssize_t k = Py_MIN(len, nibbler_unread(n));
+    if (k > 0) {
+        memcpy(dst, nibbler_unread_ptr(n), k);
+        nibbler_skip(n, k);
     }
-    Py_ssize_t k = Py_MIN(len, n->list.items[0].len);
-    memcpy(dst, n->list.items[0].ptr, k);
-    morsels_consume(&n->list, k);
     return k;
 }
 
@@ -889,11 +907,7 @@ static inline Py_ssize_t
 nibbler_noline(nibbler *n)
 {
     nibbler_end *e = nibbler_reading(n);
-    if (e == NULL || n->list.count == 0) {
-        return 0;
-    }
-    Py_ssize_t head = n->list.items[0].ptr - PyBytes_AS_STRING(e->block);
-    return Py_MAX(0, e->done - head);
+    return e == NULL ? 0 : Py_MAX(0, e->done - nibbler_reading_pos(e));
 }
 
 /* Record that the first `k` unread bytes have no end of line, for later
@@ -902,11 +916,9 @@ static inline void
 nibbler_set_noline(nibbler *n, Py_ssize_t k)
 {
     nibbler_end *e = nibbler_reading(n);
-    if (e == NULL || n->list.count == 0) {
-        return;
+    if (e != NULL) {
+        e->done = nibbler_reading_pos(e) + k;
     }
-    Py_ssize_t head = n->list.items[0].ptr - PyBytes_AS_STRING(e->block);
-    e->done = head + k;
 }
 
 /* The unread bytes grew by k bytes, read into the reading end's block
@@ -916,12 +928,7 @@ static inline void
 nibbler_extend(nibbler *n, Py_ssize_t k)
 {
     nibbler_end *e = nibbler_reading(n);
-    assert(e != NULL && n->list.count == 1);
-    assert(n->list.items[0].ptr + n->list.items[0].len
-           == PyBytes_AS_STRING(e->block) + e->limit);
-    assert(e->limit + k <= PyBytes_GET_SIZE(e->block));
-    n->list.items[0].len += k;
-    n->list.nbytes += k;
+    assert(e != NULL && e->limit + k <= PyBytes_GET_SIZE(e->block));
     FT_ATOMIC_STORE_SSIZE_RELEASE(e->limit, e->limit + k);
 }
 
@@ -933,7 +940,8 @@ nibbler_peek_held(nibbler *n)
     if (unread == 0) {
         return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     }
-    return morsel_bytes(&n->list.items[0], unread);
+    morsel m = {n->end->block, nibbler_unread_ptr(n), unread};
+    return morsel_bytes(&m, unread);
 }
 
 /* Drop the unread bytes (and any writing end).  Returns how many there
@@ -942,9 +950,6 @@ static Py_ssize_t
 nibbler_drop_unread(nibbler *n)
 {
     Py_ssize_t unread = nibbler_unread(n);
-    if (nibbler_reading(n) != NULL) {
-        morsels_clear(&n->list);
-    }
     nibbler_drop_end(n);
     return unread;
 }
@@ -954,10 +959,7 @@ static int
 nibbler_publish(nibbler *n, PyObject *block, Py_ssize_t filled)
 {
     (void)nibbler_drop_unread(n);
-    if (morsels_push(&n->list, block, PyBytes_AS_STRING(block), filled) < 0
-        || nibbler_new_end(n, block, 0, filled, 0) < 0)
-    {
-        morsels_clear(&n->list);
+    if (nibbler_new_end(n, block, 0, filled, 0) < 0) {
         PyErr_NoMemory();
         return -1;
     }
@@ -975,23 +977,17 @@ nibbler_move(nibbler *n, Py_off_t offset)
     if (e == NULL) {
         return -1;
     }
-    Py_ssize_t unread = n->list.nbytes;
-    Py_ssize_t pos = e->limit - unread;
+    Py_ssize_t pos = nibbler_reading_pos(e);
+    Py_ssize_t unread = e->limit - pos;
     if (offset < -pos || offset > unread) {
         return -1;
     }
-    pos += (Py_ssize_t)offset;
     if (offset < 0) {
         /* The end of line hint (see nibbler_noline()) was for bytes after
            pos. */
         e->done = 0;
     }
-    morsels_clear(&n->list);
-    if (pos < e->limit) {
-        /* Never fails: nibbler_publish() made room for one morsel. */
-        (void)morsels_push(&n->list, e->block,
-                           PyBytes_AS_STRING(e->block) + pos, e->limit - pos);
-    }
+    FT_ATOMIC_STORE_SSIZE_RELAXED(e->pos, ~(pos + (Py_ssize_t)offset));
     return unread;
 }
 

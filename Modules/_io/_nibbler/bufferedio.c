@@ -748,11 +748,10 @@ buffered_position(buffered *self, Py_ssize_t gathered)
     if (pos == -1) {
         return NULL;
     }
-    Py_ssize_t k = nibbler_nbytes(&self->nib);
     /* Gathered writes hand back read-ahead first; stashed data (only
        while reading) was read from the raw stream too. */
-    pos += ((nibbler_reading(&self->nib) != NULL ? -k : k) - self->stashed
-            + gathered);
+    pos += (nibbler_nbytes(&self->nib) - nibbler_unread(&self->nib)
+            - self->stashed + gathered);
     // GH-95782
     return PyLong_FromOff_t(pos < 0 ? 0 : pos);
 }
@@ -1011,8 +1010,8 @@ buffered_fill_tail(buffered *self, Py_ssize_t room)
     /* The read holds its own reference while it uses the block (see
        "Locking" in nibbler.h). */
     PyObject *block = Py_NewRef(e->block);
-    char *start = (char *)self->nib.list.items[0].ptr;
-    Py_ssize_t unread = self->nib.list.items[0].len;
+    char *start = (char *)nibbler_unread_ptr(&self->nib);
+    Py_ssize_t unread = nibbler_unread(&self->nib);
     int shared = 0;
     Py_ssize_t n = buffered_raw_read(self, start + unread, room, block,
                                      &shared);
@@ -1066,7 +1065,7 @@ buffered_fill(buffered *self, Py_ssize_t size)
     char aside[512];
     morsel keep = {NULL, NULL, 0};
     if (unread > 0) {
-        keep = n->list.items[0];
+        keep = (morsel){n->end->block, nibbler_unread_ptr(n), unread};
         if (keep.len <= (Py_ssize_t)sizeof(aside)) {
             memcpy(aside, keep.ptr, keep.len);
             keep = (morsel){NULL, aside, keep.len};
@@ -1426,7 +1425,7 @@ buffered_readline(buffered *self, Py_ssize_t limit)
         Py_ssize_t unread = nibbler_unread(n);
         Py_ssize_t end = limit >= 0 && limit < unread ? limit : unread;
         if (scanned < end) {
-            const char *p = n->list.items[0].ptr;
+            const char *p = nibbler_unread_ptr(n);
             const char *nl = memchr(p + scanned, '\n', end - scanned);
             if (nl != NULL) {
                 return nibbler_take_bytes(n, nl - p + 1);
@@ -3464,9 +3463,10 @@ buffered_text_peek_locked(buffered *self, Py_ssize_t need, morsel *m)
         Py_ssize_t n = buffered_fill(self, 0);
         r = n == -1 ? -1 : n == -2 ? _PyIO_NIBBLER_BLOCKED : 0;
     }
-    if (r >= 0 && nibbler_unread(&self->nib) > 0) {
-        *m = self->nib.list.items[0];
-        Py_INCREF(m->obj);
+    Py_ssize_t unread = nibbler_unread(&self->nib);
+    if (r >= 0 && unread > 0) {
+        *m = (morsel){Py_NewRef(self->nib.end->block),
+                      nibbler_unread_ptr(&self->nib), unread};
     }
     buffered_leave(self);
     return r;
@@ -3532,9 +3532,9 @@ buffered_text_consume_locked(buffered *self, _PyIO_Morsel *m, Py_ssize_t n)
     int r = buffered_lock(self);
     if (r == 0) {
         if (nibbler_unread(&self->nib) >= n
-            && self->nib.list.items[0].ptr == m->ptr)
+            && nibbler_unread_ptr(&self->nib) == m->ptr)
         {
-            (void)morsels_consume(&self->nib.list, n);
+            nibbler_skip(&self->nib, n);
             m->ptr += n;
             m->len -= n;
             r = 1;
