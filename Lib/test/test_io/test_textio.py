@@ -591,8 +591,6 @@ class TextIOWrapperTest:
                 f.close()
 
     def test_truncate_after_read(self):
-        if self.is_stock_C:
-            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # gh-70346: truncate() without a size cuts at the text position,
         # where the next write would go, not where the buffer read up to.
         text = "line one\nline two\nline three\n"
@@ -627,17 +625,18 @@ class TextIOWrapperTest:
             f.truncate()
         with self.open(os_helper.TESTFN, "rb") as f:
             self.assertEqual(f.read(), b"line 00000\n")
-        # While iterating: where tell() works, truncate() cuts there;
-        # where next() disabled tell(), truncate() raises like it.
+        # While iterating: where tell() works (_io._nibbler with UTF-8),
+        # truncate() cuts there; where next() disabled tell(), truncate()
+        # raises like it.
         with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
             f.write(big)
         with self.open(os_helper.TESTFN, "r+", encoding="utf-8") as f:
             self.assertEqual(next(f), "line 00000\n")
-            try:
-                pos = f.tell()
-            except OSError:
+            if not self.is_nibbler:
+                self.assertRaises(OSError, f.tell)
                 self.assertRaises(OSError, f.truncate)
             else:
+                pos = f.tell()
                 f.truncate()
                 self.assertEqual(f.tell(), pos)
                 self.assertEqual(f.read(), "")
@@ -748,18 +747,12 @@ class TextIOWrapperTest:
                         self.assertEqual(f.newlines, "\r\n")
 
     def test_truncate_below_position(self):
-        if self.is_stock_C:
-            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # As for binary files, the position is not changed: reads return
         # nothing, and a write lands at the position, after a gap of zero
         # bytes.
         text = "0123456789\nabcdefghij\n"
         for enc in ("utf-8", "utf-16-le", "utf-16"):
             for prep in ("read", "readline", "write", "seek", "readall"):
-                if enc == "utf-16" and prep == "readall":
-                    # A write after reading to the end writes a BOM in
-                    # the middle of the file: a separate problem.
-                    continue
                 with self.subTest(encoding=enc, prep=prep):
                     with self.open(os_helper.TESTFN, "w", encoding=enc) as f:
                         f.write(text)
