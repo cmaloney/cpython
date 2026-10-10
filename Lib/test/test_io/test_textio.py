@@ -1457,6 +1457,24 @@ class TextIOWrapperTest:
                 os.close(r)
             os.close(w)
 
+    def test_seek_cookie_out_of_range(self):
+        if self.is_C:
+            self.skipTest(C_TEXT_GAP)
+        # gh-91112: a cookie that tell() can't have returned is an error,
+        # instead of silently being another position.
+        with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.write("abc")
+            for cookie in (1 << 64) + 1, (1 << 63) + 1, 1 << 300:
+                with self.subTest(cookie=cookie):
+                    with self.assertRaises((OSError, OverflowError)):
+                        f.seek(cookie)
+                    self.assertEqual(f.tell(), 3)
+        with self.open(os_helper.TESTFN, "r", encoding="utf-8") as f:
+            for cookie in (1 << 63) + 1, 1 << 300:
+                with self.subTest(cookie=cookie):
+                    with self.assertRaises((OSError, OverflowError)):
+                        f.seek(cookie)
+
 
 class MemviewBytesIO(io.BytesIO):
     '''A BytesIO object whose read method returns memoryviews

@@ -1,0 +1,4 @@
+:meth:`!seek` of the :class:`!TextIOWrapper` of :mod:`!_pyio` now raises
+:exc:`OSError` for a cookie that :meth:`!tell` can't have returned (a
+position too large for a cookie, or decoder state for a stream that doesn't
+read) instead of silently seeking to another position.
