@@ -1051,15 +1051,15 @@ static void buffered_push_back(buffered *self, const char *data,
    after the unread bytes?  Nothing was handed out from there, but Python
    code must not be able to reach the bytes object itself: only a raw
    stream given views of it can (through their obj), and then it has more
-   references than ours (the unread morsel's, the end's and maybe the
-   nibbler's). */
+   references than ours (the reading end's, and maybe the nibbler's; the
+   read-ahead is the end alone, with no morsel). */
 static int
 buffered_block_private(buffered *self, PyObject *block)
 {
     if (self->raw_fileio) {
         return 1;
     }
-    Py_ssize_t ours = 2 + (self->nib.block == block);
+    Py_ssize_t ours = 1 + (self->nib.block == block);
     return Py_REFCNT(block) <= ours;
 }
 
