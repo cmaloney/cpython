@@ -2144,6 +2144,49 @@ class LockReleaseTest:
     def test_shutdown_with_threads_waiting(self):
         self.check_shutdown("f.write('.'); f.flush()", waiters=3)
 
+    @threading_helper.requires_working_threading()
+    def test_shutdown_with_daemons_writing(self):
+        # Daemon threads write to sys.stdout as fast as they can while the
+        # main thread exits.  Finalizing takes the lock over only from
+        # threads that can never run again (they hang as soon as they
+        # attach), so the output stays whole: every line complete, each
+        # thread's in order, and the main thread's last line written.
+        if not self.is_nibbler:
+            self.skipTest("only _io._nibbler takes over such locks")
+        code = textwrap.dedent("""
+            import sys, threading
+            started = threading.Barrier(5)
+            def daemon(i):
+                started.wait()
+                n = 0
+                while True:
+                    sys.stdout.write(f"d{i}:{n:08d}\\n")
+                    n += 1
+                    if n % 7 == 0:
+                        sys.stdout.flush()
+            for i in range(4):
+                threading.Thread(target=daemon, args=(i,), daemon=True).start()
+            started.wait()
+            sys.stdout.write("main:end\\n")
+            """)
+        env = dict(os.environ, _PYTHON_IO_DEFAULT_IMPL="_nibbler")
+        for _ in range(5):
+            proc = subprocess.run([sys.executable, "-c", code], env=env,
+                                  capture_output=True,
+                                  timeout=support.SHORT_TIMEOUT)
+            self.assertEqual((proc.returncode, proc.stderr), (0, b""))
+            lines = proc.stdout.decode().split("\n")
+            self.assertEqual(lines.pop(), "")
+            self.assertIn("main:end", lines)
+            last = {}
+            for line in lines:
+                if line == "main:end":
+                    continue
+                self.assertRegex(line, r"\Ad[0-3]:\d{8}\Z")
+                t, n = line[1], int(line[3:])
+                self.assertGreater(n, last.get(t, -1))
+                last[t] = n
+
     def check_fork(self, gated, holder_op):
         code = f"""
             import warnings
