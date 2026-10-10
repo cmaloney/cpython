@@ -9,6 +9,7 @@
 
 #include "Python.h"
 #include "pycore_abstract.h"      // _PyNumber_Index()
+#include "pycore_global_strings.h" // _Py_LATIN1_CHR()
 #include "pycore_interp.h"        // _PyInterpreterState_GetConfig()
 #include "pycore_long.h"          // _PyLong_IsNegative()
 #include "pycore_pyerrors.h"      // _PyErr_ChainExceptions1()
@@ -328,10 +329,18 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
             encoding = "utf-8";
         }
 #endif
-        raw = PyObject_CallFunction(RawIO_class, "OsOO",
-                                    path_or_fd, rawmode,
-                                    closefd ? Py_True : Py_False,
-                                    opener);
+        /* Single-letter modes use a cached string. */
+        PyObject *rawmodeobj = rawmode[1] == '\0'
+                               ? _Py_LATIN1_CHR((unsigned char)rawmode[0])
+                               : PyUnicode_FromString(rawmode);
+        if (rawmodeobj == NULL) {
+            goto error;
+        }
+        PyObject *args[] = {path_or_fd, rawmodeobj,
+                            closefd ? Py_True : Py_False, opener};
+        raw = PyObject_Vectorcall(RawIO_class, args, Py_ARRAY_LENGTH(args),
+                                  NULL);
+        Py_DECREF(rawmodeobj);
     }
 
     if (raw == NULL)
@@ -340,12 +349,9 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
 
     Py_SETREF(path_or_fd, NULL);
 
-    modeobj = PyUnicode_FromString(mode);
-    if (modeobj == NULL)
-        goto error;
-
-    /* buffering */
-    if (buffering < 0) {
+    /* buffering; whether the file is interactive only matters for text
+       (line buffering): binary files then use the block size either way. */
+    if (buffering < 0 && !binary) {
         PyObject *res = PyObject_CallMethodNoArgs(raw, &_Py_ID(_isatty_open_only));
         if (res == NULL)
             goto error;
@@ -387,7 +393,6 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
             goto error;
         }
 
-        Py_DECREF(modeobj);
         return result;
     }
 
@@ -410,7 +415,14 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
             goto error;
         }
 
-        buffer = PyObject_CallFunction(Buffered_class, "Oi", raw, buffering);
+        PyObject *bufsize = PyLong_FromLong(buffering);
+        if (bufsize == NULL) {
+            goto error;
+        }
+        PyObject *args[] = {raw, bufsize};
+        buffer = PyObject_Vectorcall(Buffered_class, args,
+                                     Py_ARRAY_LENGTH(args), NULL);
+        Py_DECREF(bufsize);
     }
     if (buffer == NULL)
         goto error;
@@ -420,9 +432,12 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
 
     /* if binary, returns the buffered file */
     if (binary) {
-        Py_DECREF(modeobj);
         return result;
     }
+
+    modeobj = PyUnicode_FromString(mode);
+    if (modeobj == NULL)
+        goto error;
 
     /* wraps into a TextIOWrapper */
     wrapper = PyObject_CallFunction((PyObject *)state->PyTextIOWrapper_Type,
