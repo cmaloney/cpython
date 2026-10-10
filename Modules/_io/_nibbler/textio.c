@@ -511,14 +511,16 @@ cache_put(textio *self, tcache *c)
                      c->cr_at, c->nl, (char)wide};
     }
     c->renew = 0;
+    /* (Once published, n->pos is other threads' too.) */
+    uint64_t ver = n ? n->ver : 0, pos = n ? n->pos : 0;
     if (!_Py_atomic_compare_exchange_ptr(&self->span, &sp, n)) {
         span_free(n);
         return 0;
     }
     span_free(sp);
     c->sp = n;
-    c->ver = n ? n->ver : _Py_atomic_load_uint64(&self->spans);
-    c->pos = n ? n->pos : 0;
+    c->ver = n ? ver : _Py_atomic_load_uint64(&self->spans);
+    c->pos = pos;
 #else
     (void)self;
     (void)c;
