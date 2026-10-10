@@ -499,6 +499,38 @@ class SlowDeviceTest:
                     self.assertEqual(got + f.read(), data[5:], start)
                 self.assertGreater(failures, 0)
 
+    def test_write_memory_error_after_partial_write(self):
+        # write() wrote part of its data, then the raw stream would block
+        # and keeping the rest fails for lack of memory: the MemoryError
+        # says how much was written.
+        if not self.is_nibbler:
+            self.skipTest("no characters_written")
+        _testcapi = import_helper.import_module('_testcapi')
+
+        class Raw(self.RawIOBase):
+            calls = 0
+            def writable(self):
+                return True
+            def write(self, b):
+                self.calls += 1
+                if self.calls == 1:
+                    return 60
+                _testcapi.set_nomemory(0, 1)
+                return None
+
+        f = self.BufferedWriter(Raw(), 16)
+        try:
+            f.write(bytearray(100))
+        except MemoryError as exc:
+            _testcapi.remove_mem_hooks()
+            self.assertEqual(exc.characters_written, 60)
+        except BlockingIOError as exc:
+            # Keeping the rest didn't need memory after all.
+            _testcapi.remove_mem_hooks()
+            self.assertEqual(exc.characters_written, 76)
+        finally:
+            _testcapi.remove_mem_hooks()
+
     def test_fill_memory_error_keeps_raw_error(self):
         # A raw read raising, then keeping the partial line failing for
         # lack of memory: the raw error is the MemoryError's context.

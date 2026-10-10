@@ -3224,10 +3224,34 @@ _io_BufferedWriter___init___impl(buffered *self, PyObject *raw,
     return buffered_init_writer(self, raw, buffer_size, 0);
 }
 
+/* If the raised exception is an OSError or MemoryError (raised writing,
+   or keeping data), make it say that n bytes of the data of write() were
+   accepted (written, or kept pending), as BlockingIOError does, so that
+   the caller knows what to write again.  (Others, such as one a signal
+   handler raised, are left as they are.)  Keeps the exception. */
+static void
+buffered_set_written(Py_ssize_t n)
+{
+    PyObject *exc = PyErr_GetRaisedException();
+    if (PyErr_GivenExceptionMatches(exc, PyExc_OSError)
+        || PyErr_GivenExceptionMatches(exc, PyExc_MemoryError))
+    {
+        PyObject *v = PyLong_FromSsize_t(n);
+        if (v == NULL
+            || PyObject_SetAttrString(exc, "characters_written", v) < 0)
+        {
+            PyErr_Clear();
+        }
+        Py_XDECREF(v);
+    }
+    PyErr_SetRaisedException(exc);
+}
+
 /* write() raised an error other than BlockingIOError after `done` bytes of
    its data reached the raw stream: keep the rest pending, as much of it as
    fits, so that flush() writes it, and set the error's characters_written
-   to how much of the data was accepted (written or kept).  Without that,
+   to how much of the data was accepted (written or kept), see
+   buffered_set_written().  Without that,
    the caller couldn't tell what to write again.  Returns -1. */
 static int
 buffered_write_failed(buffered *self, PyObject *obj, const char *data,
@@ -3242,19 +3266,14 @@ buffered_write_failed(buffered *self, PyObject *obj, const char *data,
                                 - nibbler_nbytes(&self->nib));
     Py_ssize_t keep = Py_MIN(len - done, room);
     if (buffered_add_write(self, obj, data + done, keep) < 0) {
+        /* Raised instead, with exc as context. */
         _PyErr_ChainExceptions1(exc);
-        return -1;
+        keep = 0;
     }
-    if (PyErr_GivenExceptionMatches(exc, PyExc_OSError)) {
-        PyObject *n = PyLong_FromSsize_t(done + keep);
-        if (n == NULL
-            || PyObject_SetAttrString(exc, "characters_written", n) < 0)
-        {
-            PyErr_Clear();
-        }
-        Py_XDECREF(n);
+    else {
+        PyErr_SetRaisedException(exc);
     }
-    PyErr_SetRaisedException(exc);
+    buffered_set_written(done + keep);
     return -1;
 }
 
@@ -3321,6 +3340,10 @@ buffered_write_data(buffered *self, PyObject *obj, const char *data,
            is 0: there is never room.) */
         if (rest < threshold && pending + rest <= threshold) {
             r = buffered_add_write(self, obj, data + done, rest);
+            if (r < 0 && done > 0) {
+                /* Some of data was written out before. */
+                buffered_set_written(done);
+            }
             break;
         }
         /* No room: write out, with the I/O role. */
@@ -3377,12 +3400,18 @@ buffered_write_data(buffered *self, PyObject *obj, const char *data,
         Py_ssize_t room = Py_MAX(0, threshold - nibbler_nbytes(&self->nib));
         if (rest <= room) {
             r = buffered_add_write(self, obj, data + done, rest);
+            if (r < 0 && done > 0) {
+                buffered_set_written(done);
+            }
             break;
         }
         int errnum = errno;
         if (buffered_add_write(self, obj, data + done, room) == 0) {
             errno = errnum;
             buffered_set_blocking_error(done + room);
+        }
+        else if (done > 0) {
+            buffered_set_written(done);
         }
         r = -1;
         break;
