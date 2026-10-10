@@ -438,6 +438,60 @@ class SlowDeviceTest:
         self.assertRaises(TimeoutError, f.read)
         self.assertEqual(f.read(), data[5:])
 
+    def test_read_all_memory_error_keeps_data(self):
+        # A MemoryError while read() puts the read-ahead and the rest of
+        # the stream together loses neither: the next read() returns all.
+        if not self.is_nibbler:
+            self.skipTest("data is lost on MemoryError")
+        _testcapi = import_helper.import_module('_testcapi')
+        data = sample_data(5_000)
+
+        class PoppingRaw(self.RawIOBase):
+            # Hands out prebuilt parts with pop(), which can't fail for lack
+            # of memory once called: only the buffered layer can lose data.
+            def __init__(self, parts):
+                self.parts = parts[::-1]
+            def readable(self):
+                return True
+            def readinto(self, b):
+                part = self.parts.pop()
+                b[:len(part)] = part
+                return len(part)        # 16: a cached int
+            def read(self, size=-1):
+                # RawIOBase.readall() calls this.
+                return self.parts.pop() if self.parts else b""
+
+        class ReadAllRaw(PoppingRaw):
+            # The rest comes in one piece.
+            readall = PoppingRaw.read
+
+        parts = [data[:16], data[16:1000], data[1000:3000], data[3000:]]
+        raws = {
+            "readall": lambda: ReadAllRaw([data[:16], data[16:]]),
+            "read chunks": lambda: PoppingRaw(parts),
+            # Seekable: positions count what was kept.
+            "seekable": lambda: self.BytesIO(data),
+        }
+        for name, make_raw in raws.items():
+            with self.subTest(raw=name):
+                # Fail each allocation in turn (a few are retried).
+                failures = 0
+                for start in range(300):
+                    f = self.BufferedReader(make_raw(), 16)
+                    self.assertEqual(f.read(5), data[:5])
+                    try:
+                        got = _testcapi.call_with_nomemory(start, start + 1,
+                                                           f.read)
+                    except MemoryError:
+                        failures += 1
+                        got = b""
+                        if name == "seekable":
+                            self.assertEqual(f.tell(), 5)
+                            f.seek(-2, 1)
+                            self.assertEqual(f.read(2), data[3:5])
+                    self.assertEqual(got + f.read(), data[5:], start)
+                self.assertGreater(failures, 0)
+
     def test_read_eintr_is_retried(self):
         if not self.is_C:
             self.skipTest("buffered layer does not retry raw EINTR")
