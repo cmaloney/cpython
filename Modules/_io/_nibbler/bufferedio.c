@@ -1081,7 +1081,9 @@ buffered_fill_tail(buffered *self, Py_ssize_t room)
     }
     else if (shared) {
         /* Python code can still write to the block: abandon it to that
-           code, and keep a copy of what is unread. */
+           code, and keep a copy of what is unread.  An error of the raw
+           read is the context of one raised here. */
+        PyObject *exc = n == -1 ? PyErr_GetRaisedException() : NULL;
         if (block == self->nib.block) {
             nibbler_set_block(&self->nib, NULL);
         }
@@ -1093,6 +1095,7 @@ buffered_fill_tail(buffered *self, Py_ssize_t room)
             n = -1;
         }
         Py_XDECREF(copy);
+        _PyErr_ChainExceptions1(exc);
     }
     Py_DECREF(block);
     return n;
@@ -1154,6 +1157,8 @@ buffered_fill(buffered *self, Py_ssize_t size)
                               PyBytes_GET_SIZE(block) - keep.len, block,
                               &shared);
         Py_ssize_t filled = keep.len + Py_MAX(r, 0);
+        /* An error of the raw read is the context of one raised below. */
+        PyObject *exc = r == -1 ? PyErr_GetRaisedException() : NULL;
         if (shared) {
             /* Python code can still write to the block: abandon it to that
                code, and keep a copy of what was read. */
@@ -1171,6 +1176,7 @@ buffered_fill(buffered *self, Py_ssize_t size)
             r = -1;
         }
         Py_XDECREF(block);
+        _PyErr_ChainExceptions1(exc);
     }
     else if (keep.len > 0) {
         /* Keep the unread bytes. */

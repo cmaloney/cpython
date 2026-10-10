@@ -499,6 +499,48 @@ class SlowDeviceTest:
                     self.assertEqual(got + f.read(), data[5:], start)
                 self.assertGreater(failures, 0)
 
+    def test_fill_memory_error_keeps_raw_error(self):
+        # A raw read raising, then keeping the partial line failing for
+        # lack of memory: the raw error is the MemoryError's context.
+        if not self.is_nibbler:
+            self.skipTest("no partial line is kept")
+        _testcapi = import_helper.import_module('_testcapi')
+
+        class Raw(self.RawIOBase):
+            def __init__(self, start):
+                self.calls = 0
+                self.start = start
+            def readable(self):
+                return True
+            def readinto(self, b):
+                self.calls += 1
+                if self.calls == 1:
+                    b[:12] = b'x' * 12
+                    return 12
+                exc = OSError("raw failed")
+                # The start-th allocation fails: for some start, one
+                # made to keep the partial line.
+                _testcapi.set_nomemory(self.start, self.start + 1)
+                raise exc
+
+        # Only an allocation of the raise itself may lose the raw error:
+        # every later MemoryError has it as context.
+        lost = []
+        for start in range(100):
+            f = self.BufferedReader(Raw(start), 16)
+            self.assertEqual(f.read(10), b'x' * 10)
+            try:
+                f.readline()
+            except MemoryError as exc:
+                _testcapi.remove_mem_hooks()
+                if not isinstance(exc.__context__, OSError):
+                    lost.append(start)
+            except OSError:
+                pass
+            finally:
+                _testcapi.remove_mem_hooks()
+        self.assertLessEqual(len(lost), 1, lost)
+
     def test_readline_long_line_trickling_in_is_linear(self):
         # A line that arrives a little at a time, the raw stream blocking in
         # between, is kept by readline() (which returns None) until it is
