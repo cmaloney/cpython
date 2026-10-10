@@ -2229,8 +2229,11 @@ class LockReleaseTest:
 
     @threading_helper.requires_working_threading()
     def test_shutdown_with_daemons_writing(self):
-        # Daemon threads write to sys.stdout as fast as they can while the
-        # main thread exits.  Finalizing takes the lock over only from
+        # Daemon threads write to sys.stdout's buffer as fast as they can
+        # while the main thread exits.  (Not through the TextIOWrapper:
+        # on free-threaded builds a daemon thread can hang holding its
+        # critical section, which flushing sys.stdout at exit then waits
+        # for.)  Finalizing takes the lock over only from
         # threads that can never run again (they hang as soon as they
         # attach), so the output stays whole: every line complete, each
         # thread's in order, and the main thread's last line written.
@@ -2243,14 +2246,14 @@ class LockReleaseTest:
                 started.wait()
                 n = 0
                 while True:
-                    sys.stdout.write(f"d{i}:{n:08d}\\n")
+                    sys.stdout.buffer.write(b"d%d:%08d\\n" % (i, n))
                     n += 1
                     if n % 7 == 0:
-                        sys.stdout.flush()
+                        sys.stdout.buffer.flush()
             for i in range(4):
                 threading.Thread(target=daemon, args=(i,), daemon=True).start()
             started.wait()
-            sys.stdout.write("main:end\\n")
+            sys.stdout.buffer.write(b"main:end\\n")
             """)
         env = dict(os.environ, _PYTHON_IO_DEFAULT_IMPL="_nibbler")
         for _ in range(5):
