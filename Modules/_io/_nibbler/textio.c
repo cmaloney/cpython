@@ -1784,6 +1784,55 @@ done:
     return text;
 }
 
+/* read() of everything, with a native codec: the buffer's read() (which
+   needn't gather what it reads in a block, as peeking would), decoded at
+   once.  The characters decoded but not taken yet came from bytes still
+   in the buffer, so the cache is dropped. */
+static PyObject *
+text_read_all(textio *self, PyObject *buffer)
+{
+    PyObject *b = PyObject_CallMethodNoArgs(buffer, &_Py_ID(read));
+    if (b == NULL) {
+        return NULL;
+    }
+    if (b == Py_None) {
+        Py_DECREF(b);
+        _PyIO_set_read_blocking_error();
+        return NULL;
+    }
+    if (!PyBytes_Check(b)) {
+        PyErr_Format(PyExc_TypeError, "underlying read() should have "
+                     "returned a bytes object, not '%.200s'",
+                     Py_TYPE(b)->tp_name);
+        Py_DECREF(b);
+        return NULL;
+    }
+    tcache copy;
+    tcache *c = cache_get(self, &copy);
+    tcache t = {.cr_at = -1, .hi_at = -1, .skip_lf = c->skip_lf};
+    cache_clear(c);
+    cache_put(self, c);
+    cache_release(c);
+    Py_ssize_t used;
+    t.chars = native_decode(self, PyBytes_AS_STRING(b), PyBytes_GET_SIZE(b),
+                            1, &used);
+    Py_DECREF(b);
+    if (t.chars == NULL) {
+        return NULL;
+    }
+    store st = {.buffer = buffer, .c = &t};
+    Py_ssize_t avail = PyUnicode_GET_LENGTH(t.chars), scanned = 0, k = 0;
+    int found;
+    PyObject *text = (avail == 0 ? NULL
+                      : text_take(self, &st, avail, -1, 0, 1, &scanned, &k,
+                                  &found));
+    Py_DECREF(t.chars);
+    if (text == NULL && !PyErr_Occurred()) {
+        text = Py_GetConstant(Py_CONSTANT_EMPTY_STR);
+    }
+    return text;
+}
+
 /* read(n) (n < 0: all), or with line, readline(n); with lockfree, without
    the critical section (*retry: do it with it after all). */
 static PyObject *
@@ -1819,6 +1868,13 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
         if (st.buffer == NULL) {
             return NULL;
         }
+    }
+    if (st.all && peeks && self->codec != CODEC_DECODER
+        && self->rbuf == NULL)
+    {
+        PyObject *text = text_read_all(self, st.buffer);
+        Py_DECREF(st.buffer);
+        return text;
     }
     st.c = cache_get(self, STORE_COPY(&st));
     /* The text so far: res, then in writer once there are two pieces. */
