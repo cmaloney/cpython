@@ -30,9 +30,6 @@ from test import support
 from test.support import import_helper, os_helper, threading_helper
 from .utils import CTestCase, PyTestCase, NibblerMixin
 
-# Skip reason for tests of _pyio TextIOWrapper fixes that _io lacks.
-C_TEXT_GAP = "_io.TextIOWrapper lacks this _pyio fix"
-
 
 # --- Scripted raw devices --------------------------------------------------
 #
@@ -406,8 +403,8 @@ class SlowDeviceTest:
         self.assertEqual(out, data)
 
     def test_text_read_would_block_keeps_partial_char(self):
-        if self.is_C:
-            self.skipTest(C_TEXT_GAP)
+        if self.is_stock_C:
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # A raw stream that would block in the middle of a multibyte
         # character: its first bytes stay buffered for the next read,
         # instead of being decoded as if at EOF.
@@ -420,8 +417,8 @@ class SlowDeviceTest:
         self.assertEqual(f.read(10), "")
 
     def test_text_readline_error_keeps_partial_line(self):
-        if self.is_C:
-            self.skipTest(C_TEXT_GAP)
+        if self.is_stock_C:
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # gh-51571: a raw read that raises (such as a socket timeout) in the
         # middle of a line loses nothing: the next readline() returns the
         # whole line.
@@ -938,8 +935,8 @@ class SlowDeviceTest:
                 self.assertEqual(raw.received, b"")
 
     def test_text_close_flush_error_no_retry(self):
-        if self.is_C:
-            self.skipTest(C_TEXT_GAP)
+        if self.is_stock_C:
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # TextIOWrapper.close() doesn't write the data again through the
         # close() of its buffer either.
         raw = self.scripted_writer([OSError(errno.EPIPE, "EPIPE")])
@@ -1202,6 +1199,64 @@ class PySlowDeviceTest(SlowDeviceTest, PyTestCase):
 
 
 class NibblerSlowDeviceTest(NibblerMixin, SlowDeviceTest, CTestCase):
+    pass
+
+
+# --- Text over a buffered object ------------------------------------------------
+
+class TextTest:
+    """TextIOWrapper over a buffered object."""
+
+    def setUp(self):
+        super().setUp()
+        if not self.is_nibbler:
+            self.skipTest("text keeps bytes of its own")
+
+    def test_text_and_buffer_writes_keep_order(self):
+        # gh-52203: sys.stdout.write() then sys.stdout.buffer.write() come
+        # out in that order.
+        for enc in ("utf-8", "latin-1"):
+            with self.subTest(encoding=enc):
+                raw = self.BytesIO()
+                t = self.TextIOWrapper(self.BufferedWriter(raw), encoding=enc)
+                t.write("unicode ")
+                t.buffer.write(b"bytes ")
+                t.write("\xe9 ")
+                t.buffer.write(b"more")
+                t.flush()
+                self.assertEqual(raw.getvalue(),
+                                 b"unicode bytes " + "\xe9".encode(enc)
+                                 + b" more")
+
+    def test_text_reads_use_buffer_size(self):
+        # gh-153656: text reads make raw reads of the buffer size, not of
+        # TextIOWrapper's chunk size (8192).
+        Reader = make_scripted_reader(self.RawIOBase)
+        class RecordingReader(Reader):
+            def readinto(self, b):
+                self.sizes.append(len(b))
+                return super().readinto(b)
+        data = b"line\n" * 50_000
+        for encoding in ("utf-8", "latin-1"):
+            with self.subTest(encoding=encoding):
+                raw = RecordingReader(data)
+                raw.sizes = []
+                t = self.TextIOWrapper(self.BufferedReader(raw, 100_000),
+                                       encoding=encoding)
+                for _ in range(1000):
+                    self.assertEqual(t.readline(), "line\n")
+                self.assertEqual(raw.sizes, [100_000])
+
+
+class CTextTest(TextTest, CTestCase):
+    pass
+
+
+class PyTextTest(TextTest, PyTestCase):
+    pass
+
+
+class NibblerTextTest(NibblerMixin, TextTest, CTestCase):
     pass
 
 

@@ -1,5 +1,6 @@
 import array
 import codecs
+import itertools
 import locale
 import os
 import pickle
@@ -13,13 +14,10 @@ from collections import UserList
 from test import support
 from test.support import os_helper, threading_helper
 from test.support.script_helper import assert_python_ok
-from .utils import CTestCase, PyTestCase
+from .utils import CTestCase, PyTestCase, NibblerMixin
 
 import io  # C implementation of io
 import _pyio as pyio # Python implementation of io
-
-# Skip reason for tests of _pyio TextIOWrapper fixes that _io lacks.
-C_TEXT_GAP = "_io.TextIOWrapper lacks this _pyio fix"
 
 
 def _default_chunk_size():
@@ -445,6 +443,41 @@ class TextIOWrapperTest:
                             self.assertEqual(got_line, exp_line)
                         self.assertEqual(len(got_lines), len(exp_lines))
 
+    def test_crlf_newline_split_by_small_buffer(self):
+        # A line longer than the buffer, with newline="\r\n" and a "\r"
+        # right before it: the "\r\n" ending it must still be found.
+        data = "\U0001f600\u0436\r\U0001f600a\xe9\U0001f600\xe9\r\r\na"
+        for bufsize in (8, 16, 64):
+            with self.subTest(bufsize=bufsize):
+                b = self.BufferedReader(self.BytesIO(data.encode()), bufsize)
+                t = self.TextIOWrapper(b, encoding="utf-8", newline="\r\n")
+                self.assertEqual(t.readline(12), data[:11])
+                self.assertEqual(t.read(), "a")
+
+    def test_read_translates_after_partial_read(self):
+        # A read() after one that stopped before a "\r\n" translates it.
+        for data, first in (("abc\r\nd", 1), ("xyz\u0436\xe9\r\na", 3)):
+            with self.subTest(data=data):
+                b = self.BufferedReader(self.BytesIO(data.encode()), 1000)
+                t = self.TextIOWrapper(b, encoding="utf-8")
+                self.assertEqual(t.read(first), data[:first])
+                self.assertEqual(t.read(5), data[first:].replace("\r\n", "\n"))
+
+    def test_read_translates_after_readline(self):
+        # Reads of n characters after a readline() translate every "\r"
+        # and "\r\n", wherever they cut the text, and note all three.
+        data = "aa\r" + "\u0436\xe9b\r\r\r\nb\r\na\r\n\u0436b\n" * 3
+        expected = data.replace("\r\n", "\n").replace("\r", "\n")
+        for size in range(1, 12):
+            with self.subTest(size=size):
+                b = self.BufferedReader(self.BytesIO(data.encode()), 64)
+                t = self.TextIOWrapper(b, encoding="utf-8")
+                got = [t.readline()]
+                while s := t.read(size):
+                    got.append(s)
+                self.assertEqual("".join(got), expected)
+                self.assertEqual(t.newlines, ("\r", "\n", "\r\n"))
+
     def test_newlines_input(self):
         testdata = b"AAA\nBB\x00B\nCCC\rDDD\rEEE\r\nFFF\r\nGGG"
         normalized = testdata.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
@@ -558,8 +591,8 @@ class TextIOWrapperTest:
                 f.close()
 
     def test_truncate_after_read(self):
-        if self.is_C:
-            self.skipTest(C_TEXT_GAP)
+        if self.is_stock_C:
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # gh-70346: truncate() without a size cuts at the text position,
         # where the next write would go, not where the buffer read up to.
         text = "line one\nline two\nline three\n"
@@ -611,9 +644,112 @@ class TextIOWrapperTest:
                 with self.open(os_helper.TESTFN, "rb") as g:
                     self.assertEqual(g.read(), b"line 00000\n")
 
+    def test_write_after_read(self):
+        # gh-82891: where TextIOWrapper takes from its buffer only the bytes
+        # of the text it returns, the buffer's position is the text
+        # position, so a write (or truncate()) after a read acts there, as
+        # after seek(tell()).  (Elsewhere a write after a read goes where the
+        # buffer read up to.)
+        if not self.is_nibbler:
+            self.skipTest("text reads ahead of its position")
+        big = "".join(f"line {i:05}\n" for i in range(3000))
+        def check(enc, newline, text, read, written, after, rest):
+            with self.subTest(encoding=enc, newline=newline, text=text[:12]):
+                with self.open(os_helper.TESTFN, "w", encoding=enc,
+                               newline="") as f:
+                    f.write(text)
+                with self.open(os_helper.TESTFN, "r+", encoding=enc,
+                               newline=newline) as f:
+                    read(f)
+                    pos = f.tell()
+                    self.assertEqual(f.buffer.tell(), pos)
+                    f.write("XY")
+                    self.assertEqual(f.tell(), pos + len("XY".encode(enc)))
+                    self.assertEqual(f.read(len(rest)), rest)
+                with self.open(os_helper.TESTFN, "r", encoding=enc,
+                               newline="") as f:
+                    self.assertEqual(f.read(), after)
+        for enc in ("utf-8", "latin-1", "ascii", "cp1252"):
+            # A file larger than the chunks text was decoded in.
+            check(enc, None, big, lambda f: f.readline(),
+                  "line 00000\n", "line 00000\nXYne 00001\n" + big[22:],
+                  "ne 00001\n")
+            check(enc, None, big, lambda f: next(f),
+                  "line 00000\n", "line 00000\nXYne 00001\n" + big[22:],
+                  "ne 00001\n")
+            check(enc, None, big, lambda f: f.read(15),
+                  "", big[:15] + "XY" + big[17:], big[17:30])
+        # Characters of several bytes.
+        check("utf-8", None, "\xe9\u20ac\U0001f600abc\n", lambda f: f.read(3),
+              "", "\xe9\u20ac\U0001f600XYc\n", "c\n")
+        check("latin-1", None, "\xe9\xe8abc\n", lambda f: f.read(2),
+              "", "\xe9\xe8XYc\n", "c\n")
+        check("cp1252", None, "\u20ac\u2019abc\n", lambda f: f.read(2),
+              "", "\u20ac\u2019XYc\n", "c\n")
+        # Translated, "\r\n" is one character; not translated, the write
+        # can go between "\r" and "\n".
+        check("utf-8", None, "ab\r\ncd\r\nef", lambda f: f.read(3),
+              "", "ab\r\nXY\r\nef", "\nef")
+        check("utf-8", "", "ab\r\ncd\r\nef", lambda f: f.read(3),
+              "", "ab\rXYd\r\nef", "d\r\nef")
+        check("utf-8", None, "ab\rcd", lambda f: f.readline(),
+              "", "ab\rXY", "")
+        # truncate() after a read cuts there.
+        with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.write(big)
+        with self.open(os_helper.TESTFN, "r+", encoding="utf-8") as f:
+            self.assertEqual(f.read(15), big[:15])
+            self.assertEqual(f.truncate(), 15)
+            self.assertEqual(f.read(), "")
+        with self.open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(), big[:15].encode())
+
+    def test_read_invalid_with_error_handler(self):
+        # Reads of a file give what reads of the same bytes in a BytesIO
+        # give, also where error handlers drop or replace invalid bytes
+        # (_io._nibbler counts characters in the bytes it reads from).
+        data = b"ab\xffcd\n\xc3(\x80x\r\n\xe2\x82\x81\ny\rz\r" * 20
+        with self.open(os_helper.TESTFN, "wb") as f:
+            f.write(data)
+        ops = [("readline", 1), ("readline", 5), ("read", 3), ("readline", -1),
+               ("read", 7), ("readline", 2), ("read", 1)] * 10
+        for enc, errors, newline in itertools.product(
+                ("utf-8", "cp1252"),
+                ("replace", "ignore", "surrogateescape", "backslashreplace"),
+                (None, "", "\r\n")):
+            with self.subTest(encoding=enc, errors=errors, newline=newline):
+                expected = self.TextIOWrapper(
+                    self.BytesIO(data), encoding=enc, errors=errors,
+                    newline=newline)
+                with self.open(os_helper.TESTFN, encoding=enc,
+                               errors=errors, newline=newline) as f:
+                    for name, n in ops:
+                        self.assertEqual(getattr(f, name)(n),
+                                         getattr(expected, name)(n))
+                    self.assertEqual(f.read(), expected.read())
+                    if newline != "\r\n":
+                        self.assertEqual(f.newlines, expected.newlines)
+
+    def test_newlines_crlf_split_by_reads(self):
+        # newline="": a "\r\n" is one newline in newlines, also when a
+        # read stops between its "\r" and "\n".
+        for enc in ("utf-8", "latin-1"):
+            with self.subTest(encoding=enc):
+                with self.open(os_helper.TESTFN, "w", encoding=enc,
+                               newline="") as f:
+                    f.write("ab\r\ncd\r\nef")
+                for rest in (lambda f: f.read(), lambda f: f.read(4),
+                             lambda f: f.readline()):
+                    with self.open(os_helper.TESTFN, encoding=enc,
+                                   newline="") as f:
+                        self.assertEqual(f.read(3), "ab\r")
+                        rest(f)
+                        f.read()
+                        self.assertEqual(f.newlines, "\r\n")
+
     def test_truncate_below_position(self):
-        if self.is_C:
-            self.skipTest(C_TEXT_GAP)
+        if self.is_stock_C:
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # As for binary files, the position is not changed: reads return
         # nothing, and a write lands at the position, after a gap of zero
         # bytes.
@@ -692,15 +828,39 @@ class TextIOWrapperTest:
         self.assertEqual(f.readline(), "\xff\n")
         self.assertEqual(f.tell(), p2)
         f.seek(0)
-        for line in f:
+        for i, line in enumerate(f):
             self.assertEqual(line, "\xff\n")
-            self.assertRaises(OSError, f.tell)
+            if self.is_nibbler:
+                # gh-81217
+                self.assertEqual(f.tell(), (p1, p2)[i])
+            else:
+                self.assertRaises(OSError, f.tell)
         self.assertEqual(f.tell(), p2)
         f.close()
 
+    def test_tell_after_flush(self):
+        # flush() after a read doesn't keep tell() from working (it dropped
+        # the read-ahead that tell() looks back at with _io._nibbler).
+        with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.write("a\xe9\nline2\nline3\n")
+        with self.open(os_helper.TESTFN, "r+", encoding="utf-8") as f:
+            self.assertEqual(f.readline(), "a\xe9\n")
+            f.flush()
+            self.assertEqual(f.tell(), 4)
+            self.assertEqual(f.readline(), "line2\n")
+            f.flush()
+            f.flush()
+            self.assertEqual(f.tell(), 10)
+            f.seek(4)
+            self.assertEqual(f.readline(), "line2\n")
+            self.assertEqual(f.read(2), "li")
+            f.flush()
+            self.assertEqual(f.tell(), 12)
+            self.assertEqual(f.read(), "ne3\n")
+
     def test_tell_after_next_and_flush(self):
-        if self.is_C:
-            self.skipTest(C_TEXT_GAP)
+        if self.is_stock_C:
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # flush() while iterating doesn't make tell() use a snapshot that
         # wasn't kept: it gives the position, or raises as it does while
         # iterating if that isn't known.
@@ -709,7 +869,11 @@ class TextIOWrapperTest:
         with self.open(os_helper.TESTFN, "r+", encoding="utf-8") as f:
             self.assertEqual(next(f), "a\n")
             f.flush()
-            self.assertRaisesRegex(OSError, "disabled by next", f.tell)
+            if self.is_nibbler:
+                self.assertEqual(f.tell(), 2)
+            else:
+                self.assertRaisesRegex(OSError, "disabled by next",
+                                       f.tell)
             self.assertEqual(next(f), "bc\n")
             self.assertEqual(next(f), "d\n")
             # All the text read was returned: the position is known.
@@ -717,6 +881,23 @@ class TextIOWrapperTest:
             self.assertEqual(f.tell(), 7)
             f.seek(2)
             self.assertEqual(f.readline(), "bc\n")
+
+    def test_tell_while_iterating(self):
+        if not self.is_nibbler:
+            self.skipTest("next() disables tell()")
+        # gh-81217: tell() inside a for loop gives positions that seek()
+        # goes back to.
+        lines = ["a\n", "b\xe9\n", "\u20ac" * 3000 + "\n", "d\n"]
+        with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        with self.open(os_helper.TESTFN, encoding="utf-8") as f:
+            positions = []
+            for line in f:
+                positions.append(f.tell())
+            self.assertEqual(positions[-1], f.tell())
+            for i, pos in enumerate(positions[:-1]):
+                f.seek(pos)
+                self.assertEqual(f.readline(), lines[i + 1])
 
     def test_seeking(self):
         chunk_size = _default_chunk_size()
@@ -826,10 +1007,9 @@ class TextIOWrapperTest:
             remaining = f.read()
             self.assertEqual(remaining, "")
 
-
     def test_tell_after_seek_with_chars_to_skip(self):
-        if self.is_C:
-            self.skipTest(C_TEXT_GAP)
+        if self.is_stock_C:
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # seek() to a cookie with characters to skip feeds the decoder a
         # new snapshot; tell() must not estimate positions inside it with
         # the bytes-per-char ratio of the previously read chunk.
@@ -903,8 +1083,8 @@ class TextIOWrapperTest:
 
     # read in amounts equal to TextIOWrapper._CHUNK_SIZE which is 128.
     def test_read_would_block_keeps_partial_char(self):
-        if self.is_C:
-            self.skipTest(C_TEXT_GAP)
+        if self.is_stock_C:
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # gh-57531: a raw stream that would block in the middle of a
         # multibyte character: its first bytes are kept for the next read,
         # instead of being decoded as if at EOF.
@@ -916,8 +1096,8 @@ class TextIOWrapperTest:
         self.assertEqual(t.read(10), "")
 
     def test_read_would_block_raises(self):
-        if self.is_C:
-            self.skipTest(C_TEXT_GAP)
+        if self.is_stock_C:
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # gh-57531: when the stream would block before any character is
         # available, read(n), readline() and iteration raise
         # BlockingIOError, as read() does: "" means EOF.  What there is is
@@ -939,8 +1119,8 @@ class TextIOWrapperTest:
         self.assertEqual(t.readline(), "")
 
     def test_readlines_would_block(self):
-        if self.is_C:
-            self.skipTest(C_TEXT_GAP)
+        if self.is_stock_C:
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # readlines() that would block returns the complete lines so far
         # and keeps the partial last line for the next call; with none,
         # it raises BlockingIOError, as readline() does.
@@ -961,8 +1141,8 @@ class TextIOWrapperTest:
         self.assertEqual(t.readlines(100), [])
 
     def test_readline_would_block_keeps_partial_line(self):
-        if self.is_C:
-            self.skipTest(C_TEXT_GAP)
+        if self.is_stock_C:
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # A readline() that would block before the end of the line raises
         # BlockingIOError and keeps the partial line for the next call.
         raw = self.MockRawIO((b"ab", None, b"c", None, b"d\nef", None,
@@ -998,8 +1178,8 @@ class TextIOWrapperTest:
         self.assertEqual(t.readline(), "x" * 63 + "y\n")
 
     def test_tell_after_readline_would_block(self):
-        if self.is_C:
-            self.skipTest(C_TEXT_GAP)
+        if self.is_stock_C:
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # A readline() that would block after a partial line keeps the
         # decoder's held bytes (a partial character) or pending \r in the
         # tell() position, so seek(tell()) then read() loses nothing.
@@ -1063,8 +1243,8 @@ class TextIOWrapperTest:
                         self.assertEqual(line + t.read(), expected)
 
     def test_tell_after_next_would_block(self):
-        if self.is_C:
-            self.skipTest(C_TEXT_GAP)
+        if self.is_stock_C:
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # A BlockingIOError from next() doesn't leave tell() disabled as
         # during iteration: it reports the position after the last line,
         # counting what the decoder holds as unread.
@@ -1242,8 +1422,8 @@ class TextIOWrapperTest:
                 self.assertEqual(f.read(), 'aaaxxx'.encode(charset))
 
     def test_read_write_bom(self):
-        if self.is_C:
-            self.skipTest(C_TEXT_GAP)
+        if self.is_stock_C:
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # Same test, but writing after reading to the end: the encoder
         # isn't at the start of the stream any more.
         filename = os_helper.TESTFN
@@ -1786,9 +1966,28 @@ class TextIOWrapperTest:
                 os.close(r)
             os.close(w)
 
+    @support.subTests('cookie_value', [
+        # Set 'cookie.chars_to_skip' to INT_MIN
+        (100 << (12 * 8)) | (0x80 << (19 * 8)),
+        # Set 'cookie.chars_to_skip' to INT_MAX
+        (100 << (12 * 8)) | (0x7FFFFFFF << (16 * 8))
+    ])
+    def test_seek_reject_invalid_chars_to_skip(self, cookie_value):
+        if self.is_stock_C or not self.is_C:
+            # (_pyio's seek() doesn't reject these.)
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
+        # See https://github.com/python/cpython/issues/153662
+        data = b"1"
+        raw = self.BytesIO(data)
+        buf = self.BufferedReader(raw)
+        tio = self.TextIOWrapper(buf, encoding='utf-8')
+        tio.read()
+        with self.assertRaisesRegex(OSError, "can't restore logical file position"):
+            tio.seek(cookie_value)
+
     def test_seek_cookie_out_of_range(self):
-        if self.is_C:
-            self.skipTest(C_TEXT_GAP)
+        if self.is_stock_C:
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # gh-91112: a cookie that tell() can't have returned is an error,
         # instead of silently being another position.
         with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
@@ -1805,8 +2004,8 @@ class TextIOWrapperTest:
                         f.seek(cookie)
 
     def test_close_and_detach_finish_encoder(self):
-        if self.is_C:
-            self.skipTest(C_TEXT_GAP)
+        if self.is_stock_C:
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # gh-79792: the incremental encoder gets final=True, so the idna
         # codec writes its last label.
         class Recorder(self.BytesIO):
@@ -1920,6 +2119,8 @@ class CTextIOWrapperTest(TextIOWrapperTest, CTestCase):
             del t._CHUNK_SIZE
 
     def test_internal_buffer_size(self):
+        if self.is_nibbler:
+            self.skipTest("text keeps no bytes of its own")
         # bpo-43260: TextIOWrapper's internal buffer should not store
         # data larger than chunk size.
         chunk_size = 8192  # default chunk size, updated later
@@ -1947,6 +2148,8 @@ class CTextIOWrapperTest(TextIOWrapperTest, CTestCase):
         self.assertEqual([b"abcdef", b"ghi", b"x"*chunk_size], buf._write_stack)
 
     def test_issue119506(self):
+        if self.is_nibbler:
+            self.skipTest("text keeps no bytes of its own")
         chunk_size = 8192
 
         class MockIO(self.MockRawIO):
@@ -2028,8 +2231,11 @@ class CTextIOWrapperTest(TextIOWrapperTest, CTestCase):
                 make_text(DetachOnFlush(self.MockRawIO()))
                 self.assertRaisesRegex(ValueError, "detached", method)
 
-        # Should not crash.
+        # Should not crash.  (Where text goes to the buffer at once, the
+        # write detaches.)
         with self.subTest('read via writeflush'):
+            if self.is_nibbler:
+                return
             make_text(DetachOnWrite(self.MockRawIO()))
             wrapper.write('x')
             self.assertRaisesRegex(ValueError, "detached", wrapper.read)
@@ -2106,6 +2312,10 @@ class CTextIOWrapperTest(TextIOWrapperTest, CTestCase):
         # must release next_input; exercise it too (leak-checked under -R).
         wrapper.seek(0)
         self.assertIsInstance(wrapper.tell(), int)
+
+
+class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
+    pass
 
 
 class PyTextIOWrapperTest(TextIOWrapperTest, PyTestCase):

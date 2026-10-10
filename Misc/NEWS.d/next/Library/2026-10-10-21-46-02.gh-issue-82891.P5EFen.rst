@@ -1,0 +1,15 @@
+Add :class:`!_io._nibbler.TextIOWrapper`, which :func:`open`, and with
+``_PYTHON_IO_DEFAULT_IMPL=_nibbler`` the :mod:`io` classes and the standard
+streams, use along with the :mod:`!_io._nibbler` buffered classes. It keeps
+no bytes of its own over them: a read takes from the buffer only the bytes
+of the text it returns, so the buffer's position is the text position. A
+:meth:`!write` or :meth:`!truncate` after a read acts at the text position,
+as after ``seek(tell())``; :meth:`!tell` works while iterating over the file
+(:gh:`81217`); text written goes straight into the buffer, so text and
+``buffer.write()`` output keep their order (:gh:`52203`); and reads make raw
+reads of the buffer size (:gh:`153656`). It also has the fixes made to the
+:mod:`!_pyio` :class:`!TextIOWrapper`: reads that would block raise
+:exc:`BlockingIOError` and keep a partial line, :meth:`!truncate` cuts at
+the text position (:gh:`70346`), :meth:`!seek` rejects cookies :meth:`!tell`
+can't have returned (:gh:`91112`), and the encoder gets ``final=True`` on
+close (:gh:`79792`).
