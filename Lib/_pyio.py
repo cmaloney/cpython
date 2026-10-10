@@ -1238,8 +1238,10 @@ class BufferedReader(_BufferedIOMixin):
         return written
 
     def tell(self):
+        with self._read_lock:
+            pos = _BufferedIOMixin.tell(self) - len(self._read_buf) + self._read_pos
         # GH-95782: Keep return value non-negative
-        return max(_BufferedIOMixin.tell(self) - len(self._read_buf) + self._read_pos, 0)
+        return max(pos, 0)
 
     def seek(self, pos, whence=0):
         if whence not in valid_seek_flags:
@@ -1332,7 +1334,11 @@ class BufferedWriter(_BufferedIOMixin):
             del self._write_buf[:n]
 
     def tell(self):
-        return _BufferedIOMixin.tell(self) + len(self._write_buf)
+        # Hold the lock so that the raw position and the pending buffer
+        # come from the same moment: a write flushing in another thread
+        # changes both.
+        with self._write_lock:
+            return _BufferedIOMixin.tell(self) + len(self._write_buf)
 
     def seek(self, pos, whence=0):
         if whence not in valid_seek_flags:
@@ -1462,10 +1468,15 @@ class BufferedRandom(BufferedWriter, BufferedReader):
         return pos
 
     def tell(self):
-        if self._write_buf:
-            return BufferedWriter.tell(self)
-        else:
-            return BufferedReader.tell(self)
+        # write() drops the read buffer under _read_lock, then buffers
+        # under _write_lock: hold both to see a consistent state.
+        with self._write_lock, self._read_lock:
+            pos = _BufferedIOMixin.tell(self)
+            if self._write_buf:
+                return pos + len(self._write_buf)
+            pos -= len(self._read_buf) - self._read_pos
+        # GH-95782: Keep return value non-negative
+        return max(pos, 0)
 
     def truncate(self, pos=None):
         if pos is None:
