@@ -2048,6 +2048,37 @@ class TextIOWrapperTest:
         self.assertIs(t.detach(), b)
         self.assertEqual(b.getvalue(), b"www.somesite.com")
 
+    def test_close_without_writes_writes_no_bom(self):
+        # close() gives final=True only to an encoder that encoded text
+        # since it was made or reset (by seek()): a reset encoder with a
+        # BOM would otherwise write one at the position.
+        filename = os_helper.TESTFN
+        for charset in ('utf-8-sig', 'utf-16', 'utf-32'):
+            with self.subTest(charset=charset):
+                data = 'abc'.encode(charset)
+                with self.open(filename, 'wb') as f:
+                    f.write(data)
+                # Reading after seek(0), opened for update or read only.
+                for mode in 'r+', 'r':
+                    with self.open(filename, mode, encoding=charset) as f:
+                        f.seek(0)
+                        self.assertEqual(f.read(), 'abc')
+                    with self.open(filename, 'rb') as f:
+                        self.assertEqual(f.read(), data)
+                # Writing nothing after seek(0).
+                with self.open(filename, 'w+', encoding=charset) as f:
+                    f.seek(0)
+                with self.open(filename, 'rb') as f:
+                    self.assertEqual(f.read(), b'')
+                # Writing, then seek(0) without writing again.
+                with self.open(filename, 'w+', encoding=charset) as f:
+                    f.write('abc')
+                    f.seek(0)
+                    self.assertEqual(f.read(), 'abc')
+                    f.seek(0)
+                with self.open(filename, 'rb') as f:
+                    self.assertEqual(f.read(), data)
+
 
 class MemviewBytesIO(io.BytesIO):
     '''A BytesIO object whose read method returns memoryviews
