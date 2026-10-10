@@ -3460,6 +3460,11 @@ buffered_text_peek_locked(buffered *self, Py_ssize_t need, morsel *m,
     if (buffered_enter(self, NULL, READING) < 0) {
         return -1;
     }
+    if (buffered_dict(self) != NULL) {
+        /* Got a dict while this waited (see _PyIONibbler_advance()). */
+        buffered_leave(self);
+        return _PyIO_NIBBLER_NO;
+    }
     /* Not even what is read ahead after close() (unlike reads). */
     int r = buffered_check_closed(self, "I/O operation on closed file.");
     if (r < 0) {
@@ -3519,7 +3524,12 @@ buffered_text_advance_locked(buffered *self, uint64_t key, Py_ssize_t off,
        this waits for the lock. */
     Py_INCREF(self);
     int r = buffered_lock(self);
-    if (r == 0) {
+    if (r == 0 && buffered_dict(self) != NULL) {
+        /* Got a dict while this waited. */
+        buffered_unlock(self);
+        r = _PyIO_NIBBLER_NO;
+    }
+    else if (r == 0) {
         r = buffered_check_closed(self, "I/O operation on closed file.");
         nibbler_end *e = nibbler_reading(&self->nib);
         if (r == 0 && e != NULL && e->id == key
@@ -3540,6 +3550,11 @@ _PyIONibbler_advance(PyObject *op, uint64_t key, Py_ssize_t off,
                      Py_ssize_t n)
 {
     buffered *self = buffered_cast(op);
+    /* Once it has a dict, its methods may be in use: then the bytes at its
+       position may not be next any more. */
+    if (buffered_dict(self) != NULL) {
+        return _PyIO_NIBBLER_NO;
+    }
     /* Without the lock: move the reading end's position from off, if it
        is still there (see _PyIONibbler_peek()). */
     nibbler_end *e = nibbler_end_get(&self->nib, 0);

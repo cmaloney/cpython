@@ -130,8 +130,8 @@ extern int _PyIONibbler_peek(PyObject *buffered, Py_ssize_t need,
                              _PyIO_Morsel *m, uint64_t *key);
 /* Take n bytes from the position named by key and off (see
    _PyIONibbler_peek()).  Returns 1, 0 (nothing taken) if the unread bytes
-   don't start there any more, or -1 (ValueError if the raw stream is
-   closed). */
+   don't start there any more, -1 (ValueError if the raw stream is closed),
+   or _PyIO_NIBBLER_NO. */
 extern int _PyIONibbler_advance(PyObject *buffered, uint64_t key,
                                 Py_ssize_t off, Py_ssize_t n);
 /* Like write(obj), for data[0:len] owned by obj, but ValueError("I/O

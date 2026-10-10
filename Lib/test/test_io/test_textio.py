@@ -2322,6 +2322,51 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
         self.addCleanup(f.close)
         return f
 
+    def test_buffer_dict_mid_read(self):
+        # An attribute set on the buffer between reads makes the text layer
+        # use its methods from then on, without losing the characters it
+        # had decoded and taken the bytes of.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        data = "0123456789\nABCDEFGHIJKLMNOP\nqrstuvwxyz\n"
+        with open(os_helper.TESTFN, "w", encoding="ascii") as f:
+            f.write(data)
+        for cls in (self.BufferedReader, self.BufferedRandom):
+            for bs, chunk, first in itertools.product(
+                    (16, 8192), (3, 8192), (("readline",), ("read", 4))):
+                with self.subTest(cls=cls, bs=bs, chunk=chunk, first=first):
+                    t = self.open_nibbler(cls, "r+", bs, encoding="utf-8")
+                    t._CHUNK_SIZE = chunk
+                    a = getattr(t, first[0])(*first[1:])
+                    t.buffer.x = 1
+                    self.assertEqual(a + t.read(7) + t.read(), data)
+
+    @threading_helper.requires_working_threading()
+    @support.requires_resource("cpu")
+    def test_buffer_dict_while_threads_read(self):
+        # The same while threads iterate (with the GIL, they switch where
+        # they wait for the buffer): each line is read once, whole.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        lines = ["%06d \xe9€ %s\n" % (i, "x" * (i % 30))
+                 for i in range(5000)]
+        with open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        self.addCleanup(sys.setswitchinterval, sys.getswitchinterval())
+        sys.setswitchinterval(1e-6)
+        for i in range(20):
+            t = self.open_nibbler(self.BufferedReader, "r", 64,
+                                  encoding="utf-8")
+            got = [[] for _ in range(6)]
+
+            def reader(k):
+                got[k].extend(t)
+
+            threads = [threading.Thread(target=reader, args=(k,))
+                       for k in range(6)]
+            with threading_helper.start_threads(threads):
+                time.sleep(0.0002 * i)
+                t.buffer.foo = 1
+            self.assertEqual(sorted(sum(got, [])), lines)
+
     @threading_helper.requires_working_threading()
     def test_reconfigure_newline_while_threads_write(self):
         # reconfigure(newline=...) keeps the codec: writes racing it never

@@ -45,6 +45,7 @@
 #include "pycore_codecs.h"              // _PyCodecInfo_GetIncrementalDecoder()
 #include "pycore_fileutils.h"           // _Py_GetLocaleEncodingObject()
 #include "pycore_interp.h"              // PyInterpreterState.unicode
+#include "pycore_lock.h"                // _PyRecursiveMutex
 #include "pycore_long.h"                // _PyLong_GetZero()
 #include "pycore_object.h"              // _PyObject_GC_UNTRACK()
 #include "pycore_pyerrors.h"            // _PyErr_ChainExceptions1()
@@ -174,6 +175,8 @@ typedef struct {
        (not rbuf); the buffer can be the store (it has no instance dict). */
     char nib;
     char nib_ok;
+    /* Held while rbuf is filled (see store_peek_methods()). */
+    _PyRecursiveMutex fill_lock;
     char encoding_start_of_stream;  /* the encoder may write a BOM */
     char encoder_used;          /* the encoder needs final=True at the end */
     uint8_t decoded;            /* read since the last seek or write */
@@ -790,6 +793,67 @@ store_peek(textio *self, store *st, Py_ssize_t need)
     return store_peek_methods(self, st, need);
 }
 
+#define RBUF_UNREAD(self) \
+    ((self)->rbuf ? PyBytes_GET_SIZE((self)->rbuf) - (self)->rpos : 0)
+#define FILL_END 3
+
+/* For store_peek_methods(), with fill_lock: read more after rbuf.
+   Returns 0 (*have: the bytes unread now), FILL_END if there are no more,
+   _PyIO_NIBBLER_BLOCKED, or -1. */
+static int
+store_fill(textio *self, store *st, Py_ssize_t need, Py_ssize_t *have)
+{
+    /* Growing geometrically, so that rbuf is copied O(1) times. */
+    PyObject *size = PyLong_FromSsize_t(
+        Py_MAX(FT_ATOMIC_LOAD_SSIZE_RELAXED(self->chunk_size),
+               Py_MAX(need - *have, *have)));
+    if (size == NULL) {
+        return -1;
+    }
+    PyObject *res = PyObject_CallMethodOneArg(
+        st->buffer, st->cf->has_read1 ? &_Py_ID(read1) : &_Py_ID(read),
+        size);
+    Py_DECREF(size);
+    if (res == NULL) {
+        return -1;
+    }
+    if (res == Py_None) {
+        Py_DECREF(res);
+        return _PyIO_NIBBLER_BLOCKED;
+    }
+    Py_buffer view;
+    if (PyObject_GetBuffer(res, &view, PyBUF_SIMPLE) < 0) {
+        PyErr_Format(PyExc_TypeError,
+                     "underlying %s() should have returned a bytes-like "
+                     "object, not '%.200s'",
+                     st->cf->has_read1 ? "read1": "read",
+                     Py_TYPE(res)->tp_name);
+        Py_DECREF(res);
+        return -1;
+    }
+    /* read1() let other threads take bytes from rbuf (but not add any). */
+    Py_ssize_t n = RBUF_UNREAD(self);
+    PyObject *rbuf = PyBytes_FromStringAndSize(NULL, n + view.len);
+    if (rbuf != NULL) {
+        if (n) {
+            memcpy(PyBytes_AS_STRING(rbuf),
+                   PyBytes_AS_STRING(self->rbuf) + self->rpos, n);
+        }
+        memcpy(PyBytes_AS_STRING(rbuf) + n, view.buf, view.len);
+    }
+    Py_ssize_t got = view.len;
+    PyBuffer_Release(&view);
+    Py_DECREF(res);
+    if (rbuf == NULL) {
+        return -1;
+    }
+    Py_XSETREF(self->rbuf, rbuf);
+    self->rpos = 0;
+    self->rgen++;
+    *have = n + got;
+    return got == 0 ? FILL_END : 0;
+}
+
 /* store_peek() through the buffer's methods. */
 Py_NO_INLINE static int
 store_peek_methods(textio *self, store *st, Py_ssize_t need)
@@ -798,63 +862,32 @@ store_peek_methods(textio *self, store *st, Py_ssize_t need)
     st->eof = 0;
     st->peeked = 1;
     int r = 0;
-    Py_ssize_t have = self->rbuf ? PyBytes_GET_SIZE(self->rbuf) - self->rpos
-                                 : 0;
+    Py_ssize_t have = RBUF_UNREAD(self);
     while (have < need) {
-        /* Growing geometrically, so that rbuf is copied O(1) times. */
-        PyObject *size = PyLong_FromSsize_t(
-            Py_MAX(FT_ATOMIC_LOAD_SSIZE_RELAXED(self->chunk_size),
-                   Py_MAX(need - have, have)));
-        if (size == NULL) {
-            return -1;
+        /* One thread at a time reads and appends, so that rbuf has the
+           bytes in their order: read1() lets other threads in (and may
+           call back into self: the lock is recursive). */
+        _PyRecursiveMutex_Lock(&self->fill_lock);
+        have = RBUF_UNREAD(self);
+        if (have >= need) {
+            _PyRecursiveMutex_Unlock(&self->fill_lock);
+            break;
         }
-        PyObject *res = PyObject_CallMethodOneArg(
-            st->buffer,
-            st->cf->has_read1 ? &_Py_ID(read1) : &_Py_ID(read),
-            size);
-        Py_DECREF(size);
-        if (res == NULL) {
-            if (_PyIO_trap_eintr()) {
+        r = store_fill(self, st, need, &have);
+        _PyRecursiveMutex_Unlock(&self->fill_lock);
+        if (r != 0) {
+            if (r < 0 && _PyIO_trap_eintr()) {
+                r = 0;
                 continue;
             }
-            return -1;
-        }
-        if (res == Py_None) {
-            Py_DECREF(res);
-            r = _PyIO_NIBBLER_BLOCKED;
-            break;
-        }
-        Py_buffer view;
-        if (PyObject_GetBuffer(res, &view, PyBUF_SIMPLE) < 0) {
-            PyErr_Format(PyExc_TypeError,
-                         "underlying %s() should have returned a bytes-like "
-                         "object, not '%.200s'",
-                         st->cf->has_read1 ? "read1": "read",
-                         Py_TYPE(res)->tp_name);
-            Py_DECREF(res);
-            return -1;
-        }
-        PyObject *rbuf = PyBytes_FromStringAndSize(NULL, have + view.len);
-        if (rbuf != NULL) {
-            if (have) {
-                memcpy(PyBytes_AS_STRING(rbuf),
-                       PyBytes_AS_STRING(self->rbuf) + self->rpos, have);
+            if (r < 0) {
+                return -1;
             }
-            memcpy(PyBytes_AS_STRING(rbuf) + have, view.buf, view.len);
-        }
-        Py_ssize_t got = view.len;
-        PyBuffer_Release(&view);
-        Py_DECREF(res);
-        if (rbuf == NULL) {
-            return -1;
-        }
-        Py_XSETREF(self->rbuf, rbuf);
-        self->rpos = 0;
-        self->rgen++;
-        have += got;
-        if (got == 0) {
             break;
         }
+    }
+    if (r == FILL_END) {
+        r = 0;
     }
     if (have > 0) {
         st->m = (_PyIO_Morsel){Py_NewRef(self->rbuf),
@@ -891,6 +924,15 @@ store_advance(textio *self, store *st, uint64_t key, Py_ssize_t off,
     int r = 1;
     if (st->lockfree || self->nib) {
         r = _PyIONibbler_advance(st->buffer, key, off, n);
+        if (r == _PyIO_NIBBLER_NO) {
+            /* A dict on the buffer: through its methods, with the critical
+               section (see text_read()). */
+            if (st->lockfree) {
+                st->retry = 1;
+                return -1;
+            }
+            return store_use_methods(self, st, 1) < 0 ? -1 : 0;
+        }
     }
     else if (self->rbuf != NULL && key == STORE_KEY(self->rgen)
              && self->rpos == off
@@ -2426,12 +2468,21 @@ error:
     store_release(&st);
     cache_release(st.c);
     conf_put(cf);
+    if (st.retry) {
+        /* The rest with the critical section, after the text taken so far
+           (see text_read_more()).  (An error found meanwhile, as of bytes
+           that weren't next any more, will be found again.) */
+        assert(lockfree);
+        PyErr_Clear();
+        *retry = 1;
+        if (pieces > 0) {
+            return pieces > 1 ? _PyUnicodeWriter_Finish(&writer) : res;
+        }
+        return NULL;
+    }
     Py_XDECREF(res);
     if (pieces > 1) {
         _PyUnicodeWriter_Dealloc(&writer);
-    }
-    if (st.retry) {
-        *retry = 1;
     }
     return NULL;
 }
@@ -2440,17 +2491,34 @@ error:
 Py_NO_INLINE static PyObject *
 text_read_more(textio *self, Py_ssize_t n, int line, int lockfree)
 {
-    PyObject *res;
+    PyObject *res, *head = NULL;
     if (lockfree) {
         int retry = 0;
-        res = text_read_impl(self, n, line, 1, &retry);
+        head = text_read_impl(self, n, line, 1, &retry);
         if (!retry) {
-            return res;
+            return head;
+        }
+        /* Text taken before it couldn't go on without the critical
+           section: the rest follows it. */
+        if (head != NULL && n >= 0) {
+            n -= PyUnicode_GET_LENGTH(head);
+            if (n == 0) {
+                return head;
+            }
         }
     }
     Py_BEGIN_CRITICAL_SECTION(self);
     res = text_read_impl(self, n, line, 0, NULL);
     Py_END_CRITICAL_SECTION();
+    if (head != NULL) {
+        if (res != NULL) {
+            PyUnicode_Append(&head, res);
+            Py_SETREF(res, head);
+        }
+        else {
+            Py_DECREF(head);
+        }
+    }
     return res;
 }
 

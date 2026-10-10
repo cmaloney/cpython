@@ -606,6 +606,32 @@ class NibblerTextIOWrapperTest(TestCase):
                              + [reinit])
             f.close()
 
+    def test_instance_dict_while_reading(self):
+        # An attribute set on the buffer while threads iterate: from then
+        # on its methods are used, and each line is still read once, whole.
+        lines = ["%06d \xe9€ %s\n" % (i, "x" * (i % 30))
+                 for i in range(5000)]
+        with open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        for i in range(20):
+            with self.open("r", buffer_size=64) as f:
+                got = [[] for _ in range(6)]
+                started = threading.Barrier(7)
+
+                def reader(k):
+                    started.wait()
+                    got[k].extend(f)
+
+                def set_attribute():
+                    started.wait()
+                    for _ in range(i * 20):
+                        pass
+                    f.buffer.foo = 1
+
+                run_concurrently([lambda k=k: reader(k) for k in range(6)]
+                                 + [set_attribute])
+                self.assertEqual(sorted(sum(got, [])), lines)
+
     @support.requires_subprocess()
     def test_daemon_writers_at_exit(self):
         # Daemon threads still writing through sys.stdout when the process
