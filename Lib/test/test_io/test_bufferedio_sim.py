@@ -1068,14 +1068,18 @@ class TextTest:
     def test_text_and_buffer_writes_keep_order(self):
         # gh-52203: sys.stdout.write() then sys.stdout.buffer.write() come
         # out in that order.
-        raw = self.BytesIO()
-        t = self.TextIOWrapper(self.BufferedWriter(raw), encoding="utf-8")
-        t.write("unicode ")
-        t.buffer.write(b"bytes ")
-        t.write("\xe9 ")
-        t.buffer.write(b"more")
-        t.flush()
-        self.assertEqual(raw.getvalue(), b"unicode bytes \xc3\xa9 more")
+        for enc in ("utf-8", "latin-1"):
+            with self.subTest(encoding=enc):
+                raw = self.BytesIO()
+                t = self.TextIOWrapper(self.BufferedWriter(raw), encoding=enc)
+                t.write("unicode ")
+                t.buffer.write(b"bytes ")
+                t.write("\xe9 ")
+                t.buffer.write(b"more")
+                t.flush()
+                self.assertEqual(raw.getvalue(),
+                                 b"unicode bytes " + "\xe9".encode(enc)
+                                 + b" more")
 
     def test_text_reads_use_buffer_size(self):
         # gh-153656: text reads make raw reads of the buffer size, not of

@@ -2065,6 +2065,13 @@ _io_TextIOWrapper_write_impl(textio *self, PyObject *text)
         else if (self->encodefunc == utf8_encode) {
             r = textiowrapper_write_utf8(self, text);
         }
+        else if (self->encodefunc == latin1_encode
+                 && PyUnicode_KIND(text) == PyUnicode_1BYTE_KIND)
+        {
+            /* The str's data is its encoding. */
+            r = _PyIONibbler_write(self->buffer, text, PyUnicode_DATA(text),
+                                   textlen, self->raw != NULL);
+        }
         if (r != _PyIO_NIBBLER_NO) {
             self->encoding_start_of_stream = 0;
             return r < 0 ? NULL : PyLong_FromSsize_t(textlen);
