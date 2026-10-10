@@ -604,9 +604,11 @@ nibbler_lock(nibbler *n, PyObject *obj)
 static void
 nibbler_relock(nibbler *n, PyObject *obj)
 {
-    /* Fails only on a reentrant call, which this thread just left. */
+    /* Takes the lock, or takes it over while finalizing (from a thread
+       that was handed it meanwhile).  Fails only on a reentrant call,
+       which this thread just left. */
     int r = nibbler_mutex_lock(&n->lock, obj, 0);
-    assert(r == 0);
+    assert(r >= 0);
     (void)r;
     nibbler_hold(n);
 }

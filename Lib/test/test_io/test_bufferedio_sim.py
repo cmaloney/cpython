@@ -2228,6 +2228,38 @@ class LockReleaseTest:
         self.check_shutdown("f.write('.'); f.flush()", waiters=3)
 
     @threading_helper.requires_working_threading()
+    def test_shutdown_lock_handed_on_during_raw_write(self):
+        # At exit the flush of sys.stdout takes the lock over from a daemon
+        # thread blocked holding it (in raw.closed), and releases it around
+        # its raw write: a daemon thread waiting for the lock is handed it,
+        # and blocks as it attaches.  Taking the lock again after the raw
+        # write takes it over once more.
+        code = """
+            import sys, time
+            from threading import Thread, current_thread
+
+            GATED = set()
+
+            class Raw(GatedRaw):
+                @property
+                def closed(self):
+                    if current_thread() is not main_thread():
+                        entered.set()
+                        Event().wait()
+                    return False
+
+            f = BufferedRandom(Raw())
+            f.write(b'!')
+            sys.stdout = f
+            # Writes this large take the lock, and check raw.closed.
+            Thread(target=f.write, args=(b'h' * 600,), daemon=True).start()
+            entered.wait()
+            Thread(target=f.write, args=(b'w' * 600,), daemon=True).start()
+            time.sleep(0.1)
+            """
+        self.assertEqual(self.run_child(code), (0, b"!", ""))
+
+    @threading_helper.requires_working_threading()
     def test_shutdown_with_daemons_writing(self):
         # Daemon threads write to sys.stdout's buffer as fast as they can
         # while the main thread exits.  (Not through the TextIOWrapper:
