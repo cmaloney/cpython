@@ -1002,6 +1002,14 @@ nibbler_nbytes(nibbler *n)
     return n->list.nbytes;
 }
 
+/* A new block.  Out of line: it is needed once per block at most, and
+   Tools/nibblerbench/churn.py counts the calls. */
+Py_NO_INLINE static PyObject *
+nibbler_new_block(nibbler *n)
+{
+    return PyBytes_FromStringAndSize(NULL, n->capacity);
+}
+
 /* The block, when nothing but this nibbler references it (then all of it
    can be overwritten); else a new one.  Either way, the end is dropped. */
 static PyObject *
@@ -1010,7 +1018,7 @@ nibbler_fresh_block(nibbler *n)
     assert(n->capacity > 0);
     nibbler_drop_end(n);
     if (n->block == NULL || !_PyObject_IsUniquelyReferenced(n->block)) {
-        PyObject *block = PyBytes_FromStringAndSize(NULL, n->capacity);
+        PyObject *block = nibbler_new_block(n);
         if (block == NULL) {
             return NULL;
         }
