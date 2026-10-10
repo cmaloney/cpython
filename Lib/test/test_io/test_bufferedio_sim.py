@@ -443,6 +443,9 @@ class SlowDeviceTest:
         # the stream together loses neither: the next read() returns all.
         if not self.is_nibbler:
             self.skipTest("data is lost on MemoryError")
+        if support.Py_GIL_DISABLED:
+            # One failed allocation is retried there.
+            self.skipTest("can't make one allocation fail")
         _testcapi = import_helper.import_module('_testcapi')
         data = sample_data(5_000)
 
