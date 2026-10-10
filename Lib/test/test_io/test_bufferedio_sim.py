@@ -495,6 +495,89 @@ class SlowDeviceTest:
                     self.assertEqual(got + f.read(), data[5:], start)
                 self.assertGreater(failures, 0)
 
+    def test_readline_long_line_trickling_in_is_linear(self):
+        # A line that arrives a little at a time, the raw stream blocking in
+        # between, is kept by readline() (which returns None) until it is
+        # whole: keeping it, and looking for its end, takes time linear in
+        # its length, not quadratic.
+        if not self.is_nibbler:
+            self.skipTest("copies the partial line on each call")
+        step = 100
+
+        class Trickle(self.RawIOBase):
+            def __init__(self, data):
+                self.data = data
+                self.pos = 0
+                self.block = False
+            def readable(self):
+                return True
+            def readinto(self, b):
+                self.block = not self.block
+                if self.block:
+                    return None
+                n = min(len(b), step, len(self.data) - self.pos)
+                b[:n] = self.data[self.pos:self.pos + n]
+                self.pos += n
+                return n
+
+        def read_line(size):
+            line = b"x" * (size - 1) + b"\n"
+            f = self.BufferedReader(Trickle(line), 1 << 16)
+            start = time.perf_counter()
+            while (got := f.readline()) is None:
+                pass
+            elapsed = time.perf_counter() - start
+            self.assertEqual(got, line)
+            return elapsed
+
+        # 8 times longer: about 8 times slower if linear, 64 if quadratic.
+        # (Without the garbage collector, whose passes cost more as the
+        # heap grows.)
+        with support.disable_gc():
+            small = min(read_line(64 * 1024) for _ in range(3))
+            large = min(read_line(512 * 1024) for _ in range(3))
+        self.assertLess(large, 24 * small)
+
+    def test_readline_after_seek_back_over_partial_line(self):
+        # A readline() that kept a partial line (here because the raw
+        # stream raised) remembers where it looked for the end of the
+        # line; seeking back inside the read-ahead must not skip an end of
+        # line before that.
+        if not self.is_nibbler:
+            self.skipTest("data read before a raw error is lost")
+        data = b"ab\ncdefgh\nij\n"
+
+        class Raw(self.RawIOBase):
+            def __init__(self):
+                self.pos = 0
+                self.plan = [9, TimeoutError("timed out")]
+            def readable(self):
+                return True
+            def seekable(self):
+                return True
+            def tell(self):
+                return self.pos
+            def seek(self, pos, whence=0):
+                self.pos = pos if whence == 0 else self.pos + pos
+                return self.pos
+            def readinto(self, b):
+                step = self.plan.pop(0) if self.plan else len(b)
+                if isinstance(step, BaseException):
+                    raise step
+                chunk = data[self.pos:self.pos + min(step, len(b))]
+                b[:len(chunk)] = chunk
+                self.pos += len(chunk)
+                return len(chunk)
+
+        f = self.BufferedReader(Raw(), 64)
+        self.assertEqual(f.readline(), b"ab\n")
+        self.assertRaises(TimeoutError, f.readline)
+        self.assertEqual(f.seek(0), 0)
+        self.assertEqual(f.readline(), b"ab\n")
+        self.assertEqual(f.readline(), b"cdefgh\n")
+        self.assertEqual(f.readline(), b"ij\n")
+        self.assertEqual(f.readline(), b"")
+
     def test_read_eintr_is_retried(self):
         if not self.is_C:
             self.skipTest("buffered layer does not retry raw EINTR")

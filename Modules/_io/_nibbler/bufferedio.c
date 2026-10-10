@@ -940,19 +940,88 @@ buffered_sync(buffered *self, int unlocked)
  * Reading
  */
 
-/* Make the read-ahead one raw read into a fresh block, after the bytes
-   still unread (only TextIOWrapper leaves some, fewer than the capacity:
-   a partial character); unbuffered, into a new one of `size` bytes, so
-   that no more are read.  Returns the count (0 at EOF), -2 if the raw
-   stream would block, or -1 on error. */
+static void buffered_unread(buffered *self, const char *data, Py_ssize_t len);
+
+/* Can a raw read write into the free tail of block, the reading end's,
+   after the unread bytes?  Nothing was handed out from there, but Python
+   code must not be able to reach the bytes object itself: only a raw
+   stream given views of it can (through their obj), and then it has more
+   references than ours (the unread morsel's, the end's and maybe the
+   nibbler's). */
+static int
+buffered_block_private(buffered *self, PyObject *block)
+{
+    if (self->raw_fileio) {
+        return 1;
+    }
+    Py_ssize_t ours = 2 + (self->nib.block == block);
+    return Py_REFCNT(block) <= ours;
+}
+
+/* buffered_fill() into the free tail of the reading end's block. */
+static Py_ssize_t
+buffered_fill_tail(buffered *self, Py_ssize_t room)
+{
+    nibbler_end *e = nibbler_reading(&self->nib);
+    /* The read holds its own reference while it uses the block (see
+       nibbler_lock_wait()). */
+    PyObject *block = Py_NewRef(e->block);
+    char *start = (char *)self->nib.list.items[0].ptr;
+    Py_ssize_t unread = self->nib.list.items[0].len;
+    int shared = 0;
+    Py_ssize_t n = buffered_raw_read(self, start + unread, room, block,
+                                     &shared);
+    if (n > 0 && !shared) {
+        nibbler_extend(&self->nib, n);
+    }
+    else if (shared) {
+        /* Python code can still write to the block: abandon it to that
+           code, and keep a copy of what is unread. */
+        if (block == self->nib.block) {
+            nibbler_set_block(&self->nib, NULL);
+        }
+        PyObject *copy = PyBytes_FromStringAndSize(start,
+                                                   unread + Py_MAX(n, 0));
+        if (copy == NULL || nibbler_publish(&self->nib, copy,
+                                            PyBytes_GET_SIZE(copy)) < 0)
+        {
+            n = -1;
+        }
+        Py_XDECREF(copy);
+    }
+    Py_DECREF(block);
+    return n;
+}
+
+/* One raw read into the read-ahead, after the bytes still unread, which
+   stay in front (TextIOWrapper leaves a partial character there, and
+   readline() a partial line); unbuffered, into a new block of `size`
+   bytes, so that no more are read.  Unread bytes are read after where
+   they are when their block has room (at least half a block), else moved
+   to the start of a fresh block, or of one twice their size when they
+   take more than half a block: so a line of any length is copied a
+   bounded number of times however it trickles in.  Returns the count (0
+   at EOF), -2 if the raw stream would block, or -1 on error. */
 static Py_ssize_t
 buffered_fill(buffered *self, Py_ssize_t size)
 {
+    nibbler *n = &self->nib;
+    Py_ssize_t capacity = n->capacity;
+    Py_ssize_t unread = nibbler_unread(n);
+    if (unread > 0 && capacity > 0) {
+        nibbler_end *e = nibbler_reading(n);
+        Py_ssize_t room = PyBytes_GET_SIZE(e->block) - e->limit;
+        if (room > 0 && room >= capacity / 2
+            && buffered_block_private(self, e->block))
+        {
+            return buffered_fill_tail(self, room);
+        }
+    }
     /* A few bytes are copied aside, so that the block can be reused. */
     char aside[512];
     morsel keep = {NULL, NULL, 0};
-    if (nibbler_unread(&self->nib) > 0) {
-        keep = self->nib.list.items[0];
+    if (unread > 0) {
+        keep = n->list.items[0];
         if (keep.len <= (Py_ssize_t)sizeof(aside)) {
             memcpy(aside, keep.ptr, keep.len);
             keep = (morsel){NULL, aside, keep.len};
@@ -961,44 +1030,51 @@ buffered_fill(buffered *self, Py_ssize_t size)
             Py_INCREF(keep.obj);
         }
     }
-    assert(keep.len == 0 || keep.len < self->nib.capacity);
-    (void)nibbler_drop_unread(&self->nib);
+    (void)nibbler_drop_unread(n);
     /* The read holds its own reference while it uses the block (see
        nibbler_lock_wait()). */
-    PyObject *block = (self->nib.capacity > 0
-                       ? Py_XNewRef(nibbler_fresh_block(&self->nib))
-                       : PyBytes_FromStringAndSize(NULL, size));
-    Py_ssize_t n = -1;
+    PyObject *block = (capacity == 0
+                       ? PyBytes_FromStringAndSize(NULL, size)
+                       : keep.len > capacity / 2
+                       ? PyBytes_FromStringAndSize(NULL, 2 * keep.len)
+                       : Py_XNewRef(nibbler_fresh_block(n)));
+    Py_ssize_t r = -1;
     if (block != NULL) {
         char *dst = PyBytes_AS_STRING(block);
         if (keep.len > 0) {
             memcpy(dst, keep.ptr, keep.len);
         }
         int shared = 0;
-        n = buffered_raw_read(self, dst + keep.len,
+        r = buffered_raw_read(self, dst + keep.len,
                               PyBytes_GET_SIZE(block) - keep.len, block,
                               &shared);
-        Py_ssize_t filled = keep.len + Py_MAX(n, 0);
+        Py_ssize_t filled = keep.len + Py_MAX(r, 0);
         if (shared) {
             /* Python code can still write to the block: abandon it to that
                code, and keep a copy of what was read. */
-            if (block == self->nib.block) {
-                nibbler_set_block(&self->nib, NULL);
+            if (block == n->block) {
+                nibbler_set_block(n, NULL);
             }
             PyObject *copy = PyBytes_FromStringAndSize(dst, filled);
             Py_SETREF(block, copy);
             if (block == NULL) {
-                n = -1;
+                r = -1;
                 filled = 0;
             }
         }
-        if (filled > 0 && nibbler_publish(&self->nib, block, filled) < 0) {
-            n = -1;
+        if (filled > 0 && nibbler_publish(n, block, filled) < 0) {
+            r = -1;
         }
         Py_XDECREF(block);
     }
+    else if (keep.len > 0) {
+        /* Keep the unread bytes. */
+        PyObject *exc = PyErr_GetRaisedException();
+        buffered_unread(self, keep.ptr, keep.len);
+        _PyErr_ChainExceptions1(exc);
+    }
     Py_XDECREF(keep.obj);
-    return n;
+    return r;
 }
 
 /* After a raw read raised: data[0:len], taken from the read-ahead or read
@@ -1286,83 +1362,57 @@ buffered_read_all(buffered *self)
     return res;
 }
 
+/* readline(): the line is found in the read-ahead, which keeps all of it
+   as more is read (see buffered_fill()), and is only copied out once
+   whole.  So a partial line kept when the raw stream would block, or
+   raises, is not copied again, and the newline is only looked for in what
+   came after the bytes looked at before. */
 static PyObject *
 buffered_readline(buffered *self, Py_ssize_t limit)
 {
     if (limit == 0) {
         return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     }
-    PyBytesWriter *writer = NULL;
+    nibbler *n = &self->nib;
+    /* The unread bytes known to have no end of line (an earlier call may
+       have looked at them, see nibbler_noline()). */
+    Py_ssize_t scanned = nibbler_noline(n);
     for (;;) {
-        if (nibbler_unread(&self->nib) == 0) {
-            Py_ssize_t r = buffered_fill(self, 0);
-            if (r == -1) {
-                if (writer != NULL) {
-                    buffered_unread(self, PyBytesWriter_GetData(writer),
-                                    PyBytesWriter_GetSize(writer));
-                }
-                goto error;
+        Py_ssize_t unread = nibbler_unread(n);
+        Py_ssize_t end = limit >= 0 && limit < unread ? limit : unread;
+        if (scanned < end) {
+            const char *p = n->list.items[0].ptr;
+            const char *nl = memchr(p + scanned, '\n', end - scanned);
+            if (nl != NULL) {
+                return nibbler_take_bytes(n, nl - p + 1);
             }
-            if (r == -2 && (writer == NULL
-                            || limit >= 0
-                            || (PyBytesWriter_GetSize(writer)
-                                < READLINE_KEEP_MAX * self->nib.capacity)))
+            scanned = end;
+        }
+        if (limit >= 0 && scanned >= limit) {
+            return nibbler_take_bytes(n, limit);
+        }
+        Py_ssize_t r = buffered_fill(self, 0);
+        if (r == -1 || r == -2) {
+            if (r == -1 || unread == 0 || limit >= 0
+                || unread < READLINE_KEEP_MAX * n->capacity)
             {
-                /* Would block before the end of the line: keep what there
-                   is of it for the next call, and return None. */
-                if (writer != NULL) {
-                    buffered_unread(self, PyBytesWriter_GetData(writer),
-                                    PyBytesWriter_GetSize(writer));
-                    PyBytesWriter_Discard(writer);
-                    if (PyErr_Occurred()) {
-                        return NULL;
-                    }
+                /* The partial line stays for the next call (gh-51571),
+                   which looks for the end of the line after what was
+                   looked at.  Would block: return None, unless it is too
+                   long to keep. */
+                nibbler_set_noline(n, scanned);
+                if (r == -1) {
+                    return NULL;
                 }
                 Py_RETURN_NONE;
             }
-            if (r <= 0) {
-                break;
-            }
+            return nibbler_take_bytes(n, unread);
         }
-        Py_ssize_t k = nibbler_line(&self->nib, limit);
-        int done = k >= 0;
-        if (done && writer == NULL) {
-            /* The whole line was in the read-ahead. */
-            return nibbler_take_bytes(&self->nib, k);
-        }
-        if (!done) {
-            /* No end of line in the read-ahead, nor limit reached: take
-               all of it. */
-            k = nibbler_unread(&self->nib);
-        }
-        if (writer == NULL) {
-            writer = PyBytesWriter_Create(0);
-            if (writer == NULL) {
-                return NULL;
-            }
-        }
-        Py_ssize_t size = PyBytesWriter_GetSize(writer);
-        if (PyBytesWriter_Grow(writer, k) < 0) {
-            goto error;
-        }
-        (void)nibbler_take_into(&self->nib,
-                                (char *)PyBytesWriter_GetData(writer) + size,
-                                k);
-        if (limit >= 0 && (limit -= k) == 0) {
-            done = 1;
-        }
-        if (done) {
-            break;
+        if (r == 0) {
+            /* EOF: what there is (b"" for none). */
+            return nibbler_take_bytes(n, unread);
         }
     }
-    if (writer == NULL) {
-        return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
-    }
-    return PyBytesWriter_Finish(writer);
-
-error:
-    PyBytesWriter_Discard(writer);
-    return NULL;
 }
 
 /*
@@ -3260,11 +3310,12 @@ buffered_text_peek_locked(buffered *self, Py_ssize_t need, morsel *m)
 /* m views another block: out of line, so that _PyIONibbler_view() needs
    no stack frame. */
 Py_NO_INLINE static int
-nibbler_text_view_block(nibbler_end *e, Py_ssize_t c, _PyIO_Morsel *m)
+nibbler_text_view_block(nibbler_end *e, Py_ssize_t c, Py_ssize_t limit,
+                        _PyIO_Morsel *m)
 {
     Py_XSETREF(m->obj, Py_NewRef(e->block));
     m->ptr = PyBytes_AS_STRING(e->block) + c;
-    m->len = e->limit - c;
+    m->len = limit - c;
     return 1;
 }
 
@@ -3275,15 +3326,16 @@ _PyIONibbler_view(PyObject *op, _PyIO_Morsel *m)
     assert(_PyIO_is_nibbler_buffered_type(Py_TYPE(op)));
     nibbler_end *e = nibbler_end_get(&self->nib, 0);
     Py_ssize_t c = e == NULL ? -1 : FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
-    if (c < 0 || c == e->limit || buffered_dict(self) != NULL) {
+    Py_ssize_t limit = c < 0 ? 0 : nibbler_end_limit(e);
+    if (c < 0 || c == limit || buffered_dict(self) != NULL) {
         return 0;
     }
     if (m->obj != e->block) {
-        return nibbler_text_view_block(e, c, m);
+        return nibbler_text_view_block(e, c, limit, m);
     }
     /* m keeps its reference to the block. */
     m->ptr = PyBytes_AS_STRING(e->block) + c;
-    m->len = e->limit - c;
+    m->len = limit - c;
     return 1;
 }
 
