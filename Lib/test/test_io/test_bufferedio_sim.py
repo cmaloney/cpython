@@ -1530,6 +1530,26 @@ class PositionTest:
                 with self.open(os_helper.TESTFN, "rb") as f:
                     self.assertEqual(f.read(), b"abcdefghijkl")
 
+    def test_append_mode_seek_in_buffer_after_write(self):
+        # A write to a raw file in append mode lands at the end of the
+        # file, not at the position the buffered object last knew: seek()
+        # within the read buffer afterwards must not count from there.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with self.open(os_helper.TESTFN, "wb") as f:
+            f.write(b"0123456789")
+        with self.BufferedRandom(self.FileIO(os_helper.TESTFN, "a+"),
+                                 8) as f:
+            f.seek(0)
+            f.write(b"X" * 20)
+            with self.open(os_helper.TESTFN, "ab") as g:
+                g.write(b"abcdef")
+            self.assertEqual(f.read(1), b"a")
+            self.assertEqual(f.seek(1, 1), 32)
+            self.assertEqual(f.read(1), b"c")
+            self.assertEqual(f.seek(-3, 1), 30)
+            self.assertEqual(f.read(2), b"ab")
+            self.assertEqual(f.tell(), 32)
+
 
     @property
     def detached_errors(self):

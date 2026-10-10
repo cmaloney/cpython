@@ -2201,8 +2201,16 @@ _bufferedwriter_raw_write(buffered *self, char *start, Py_ssize_t len)
         PyErr_SetString(PyExc_OSError, "raw write() made no progress");
         return -1;
     }
-    if (n > 0 && self->abs_pos != -1)
-        self->abs_pos += n;
+    if (n > 0 && self->abs_pos != -1) {
+        if (self->raw_appending) {
+            /* The data went to the end of the file, not to abs_pos: let
+               RAW_TELL() ask the raw stream. */
+            self->abs_pos = -1;
+        }
+        else {
+            self->abs_pos += n;
+        }
+    }
     return n;
 }
 
