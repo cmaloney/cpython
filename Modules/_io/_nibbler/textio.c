@@ -2141,7 +2141,7 @@ text_quick_translate(PyObject *chars, Py_ssize_t ci, Py_ssize_t k,
    of text_take()'s work.  Returns the text, or NULL, with an exception set
    or not (then text_read_impl() goes on as if this wasn't tried). */
 static inline PyObject *
-text_quick(textio *self, tconf *cf, PyObject *buffer, Py_ssize_t n, int line)
+text_quick(textio *self, tconf *cf, Py_ssize_t n, int line)
 {
     /* What is known of the characters: with the GIL, the cache, which
        other threads may change while this one waits to take the bytes;
@@ -2264,7 +2264,7 @@ text_quick(textio *self, tconf *cf, PyObject *buffer, Py_ssize_t n, int line)
     }
     /* Taking the bytes finds out whether the characters are theirs. */
     Py_ssize_t koff = KOFF;
-    if (_PyIONibbler_advance(buffer, C->key, koff, b) != 1) {
+    if (_PyIONibbler_advance(cf->buffer, C->key, koff, b) != 1) {
         Py_CLEAR(text);
         goto done;
     }
@@ -2377,7 +2377,7 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
         }
     }
     if (!lockfree && peeks && self->nib && n != 0) {
-        PyObject *text = text_quick(self, cf, cf->buffer, n, line);
+        PyObject *text = text_quick(self, cf, n, line);
         if (text != NULL || PyErr_Occurred()) {
             conf_put(cf);
             return text;
@@ -2568,19 +2568,20 @@ text_read_more(textio *self, Py_ssize_t n, int line, int lockfree)
 static inline PyObject *
 text_read(textio *self, Py_ssize_t n, int line)
 {
-    /* The settings borrowed: nothing text_quick() does before it is done
-       with them (and the buffer) lets other code run, or this thread wait
-       (with free threading, settings replaced are freed only once it has).
-       (Without the buffer, text_read_impl() raises.) */
+    /* The settings borrowed: text_quick() runs no other code, and is done
+       with them once it may wait (in _PyIONibbler_advance(), which keeps
+       the buffer alive then); with free threading, lockfree settings are
+       freed only once every thread is past such a call (see conf_set()).
+       lockfree settings have a buffer; n == 0 is never quick. */
     tconf *cf = conf_peek(self);
-    int lockfree = cf != NULL && cf->lockfree;
-    if (lockfree && n != 0 && cf->buffer != NULL) {
-        PyObject *res = text_quick(self, cf, cf->buffer, n, line);
+    if (cf != NULL && cf->lockfree) {
+        PyObject *res = text_quick(self, cf, n, line);
         if (res != NULL || PyErr_Occurred()) {
             return res;
         }
+        return text_read_more(self, n, line, 1);
     }
-    return text_read_more(self, n, line, lockfree);
+    return text_read_more(self, n, line, 0);
 }
 
 /*
