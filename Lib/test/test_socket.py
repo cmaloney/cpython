@@ -5725,13 +5725,32 @@ class FileObjectClassTestCase(SocketConnectedTest):
         self.write_file = None
         SocketConnectedTest.clientTearDown(self)
 
+    def _keeps_data_on_timeout(self):
+        # Does the buffered reader keep what it read before a timeout for
+        # the next read?  (gh-51571)  Also called from the client thread.
+        return (self.bufsize != 0
+                and getattr(io.BufferedReader, "_is_nibbler", False))
+
+    def _keeps_text_on_timeout(self):
+        # Does the file object keep what it read before a timeout in the
+        # middle of a line or of the rest?  In text mode, TextIOWrapper must
+        # keep it too.
+        return (self._keeps_data_on_timeout()
+                and ('b' in self.read_mode
+                     or getattr(io.TextIOWrapper, "_is_nibbler", False)))
+
     def testReadAfterTimeout(self):
         # Issue #7322: A file object must disallow further reads
-        # after a timeout has occurred.
+        # after a timeout has occurred, unless its buffered reader keeps
+        # the data read before it (gh-51571).
         self.cli_conn.settimeout(1)
         self.read_file.read(3)
         # First read raises a timeout
         self.assertRaises(TimeoutError, self.read_file.read, 1)
+        if self._keeps_data_on_timeout():
+            # Second read times out again
+            self.assertRaises(TimeoutError, self.read_file.read, 1)
+            return
         # Second read is disallowed
         with self.assertRaises(OSError) as ctx:
             self.read_file.read(1)
@@ -5740,6 +5759,48 @@ class FileObjectClassTestCase(SocketConnectedTest):
     def _testReadAfterTimeout(self):
         self.write_file.write(self.write_msg[0:3])
         self.write_file.flush()
+        self.serv_finished.wait()
+
+    def testReadlineAfterTimeout(self):
+        # gh-51571: a timeout in the middle of a line loses nothing, and
+        # reading goes on once the rest arrives.
+        if not self._keeps_text_on_timeout():
+            self.skipTest("data read before a timeout is lost")
+        self.cli_conn.settimeout(0.5)
+        self.assertRaises(TimeoutError, self.read_file.readline)
+        self.evt1.set()
+        self.cli_conn.settimeout(support.LONG_TIMEOUT)
+        self.assertEqual(self.read_file.readline(), self.read_msg)
+
+    def _testReadlineAfterTimeout(self):
+        if not self._keeps_text_on_timeout():
+            return
+        self.write_file.write(self.write_msg[0:3])
+        self.write_file.flush()
+        self.evt1.wait()
+        self.write_file.write(self.write_msg[3:])
+        self.write_file.flush()
+        self.serv_finished.wait()
+
+    def testReadAllAfterTimeout(self):
+        # gh-51571: the same for read() to the end.
+        if not self._keeps_text_on_timeout():
+            self.skipTest("data read before a timeout is lost")
+        self.cli_conn.settimeout(0.5)
+        self.assertRaises(TimeoutError, self.read_file.read)
+        self.evt1.set()
+        self.cli_conn.settimeout(support.LONG_TIMEOUT)
+        self.assertEqual(self.read_file.read(), self.read_msg)
+
+    def _testReadAllAfterTimeout(self):
+        if not self._keeps_text_on_timeout():
+            return
+        self.write_file.write(self.write_msg[0:3])
+        self.write_file.flush()
+        self.evt1.wait()
+        self.write_file.write(self.write_msg[3:])
+        self.write_file.flush()
+        self.serv_conn.shutdown(socket.SHUT_WR)
         self.serv_finished.wait()
 
     def testSmallRead(self):
