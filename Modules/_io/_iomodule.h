@@ -80,6 +80,10 @@ extern Py_ssize_t _PyIO_find_line_ending(
    Should only be called when PyErr_Occurred() is true.
 */
 extern int _PyIO_trap_eintr(void);
+/* Warn that close() discarded n buffered bytes because writing them out
+   would block (would_block) or failed.  Keeps the raised exception, or
+   chains it to the warning's if that raised. */
+extern void _PyIO_warn_discarded(Py_ssize_t n, int would_block);
 
 #define DEFAULT_BUFFER_SIZE (128 * 1024)  /* bytes */
 

@@ -475,6 +475,13 @@ io
   what to write again.
   (Contributed by Cody Maloney.)
 
+* When the flush done by :meth:`!close` of a buffered binary stream fails,
+  for example because it would block or the pipe is broken, the stream is
+  now closed completely and the buffered data is discarded with a
+  :exc:`RuntimeWarning` saying how many bytes were lost, instead of being
+  written again by a later :meth:`!close` or the finalizer.
+  (Contributed by Cody Maloney in :gh:`83973`.)
+
 
 ipaddress
 ---------

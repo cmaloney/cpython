@@ -351,6 +351,23 @@ I/O base classes
       As a convenience, it is allowed to call this method more than once;
       only the first call, however, will have an effect.
 
+      If the flush of a buffered stream (:class:`BufferedWriter`,
+      :class:`BufferedRandom`, :class:`BufferedRWPair`) fails, because it
+      would block or for any other reason (an error, or an exception such as
+      :exc:`KeyboardInterrupt` raised while it waits), the stream is closed
+      anyway, raw stream included, and the data still buffered is discarded:
+      a :exc:`RuntimeWarning` says how many bytes were lost, and
+      :meth:`!close` raises the exception.  Nothing writes the data again,
+      neither a later :meth:`!close` nor the finalizer.  To avoid losing
+      data, call :meth:`flush` until it succeeds before closing.  The
+      :class:`TextIOWrapper` of :mod:`!_pyio` likewise doesn't let its
+      buffer's :meth:`!close` flush again; the one of :mod:`!io` closes its
+      buffer, whose :meth:`!close` tries to flush once more.
+
+      .. versionchanged:: next
+         Buffered streams discard their buffered data with a
+         :exc:`RuntimeWarning` when the flush of :meth:`!close` fails.
+
    .. attribute:: closed
 
       ``True`` if the stream is closed.

@@ -1,0 +1,10 @@
+When the flush done by :meth:`!close` of a buffered binary stream of
+:mod:`io` fails, the stream is now closed completely, raw stream included,
+and the data still buffered is discarded with a :exc:`RuntimeWarning` that
+says how many bytes were lost, instead of a later :meth:`!close` or the
+finalizer trying to write it again. After a :exc:`KeyboardInterrupt`
+interrupted a blocked write at exit, a second one is no longer needed, and a
+broken pipe is no longer reported twice (:gh:`55589`). The
+:class:`!TextIOWrapper` of :mod:`!_pyio` does the same. A private
+:meth:`!_discard_writes` method of buffered objects drops the pending
+writes.

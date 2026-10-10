@@ -519,6 +519,36 @@ _io__Buffered__dealloc_warn_impl(buffered *self, PyObject *source)
     Py_RETURN_NONE;
 }
 
+/*[clinic input]
+_io._Buffered._discard_writes
+
+Drop the pending writes; return how many bytes they were.
+
+TextIOWrapper.close() calls this when its flush failed, so that the
+close() of its buffer doesn't try to write them again.
+[clinic start generated code]*/
+
+static PyObject *
+_io__Buffered__discard_writes_impl(buffered *self)
+/*[clinic end generated code: output=4a612257ab62b745 input=8c98a37d7a14ddfa]*/
+{
+    CHECK_INITIALIZED(self)
+    if (!ENTER_BUFFERED(self)) {
+        return NULL;
+    }
+    Py_ssize_t n = 0;
+    if (self->writable && VALID_WRITE_BUFFER(self)) {
+        n = Py_SAFE_DOWNCAST(self->write_end - self->write_pos,
+                             Py_off_t, Py_ssize_t);
+        /* The position goes back to the raw stream's. */
+        self->write_pos = 0;
+        self->write_end = -1;
+        self->read_end = -1;
+    }
+    LEAVE_BUFFERED(self)
+    return PyLong_FromSsize_t(n);
+}
+
 /*
  * _BufferedIOMixin methods
  * This is not a class, just a collection of methods that will be reused
@@ -577,6 +607,8 @@ _io__Buffered_close_impl(buffered *self)
 /*[clinic end generated code: output=7280b7b42033be0c input=56d95935b03fd326]*/
 {
     PyObject *res = NULL;
+    Py_ssize_t discarded = 0;
+    int would_block = 0;
     int r;
 
     CHECK_INITIALIZED(self)
@@ -611,6 +643,15 @@ _io__Buffered_close_impl(buffered *self)
         _PyErr_ChainExceptions1(exc);
         return NULL;
     }
+    if (exc != NULL && VALID_WRITE_BUFFER(self)) {
+        /* The flush failed: pending writes are lost with the buffer, and
+           nothing writes them again (gh-83973, gh-55589). */
+        discarded = Py_SAFE_DOWNCAST(self->write_end - self->write_pos,
+                                     Py_off_t, Py_ssize_t);
+        would_block = PyErr_GivenExceptionMatches(exc, PyExc_BlockingIOError);
+        self->write_pos = 0;
+        self->write_end = -1;
+    }
 
     res = PyObject_CallMethodNoArgs(self->raw, &_Py_ID(close));
 
@@ -629,6 +670,10 @@ _io__Buffered_close_impl(buffered *self)
 
 end:
     LEAVE_BUFFERED(self)
+    if (discarded > 0) {
+        /* Without the lock: the warning may write to this file. */
+        _PyIO_warn_discarded(discarded, would_block);
+    }
     return res;
 }
 
@@ -928,6 +973,21 @@ _PyIO_trap_eintr(void)
     /* This silences any error set by PyObject_RichCompareBool() */
     PyErr_SetRaisedException(exc);
     return 0;
+}
+
+void
+_PyIO_warn_discarded(Py_ssize_t n, int would_block)
+{
+    PyObject *exc = PyErr_GetRaisedException();
+    if (PyErr_WarnFormat(PyExc_RuntimeWarning, 1,
+                         "close() discarded %zd buffered bytes: writing them "
+                         "%s", n, would_block ? "would block" : "failed") < 0)
+    {
+        _PyErr_ChainExceptions1(exc);
+    }
+    else {
+        PyErr_SetRaisedException(exc);
+    }
 }
 
 /*
@@ -2750,6 +2810,7 @@ static PyMethodDef bufferedreader_methods[] = {
     _IO__BUFFERED_FILENO_METHODDEF
     _IO__BUFFERED_ISATTY_METHODDEF
     _IO__BUFFERED__DEALLOC_WARN_METHODDEF
+    _IO__BUFFERED__DISCARD_WRITES_METHODDEF
 
     _IO__BUFFERED_READ_METHODDEF
     _IO__BUFFERED_PEEK_METHODDEF
@@ -2813,6 +2874,7 @@ static PyMethodDef bufferedwriter_methods[] = {
     _IO__BUFFERED_FILENO_METHODDEF
     _IO__BUFFERED_ISATTY_METHODDEF
     _IO__BUFFERED__DEALLOC_WARN_METHODDEF
+    _IO__BUFFERED__DISCARD_WRITES_METHODDEF
 
     _IO_BUFFEREDWRITER_WRITE_METHODDEF
     _IO__BUFFERED_TRUNCATE_METHODDEF
@@ -2923,6 +2985,7 @@ static PyMethodDef bufferedrandom_methods[] = {
     _IO__BUFFERED_FILENO_METHODDEF
     _IO__BUFFERED_ISATTY_METHODDEF
     _IO__BUFFERED__DEALLOC_WARN_METHODDEF
+    _IO__BUFFERED__DISCARD_WRITES_METHODDEF
 
     _IO__BUFFERED_FLUSH_METHODDEF
 
