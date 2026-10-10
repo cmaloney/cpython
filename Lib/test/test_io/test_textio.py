@@ -1443,8 +1443,6 @@ class TextIOWrapperTest:
                 self.assertEqual(f.read(), 'aaaxxx'.encode(charset))
 
     def test_read_write_bom(self):
-        if self.is_stock_C:
-            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # Same test, but writing after reading to the end: the encoder
         # isn't at the start of the stream any more.
         filename = os_helper.TESTFN
