@@ -1410,7 +1410,8 @@ _buffered_readline(buffered *self, Py_ssize_t limit)
         if (n == -2 && PyBytesWriter_GetSize(writer) <= self->buffer_size) {
             /* Would block before the end of the line: keep what there is
                of it in the buffer, which is empty, for the next call, and
-               return None.  (A longer partial line is returned.) */
+               return None.  The buffer size bounds what is kept, with or
+               without a size: a longer partial line is returned. */
             Py_ssize_t size = PyBytesWriter_GetSize(writer);
             memcpy(self->buffer, PyBytesWriter_GetData(writer), size);
             self->pos = 0;

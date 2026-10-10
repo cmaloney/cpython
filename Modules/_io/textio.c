@@ -2414,11 +2414,6 @@ _PyIO_find_line_ending(
     }
 }
 
-/* Without a limit, a partial line that would block is kept for the next
-   readline() (which raises BlockingIOError) until it is this many times
-   the chunk size: then it is returned as it is. */
-#define READLINE_KEEP_MAX 64
-
 /* While readline() reads a line spanning chunks, the tell() snapshot of
    where the line started: if the stream would block before the line ends,
    the line is kept for the next call, so the position must stay at its
@@ -2558,17 +2553,17 @@ error:
 /* readline() would block before the end of the line, with chunked chars
    in chunks and then remaining (either may be NULL): keep them for the next
    call and raise BlockingIOError, since "" would mean EOF.  Returns 0
-   (the line is returned as it is, as at EOF) only when it has grown too
-   long to keep. */
+   (the line is returned as it is, as at EOF) only when it is longer than
+   the chunk size, the text layer's buffer size, which bounds what is
+   kept, as the buffer size does for binary readline(). */
 Py_NO_INLINE static int
 textiowrapper_readline_blocked(textio *self, PyObject *chunks,
-                               PyObject *remaining, Py_ssize_t chunked,
-                               Py_ssize_t limit)
+                               PyObject *remaining, Py_ssize_t chunked)
 {
     if (remaining != NULL) {
         chunked += PyUnicode_GET_LENGTH(remaining);
     }
-    if (limit < 0 && chunked >= READLINE_KEEP_MAX * self->chunk_size) {
+    if (chunked > self->chunk_size) {
         return 0;
     }
     if ((remaining != NULL || chunks != NULL)
@@ -2652,7 +2647,7 @@ _textiowrapper_readline(textio *self, Py_ssize_t limit)
         if (res != 1) {
             if (res == TEXTIO_BLOCKED
                 && textiowrapper_readline_blocked(self, chunks, remaining,
-                                                  chunked, limit) < 0)
+                                                  chunked) < 0)
             {
                 goto error;
             }

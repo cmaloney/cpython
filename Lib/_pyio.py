@@ -1208,8 +1208,9 @@ class BufferedReader(_BufferedIOMixin):
 
     def _readline_would_block(self, res, size):
         # Keep the partial line for the next call, which can then find its
-        # end, unless it is too long to keep.
-        if size < 0 and len(res) >= _READLINE_KEEP_MAX * self.buffer_size:
+        # end, unless it is longer than the buffer size: then it is
+        # returned as it is.
+        if len(res) > self.buffer_size:
             return res.take_bytes()
         if res:
             with self._read_lock:
@@ -1658,12 +1659,6 @@ def _warn_discarded(n, would_block):
     warnings.warn(f"close() discarded {n} buffered bytes: writing them "
                   f"{'would block' if would_block else 'failed'}",
                   ResourceWarning, stacklevel=3)
-
-
-# Without a size, a partial line that would block is kept for the next
-# readline() (which then returns None) until it is this many times the
-# buffer size: then it is returned as it is.
-_READLINE_KEEP_MAX = 64
 
 
 def _new_buffersize(bytes_read):
@@ -3023,12 +3018,11 @@ class TextIOWrapper(TextIOBase):
                     break
             if self._decoded_chars:
                 line += self._get_decoded_chars()
-            elif more is None and (
-                    size >= 0 or
-                    len(line) < _READLINE_KEEP_MAX * self._CHUNK_SIZE):
+            elif more is None and len(line) <= self._CHUNK_SIZE:
                 # Would block before the end of the line: keep what there
                 # is of it for the next call, and raise, since "" would
-                # mean EOF.
+                # mean EOF.  (A line longer than the chunk size, the text
+                # layer's buffer size, is returned as it is.)
                 if line:
                     self._keep_line(line, line_snapshot)
                 raise BlockingIOError(

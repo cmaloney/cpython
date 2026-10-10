@@ -296,8 +296,7 @@ class CTestCase(unittest.TestCase):
     #       _is_nibbler.
     #   is_stock_C: the buffered layer is _io's stock one, for its limits
     #       that _pyio doesn't share (peek() returns the read-ahead however
-    #       short; readline() that would block keeps a partial line only if
-    #       it fits in the buffer).
+    #       short).
     is_C = True
 
     @property

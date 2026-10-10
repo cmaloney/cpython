@@ -1178,17 +1178,27 @@ class TextIOWrapperTest:
         self.assertEqual(t.readline(3), "abc")
         self.assertRaises(BlockingIOError, t.readline, 5)
         self.assertEqual(t.readline(5), "defg\n")
-        # Too long to keep: returned as it is, as at EOF.
-        raw = self.MockRawIO((b"x" * 100, None, b"y\n"))
-        t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
-        t._CHUNK_SIZE = 1
-        self.assertEqual(t.readline(), "x" * 100)
-        self.assertEqual(t.readline(), "y\n")
-        raw = self.MockRawIO((b"x" * 63, None, b"y\n"))
-        t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
-        t._CHUNK_SIZE = 1
-        self.assertRaises(BlockingIOError, t.readline)
-        self.assertEqual(t.readline(), "x" * 63 + "y\n")
+
+    def test_readline_would_block_long_partial_line(self):
+        # A partial line is kept up to the chunk size (the text layer's
+        # buffer size); a longer one is returned as it is, as at EOF, with
+        # or without a size.
+        if self.is_nibbler:
+            self.skipTest("_io._nibbler keeps up to 64 times the chunk size")
+        for size in -1, 100:
+            with self.subTest(size=size):
+                raw = self.MockRawIO((b"x" * 5, None, b"y\n"))
+                t = self.TextIOWrapper(self.BufferedReader(raw),
+                                       encoding="utf-8")
+                t._CHUNK_SIZE = 4
+                self.assertEqual(t.readline(size), "x" * 5)
+                self.assertEqual(t.readline(size), "y\n")
+                raw = self.MockRawIO((b"xx", b"xx", None, b"y\n"))
+                t = self.TextIOWrapper(self.BufferedReader(raw),
+                                       encoding="utf-8")
+                t._CHUNK_SIZE = 4
+                self.assertRaises(BlockingIOError, t.readline, size)
+                self.assertEqual(t.readline(size), "x" * 4 + "y\n")
 
     def test_tell_after_readline_would_block(self):
         # A readline() that would block after a partial line keeps the
@@ -1221,7 +1231,7 @@ class TextIOWrapperTest:
             ("utf-8", "", "ab\rcd", 3),
         ]
         # A readline() that would block keeps the partial line and raises;
-        # one that has grown too long to keep (64 times the chunk size)
+        # one that has grown too long to keep (longer than the chunk size)
         # returns it.
         prefix = "x" * 70
         for encoding, newline, text, at in cases:
