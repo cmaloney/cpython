@@ -671,7 +671,7 @@ class TextIOWrapperTest:
         # Reads of a file give what reads of the same bytes in a BytesIO
         # give, also where error handlers drop or replace invalid bytes
         # (_io._nibbler counts characters in the bytes it reads from).
-        data = b"ab\xffcd\n\xc3(\x80x\r\n\xe2\x82\x81\n" * 20
+        data = b"ab\xffcd\n\xc3(\x80x\r\n\xe2\x82\x81\ny\rz\r" * 20
         with self.open(os_helper.TESTFN, "wb") as f:
             f.write(data)
         ops = [("readline", 1), ("readline", 5), ("read", 3), ("readline", -1),

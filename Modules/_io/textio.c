@@ -2613,6 +2613,46 @@ native_peek(textio *self, PyObject *buffer, Py_ssize_t need)
     return _PyIONibbler_peek(buffer, need, &self->view);
 }
 
+/* How far native_readline_fast() looks for "\n". */
+#define NATIVE_LINE 1024
+
+/* native_readline_fast() of an ASCII line ending with a "\r" not followed
+   by "\n", or NULL. */
+Py_NO_INLINE static PyObject *
+native_readline_cr(textio *self, PyObject *buffer)
+{
+    _PyIO_Morsel *m = &self->view;
+    const char *s = m->ptr;
+    const char *cr = native_first(self, &self->cr, 1, s,
+                                  s + Py_MIN(m->len, NATIVE_LINE));
+    if (cr + 1 >= s + m->len || *cr != '\r'
+        || native_first(self, &self->ascii, 0, s, cr) != cr)
+    {
+        /* What follows isn't there yet, no "\r", or not ASCII. */
+        return NULL;
+    }
+    Py_ssize_t len = cr - s + 1;
+    PyObject *line;
+    if (!self->readtranslate) {
+        line = native_ascii_str(s, len);
+    }
+    else if (len == 1) {
+        line = PyUnicode_FromOrdinal('\n');
+    }
+    else if ((line = PyUnicode_New(len, 127)) != NULL) {
+        Py_UCS1 *data = PyUnicode_1BYTE_DATA(line);
+        memcpy(data, s, len - 1);
+        data[len - 1] = '\n';
+    }
+    if (line != NULL && _PyIONibbler_consume(buffer, m, len) != 1) {
+        Py_CLEAR(line);
+    }
+    if (line != NULL) {
+        nldecoder_object_CAST(self->decoder)->seennl |= SEEN_CR;
+    }
+    return line;
+}
+
 /* The fast path of readline() (no limit) for a line that ends with "\n"
    in the buffer already, and has no "\r" for universal newlines: the line,
    or NULL, with an exception set or not (then native_readline()). */
@@ -2624,9 +2664,10 @@ native_readline_fast(textio *self, PyObject *buffer)
         return NULL;
     }
     const char *s = m->ptr;
-    const char *lf = memchr(s, '\n', m->len);
+    /* Not far: lines may end with "\r". */
+    const char *lf = memchr(s, '\n', Py_MIN(m->len, NATIVE_LINE));
     if (lf == NULL) {
-        return NULL;
+        return self->readuniversal ? native_readline_cr(self, buffer) : NULL;
     }
     Py_ssize_t len = lf - s + 1;
     const char *bad = native_clean(self, s, lf);
@@ -2796,10 +2837,14 @@ native_find_line_end(textio *self, const char *s, Py_ssize_t len,
 {
     const char *p = s + *start, *end = s + len;
     if (self->readuniversal) {
-        const char *lf = memchr(p, '\n', end - p);
-        const char *q = memchr(p, '\r', (lf != NULL ? lf : end) - p);
-        if (q == NULL) {
-            q = lf;
+        /* Up to the first "\r" (by windows, from what is known): not to
+           look for "\n" far past it. */
+        const char *q = NULL;
+        for (; q == NULL && p < end; p += NATIVE_SCAN) {
+            const char *w = end - p > NATIVE_SCAN ? p + NATIVE_SCAN : end;
+            q = native_first(self, &self->cr, 1, p, w);
+            const char *lf = memchr(p, '\n', q - p);
+            q = lf != NULL ? lf : q < w ? q : NULL;
         }
         if (q == NULL || (q + 1 == end && *q == '\r' && !eof)) {
             *start = q == NULL ? len : q - s;
