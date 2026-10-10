@@ -699,6 +699,9 @@ struct textio
     encodefunc_t encodefunc;
     /* Whether or not it's the start of the stream */
     char encoding_start_of_stream;
+    /* The encoder (not encodefunc) encoded text since it was created or
+       reset, so close() and detach() give it final=True (gh-79792). */
+    char enc_fed;
 
     /* Reads and writes are internally buffered in order to speed things up.
        However, any read will first flush the write buffer if itsn't empty.
@@ -1040,6 +1043,7 @@ _textiowrapper_set_encoder(textio *self, PyObject *codec_info,
 
     Py_CLEAR(self->encoder);
     self->encodefunc = NULL;
+    self->enc_fed = 0;
     self->encoder = _PyCodecInfo_GetIncrementalEncoder(codec_info, errors);
     if (self->encoder == NULL)
         return -1;
@@ -1630,6 +1634,44 @@ _io_TextIOWrapper_closed_get_impl(textio *self);
     }
 
 
+static int _textiowrapper_writeflush(textio *self);
+
+/* gh-79792: give the encoder the end of the text (final=True), and write
+   what it still held, for close() and detach().  Only after it encoded
+   text since it was created or reset: the built-in fast encoders
+   (encodefunc) hold nothing, and a fresh or reset encoder may begin with
+   a BOM. */
+static int
+textiowrapper_finish_encoder(textio *self)
+{
+    if (self->encoder == NULL || !self->enc_fed) {
+        return 0;
+    }
+    self->enc_fed = 0;
+    PyObject *b = PyObject_CallMethodObjArgs(
+        self->encoder, &_Py_ID(encode), &_Py_STR(empty), Py_True, NULL);
+    if (b == NULL) {
+        return -1;
+    }
+    if (!PyBytes_Check(b)) {
+        PyErr_Format(PyExc_TypeError,
+                     "encoder should return a bytes object, not '%.200s'",
+                     Py_TYPE(b)->tp_name);
+        Py_DECREF(b);
+        return -1;
+    }
+    PyObject *res = NULL;
+    if (PyBytes_GET_SIZE(b) == 0) {
+        res = Py_None;
+    }
+    else if (_textiowrapper_writeflush(self) == 0) {
+        res = buffer_callmethod_onearg(self, &_Py_ID(write), b);
+        Py_XDECREF(res);
+    }
+    Py_DECREF(b);
+    return res == NULL ? -1 : 0;
+}
+
 /*[clinic input]
 @critical_section
 _io.TextIOWrapper.detach
@@ -1640,7 +1682,9 @@ _io_TextIOWrapper_detach_impl(textio *self)
 /*[clinic end generated code: output=7ba3715cd032d5f2 input=c908a3b4ef203b0f]*/
 {
     PyObject *buffer;
-    if (_PyFile_Flush((PyObject *)self) < 0) {
+    if (textiowrapper_finish_encoder(self) < 0
+        || _PyFile_Flush((PyObject *)self) < 0)
+    {
         return NULL;
     }
     /* _PyFile_Flush could detach before returning; raise an exception. */
@@ -1793,6 +1837,9 @@ _io_TextIOWrapper_write_impl(textio *self, PyObject *text)
     }
     else {
         b = PyObject_CallMethodOneArg(self->encoder, &_Py_ID(encode), text);
+        if (b != NULL && PyBytes_Check(b)) {
+            self->enc_fed = 1;
+        }
     }
 
     Py_DECREF(text);
@@ -2604,6 +2651,7 @@ _textiowrapper_encoder_reset(textio *self, int start_of_stream)
                                         _PyLong_GetZero());
         self->encoding_start_of_stream = 0;
     }
+    self->enc_fed = 0;
     if (res == NULL)
         return -1;
     Py_DECREF(res);
@@ -3312,7 +3360,9 @@ _io_TextIOWrapper_close_impl(textio *self)
                 PyErr_Clear();
             }
         }
-        if (_PyFile_Flush((PyObject *)self) < 0) {
+        if (textiowrapper_finish_encoder(self) < 0
+            || _PyFile_Flush((PyObject *)self) < 0)
+        {
             exc = PyErr_GetRaisedException();
         }
 

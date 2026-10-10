@@ -2027,8 +2027,6 @@ class TextIOWrapperTest:
                         f.seek(cookie)
 
     def test_close_and_detach_finish_encoder(self):
-        if self.is_stock_C:
-            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # gh-79792: the incremental encoder gets final=True, so the idna
         # codec writes its last label.
         class Recorder(self.BytesIO):
