@@ -359,6 +359,36 @@ class IOTest:
                 return None
         self.assertRaises(BlockingIOError, next, R())
 
+    def test_readline_peek_would_block(self):
+        # IOBase.readline() over peek() and read(): None from either
+        # before anything arrived is None, after part of a line the part
+        # (which IOBase has nowhere to keep).
+        class R(self.IOBase):
+            def __init__(self, script):
+                self.script = script
+
+            def readable(self):
+                return True
+
+            def peek(self, size=0):
+                return self.script[0]
+
+            def read(self, size=-1):
+                data = self.script.pop(0)
+                if data is None:
+                    return None
+                b, rest = data[:size], data[size:]
+                if rest:
+                    self.script.insert(0, rest)
+                return b
+
+        f = R([None, b"ab", None, b"c\n"])
+        self.assertIsNone(f.readline())
+        f.script.pop(0)
+        self.assertEqual(f.readline(), b"ab")
+        f.script.pop(0)
+        self.assertEqual(f.readline(), b"c\n")
+
     def test_readlines_would_block(self):
         # readlines() built on iteration: when readline() would block, the
         # lines so far, or with none, what readline() gives: None for

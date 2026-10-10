@@ -1345,6 +1345,18 @@ class BufferedRWPairTest:
         self.assertEqual(pair().readlines(), [b"abc\n", b"def\n", b"h"])
         self.assertEqual(pair().readlines(5), [b"abc\n", b"def\n"])
 
+    def test_readline_would_block(self):
+        # readline() is the reader's: when the raw stream would block, it
+        # returns None and keeps a partial line for the next call.
+        raw = self.MockRawIO((b"ab", None, b"c\nd", None, None, b"e"))
+        pair = self.tp(raw, self.MockRawIO())
+        self.assertIsNone(pair.readline())
+        self.assertEqual(pair.readline(), b"abc\n")
+        self.assertIsNone(pair.readline())
+        self.assertRaises(BlockingIOError, next, pair)
+        self.assertEqual(pair.readline(), b"de")
+        self.assertEqual(pair.readline(), b"")
+
     def test_read1(self):
         # .read1() is delegated to the underlying reader object, so this test
         # can be shallow.
