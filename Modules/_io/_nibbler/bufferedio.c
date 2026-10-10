@@ -480,10 +480,74 @@ buffered_raw_result(PyObject *res, Py_ssize_t len, const char *method)
     return n;
 }
 
-/* One raw readinto() of up to len bytes at dst.  Returns the count (0 at
-   EOF), WOULD_BLOCK if the raw stream would block, or -1 on error. */
+/* Python code had view (see buffered_memory_view()): release it, so that
+   keeping it gives no access to the memory any more (gh-60198, gh-157075).
+   Returns 1 if the memory can still be reached anyway, through a view made
+   from it or a buffer it exported: then memory of ours must neither be
+   reused nor handed out without a copy.  Keeps the raised exception.
+   Steals view. */
+static int
+buffered_release_view(PyObject *view)
+{
+    PyMemoryViewObject *mv = (PyMemoryViewObject *)view;
+    int shared = mv->exports > 0 || mv->mbuf->exports > 1;
+    PyObject *exc = PyErr_GetRaisedException();
+    PyObject *r = PyObject_CallMethodNoArgs(view, &_Py_ID(release));
+    if (r == NULL) {
+        PyErr_Clear();
+        shared = 1;
+    }
+    Py_XDECREF(r);
+    PyErr_SetRaisedException(exc);
+    Py_DECREF(view);
+    return shared;
+}
+
+/* A memoryview of mem[0:len] for Python code (writable with PyBUF_WRITE),
+   inside memobj: a bytes object of ours, or the object whose buffer the
+   caller passed (whose export the view holds, so that a view made from it
+   keeps that memory valid like any other).  Without memobj, the memory must
+   stay valid otherwise. */
+static PyObject *
+buffered_memory_view(char *mem, Py_ssize_t len, int flags, PyObject *memobj)
+{
+    PyObject *view = PyMemoryView_FromMemory(mem, len, flags);
+    if (view == NULL || memobj == NULL) {
+        return view;
+    }
+    PyMemoryViewObject *mv = (PyMemoryViewObject *)view;
+    Py_buffer *master = &mv->mbuf->master;
+    if (PyBytes_CheckExact(memobj)) {
+        /* Released with the managed buffer; bytes have no
+           bf_releasebuffer. */
+        master->obj = Py_NewRef(memobj);
+        return view;
+    }
+    /* The view keeps its own shape; the managed buffer releases the export
+       when the last view made from it goes. */
+    Py_buffer whole;
+    if (PyObject_GetBuffer(memobj, &whole, PyBUF_WRITABLE) < 0) {
+        Py_DECREF(view);
+        return NULL;
+    }
+    char *start = whole.buf;
+    if (mem < start || mem + len > start + whole.len) {
+        /* Not the memory the caller passed after all. */
+        PyBuffer_Release(&whole);
+        return view;
+    }
+    *master = whole;
+    mv->view.obj = memobj;
+    return view;
+}
+
+/* One raw readinto() of up to len bytes at dst, inside memobj (see
+   buffered_memory_view()).  Returns the count (0 at EOF), WOULD_BLOCK if
+   the raw stream would block, or -1 on error.  Sets *shared if Python code
+   can still reach the memory (see buffered_release_view()). */
 static Py_ssize_t
-buffered_raw_read(buffered *self, char *dst, Py_ssize_t len)
+buffered_raw_read(buffered *self, char *dst, Py_ssize_t len, PyObject *memobj,
+                  int *shared)
 {
     if (self->stash != NULL) {
         /* Data the raw stream returned already. */
@@ -492,7 +556,8 @@ buffered_raw_read(buffered *self, char *dst, Py_ssize_t len)
     if (self->raw_fileio) {
         return _PyFileIO_readinto(self->raw, dst, len);
     }
-    PyObject *view = PyMemoryView_FromMemory(dst, len, PyBUF_WRITE);
+    assert(memobj != NULL);
+    PyObject *view = buffered_memory_view(dst, len, PyBUF_WRITE, memobj);
     if (view == NULL) {
         return -1;
     }
@@ -502,15 +567,29 @@ buffered_raw_read(buffered *self, char *dst, Py_ssize_t len)
     do {
         res = PyObject_CallMethodOneArg(self->raw, &_Py_ID(readinto), view);
     } while (res == NULL && _PyIO_trap_eintr());
-    Py_DECREF(view);
+    if (buffered_release_view(view)) {
+        *shared = 1;
+    }
     return buffered_raw_result(res, len, "readinto");
 }
 
-/* A read-only memoryview of the morsel's bytes. */
+/* A read-only memoryview of the morsel, which keeps its bytes alive; or,
+   without obj (data of the current write() call), of memory only valid
+   during the call. */
 static PyObject *
 buffered_view(const morsel *m)
 {
-    return PyMemoryView_FromMemory((char *)m->ptr, m->len, PyBUF_READ);
+    if (m->obj == NULL) {
+        return PyMemoryView_FromMemory((char *)m->ptr, m->len, PyBUF_READ);
+    }
+    PyObject *whole = PyMemoryView_FromObject(m->obj);
+    if (whole == NULL) {
+        return NULL;
+    }
+    Py_ssize_t start = m->ptr - PyBytes_AS_STRING(m->obj);
+    PyObject *view = PySequence_GetSlice(whole, start, start + m->len);
+    Py_DECREF(whole);
+    return view;
 }
 
 /* A raw write of len > 0 bytes that wrote none: raise, since retrying it
@@ -563,7 +642,26 @@ buffered_raw_writev_py(buffered *self, const _PyIO_Span *spans,
         res = PyObject_CallMethodOneArg(self->raw, name, arg);
         errnum = errno;
     } while (res == NULL && _PyIO_trap_eintr());
-    Py_DECREF(arg);
+    /* Views of the data of the current write() call have no exporter:
+       release them, so that they give no access to it later.  (The others
+       keep their bytes alive.) */
+    if (cnt == 1) {
+        if (objs[0] == NULL) {
+            (void)buffered_release_view(arg);
+        }
+        else {
+            Py_DECREF(arg);
+        }
+    }
+    else {
+        for (Py_ssize_t i = 0; i < cnt; i++) {
+            if (objs[i] == NULL) {
+                (void)buffered_release_view(
+                    Py_NewRef(PyList_GET_ITEM(arg, i)));
+            }
+        }
+        Py_DECREF(arg);
+    }
     Py_ssize_t n = buffered_check_progress(
         buffered_raw_result(res, total, method), total, method);
     /* Decrefs may have changed errno, which the BlockingIOError reports. */
@@ -873,6 +971,22 @@ buffered_sync(buffered *self, int unlocked)
 static void buffered_push_back(buffered *self, const char *data,
                                Py_ssize_t len);
 
+/* Can a raw read write into the free tail of block, the reading end's,
+   after the unread bytes?  Nothing was handed out from there, but Python
+   code must not be able to reach the bytes object itself: only a raw
+   stream given views of it can (through their obj), and then it has more
+   references than ours (the unread morsel's, the end's and maybe the
+   nibbler's). */
+static int
+buffered_block_private(buffered *self, PyObject *block)
+{
+    if (self->raw_fileio) {
+        return 1;
+    }
+    Py_ssize_t ours = 2 + (self->nib.block == block);
+    return Py_REFCNT(block) <= ours;
+}
+
 /* buffered_fill() into the free tail of the reading end's block. */
 static Py_ssize_t
 buffered_fill_tail(buffered *self, Py_ssize_t room)
@@ -883,9 +997,26 @@ buffered_fill_tail(buffered *self, Py_ssize_t room)
     PyObject *block = Py_NewRef(e->block);
     char *start = (char *)nibbler_unread_ptr(&self->nib);
     Py_ssize_t unread = nibbler_unread(&self->nib);
-    Py_ssize_t n = buffered_raw_read(self, start + unread, room);
-    if (n > 0) {
+    int shared = 0;
+    Py_ssize_t n = buffered_raw_read(self, start + unread, room, block,
+                                     &shared);
+    if (n > 0 && !shared) {
         nibbler_extend(&self->nib, n);
+    }
+    else if (shared) {
+        /* Python code can still write to the block: abandon it to that
+           code, and keep a copy of what is unread. */
+        if (block == self->nib.block) {
+            nibbler_set_block(&self->nib, NULL);
+        }
+        PyObject *copy = PyBytes_FromStringAndSize(start,
+                                                   unread + Py_MAX(n, 0));
+        if (copy == NULL || nibbler_publish(&self->nib, copy,
+                                            PyBytes_GET_SIZE(copy)) < 0)
+        {
+            n = -1;
+        }
+        Py_XDECREF(copy);
     }
     Py_DECREF(block);
     return n;
@@ -909,7 +1040,9 @@ buffered_fill(buffered *self, Py_ssize_t size)
     if (unread > 0 && capacity > 0) {
         nibbler_end *e = nibbler_reading(n);
         Py_ssize_t room = PyBytes_GET_SIZE(e->block) - e->limit;
-        if (room > 0 && room >= capacity / 2) {
+        if (room > 0 && room >= capacity / 2
+            && buffered_block_private(self, e->block))
+        {
             return buffered_fill_tail(self, room);
         }
     }
@@ -940,9 +1073,24 @@ buffered_fill(buffered *self, Py_ssize_t size)
         if (keep.len > 0) {
             memcpy(dst, keep.ptr, keep.len);
         }
+        int shared = 0;
         r = buffered_raw_read(self, dst + keep.len,
-                              PyBytes_GET_SIZE(block) - keep.len);
+                              PyBytes_GET_SIZE(block) - keep.len, block,
+                              &shared);
         Py_ssize_t filled = keep.len + Py_MAX(r, 0);
+        if (shared) {
+            /* Python code can still write to the block: abandon it to that
+               code, and keep a copy of what was read. */
+            if (block == n->block) {
+                nibbler_set_block(n, NULL);
+            }
+            PyObject *copy = PyBytes_FromStringAndSize(dst, filled);
+            Py_SETREF(block, copy);
+            if (block == NULL) {
+                r = -1;
+                filled = 0;
+            }
+        }
         if (filled > 0 && nibbler_publish(n, block, filled) < 0) {
             r = -1;
         }
@@ -987,7 +1135,8 @@ buffered_push_back(buffered *self, const char *data, Py_ssize_t len)
    WOULD_BLOCK if the raw stream would block before anything was read, or
    -1 on error. */
 static Py_ssize_t
-buffered_read_into(buffered *self, char *dst, Py_ssize_t len, int read1)
+buffered_read_into(buffered *self, char *dst, Py_ssize_t len, int read1,
+                   PyObject *memobj, int *shared)
 {
     Py_ssize_t written = 0;
     for (int reads = 0; ; reads++) {
@@ -1002,7 +1151,8 @@ buffered_read_into(buffered *self, char *dst, Py_ssize_t len, int read1)
             /* Bypasses the read-ahead, which no longer precedes the raw
                position. */
             (void)nibbler_drop_unread(&self->nib);
-            n = buffered_raw_read(self, dst + written, remaining);
+            n = buffered_raw_read(self, dst + written, remaining, memobj,
+                                  shared);
             written += Py_MAX(n, 0);
         }
         else if (read1 && written > 0) {
@@ -1030,6 +1180,32 @@ buffered_read_into(buffered *self, char *dst, Py_ssize_t len, int read1)
    buffer size: then it is returned as it is. */
 #define READLINE_KEEP_BLOCKS 64
 
+/* buffered_read_bytes() over a raw stream other than FileIO: its readinto()
+   gets views of the result, which they keep alive. */
+Py_NO_INLINE static PyObject *
+buffered_read_bytes_views(buffered *self, Py_ssize_t n, int read1)
+{
+    PyObject *res = PyBytes_FromStringAndSize(NULL, n);
+    if (res == NULL) {
+        return NULL;
+    }
+    int shared = 0;
+    Py_ssize_t r = buffered_read_into(self, PyBytes_AS_STRING(res), n, read1,
+                                      res, &shared);
+    if (r < 0) {
+        Py_DECREF(res);
+        return r == WOULD_BLOCK ? Py_NewRef(Py_None) : NULL;
+    }
+    if (shared) {
+        /* Python code can still write to res: return a copy. */
+        Py_SETREF(res, PyBytes_FromStringAndSize(PyBytes_AS_STRING(res), r));
+    }
+    else if (r < n) {
+        (void)_PyBytes_Resize(&res, r);
+    }
+    return res;
+}
+
 /* read(n) and read1(n). */
 static PyObject *
 buffered_read_bytes(buffered *self, Py_ssize_t n, int read1)
@@ -1053,12 +1229,15 @@ buffered_read_bytes(buffered *self, Py_ssize_t n, int read1)
     if (n == 0) {
         return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     }
+    if (!self->raw_fileio) {
+        return buffered_read_bytes_views(self, n, read1);
+    }
     PyBytesWriter *writer = PyBytesWriter_Create(n);
     if (writer == NULL) {
         return NULL;
     }
     Py_ssize_t r = buffered_read_into(self, PyBytesWriter_GetData(writer), n,
-                                      read1);
+                                      read1, NULL, NULL);
     if (r < 0) {
         PyBytesWriter_Discard(writer);
         return r == WOULD_BLOCK ? Py_NewRef(Py_None) : NULL;
@@ -2000,9 +2179,11 @@ buffered_readinto_common(buffered *self, Py_buffer *buffer, int readinto1)
     if (buffered_enter(self, "readinto of closed file", READING) < 0) {
         return NULL;
     }
-    /* The raw stream reads into the caller's memory itself. */
+    /* The raw stream reads into the caller's memory itself; what Python
+       code keeps of it stays valid through the caller's object. */
+    int shared = 0;
     Py_ssize_t n = buffered_read_into(self, buffer->buf, buffer->len,
-                                      readinto1);
+                                      readinto1, buffer->obj, &shared);
     buffered_leave(self);
     if (n == WOULD_BLOCK) {
         Py_RETURN_NONE;
