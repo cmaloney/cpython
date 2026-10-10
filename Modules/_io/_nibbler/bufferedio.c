@@ -165,6 +165,14 @@ buffered_cast(PyObject *op)
     return (buffered *)op;
 }
 
+/* The instance dict, or NULL: read without the lock (its creation, by
+   setting an attribute, stores it atomically). */
+static inline PyObject *
+buffered_dict(buffered *self)
+{
+    return FT_ATOMIC_LOAD_PTR_RELAXED(self->dict);
+}
+
 static PyType_Spec nibbler_bufferedreader_spec;
 static PyType_Spec nibbler_bufferedwriter_spec;
 static PyType_Spec nibbler_bufferedrandom_spec;
@@ -354,12 +362,12 @@ buffered_take_stash(buffered *self, char *dst, Py_ssize_t len)
     return done;
 }
 
-/* Is raw, self's raw stream, closed?  Returns 1 if closed, 0 if open, -1
-   on error. */
+/* Is raw closed (fileio: it is exactly a FileIO)?  Returns 1 if closed, 0
+   if open, -1 on error. */
 static int
-buffered_raw_closed(buffered *self, PyObject *raw)
+buffered_raw_closed(PyObject *raw, int fileio)
 {
-    if (self->raw_fileio) {
+    if (fileio) {
         return _PyFileIO_closed(raw);
     }
     PyObject *res = PyObject_GetAttr(raw, &_Py_ID(closed));
@@ -375,7 +383,17 @@ buffered_raw_closed(buffered *self, PyObject *raw)
 static int
 buffered_is_closed(buffered *self)
 {
-    return buffered_raw_closed(self, self->raw);
+    return buffered_raw_closed(self->raw, self->raw_fileio);
+}
+
+/* Like buffered_is_closed(), without the lock: raw is a reference taken
+   with buffered_ref_raw(), and raw_fileio may already describe another
+   raw stream (__init__() again), so its type is looked at. */
+static int
+buffered_ref_closed(buffered *self, PyObject *raw)
+{
+    _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
+    return buffered_raw_closed(raw, Py_IS_TYPE(raw, state->PyFileIO_Type));
 }
 
 /* Raise ValueError(closed_msg) if closed.  Then writes can't go on
@@ -1583,7 +1601,7 @@ gather_commit(gather *g, int flush)
         /* A deferred flush is moot once close() or detach() wrote
            everything out. */
         PyObject *raw = buffered_ref_raw(self);
-        int closed = raw == NULL ? 1 : buffered_raw_closed(self, raw);
+        int closed = raw == NULL ? 1 : buffered_ref_closed(self, raw);
         Py_XDECREF(raw);
         if (closed != 0) {
             return closed < 0 ? -1 : 0;
@@ -1651,7 +1669,7 @@ gather_check(buffered *self)
     if (raw == NULL) {
         return -1;
     }
-    int closed = buffered_raw_closed(self, raw);
+    int closed = buffered_ref_closed(self, raw);
     Py_DECREF(raw);
     if (closed > 0) {
         PyErr_SetString(PyExc_ValueError, "write to closed file");
@@ -1668,7 +1686,8 @@ gather_add(gather *g, PyObject *obj, const char *data, Py_ssize_t len)
     if (len == 0) {
         return 0;
     }
-    if (g->stream->raw_vectored && len >= NIBBLER_REF_MIN && obj != NULL
+    if (FT_ATOMIC_LOAD_UINT8_RELAXED(g->stream->raw_vectored)
+        && len >= NIBBLER_REF_MIN && obj != NULL
         && PyBytes_CheckExact(obj))
     {
         if (morsels_push(&g->list, obj, data, len) < 0) {
@@ -1740,7 +1759,7 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
     if (raw == NULL) {
         return NULL;
     }
-    int closed = buffered_raw_closed(self, raw);
+    int closed = buffered_ref_closed(self, raw);
     Py_DECREF(raw);
     if (closed != 0) {
         if (closed > 0) {
@@ -2094,10 +2113,11 @@ buffered_flush_is_ours(buffered *self)
     if (!_PyIO_is_nibbler_buffered_type(Py_TYPE(self))) {
         return 0;
     }
-    if (self->dict == NULL) {
+    PyObject *dict = buffered_dict(self);
+    if (dict == NULL) {
         return 1;
     }
-    int r = PyDict_Contains(self->dict, &_Py_ID(flush));
+    int r = PyDict_Contains(dict, &_Py_ID(flush));
     return r < 0 ? -1 : !r;
 }
 
@@ -2362,7 +2382,8 @@ _io__Buffered_peek_impl(buffered *self, Py_ssize_t size)
 {
     /* At least min(size, buffer size) bytes, when the raw stream has them
        (gh-50061). */
-    Py_ssize_t want = Py_MAX(Py_MIN(size, self->nib.capacity), 1);
+    Py_ssize_t capacity = FT_ATOMIC_LOAD_SSIZE_RELAXED(self->nib.capacity);
+    Py_ssize_t want = Py_MAX(Py_MIN(size, capacity), 1);
     /* Without the lock when the read-ahead has them. */
     PyObject *res = nibbler_peek(&self->nib, want);
     if (res == NULL || PyBytes_GET_SIZE(res) > 0) {
@@ -2474,7 +2495,8 @@ _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
         return nibbler_end_bytes(e, start, k);
     }
     if (n < 0) {
-        n = self->nib.capacity > 0 ? self->nib.capacity : DEFAULT_BUFFER_SIZE;
+        Py_ssize_t capacity = FT_ATOMIC_LOAD_SSIZE_RELAXED(self->nib.capacity);
+        n = capacity > 0 ? capacity : DEFAULT_BUFFER_SIZE;
     }
     return buffered_read_locked(self, n, 1);
 }
@@ -2837,10 +2859,11 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
         /* Use _writev() only where it can't bypass an overridden write():
            on FileIO itself, or on raw types not derived from it.  (Readers
            skip the lookups.) */
-        self->raw_vectored = (
+        /* Also read without the lock, by gather(). */
+        FT_ATOMIC_STORE_UINT8_RELAXED(self->raw_vectored, (uint8_t)(
             writable
             && (raw_fileio || !PyObject_TypeCheck(raw, state->PyFileIO_Type))
-            && _PyType_Lookup(Py_TYPE(raw), &_Py_ID(_writev)) != NULL);
+            && _PyType_Lookup(Py_TYPE(raw), &_Py_ID(_writev)) != NULL));
         self->raw_appending = (
             writable
             && PyObject_TypeCheck(raw, state->PyFileIO_Type)
@@ -3252,7 +3275,7 @@ _PyIONibbler_view(PyObject *op, _PyIO_Morsel *m)
     assert(_PyIO_is_nibbler_buffered_type(Py_TYPE(op)));
     nibbler_end *e = nibbler_end_get(&self->nib, 0);
     Py_ssize_t c = e == NULL ? -1 : FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
-    if (c < 0 || c == e->limit || self->dict != NULL) {
+    if (c < 0 || c == e->limit || buffered_dict(self) != NULL) {
         return 0;
     }
     if (m->obj != e->block) {
@@ -3275,7 +3298,7 @@ _PyIONibbler_peek(PyObject *op, Py_ssize_t need, _PyIO_Morsel *m)
     Py_CLEAR(m->obj);
     *m = (morsel){NULL, NULL, 0};
     buffered *self = buffered_cast(op);
-    if (self->dict != NULL) {
+    if (buffered_dict(self) != NULL) {
         return _PyIO_NIBBLER_NO;
     }
     return buffered_text_peek_locked(self, need, m);
@@ -3337,7 +3360,7 @@ Py_NO_INLINE static int
 nibbler_text_write(buffered *self, PyObject *obj, const char *data,
                    Py_ssize_t len, int closed_checked)
 {
-    if (self->dict != NULL
+    if (buffered_dict(self) != NULL
         || ((PyHeapTypeObject *)Py_TYPE(self))->ht_token
            == &nibbler_bufferedreader_spec)
     {
@@ -3365,7 +3388,7 @@ _PyIONibbler_write(PyObject *op, PyObject *obj, const char *data,
        and the raw stream is known to be open. */
     nibbler_end *e;
     Py_ssize_t r;
-    if (closed_checked && self->dict == NULL && len < NIBBLER_REF_MIN
+    if (closed_checked && buffered_dict(self) == NULL && len < NIBBLER_REF_MIN
         && (e = nibbler_end_get(&self->nib, 1)) != NULL
         && (r = nibbler_reserve(e, len)) >= 0)
     {
@@ -3382,7 +3405,7 @@ _PyIONibbler_reserve(PyObject *op, Py_ssize_t len, int closed_checked,
     buffered *self = buffered_cast(op);
     nibbler_end *e;
     Py_ssize_t r;
-    if (closed_checked && self->dict == NULL && len < NIBBLER_REF_MIN
+    if (closed_checked && buffered_dict(self) == NULL && len < NIBBLER_REF_MIN
         && (e = nibbler_end_get(&self->nib, 1)) != NULL
         && (r = nibbler_reserve(e, len)) >= 0)
     {
