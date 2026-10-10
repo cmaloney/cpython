@@ -722,30 +722,14 @@ nibbler_wait_io(nibbler *n, PyObject *obj)
     return 0;
 }
 
-/* Fill pieces with up to limit morsels from the front, avail bytes at
-   most, for a raw write; they are in flight until nibbler_written().
-   Returns how many, with their total length in *total. */
-static Py_ssize_t
-nibbler_pieces(nibbler *n, Py_ssize_t avail, morsel *pieces,
-               Py_ssize_t limit, Py_ssize_t *total)
-{
-    Py_ssize_t cnt = 0;
-    Py_ssize_t sum = 0;
-    for (; cnt < limit && cnt < n->list.count && sum < avail; cnt++) {
-        pieces[cnt] = n->list.items[cnt];
-        pieces[cnt].len = Py_MIN(pieces[cnt].len, avail - sum);
-        sum += pieces[cnt].len;
-    }
-    n->inflight = sum;
-    *total = sum;
-    return cnt;
-}
-
 /* A raw write took `written` bytes, starting with those in flight: drop
    those from the front.  Returns how many of them were in flight. */
-static Py_ssize_t
+static inline Py_ssize_t
 nibbler_written(nibbler *n, Py_ssize_t written)
 {
+    if (n->inflight == 0) {
+        return 0;
+    }
     Py_ssize_t k = morsels_consume(&n->list, Py_MIN(written, n->inflight));
     n->inflight = 0;
     return k;
