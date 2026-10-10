@@ -41,7 +41,7 @@
 #include "pycore_tstate.h"              // _PyThreadStateImpl
 
 /* Exact bytes appended at least this large can be kept by reference
-   instead of being copied (the owner may ask for a larger minimum, see
+   instead of being copied (the caller may ask for a larger minimum, see
    nibbler_append()). */
 #define NIBBLER_REF_MIN 512
 
@@ -81,8 +81,8 @@ typedef struct nibbler {
     /* The block size, which reads fill and small appends are copied into.
        Also read without the lock (FT_ATOMIC relaxed). */
     Py_ssize_t capacity;
-    /* Pending writes past this many bytes are written out by the owner:
-       appends without the lock stay within it.  Set by the owner. */
+    /* Pending writes past this many bytes are written out by the caller:
+       appends without the lock stay within it.  Set by the caller. */
     Py_ssize_t threshold;
     morsel_list list;
     /* NULL until needed.  Also read without the lock (FT_ATOMIC relaxed),
@@ -267,15 +267,15 @@ morsels_consume(morsel_list *list, Py_ssize_t n)
  * Whoever holds the lock holds the end: taking the lock swaps `pos` for
  * ~pos (negative, so everything without the lock fails and takes the
  * lock).  Writing, it then waits until every append that reserved has
- * committed and adds what was appended to the last morsel; reading, it
- * drops what readers took from the front morsel.  So code holding the lock
- * sees plain morsels.  Releasing the lock opens the end again: reading, at
- * the front morsel (or `limit` when all was read); writing, after them if
- * they still end in its block, with `limit` keeping everything appended
- * within the block and the threshold.  An end that is replaced or dropped stays held, so
+ * committed and adds what was appended to the last morsel, so code holding
+ * the lock sees plain morsels; reading, the position (~pos) is where the
+ * unread bytes start.  Releasing the lock opens the end again: reading, at
+ * that position; writing, after the morsels if they still end in its
+ * block, with `limit` keeping everything appended within the block and
+ * the threshold.  An end that is replaced or dropped stays held, so
  * lock-free users that loaded it fail; it is freed, with its reference to
  * the block, once none can still be using it: delayed with QSBR on
- * free-threaded builds.
+ * free-threaded builds (see also nibbler_fresh_block()).
  *
  * Nothing that waits (or lets the thread be stopped, or detached) comes
  * between reserving and committing, so a waiting holder only ever waits for
@@ -1121,7 +1121,7 @@ nibbler_append_copy(nibbler *n, const char *data, Py_ssize_t len)
     return r;
 }
 
-/* Append data[0:len], owned by obj (or NULL): by reference when it is at
+/* Append data[0:len], inside obj (or NULL): by reference when it is at
    least ref_min bytes or larger than a block (exact bytes only, and at
    least NIBBLER_REF_MIN), else copied into the block, or into a bytes
    object of its own when larger. */
@@ -1132,7 +1132,7 @@ nibbler_append(nibbler *n, PyObject *obj, const char *data, Py_ssize_t len,
     if (len == 0) {
         return 0;
     }
-    /* Data larger than a block (the owner may let pending writes pass the
+    /* Data larger than a block (the caller may let pending writes pass the
        block size) is never copied into one. */
     int large = len > n->capacity;
     if ((len >= ref_min || large) && len >= NIBBLER_REF_MIN && obj != NULL

@@ -76,10 +76,10 @@ find_nibblermodule_state_by_def(PyTypeObject *type)
  * buffered (with nothing buffered, the direction doesn't matter):
  *
  * - Writing: the morsels are pending writes, oldest first, and there is no
- *   read window.  write() and
- *   flush() write them out together (in one call when the raw stream has a
- *   vectored _writev() method) with the I/O role, without holding the
- *   lock; meanwhile other threads can only queue more writes.  Small
+ *   reading end.  write() and flush() write them out together (in one call
+ *   when the raw stream has a vectored _writev() method) with the I/O
+ *   role, without holding the lock; meanwhile other threads can only queue
+ *   more writes.  Small
  *   writes that fit are queued without the lock (see "The open end" in
  *   nibbler.h), so all code holding the lock sees them queued.  They
  *   check that an exact FileIO is open; other raw streams are asked with
@@ -105,7 +105,7 @@ find_nibblermodule_state_by_def(PyTypeObject *type)
  * up to DEFAULT_BUFFER_SIZE bytes.  peek() and readline() (so also
  * iteration and readlines()) raise UnsupportedOperation, as they can't
  * look ahead without taking the bytes.  The only read-ahead is data kept
- * after a raw read raised (see buffered_unread()), which reads, and peek(),
+ * after a raw read raised (see buffered_push_back()), which reads, and peek(),
  * return first; readline() returns a line from it when all of it is there.
  *
  * With buffer size None (BufferedWriter and BufferedRandom), writes are
@@ -437,6 +437,10 @@ buffered_set_blocking_error(Py_ssize_t written)
  * Raw stream calls
  */
 
+/* What raw calls (also FileIO's C functions) and the functions here return
+   when the raw stream would block: one code for all of them. */
+#define WOULD_BLOCK (-2)
+
 /* With unlocked, release the lock around a raw call; take it again with
    buffered_relock_after_raw(). */
 static inline void
@@ -469,7 +473,7 @@ buffered_relock_after_raw(buffered *self, int unlocked)
 }
 
 /* Convert the result of a raw readinto(), write() or _writev() of up to len
-   bytes: the count, -2 for None ("would block"), or -1 on error. */
+   bytes: the count, WOULD_BLOCK for None, or -1 on error. */
 static Py_ssize_t
 buffered_raw_result(PyObject *res, Py_ssize_t len, const char *method)
 {
@@ -478,7 +482,7 @@ buffered_raw_result(PyObject *res, Py_ssize_t len, const char *method)
     }
     if (res == Py_None) {
         Py_DECREF(res);
-        return -2;
+        return WOULD_BLOCK;
     }
     Py_ssize_t n = PyNumber_AsSsize_t(res, PyExc_ValueError);
     Py_DECREF(res);
@@ -495,7 +499,7 @@ buffered_raw_result(PyObject *res, Py_ssize_t len, const char *method)
     return n;
 }
 
-/* Python code had view (see buffered_owned_view()): release it, so that
+/* Python code had view (see buffered_memory_view()): release it, so that
    keeping it gives no access to the memory any more (gh-60198, gh-157075).
    Returns 1 if the memory can still be reached anyway, through a view made
    from it or a buffer it exported: then memory of ours must neither be
@@ -519,29 +523,29 @@ buffered_release_view(PyObject *view)
 }
 
 /* A memoryview of mem[0:len] for Python code (writable with PyBUF_WRITE),
-   inside owner: a bytes object of ours, or the object whose buffer the
+   inside memobj: a bytes object of ours, or the object whose buffer the
    caller passed (whose export the view holds, so that a view made from it
-   keeps that memory valid like any other).  Without owner, the memory must
+   keeps that memory valid like any other).  Without memobj, the memory must
    stay valid otherwise. */
 static PyObject *
-buffered_owned_view(char *mem, Py_ssize_t len, int flags, PyObject *owner)
+buffered_memory_view(char *mem, Py_ssize_t len, int flags, PyObject *memobj)
 {
     PyObject *view = PyMemoryView_FromMemory(mem, len, flags);
-    if (view == NULL || owner == NULL) {
+    if (view == NULL || memobj == NULL) {
         return view;
     }
     PyMemoryViewObject *mv = (PyMemoryViewObject *)view;
     Py_buffer *master = &mv->mbuf->master;
-    if (PyBytes_CheckExact(owner)) {
+    if (PyBytes_CheckExact(memobj)) {
         /* Released with the managed buffer; bytes have no
            bf_releasebuffer. */
-        master->obj = Py_NewRef(owner);
+        master->obj = Py_NewRef(memobj);
         return view;
     }
     /* The view keeps its own shape; the managed buffer releases the export
        when the last view made from it goes. */
     Py_buffer whole;
-    if (PyObject_GetBuffer(owner, &whole, PyBUF_WRITABLE) < 0) {
+    if (PyObject_GetBuffer(memobj, &whole, PyBUF_WRITABLE) < 0) {
         Py_DECREF(view);
         return NULL;
     }
@@ -552,16 +556,16 @@ buffered_owned_view(char *mem, Py_ssize_t len, int flags, PyObject *owner)
         return view;
     }
     *master = whole;
-    mv->view.obj = owner;
+    mv->view.obj = memobj;
     return view;
 }
 
-/* One raw readinto() of up to len bytes at dst, inside owner (see
-   buffered_owned_view()).  Returns the count (0 at EOF), -2 if the raw
-   stream would block, or -1 on error.  Sets *shared if Python code can
-   still reach the memory (see buffered_release_view()). */
+/* One raw readinto() of up to len bytes at dst, inside memobj (see
+   buffered_memory_view()).  Returns the count (0 at EOF), WOULD_BLOCK if
+   the raw stream would block, or -1 on error.  Sets *shared if Python code
+   can still reach the memory (see buffered_release_view()). */
 static Py_ssize_t
-buffered_raw_read(buffered *self, char *dst, Py_ssize_t len, PyObject *owner,
+buffered_raw_read(buffered *self, char *dst, Py_ssize_t len, PyObject *memobj,
                   int *shared)
 {
     if (self->stash != NULL) {
@@ -571,8 +575,8 @@ buffered_raw_read(buffered *self, char *dst, Py_ssize_t len, PyObject *owner,
     if (self->raw_fileio) {
         return _PyFileIO_readinto(self->raw, dst, len);
     }
-    assert(owner != NULL);
-    PyObject *view = buffered_owned_view(dst, len, PyBUF_WRITE, owner);
+    assert(memobj != NULL);
+    PyObject *view = buffered_memory_view(dst, len, PyBUF_WRITE, memobj);
     if (view == NULL) {
         return -1;
     }
@@ -623,8 +627,8 @@ buffered_check_progress(Py_ssize_t n, Py_ssize_t len, const char *method)
    are inside objs[0:cnt] (NULL: data of the current write() call, only
    valid during it): one vectored write to an exact FileIO; else write() of
    one span, or _writev() of memoryviews of them when the raw stream has it.
-   Returns the count, -2 if the raw stream would block (errno set for the
-   BlockingIOError), or -1 on error. */
+   Returns the count, WOULD_BLOCK if the raw stream would block (errno set
+   for the BlockingIOError), or -1 on error. */
 Py_NO_INLINE static Py_ssize_t
 buffered_raw_writev_py(buffered *self, const _PyIO_Span *spans,
                        PyObject *const *objs, Py_ssize_t cnt,
@@ -761,7 +765,7 @@ buffered_position(buffered *self, Py_ssize_t gathered)
  * Writing
  */
 
-/* Add data[0:len], owned by obj, to the pending writes, which must have
+/* Add data[0:len], inside obj, to the pending writes, which must have
    room for it. */
 static int
 buffered_add_write(buffered *self, PyObject *obj, const char *data,
@@ -772,18 +776,17 @@ buffered_add_write(buffered *self, PyObject *obj, const char *data,
     return nibbler_append(&self->nib, obj, data, len, self->ref_min);
 }
 
-/* How a write out stopped: everything written, the raw stream would
-   block, or an error. */
+/* How a write out stopped: everything written, an error, or the raw
+   stream would block (WOULD_BLOCK). */
 enum {
     WRITE_DONE = 0,
-    WRITE_BLOCKED = 1,
     WRITE_ERROR = -1,
 };
 
 /* Write spans[0:cnt] (total bytes, inside objs, see buffered_raw_writev())
    to the raw stream, with unlocked without the lock, retrying partial
    writes (advancing spans) until all of them are written, the raw stream
-   would block or an error is raised: returns WRITE_DONE, WRITE_BLOCKED or
+   would block or an error is raised: returns WRITE_DONE, WOULD_BLOCK or
    WRITE_ERROR, with the count in *written.  The lock is held again on
    return.  This is the one way data goes to the raw stream. */
 static Py_ALWAYS_INLINE int
@@ -804,7 +807,7 @@ buffered_write_spans(buffered *self, _PyIO_Span *spans, PyObject **objs,
             if (r == 0) {
                 (void)buffered_check_progress(r, total - done, "write");
             }
-            st = r == -2 ? WRITE_BLOCKED : WRITE_ERROR;
+            st = r == WOULD_BLOCK ? WOULD_BLOCK : WRITE_ERROR;
             break;
         }
         done += r;
@@ -952,7 +955,7 @@ buffered_flush_writes(buffered *self, int unlocked)
     int status;
     (void)buffered_write_out(self, nibbler_nbytes(&self->nib), NULL, 0,
                              &status, unlocked);
-    if (status == WRITE_BLOCKED) {
+    if (status == WOULD_BLOCK) {
         buffered_set_blocking_error(0);
     }
     return status == WRITE_DONE ? 0 : -1;
@@ -985,7 +988,8 @@ buffered_sync(buffered *self, int unlocked)
  * Reading
  */
 
-static void buffered_unread(buffered *self, const char *data, Py_ssize_t len);
+static void buffered_push_back(buffered *self, const char *data,
+                               Py_ssize_t len);
 
 /* Can a raw read write into the free tail of block, the reading end's,
    after the unread bytes?  Nothing was handed out from there, but Python
@@ -1046,7 +1050,7 @@ buffered_fill_tail(buffered *self, Py_ssize_t room)
    to the start of a fresh block, or of one twice their size when they
    take more than half a block: so a line of any length is copied a
    bounded number of times however it trickles in.  Returns the count (0
-   at EOF), -2 if the raw stream would block, or -1 on error. */
+   at EOF), WOULD_BLOCK if the raw stream would block, or -1 on error. */
 static Py_ssize_t
 buffered_fill(buffered *self, Py_ssize_t size)
 {
@@ -1115,7 +1119,7 @@ buffered_fill(buffered *self, Py_ssize_t size)
     else if (keep.len > 0) {
         /* Keep the unread bytes. */
         PyObject *exc = PyErr_GetRaisedException();
-        buffered_unread(self, keep.ptr, keep.len);
+        buffered_push_back(self, keep.ptr, keep.len);
         _PyErr_ChainExceptions1(exc);
     }
     Py_XDECREF(keep.obj);
@@ -1127,7 +1131,7 @@ buffered_fill(buffered *self, Py_ssize_t size)
    again for the next read to return (gh-51571).  The raised exception is
    kept. */
 static void
-buffered_unread(buffered *self, const char *data, Py_ssize_t len)
+buffered_push_back(buffered *self, const char *data, Py_ssize_t len)
 {
     if (len == 0) {
         return;
@@ -1147,11 +1151,12 @@ buffered_unread(buffered *self, const char *data, Py_ssize_t len)
    stream until len bytes, EOF, or the raw stream would block.  A request
    of at least a buffer's worth is read directly into dst, smaller ones
    through the read-ahead.  read1 makes at most one raw read, and none into
-   the read-ahead once there is data to return.  Returns the count, -2 if
-   the raw stream would block before anything was read, or -1 on error. */
+   the read-ahead once there is data to return.  Returns the count,
+   WOULD_BLOCK if the raw stream would block before anything was read, or
+   -1 on error. */
 static Py_ssize_t
 buffered_read_into(buffered *self, char *dst, Py_ssize_t len, int read1,
-                   PyObject *owner, int *shared)
+                   PyObject *memobj, int *shared)
 {
     Py_ssize_t written = 0;
     for (int reads = 0; ; reads++) {
@@ -1166,7 +1171,7 @@ buffered_read_into(buffered *self, char *dst, Py_ssize_t len, int read1,
             /* Bypasses the read-ahead, which no longer precedes the raw
                position. */
             (void)nibbler_drop_unread(&self->nib);
-            n = buffered_raw_read(self, dst + written, remaining, owner,
+            n = buffered_raw_read(self, dst + written, remaining, memobj,
                                   shared);
             written += Py_MAX(n, 0);
         }
@@ -1177,11 +1182,11 @@ buffered_read_into(buffered *self, char *dst, Py_ssize_t len, int read1,
             /* Copied out on the next pass. */
             n = buffered_fill(self, remaining);
         }
-        if (n == 0 || (n == -2 && written > 0)) {
+        if (n == 0 || (n == WOULD_BLOCK && written > 0)) {
             break;
         }
         if (n == -1) {
-            buffered_unread(self, dst, written);
+            buffered_push_back(self, dst, written);
         }
         if (n < 0) {
             return n;
@@ -1193,12 +1198,12 @@ buffered_read_into(buffered *self, char *dst, Py_ssize_t len, int read1,
 /* Without a size, a partial line that would block is kept for the next
    readline() (which then returns None) until it is this many times the
    buffer size: then it is returned as it is. */
-#define READLINE_KEEP_MAX 64
+#define READLINE_KEEP_BLOCKS 64
 
 /* buffered_read_bytes() over a raw stream other than FileIO: its readinto()
    gets views of the result, which they keep alive. */
 Py_NO_INLINE static PyObject *
-buffered_read_bytes_owned(buffered *self, Py_ssize_t n, int read1)
+buffered_read_bytes_views(buffered *self, Py_ssize_t n, int read1)
 {
     PyObject *res = PyBytes_FromStringAndSize(NULL, n);
     if (res == NULL) {
@@ -1209,7 +1214,7 @@ buffered_read_bytes_owned(buffered *self, Py_ssize_t n, int read1)
                                       res, &shared);
     if (r < 0) {
         Py_DECREF(res);
-        return r == -2 ? Py_NewRef(Py_None) : NULL;
+        return r == WOULD_BLOCK ? Py_NewRef(Py_None) : NULL;
     }
     if (shared) {
         /* Python code can still write to res: return a copy. */
@@ -1233,7 +1238,7 @@ buffered_read_bytes(buffered *self, Py_ssize_t n, int read1)
         if (r <= 0) {
             /* EOF, or None if it would block. */
             return (r == 0 ? Py_GetConstant(Py_CONSTANT_EMPTY_BYTES)
-                    : r == -2 ? Py_NewRef(Py_None) : NULL);
+                    : r == WOULD_BLOCK ? Py_NewRef(Py_None) : NULL);
         }
         avail = nibbler_unread(&self->nib);
     }
@@ -1245,7 +1250,7 @@ buffered_read_bytes(buffered *self, Py_ssize_t n, int read1)
         return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     }
     if (!self->raw_fileio) {
-        return buffered_read_bytes_owned(self, n, read1);
+        return buffered_read_bytes_views(self, n, read1);
     }
     PyBytesWriter *writer = PyBytesWriter_Create(n);
     if (writer == NULL) {
@@ -1255,7 +1260,7 @@ buffered_read_bytes(buffered *self, Py_ssize_t n, int read1)
                                       read1, NULL, NULL);
     if (r < 0) {
         PyBytesWriter_Discard(writer);
-        return r == -2 ? Py_NewRef(Py_None) : NULL;
+        return r == WOULD_BLOCK ? Py_NewRef(Py_None) : NULL;
     }
     return PyBytesWriter_FinishWithSize(writer, r);
 }
@@ -1437,9 +1442,9 @@ buffered_readline(buffered *self, Py_ssize_t limit)
             return nibbler_take_bytes(n, limit);
         }
         Py_ssize_t r = buffered_fill(self, 0);
-        if (r == -1 || r == -2) {
+        if (r == -1 || r == WOULD_BLOCK) {
             if (r == -1 || unread == 0 || limit >= 0
-                || unread < READLINE_KEEP_MAX * n->capacity)
+                || unread < READLINE_KEEP_BLOCKS * n->capacity)
             {
                 /* The partial line stays for the next call (gh-51571),
                    which looks for the end of the line after what was
@@ -1764,7 +1769,7 @@ gather_commit(gather *g, int flush)
         if (status == WRITE_ERROR) {
             r = -1;
         }
-        else if (status == WRITE_BLOCKED && flush) {
+        else if (status == WOULD_BLOCK && flush) {
             buffered_set_blocking_error(0);
             r = -1;
         }
@@ -1802,7 +1807,7 @@ gather_check(buffered *self)
     return closed == 0 ? 0 : -1;
 }
 
-/* Add data[0:len], owned by obj (or NULL), to what g gathered: by
+/* Add data[0:len], inside obj (or NULL), to what g gathered: by
    reference where the pending writes would keep it so, else copied into
    g's block.  Moves it all to the stream once it reaches the limit. */
 static int
@@ -1845,7 +1850,7 @@ gather_add(gather *g, PyObject *obj, const char *data, Py_ssize_t len)
     return 0;
 }
 
-/* A write() of data[0:len], owned by obj (or NULL), made while the stream
+/* A write() of data[0:len], inside obj (or NULL), made while the stream
    has active gather() blocks: gather it if one is the current context's.
    Returns 1 when gathered, 0 when the write is not in a block, -1 on
    error. */
@@ -2602,7 +2607,7 @@ _io__Buffered_peek_impl(buffered *self, Py_ssize_t size)
     }
     Py_ssize_t r = (nibbler_unread(&self->nib) > 0
                     ? 1 : buffered_fill(self, 0));
-    if (r == -2 && nibbler_unread(&self->nib) == 0) {
+    if (r == WOULD_BLOCK && nibbler_unread(&self->nib) == 0) {
         /* Would block, with nothing to return. */
         res = Py_NewRef(Py_None);
     }
@@ -2709,7 +2714,7 @@ buffered_readinto_common(buffered *self, Py_buffer *buffer, int readinto1)
     Py_ssize_t n = buffered_read_into(self, buffer->buf, buffer->len,
                                       readinto1, buffer->obj, &shared);
     buffered_leave(self);
-    if (n == -2) {
+    if (n == WOULD_BLOCK) {
         Py_RETURN_NONE;
     }
     return n < 0 ? NULL : PyLong_FromSsize_t(n);
@@ -3063,10 +3068,6 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
     if (err == 0) {
         /* Also read without the lock, by small writes. */
         FT_ATOMIC_STORE_UINT8_RELAXED(self->raw_fileio, (uint8_t)raw_fileio);
-        /* Use _writev() only where it can't bypass an overridden write():
-           on FileIO itself, or on raw types not derived from it.  (Readers
-           skip the lookups.) */
-        /* Also read without the lock, by gather(). */
         /* Write several pieces with one _writev() call when the raw stream
            has one of its own (FileIO's writes them with one writev()), but
            not RawIOBase's, which only calls write() on each: joining small
@@ -3074,7 +3075,7 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
            bytes and 16 bytes to a raw stream with only write(): 39 calls
            instead of 1000, 1679 instead of 8244 instructions per write).
            Not on a FileIO subclass, whose _writev() could bypass an
-           overridden write(). */
+           overridden write().  (Readers skip the lookups.) */
         PyObject *writev = (writable
                             ? _PyType_Lookup(Py_TYPE(raw), &_Py_ID(_writev))
                             : NULL);
@@ -3245,7 +3246,7 @@ buffered_write_lockfree(buffered *self, const char *data, Py_ssize_t len,
     return 1;
 }
 
-/* write() of data[0:len], owned by obj (or NULL), with the lock: buffer
+/* write() of data[0:len], inside obj (or NULL), with the lock: buffer
    it, writing out what is pending first when it doesn't fit.  Called from
    code that the raw write of this thread's write out runs (such as a
    signal handler), it buffers all of the data, past the capacity if need
@@ -3310,10 +3311,9 @@ buffered_write_data(buffered *self, PyObject *obj, const char *data,
            into the buffer than as one more piece), without the lock: other
            threads can queue writes meanwhile. */
         int status;
-        Py_ssize_t direct = (rest >= threshold
-                             || (self->raw_vectored
-                                 && (self->raw_fileio || rest >= self->ref_min))
-                             ? rest : 0);
+        int vectored = (self->raw_vectored
+                        && (self->raw_fileio || rest >= self->ref_min));
+        Py_ssize_t direct = rest >= threshold || vectored ? rest : 0;
         done += buffered_write_out(self, pending, data + done, direct,
                                    &status, 1);
         rest = len - done;
@@ -3466,7 +3466,7 @@ buffered_text_peek_locked(buffered *self, Py_ssize_t need, morsel *m)
     }
     else if (nibbler_unread(&self->nib) < need) {
         Py_ssize_t n = buffered_fill(self, 0);
-        r = n == -1 ? -1 : n == -2 ? _PyIO_NIBBLER_BLOCKED : 0;
+        r = n == -1 ? -1 : n == WOULD_BLOCK ? _PyIO_NIBBLER_BLOCKED : 0;
     }
     Py_ssize_t unread = nibbler_unread(&self->nib);
     if (r >= 0 && unread > 0) {
