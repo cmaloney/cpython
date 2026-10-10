@@ -2366,6 +2366,37 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                 with self.assertRaises(UnicodeDecodeError):
                     list(t)
 
+    def test_decoder_flags_past_32_bits(self):
+        # iso2022_kr's decoder state goes past 32 bits: reads work, and
+        # only tell(), whose cookie can't hold it, raises.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        text = "abc\n\ud55c\uad6d\ud55c\uad6d\nx\n" * 3
+        with open(os_helper.TESTFN, "w", encoding="iso2022_kr") as f:
+            f.write(text)
+        t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                              encoding="iso2022_kr")
+        t._CHUNK_SIZE = 4
+        lines = text.splitlines(keepends=True)
+        self.assertEqual(t.readline(), lines[0])
+        self.assertEqual(t.readline(), lines[1])
+        self.assertEqual(t.readline(), lines[2])
+        self.assertEqual(t.readline(), lines[3])
+        self.assertEqual(t.read(1), "\ud55c")
+        with self.assertRaises(OverflowError):
+            t.tell()
+        self.assertEqual(t.read(), text[len("".join(lines[:4])) + 1:])
+        # Flags within 32 bits still go through tell() and seek().
+        with open(os_helper.TESTFN, "w", encoding="iso2022_jp") as f:
+            f.write("abc\n日本\nx\n")
+        t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                              encoding="iso2022_jp")
+        self.assertEqual(t.readline(), "abc\n")
+        self.assertEqual(t.read(1), "日")
+        pos = t.tell()
+        self.assertEqual(t.read(), "本\nx\n")
+        t.seek(pos)
+        self.assertEqual(t.read(), "本\nx\n")
+
     def test_invalid_bytes_codec_decoder(self):
         # The same through the codec's incremental decoder: the bad bytes
         # are taken, so that reading goes on past them.

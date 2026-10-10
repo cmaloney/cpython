@@ -71,7 +71,15 @@ enum {
     CODEC_CHARMAP,          /* a byte-to-character table, `charmap` */
 };
 
-#define FLAGS_FRESH INT_MIN
+/* The codec's decoder's flags (the second item of its state, which
+   iso2022_kr's and others' go past 32 bits), or as after reset() (fresh:
+   not asked yet). */
+typedef struct {
+    unsigned long long v;
+    char fresh;
+} dflags_t;
+
+#define FLAGS_FRESH ((dflags_t){0, 1})
 
 /* Newlines seen, for the newlines attribute. */
 enum { SEEN_CR = 1, SEEN_LF = 2, SEEN_CRLF = 4 };
@@ -195,11 +203,11 @@ typedef struct {
     /* With the decoder, the characters came from the bytes taken last,
        dspan, which the decoder started on with flags dflags; at the
        store's position, the decoder holds nothing and has flags `flags`
-       (FLAGS_FRESH: as after reset(), not asked yet).  Used only with the
+       (see dflags_t).  Used only with the
        critical section. */
     PyObject *dspan;
-    int dflags;
-    int flags;
+    dflags_t dflags;
+    dflags_t flags;
 
     /* The store over other buffers: rbuf[rpos:] is read-ahead (rgen tells
        its successive values apart). */
@@ -1283,15 +1291,16 @@ native_decode(tconf *cf, const char *s, Py_ssize_t len, int final,
 
 /* The decoder's flags. */
 static int
-decoder_flags(PyObject *decoder, int *flags, Py_ssize_t *held)
+decoder_flags(PyObject *decoder, dflags_t *flags, Py_ssize_t *held)
 {
     PyObject *state = PyObject_CallMethodNoArgs(decoder,
                                                 &_Py_ID(getstate));
     PyObject *buf;
     int ok = (state != NULL && PyTuple_Check(state)
-              && PyArg_ParseTuple(state, "Oi;illegal decoder state", &buf,
-                                  flags)
+              && PyArg_ParseTuple(state, "OK;illegal decoder state", &buf,
+                                  &flags->v)
               && PyBytes_Check(buf));
+    flags->fresh = 0;
     if (ok && held != NULL) {
         *held = PyBytes_GET_SIZE(buf);
     }
@@ -1302,14 +1311,14 @@ decoder_flags(PyObject *decoder, int *flags, Py_ssize_t *held)
     return ok ? 0 : -1;
 }
 
-/* Set the decoder to (b"", flags), or reset it (FLAGS_FRESH). */
+/* Set the decoder to (b"", flags), or reset it (fresh). */
 static int
-decoder_setstate(PyObject *decoder, int flags)
+decoder_setstate(PyObject *decoder, dflags_t flags)
 {
-    PyObject *res = (flags == FLAGS_FRESH
+    PyObject *res = (flags.fresh
                      ? PyObject_CallMethodNoArgs(decoder, &_Py_ID(reset))
                      : _PyObject_CallMethod(decoder, &_Py_ID(setstate),
-                                            "((yi))", "", flags));
+                                            "((yK))", "", flags.v));
     Py_XDECREF(res);
     return res == NULL ? -1 : 0;
 }
@@ -1319,7 +1328,7 @@ decoder_setstate(PyObject *decoder, int flags)
    *flags its flags after them. */
 static PyObject *
 decoder_decode(PyObject *decoder, const char *s, Py_ssize_t len, int final,
-               Py_ssize_t *used, int *flags)
+               Py_ssize_t *used, dflags_t *flags)
 {
     if (decoder_setstate(decoder, *flags) < 0) {
         return NULL;
@@ -1355,11 +1364,11 @@ decoder_decode(PyObject *decoder, const char *s, Py_ssize_t len, int final,
    byte decoded to as a group, or -1. */
 static int
 decoder_offset(textio *self, PyObject *decoder, Py_ssize_t ci,
-               Py_ssize_t *off, int *flags)
+               Py_ssize_t *off, dflags_t *flags)
 {
     /* The decoder runs Python code, which may use self. */
     PyObject *span = Py_NewRef(self->dspan);
-    int dflags = self->dflags;
+    dflags_t dflags = self->dflags;
     Py_ssize_t lo = 0, hi = PyBytes_GET_SIZE(span), used = 0, n = 0;
     int r = -1;
     while (lo <= hi) {
@@ -1535,12 +1544,12 @@ decoder_more(textio *self, store *st)
     /* From the store's position (another thread may have used the decoder
        while this one waited): the flags there. */
     PyObject *decoder = st->cf->decoder;
-    if (self->flags == FLAGS_FRESH
+    if (self->flags.fresh
         && decoder_flags(decoder, &self->flags, NULL) < 0)
     {
         return -1;
     }
-    int flags = self->flags;
+    dflags_t flags = self->flags;
     PyObject *chars = decoder_decode(decoder, st->m.ptr, span, final, &used,
                                      &flags);
     Py_ssize_t start, end;
@@ -2716,7 +2725,7 @@ static int
 decoder_sync(textio *self, tconf *cf)
 {
     Py_ssize_t off, ci;
-    int flags;
+    dflags_t flags;
     (void)cache_chars(self, &ci);
     if (!cf->seekable
         || decoder_offset(self, cf->decoder, ci, &off, &flags) < 0)
@@ -2919,10 +2928,15 @@ typedef struct {
 #define COOKIE_BUF_LEN 21
 
 static PyObject *
-cookie_build(Py_off_t pos, int flags, Py_ssize_t skip)
+cookie_build(Py_off_t pos, dflags_t flags, Py_ssize_t skip)
 {
+    if (!flags.fresh && flags.v > UINT32_MAX) {
+        PyErr_SetString(PyExc_OverflowError,
+                        "the decoder's state doesn't fit a tell() cookie");
+        return NULL;
+    }
     unsigned char b[COOKIE_BUF_LEN] = {0};
-    uint64_t f[3] = {(uint64_t)pos, (uint32_t)flags, 0};
+    uint64_t f[3] = {(uint64_t)pos, flags.fresh ? 0 : flags.v, 0};
     for (int i = 0; i < 8; i++) {
         b[i] = (unsigned char)(f[0] >> (8 * i));
     }
@@ -3027,12 +3041,12 @@ text_tell(textio *self, tconf *cf)
     }
     Py_ssize_t ci;
     PyObject *chars = cache_chars(self, &ci);
-    int flags = self->flags;
+    dflags_t flags = self->flags;
     if (chars != NULL && PyUnicode_GET_LENGTH(chars) > ci) {
         /* The byte position of the text position, if there is one; else
            where the characters were decoded from, and how many to skip. */
         Py_ssize_t off, start = -PyBytes_GET_SIZE(self->dspan);
-        int dflags = self->dflags;
+        dflags_t dflags = self->dflags;
         int r = decoder_offset(self, cf->decoder, ci, &off, &flags);
         if (r < 0) {
             Py_DECREF(pos);
@@ -3041,7 +3055,7 @@ text_tell(textio *self, tconf *cf)
         Py_SETREF(pos, r > 0 ? cookie_build(p + off, flags, 0)
                              : cookie_build(p + start, dflags, ci));
     }
-    else if (p != 0 && flags != FLAGS_FRESH && flags != 0) {
+    else if (p != 0 && !flags.fresh && flags.v != 0) {
         Py_SETREF(pos, cookie_build(p, flags, 0));
     }
     return pos;
@@ -3067,12 +3081,13 @@ text_encoder_reset(textio *self, tconf *cf, int start)
 /* The decoder at a position: reset at the stream's start (pos and flags
    0), else with flags. */
 static int
-text_decoder_reset(textio *self, tconf *cf, Py_off_t pos, int flags)
+text_decoder_reset(textio *self, tconf *cf, Py_off_t pos, uint32_t flags)
 {
     if (cf->decoder == NULL) {
         return 0;
     }
-    self->flags = pos == 0 && flags == 0 ? FLAGS_FRESH : flags;
+    self->flags = (pos == 0 && flags == 0 ? FLAGS_FRESH
+                   : (dflags_t){flags, 0});
     return decoder_setstate(cf->decoder, self->flags);
 }
 
@@ -3226,7 +3241,7 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
     }
     Py_CLEAR(res);
     int start = c.start_pos == 0 && c.dec_flags == 0;
-    if (text_decoder_reset(self, cf, c.start_pos, c.dec_flags) < 0
+    if (text_decoder_reset(self, cf, c.start_pos, (uint32_t)c.dec_flags) < 0
         || text_encoder_reset(self, cf, start) < 0)
     {
         goto done;
