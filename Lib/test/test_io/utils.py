@@ -337,19 +337,33 @@ class CTestCase(unittest.TestCase):
     # Does peek(n) return min(n, buffer size) bytes when the raw stream has
     # them, reading after the read-ahead?  (gh-50061)
     peek_reads_to_size = is_nibbler
+
+    # Is the TextIOWrapper _io._nibbler's?  (It is with
+    # _PYTHON_IO_DEFAULT_IMPL=_nibbler and with NibblerMixin.)  The text
+    # capabilities below follow it, not the buffered classes.
+    @property
+    def text_is_nibbler(self):
+        return getattr(self.TextIOWrapper, '_is_nibbler', False)
+
+    # Is the TextIOWrapper _io's own, which stays as upstream has it?  Tests
+    # of fixes made to _pyio's and _io._nibbler's skip it.
+    @property
+    def stock_c_text(self):
+        return not self.text_is_nibbler
+
     # Does TextIOWrapper.tell() work while iterating?  (gh-81217)
-    tells_while_iterating = is_nibbler
+    tells_while_iterating = text_is_nibbler
     # Does readline() that would block keep a partial line longer than the
     # buffer for the next call?  (_io's keeps one only if it fits.)
     keeps_long_partial_lines = is_nibbler
     # Does TextIOWrapper put encoded text straight into its buffer and
     # decode from the buffer's read-ahead, instead of keeping bytes of its
     # own (pending_bytes) and reading chunks with read1()?
-    text_uses_buffer_directly = is_nibbler
+    text_uses_buffer_directly = text_is_nibbler
     # Does TextIOWrapper take from the buffer only the bytes of the text it
     # returns (UTF-8, Latin-1 and ASCII), so that the buffer's position is
     # the text position and a write after a read goes there?  (gh-82891)
-    text_reads_in_place = is_nibbler
+    text_reads_in_place = text_is_nibbler
 
     MockRawIO = CMockRawIO
     MisbehavedRawIO = CMisbehavedRawIO
@@ -384,6 +398,8 @@ class PyTestCase(unittest.TestCase):
     has_readall = False
     keeps_writes_racing_close = False
     peek_reads_to_size = True
+    text_is_nibbler = False
+    stock_c_text = False
     tells_while_iterating = False
     keeps_long_partial_lines = True
     text_uses_buffer_directly = False

@@ -405,6 +405,8 @@ class SlowDeviceTest:
         self.assertEqual(out, data)
 
     def test_text_read_would_block_keeps_partial_char(self):
+        if self.stock_c_text:
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # A raw stream that would block in the middle of a multibyte
         # character: its first bytes stay buffered for the next read,
         # instead of being decoded as if at EOF.
@@ -417,6 +419,8 @@ class SlowDeviceTest:
         self.assertEqual(f.read(10), "")
 
     def test_text_readline_error_keeps_partial_line(self):
+        if self.stock_c_text:
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # gh-51571: a raw read that raises (such as a socket timeout) in the
         # middle of a line loses nothing: the next readline() returns the
         # whole line.
@@ -790,6 +794,8 @@ class SlowDeviceTest:
                 self.assertEqual(raw.received, b"")
 
     def test_text_close_flush_error_no_retry(self):
+        if self.stock_c_text:
+            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # TextIOWrapper.close() doesn't write the data again through the
         # close() of its buffer either.
         raw = self.scripted_writer([OSError(errno.EPIPE, "EPIPE")])
