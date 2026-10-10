@@ -13,7 +13,9 @@
  *
  * Threads coordinate with two things, both taken over (not waited for) when
  * their holder is gone, see nibbler_lock_wait().  Threads waiting for either
- * hold nothing, so only a gone holder ever needs taking over:
+ * hold nothing, so only a gone holder ever needs taking over.  Waits are
+ * timed: only when one times out does the waiter look for a gone holder,
+ * so contended waits don't scan the thread states.
  *
  * - The lock guards all of the state.  Its owner (the id of the holding
  *   thread state) detects reentrant calls, which raise instead of
@@ -458,8 +460,16 @@ nibbler_commit(nibbler_end *e, Py_ssize_t r, const char *data,
  * Locking and the I/O role
  */
 
+/* How long a thread waits for the lock or the I/O role before it checks
+   whether their holder is gone (see nibbler_lock_wait()): taking over after
+   a fork waits this long, and contended waits check at most once per
+   period. */
+#define NIBBLER_WAIT_NS (20 * 1000 * 1000)
+
 /* Is there no thread state with this id in the interpreter any more?  Its
-   thread exited, or was removed by a fork or by finalization. */
+   thread exited, or was removed by a fork or by finalization.  Scans the
+   thread states with the runtime's lock held: only done after a wait timed
+   out. */
 static int
 nibbler_thread_gone(PyInterpreterState *interp, uint64_t id)
 {
@@ -558,25 +568,42 @@ nibbler_reentrant(PyObject *obj)
    It may or may not have written the data it was given (the parent
    process still will, after a fork), so that is dropped.  A thread exits
    only after releasing the lock, so a gone thread still recorded as owner
-   never released it. */
+   never released it.
+
+   Waiting is timed, and only after a wait of NIBBLER_WAIT_NS timed out is
+   the owner looked for among the thread states (once per period), so that
+   contended waits don't take the runtime's lock to scan them.  Finalizing
+   is a cheap check, made before each wait. */
 static int
 nibbler_lock_wait(nibbler *n, PyObject *obj, PyThreadState *tstate,
                   int interruptible)
 {
+    _PyLockFlags flags = _PY_LOCK_DETACH;
+    if (interruptible) {
+        flags |= _PY_LOCK_HANDLE_SIGNALS;
+    }
+    int timed_out = 0;
     for (;;) {
         uint64_t owner = _Py_atomic_load_uint64_relaxed(&n->owner);
         if (owner == tstate->id) {
             return nibbler_reentrant(obj);
         }
-        if (!_Py_IsInterpreterFinalizing(tstate->interp)
-            && (owner == 0 || !nibbler_thread_gone(tstate->interp, owner)))
-        {
-            _PyLockFlags flags = _PY_LOCK_DETACH;
-            if (interruptible) {
-                flags |= _PY_LOCK_HANDLE_SIGNALS;
+        int take_over = _Py_IsInterpreterFinalizing(tstate->interp);
+        if (!take_over && timed_out && owner != 0) {
+            take_over = nibbler_thread_gone(tstate->interp, owner);
+            timed_out = 0;
+        }
+        if (!take_over) {
+            PyLockStatus st = _PyMutex_LockTimed(&n->lock, NIBBLER_WAIT_NS,
+                                                 flags);
+            if (st == PY_LOCK_ACQUIRED) {
+                return 0;
             }
-            PyLockStatus st = _PyMutex_LockTimed(&n->lock, -1, flags);
-            return st == PY_LOCK_INTR ? -1 : 0;
+            if (st == PY_LOCK_INTR) {
+                return -1;
+            }
+            timed_out = 1;
+            continue;
         }
         /* Unlocked after all (PyMutex_LockFast() also fails while
            threads are parked)? */
@@ -636,8 +663,9 @@ nibbler_unlock(nibbler *n)
 }
 
 /* Wait until the I/O role is free, parked rather than holding the lock.
-   A gone holder is taken over the same way as a gone lock holder.  Returns
-   0 with the lock held, or -1 with it released.
+   A gone holder is taken over the same way as a gone lock holder, also
+   looked for only once a wait timed out.  Returns 0 with the lock held, or
+   -1 with it released.
 
    Parking expects `io` to still be the value with NIBBLER_IO_PARKED set
    here.  Every release sets it to 0 and every take to a value without the
@@ -653,6 +681,7 @@ static int
 nibbler_wait_io(nibbler *n, PyObject *obj)
 {
     PyThreadState *tstate = _PyThreadState_GET();
+    int timed_out = 0;
     while (nibbler_io_busy(n)) {
         uint64_t holder = nibbler_io_holder(n);
         if (holder == tstate->id) {
@@ -660,7 +689,7 @@ nibbler_wait_io(nibbler *n, PyObject *obj)
             return nibbler_reentrant(obj);
         }
         if (_Py_IsInterpreterFinalizing(tstate->interp)
-            || nibbler_thread_gone(tstate->interp, holder))
+            || (timed_out && nibbler_thread_gone(tstate->interp, holder)))
         {
             nibbler_abandon_io(n);
             break;
@@ -670,10 +699,12 @@ nibbler_wait_io(nibbler *n, PyObject *obj)
         uint64_t io = n->io | NIBBLER_IO_PARKED;
         _Py_atomic_store_uint64_relaxed(&n->io, io);
         nibbler_unlock(n);
-        int r = _PyParkingLot_Park(&n->io, &io, sizeof(io), -1, NULL, 1);
+        int r = _PyParkingLot_Park(&n->io, &io, sizeof(io), NIBBLER_WAIT_NS,
+                                   NULL, 1);
         if (r == Py_PARK_INTR && PyErr_CheckSignals() < 0) {
             return -1;
         }
+        timed_out = r == Py_PARK_TIMEOUT;
         if (nibbler_lock(n, obj) < 0) {
             return -1;
         }

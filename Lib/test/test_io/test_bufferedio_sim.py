@@ -2087,20 +2087,17 @@ class LockReleaseTest:
     def test_shutdown_with_threads_waiting(self):
         self.check_shutdown("f.write('.'); f.flush()", waiters=3)
 
-    @threading_helper.requires_working_threading()
-    @support.requires_fork()
-    def test_fork_while_other_thread_holds_lock(self):
-        code = """
+    def check_fork(self, gated, holder_op):
+        code = f"""
             import warnings
             from threading import Thread
             warnings.simplefilter('ignore', DeprecationWarning)
 
-            GATED = {'write'}
+            GATED = {{{gated!r}}}
             f = BufferedRandom(GatedRaw())
 
             def holder():
-                f.write(b'.')
-                f.flush()
+                {holder_op}
 
             Thread(target=holder, daemon=True).start()
             entered.wait()
@@ -2113,6 +2110,19 @@ class LockReleaseTest:
             os.write(1, b'exit %d' % status)
             """
         self.assertEqual(self.run_child(code), (0, b"child exit 0", ""))
+
+    @threading_helper.requires_working_threading()
+    @support.requires_fork()
+    def test_fork_while_other_thread_holds_lock(self):
+        # The gone thread holds the lock, in a raw seek().
+        self.check_fork('seek', "f.seek(1)")
+
+    @threading_helper.requires_working_threading()
+    @support.requires_fork()
+    def test_fork_while_other_thread_writes_out(self):
+        # The gone thread holds the I/O role, in a raw write() made without
+        # the lock.
+        self.check_fork('write', "f.write(b'.'); f.flush()")
 
     @threading_helper.requires_working_threading()
     @unittest.skipUnless(hasattr(signal, "pthread_kill"),
