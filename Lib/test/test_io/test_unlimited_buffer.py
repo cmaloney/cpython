@@ -485,6 +485,19 @@ class OpenUnlimitedTest(unittest.TestCase):
                 # Raised before opening: not truncated.
                 self.assertEqual(self.read(), b'old')
 
+    def test_switched_while_opening(self):
+        # The class checked before the file is opened is the one used, also
+        # when _io._set_open_impl() replaces it meanwhile (here from the
+        # opener, called in between).
+        self.nibbler()
+        def opener(path, flags):
+            _io._set_open_impl('_io')
+            return os.open(path, flags)
+        with open(self.path, 'wb', buffering=None, opener=opener) as f:
+            self.assertIs(type(f), _nibbler.BufferedWriter)
+            f.write(b'new')
+        self.assertEqual(self.read(), b'new')
+
     def test_binary(self):
         self.nibbler()
         for mode, cls in [('wb', _nibbler.BufferedWriter),

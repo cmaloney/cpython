@@ -264,6 +264,8 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
     int line_buffering, is_number, isatty = 0;
 
     PyObject *raw, *modeobj = NULL, *buffer, *wrapper, *result = NULL, *path_or_fd = NULL;
+    /* With buffering=None, the buffered class (see below). */
+    PyObject *unlimited_class = NULL;
 
     is_number = PyNumber_Check(file);
 
@@ -372,14 +374,16 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
 
     _PyIO_State *state = get_io_state(module);
     if (unlimited) {
-        /* Check before the file is opened (and maybe truncated). */
+        /* Check before the file is opened (and maybe truncated), and use
+           the class checked: _io._set_open_impl() may replace it
+           meanwhile. */
         int writable = creating || writing || appending || updating;
-        PyObject *type = iomodule_get_open_type(
+        unlimited_class = iomodule_get_open_type(
             updating ? &state->open_random_type : &state->open_writer_type);
-        int nibbler = (type != NULL
-                       && _PyIO_is_nibbler_buffered_type((PyTypeObject *)type));
-        Py_XDECREF(type);
-        if (!nibbler) {
+        if (unlimited_class == NULL
+            || !_PyIO_is_nibbler_buffered_type(
+                (PyTypeObject *)unlimited_class))
+        {
             PyErr_SetString(PyExc_TypeError,
                             "buffering=None (unlimited write buffering) "
                             "needs open() to use _io._nibbler");
@@ -491,7 +495,10 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
             goto error;
         }
 
-        PyObject *Buffered_class = iomodule_get_open_type(slot);
+        PyObject *Buffered_class = (unlimited_class != NULL
+                                    ? Py_NewRef(unlimited_class)
+                                    : iomodule_get_open_type(slot));
+        Py_CLEAR(unlimited_class);
         if (Buffered_class == NULL) {
             assert(buffering == 0);
             if (!binary) {
@@ -564,6 +571,7 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
     }
     Py_XDECREF(path_or_fd);
     Py_XDECREF(modeobj);
+    Py_XDECREF(unlimited_class);
     return NULL;
 }
 
