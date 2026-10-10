@@ -493,6 +493,7 @@ typedef struct {
     char all;           /* read everything there is before decoding */
     char lockfree;      /* without the critical section */
     char retry;         /* error: do it with the critical section */
+    char stop;          /* invalid bytes follow the characters */
     Py_ssize_t held;    /* bytes of m the decoder held (it forgot them) */
     /* The cache as this call knows it: a copy (copy), with free threading
        (see "Locking"); with the GIL, the cache itself. */
@@ -517,7 +518,7 @@ static void
 store_forget(store *st)
 {
     store_release(st);
-    st->peeked = st->eof = st->status = 0;
+    st->peeked = st->eof = st->status = st->stop = 0;
     st->held = 0;
 }
 
@@ -1451,11 +1452,13 @@ native_more(textio *self, store *st)
         if (chars == NULL && PyErr_ExceptionMatches(PyExc_UnicodeDecodeError)
             && text_decode_error(&start, &end) == 0)
         {
-            /* Decode what is valid; at invalid bytes, take them, so that
-               the error is raised once (as _io's does). */
+            /* Decode what is valid, which ends this call (as if at the
+               end); at invalid bytes, take them, so that the error is
+               raised once (as _io's does). */
             if (start > 0) {
                 PyErr_Clear();
                 chars = native_decode(st->cf, st->m.ptr, start, 0, &used);
+                st->stop = 1;
             }
             else {
                 PyObject *exc = PyErr_GetRaisedException();
@@ -1487,7 +1490,7 @@ native_more(textio *self, store *st)
         }
         /* Only part of a character more. */
     }
-    if (st->peeked && (st->eof || st->status)) {
+    if (st->stop || (st->peeked && (st->eof || st->status))) {
         return 0;
     }
     if (store_peek(self, st, st->m.len + 1) < 0) {
@@ -1590,8 +1593,9 @@ static inline int
 text_at_end(textio *self, store *st, Py_ssize_t avail)
 {
     (void)self;
-    return st->eof && (st->cf->codec == CODEC_DECODER ? st->m.len == 0
-                       : avail == 0 || st->c->kbytes == st->m.len);
+    return st->stop
+           || (st->eof && (st->cf->codec == CODEC_DECODER ? st->m.len == 0
+                           : avail == 0 || st->c->kbytes == st->m.len));
 }
 
 Py_NO_INLINE static Py_ssize_t

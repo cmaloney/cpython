@@ -2340,6 +2340,32 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                     t.buffer.x = 1
                     self.assertEqual(a + t.read(7) + t.read(), data)
 
+    def test_invalid_bytes_strict(self):
+        # Invalid bytes end the text before them, and the next read raises
+        # (once): they don't look like the end of the stream.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        cases = [
+            ("utf-8", b"one\ntwo\xff\nthree\n",
+             ["one\n", "two", None, "\n", "three\n", ""]),
+            ("utf-8", b"ab\xc3", ["ab", None, ""]),
+            ("ascii", b"x\x80y\n", ["x", None, "y\n", ""]),
+            ("cp1252", b"x\x81y\n", ["x", None, "y\n", ""]),
+        ]
+        for encoding, data, expected in cases:
+            with self.subTest(encoding=encoding, data=data):
+                with open(os_helper.TESTFN, "wb") as f:
+                    f.write(data)
+                t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                                      encoding=encoding)
+                for want in expected:
+                    if want is None:
+                        self.assertRaises(UnicodeDecodeError, t.readline)
+                    else:
+                        self.assertEqual(t.readline(), want)
+                t.seek(0)
+                with self.assertRaises(UnicodeDecodeError):
+                    list(t)
+
     @threading_helper.requires_working_threading()
     @support.requires_resource("cpu")
     def test_buffer_dict_while_threads_read(self):
