@@ -1113,6 +1113,10 @@ _PyFileIO_writev(PyObject *op, const _PyIO_Span *spans, Py_ssize_t cnt)
     if (fd < 0) {
         return -1;
     }
+    if (cnt <= 0) {
+        /* Nothing to write (and no spans[0] to read without writev()). */
+        return 0;
+    }
 #ifdef HAVE_WRITEV
     /* Writing less than everything is a valid partial write: at most
        _PyIO_WRITEV_LONG (and IOV_MAX) spans, and like _Py_write() at most

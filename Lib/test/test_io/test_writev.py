@@ -9,7 +9,7 @@ import unittest
 import _pyio as pyio
 from _io import _nibbler
 
-from test.support import threading_helper
+from test.support import os_helper, threading_helper
 
 
 class DefaultWritevTest:
@@ -96,6 +96,27 @@ class CDefaultWritevTest(DefaultWritevTest, unittest.TestCase):
 
 class PyDefaultWritevTest(DefaultWritevTest, unittest.TestCase):
     RawIOBase = pyio.RawIOBase
+
+
+class FileIOWritevTest(unittest.TestCase):
+
+    def setUp(self):
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+
+    def test_writev(self):
+        with io.FileIO(os_helper.TESTFN, "w") as f:
+            self.assertEqual(f._writev([b"ab", bytearray(b"cd"),
+                                        memoryview(b"ef")]), 6)
+            # Nothing to write.
+            self.assertEqual(f._writev([]), 0)
+        with open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(), b"abcdef")
+
+    def test_closed(self):
+        f = io.FileIO(os_helper.TESTFN, "w")
+        f.close()
+        self.assertRaises(ValueError, f._writev, [])
+        self.assertRaises(ValueError, f._writev, [b"x"])
 
 
 @unittest.skipUnless(hasattr(socket, "socketpair"), "needs socketpair()")
