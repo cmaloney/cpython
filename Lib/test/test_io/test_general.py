@@ -707,6 +707,14 @@ class IOTest:
         with self.open("non-existent", "r", encoding="utf-8", opener=opener) as f:
             self.assertEqual(f.read(), "egg\n")
 
+    def test_open_without_read_write_mode(self):
+        # A mode with none of "xrwa" is an error, whatever else it has.
+        for mode in "b", "t", "", "+", "b+":
+            with self.subTest(mode=mode):
+                with self.assertRaisesRegex(ValueError,
+                                            "(?i)exactly one of"):
+                    self.open(os_helper.TESTFN, mode)
+
     def test_bad_opener_negative_1(self):
         # Issue #27066.
         def badopener(fname, flags):
