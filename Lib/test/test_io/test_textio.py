@@ -852,8 +852,6 @@ class TextIOWrapperTest:
             self.assertEqual(f.read(), "ne3\n")
 
     def test_tell_after_next_and_flush(self):
-        if self.is_stock_C:
-            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # flush() while iterating doesn't make tell() use a snapshot that
         # wasn't kept: it gives the position, or raises as it does while
         # iterating if that isn't known.
