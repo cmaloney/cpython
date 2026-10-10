@@ -52,6 +52,17 @@ extern int _PyIOBase_finalize(PyObject *self);
    Doesn't check the argument type, so be careful! */
 extern int _PyFileIO_closed(PyObject *self);
 
+/* Is op an exact FileIO (of any interpreter's _io)?  Without looking up
+   the module state, which takes the type lock to search the MRO of types
+   that aren't _io's own. */
+static inline int
+_PyFileIO_CheckExact(PyObject *op)
+{
+    PyTypeObject *tp = Py_TYPE(op);
+    return (PyType_HasFeature(tp, Py_TPFLAGS_HEAPTYPE)
+            && ((PyHeapTypeObject *)tp)->ht_token == &_Py_fileio_spec);
+}
+
 /* Direct calls into an exact FileIO for the buffered layer.  The
    Py_ssize_t ones return the byte count, -2 if a non-blocking file would
    block, or -1 with an exception set. */

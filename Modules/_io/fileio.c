@@ -1750,6 +1750,7 @@ static PyType_Slot fileio_slots[] = {
     {Py_tp_getset, fileio_getsetlist},
     {Py_tp_init, _io_FileIO___init__},
     {Py_tp_new, fileio_new},
+    {Py_tp_token, Py_TP_USE_SPEC},
     {0, NULL},
 };
 

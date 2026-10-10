@@ -402,10 +402,9 @@ buffered_is_closed(buffered *self)
    with buffered_ref_raw(), and raw_fileio may already describe another
    raw stream (__init__() again), so its type is looked at. */
 static int
-buffered_ref_closed(buffered *self, PyObject *raw)
+buffered_ref_closed(PyObject *raw)
 {
-    _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
-    return buffered_raw_closed(raw, Py_IS_TYPE(raw, state->PyFileIO_Type));
+    return buffered_raw_closed(raw, _PyFileIO_CheckExact(raw));
 }
 
 /* Raise ValueError(closed_msg) if closed.  Then writes can't go on
@@ -1717,7 +1716,7 @@ gather_commit(gather *g, int flush)
         /* A deferred flush is moot once close() or detach() wrote
            everything out. */
         PyObject *raw = buffered_ref_raw(self);
-        int closed = raw == NULL ? 1 : buffered_ref_closed(self, raw);
+        int closed = raw == NULL ? 1 : buffered_ref_closed(raw);
         Py_XDECREF(raw);
         if (closed != 0) {
             return closed < 0 ? -1 : 0;
@@ -1800,7 +1799,7 @@ gather_check(buffered *self)
     if (raw == NULL) {
         return -1;
     }
-    int closed = buffered_ref_closed(self, raw);
+    int closed = buffered_ref_closed(raw);
     Py_DECREF(raw);
     if (closed > 0) {
         PyErr_SetString(PyExc_ValueError, "write to closed file");
@@ -1890,7 +1889,7 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
     if (raw == NULL) {
         return NULL;
     }
-    int closed = buffered_ref_closed(self, raw);
+    int closed = buffered_ref_closed(raw);
     Py_DECREF(raw);
     if (closed != 0) {
         if (closed > 0) {
@@ -3617,7 +3616,7 @@ _PyIONibbler_closed(PyObject *op)
         return -1;
     }
     /* Without the lock: raw_fileio may be another raw stream's. */
-    int r = buffered_ref_closed(self, raw);
+    int r = buffered_ref_closed(raw);
     Py_DECREF(raw);
     return r;
 }
