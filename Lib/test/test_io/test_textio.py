@@ -1994,9 +1994,8 @@ class TextIOWrapperTest:
         (100 << (12 * 8)) | (0x7FFFFFFF << (16 * 8))
     ])
     def test_seek_reject_invalid_chars_to_skip(self, cookie_value):
-        if self.is_stock_C or not self.is_C:
-            # (_pyio's seek() doesn't reject these.)
-            self.skipTest("_io.TextIOWrapper is as upstream has it")
+        if not self.is_C:
+            self.skipTest("_pyio's seek() doesn't reject these")
         # See https://github.com/python/cpython/issues/153662
         data = b"1"
         raw = self.BytesIO(data)
@@ -2007,21 +2006,24 @@ class TextIOWrapperTest:
             tio.seek(cookie_value)
 
     def test_seek_cookie_out_of_range(self):
-        if self.is_stock_C:
-            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # gh-91112: a cookie that tell() can't have returned is an error,
         # instead of silently being another position.
+        # A cookie too large for any layout: C can't even unpack it.
+        too_large = OverflowError if self.is_C else OSError
         with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
             f.write("abc")
-            for cookie in (1 << 64) + 1, (1 << 63) + 1, 1 << 300:
+            for cookie, exc in [((1 << 64) + 1, OSError),
+                                ((1 << 63) + 1, OSError),
+                                (1 << 300, too_large)]:
                 with self.subTest(cookie=cookie):
-                    with self.assertRaises((OSError, OverflowError)):
+                    with self.assertRaises(exc):
                         f.seek(cookie)
                     self.assertEqual(f.tell(), 3)
         with self.open(os_helper.TESTFN, "r", encoding="utf-8") as f:
-            for cookie in (1 << 63) + 1, 1 << 300:
+            for cookie, exc in [((1 << 63) + 1, OSError),
+                                (1 << 300, too_large)]:
                 with self.subTest(cookie=cookie):
-                    with self.assertRaises((OSError, OverflowError)):
+                    with self.assertRaises(exc):
                         f.seek(cookie)
 
     def test_close_and_detach_finish_encoder(self):
