@@ -931,8 +931,6 @@ class SlowDeviceTest:
                 self.assertEqual(raw.received, b"")
 
     def test_text_close_flush_error_no_retry(self):
-        if self.is_stock_C:
-            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # TextIOWrapper.close() doesn't write the data again through the
         # close() of its buffer either.
         raw = self.scripted_writer([OSError(errno.EPIPE, "EPIPE")])
