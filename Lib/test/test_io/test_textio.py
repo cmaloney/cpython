@@ -613,7 +613,7 @@ class TextIOWrapperTest:
         # position, so a write (or truncate()) after a read acts there, as
         # after seek(tell()).  (Elsewhere a write after a read goes where the
         # buffer read up to.)
-        if not self.text_reads_in_place:
+        if not self.is_nibbler:
             self.skipTest("text reads ahead of its position")
         big = "".join(f"line {i:05}\n" for i in range(3000))
         def check(enc, newline, text, read, written, after, rest):
@@ -791,7 +791,7 @@ class TextIOWrapperTest:
         f.seek(0)
         for i, line in enumerate(f):
             self.assertEqual(line, "\xff\n")
-            if self.tells_while_iterating:
+            if self.is_nibbler:
                 # gh-81217
                 self.assertEqual(f.tell(), (p1, p2)[i])
             else:
@@ -828,7 +828,7 @@ class TextIOWrapperTest:
         with self.open(os_helper.TESTFN, "r+", encoding="utf-8") as f:
             self.assertEqual(next(f), "a\n")
             f.flush()
-            if self.tells_while_iterating:
+            if self.is_nibbler:
                 self.assertEqual(f.tell(), 2)
             else:
                 self.assertRaisesRegex(OSError, "disabled by next",
@@ -842,7 +842,7 @@ class TextIOWrapperTest:
             self.assertEqual(f.readline(), "bc\n")
 
     def test_tell_while_iterating(self):
-        if not self.tells_while_iterating:
+        if not self.is_nibbler:
             self.skipTest("next() disables tell()")
         # gh-81217: tell() inside a for loop gives positions that seek()
         # goes back to.

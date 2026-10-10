@@ -10,8 +10,7 @@
 
 Each test class runs against the C (_io), Python (_pyio) and C nibbler
 (_io._nibbler) implementations.  Behavior differences are gated on
-capability attributes (see utils.py); is_C only picks error messages and
-known _pyio quirks.
+is_nibbler, is_C and is_stock_C (see utils.py).
 """
 import array
 import errno
@@ -362,7 +361,7 @@ class SlowDeviceTest:
         self.assertEqual(out, data)
 
     def test_peek_reads_to_size(self):
-        if not self.peek_reads_to_size:
+        if self.is_stock_C:
             self.skipTest("peek() returns the read-ahead, however short")
         # gh-50061: peek(n) returns at least min(n, buffer size) bytes when
         # the raw stream has them, with at most one raw read.
@@ -430,7 +429,7 @@ class SlowDeviceTest:
     def test_read_all_error_keeps_data(self):
         # read() of a raw stream with only RawIOBase.readall() keeps what
         # it read before a raw read raised.
-        if not self.keeps_data_on_raw_error:
+        if not self.is_nibbler:
             self.skipTest("data read before a raw error is lost")
         data = sample_data(100)
         raw = self.scripted_reader(data, [30, 20, TimeoutError("timed out")])
@@ -440,7 +439,7 @@ class SlowDeviceTest:
         self.assertEqual(f.read(), data[5:])
 
     def test_read_eintr_is_retried(self):
-        if not self.retries_raw_eintr:
+        if not self.is_C:
             self.skipTest("buffered layer does not retry raw EINTR")
         data = sample_data(1_000)
         plan = [eintr(), 10, eintr(), eintr(), 5, eintr()] * 20
@@ -463,7 +462,7 @@ class SlowDeviceTest:
         self.assertEqual(bytes(got), data)
 
     def test_read_error_keeps_partial_data(self):
-        if not self.keeps_data_on_raw_error:
+        if not self.is_nibbler:
             self.skipTest("data read before a raw error is lost")
         # gh-51571: a raw error (such as a socket timeout) in the middle of
         # a readline() or read(n) loses none of the data read before it.
@@ -622,7 +621,7 @@ class SlowDeviceTest:
         # that or twice is a no-op.
         self.addCleanup(os_helper.unlink, os_helper.TESTFN)
         for unbuffered in (False, True):
-            if unbuffered and not self.supports_buffer_size_zero:
+            if unbuffered and not self.is_nibbler:
                 continue
             size = 0 if unbuffered else 16
             with self.subTest(buffer_size=size):
@@ -688,7 +687,7 @@ class SlowDeviceTest:
         self.assertTrue(raw.closed)
 
     def test_write_eintr_is_retried(self):
-        if not self.retries_raw_eintr:
+        if not self.is_C:
             self.skipTest("buffered layer does not retry raw EINTR")
         plan = [eintr(), 3, eintr(), eintr(), 50] * 100
         raw = self.scripted_writer(plan)
@@ -754,7 +753,7 @@ class SlowDeviceTest:
         self.assertEqual(bytes(raw.received), data)
 
     def test_size_zero_write_error_reports_written(self):
-        if not self.supports_buffer_size_zero:
+        if not self.is_nibbler:
             self.skipTest("buffer_size=0 not supported")
         data = sample_data(100)
         raw = self.scripted_writer([30, OSError(errno.EIO, "EIO")])
@@ -871,7 +870,7 @@ class SlowDeviceTest:
     # buffer_size=0: no internal buffer, but partial transfers are retried.
 
     def check_buffer_size_zero(self):
-        if not self.supports_buffer_size_zero:
+        if not self.is_nibbler:
             self.skipTest("buffer_size=0 not supported")
 
     def test_size_zero_write_retries(self):
@@ -1062,7 +1061,7 @@ class TextTest:
 
     def setUp(self):
         super().setUp()
-        if not self.text_uses_buffer_directly:
+        if not self.is_nibbler:
             self.skipTest("text keeps bytes of its own")
 
     def test_text_and_buffer_writes_keep_order(self):
@@ -1215,7 +1214,7 @@ class PositionTest:
             self.assertEqual(block, expected)
 
     def test_raw_keeping_write_view(self):
-        if not self.isolates_raw_views:
+        if not self.is_nibbler:
             self.skipTest("buffer memory is reused under raw views")
         # A raw stream that keeps the views given to write() sees data that
         # stays as written.
@@ -1235,7 +1234,7 @@ class PositionTest:
             self.assertEqual(bytes(view), copy)
 
     def test_raw_keeping_read_view(self):
-        if not self.isolates_raw_views:
+        if not self.is_nibbler:
             self.skipTest("buffer memory is reused under raw views")
         # gh-60198, gh-157075: a raw stream that keeps the views given to
         # readinto(), and views made from them, and writes through them
@@ -1340,8 +1339,6 @@ class PositionTest:
         self.assertEqual(bytes(raw.buf), b"abcdefghij")
 
     def test_append_mode_write_after_read(self):
-        if not self.keeps_reads_on_append:
-            self.skipTest("writes in append mode overwrite read data")
         # gh-64281: a raw stream in append mode writes at the end of the
         # file whatever the position, so data read before a write must
         # still read back as it is in the file.
@@ -1361,8 +1358,6 @@ class PositionTest:
             self.assertEqual(f.read(), b"testestAB")
 
     def test_append_mode_tell_after_write(self):
-        if not self.tells_append_position:
-            self.skipTest("tell() counts appended writes from the position")
         # gh-80592: a write to a raw file in append mode goes to the end of
         # the file, so tell() is the end of the file after it.
         self.addCleanup(os_helper.unlink, os_helper.TESTFN)
@@ -1576,7 +1571,7 @@ class WriteOutTest:
 
     def setUp(self):
         super().setUp()
-        if not self.queues_writes_during_io:
+        if not self.is_nibbler:
             self.skipTest("the lock is held across raw writes")
 
     def gated(self, buffer_size=16):
@@ -1667,7 +1662,7 @@ class WriteOutTest:
         self.assertEqual(bytes(raw.out), b"a" * 20 + b"c")
 
     def test_raw_write_calling_large_write(self):
-        if not self.buffers_reentrant_writes:
+        if not self.is_nibbler:
             self.skipTest("raises RuntimeError")
         # gh-118143: a signal handler printing while the raw write it
         # interrupted runs, with more than the buffer holds.  The data is
@@ -1688,7 +1683,7 @@ class WriteOutTest:
 
     @unittest.skipUnless(hasattr(signal, "setitimer"), "requires setitimer")
     def test_signal_handler_printing_during_writes(self):
-        if not self.buffers_reentrant_writes:
+        if not self.is_nibbler:
             self.skipTest("raises RuntimeError")
         # gh-112608: a signal handler that print()s to a file while the
         # main code writes to it, with signals arriving during write outs
@@ -1936,7 +1931,7 @@ class ReentrantCallTest:
             self.assertEqual(raw.out, b"012")
 
     def test_seek_target_closing(self):
-        if not self.survives_reentrant_close:
+        if not self.is_nibbler:
             self.skipTest("crashes (gh-143375)")
         # gh-143375: the target closing the object while seek() has a
         # partly written buffer to write out.
@@ -2265,7 +2260,7 @@ class ConcurrentAccessTest:
         closing = threading.Event()
         errors = []
         # (_pyio's raw calls can fail on the file descriptor being closed.)
-        closed_errors = ValueError if self.tells_are_atomic else (
+        closed_errors = ValueError if self.is_nibbler else (
             ValueError, OSError)
 
         def writer(tid):
@@ -2289,7 +2284,7 @@ class ConcurrentAccessTest:
                         f.flush()
                     elif op == "tell":
                         pos = f.tell()
-                        if pos < last and self.tells_are_atomic:
+                        if pos < last and self.is_nibbler:
                             errors.append((last, pos))
                         last = pos
                     elif op == "seek":
@@ -2320,7 +2315,7 @@ class ConcurrentAccessTest:
         with open(os_helper.TESTFN, "rb") as result:
             lines = result.read().splitlines(keepends=True)
         everything = [r for w in written for r in w]
-        if self.keeps_writes_racing_close:
+        if self.is_nibbler:
             self.assertEqual(sorted(lines), sorted(everything))
         else:
             # A write racing close() can't be shown to come before it, so
@@ -2331,7 +2326,7 @@ class ConcurrentAccessTest:
             mine = [r for r in lines if r.startswith(prefix)]
             if not self.is_C:
                 self.assertEqual(mine, sorted(mine))
-            elif self.keeps_writes_racing_close:
+            elif self.is_nibbler:
                 self.assertEqual(mine, written[t])
             else:
                 # Only the last writes, those racing close(), can be lost.
@@ -2367,7 +2362,7 @@ class ConcurrentAccessTest:
                                               buffering)
 
     def test_concurrent_readline_gets_each_line_once(self):
-        if not self.reads_are_atomic:
+        if not self.is_C:
             self.skipTest("readline() can split lines between threads")
         for buffering in (1000, 24):
             with self.subTest(buffering=buffering):
@@ -2375,7 +2370,7 @@ class ConcurrentAccessTest:
                                               buffering)
 
     def test_concurrent_readinto_gets_each_record_once(self):
-        if not self.reads_are_atomic:
+        if not self.is_C:
             self.skipTest("readinto() can split records between threads")
 
         def readinto(f):
