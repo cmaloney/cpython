@@ -55,8 +55,9 @@
                             : (*(expected) = (value), 0))
 #endif
 
-/* Exact bytes appended at least this large are kept by reference instead
-   of being copied, when the owner asks for it. */
+/* Exact bytes appended at least this large can be kept by reference
+   instead of being copied (the owner may ask for a larger minimum, see
+   nibbler_append()). */
 #define NIBBLER_REF_MIN 512
 
 /* A run of bytes inside the bytes object obj, which keeps them alive (see
@@ -1057,12 +1058,13 @@ nibbler_append_copy(nibbler *n, const char *data, Py_ssize_t len)
     return r;
 }
 
-/* Append data[0:len], owned by obj (or NULL): by reference when by_ref
-   allows it or it is larger than a block (exact bytes only), else copied
-   into the block, or into a bytes object of its own when larger. */
+/* Append data[0:len], owned by obj (or NULL): by reference when it is at
+   least ref_min bytes or larger than a block (exact bytes only, and at
+   least NIBBLER_REF_MIN), else copied into the block, or into a bytes
+   object of its own when larger. */
 static int
 nibbler_append(nibbler *n, PyObject *obj, const char *data, Py_ssize_t len,
-               int by_ref)
+               Py_ssize_t ref_min)
 {
     if (len == 0) {
         return 0;
@@ -1070,7 +1072,7 @@ nibbler_append(nibbler *n, PyObject *obj, const char *data, Py_ssize_t len,
     /* Data larger than a block (the owner may let pending writes pass the
        block size) is never copied into one. */
     int large = len > n->capacity;
-    if ((by_ref || large) && len >= NIBBLER_REF_MIN && obj != NULL
+    if ((len >= ref_min || large) && len >= NIBBLER_REF_MIN && obj != NULL
         && PyBytes_CheckExact(obj))
     {
         return morsels_push(&n->list, obj, data, len);

@@ -183,13 +183,18 @@ class UnlimitedTest(unittest.TestCase):
         expected = b''.join(b + (b'%d,' % i if i % 3 == 0 else b'')
                             for i, b in enumerate(objs))
         self.assertEqual(self.read(), expected)
+        # A Python-level _writev() keeps pieces of 2 KiB and more by
+        # reference (smaller ones are joined in blocks): batches of up to
+        # IOV_MAX of them.
+        big = [bytes([i % 256]) * (2048 + i % 7) for i in range(5000)]
         r = VectoredRaw()
         f = _nibbler.BufferedWriter(r, None)
-        for b in objs:
+        for b in big:
             f.write(b)
         f.flush()
-        self.assertEqual(bytes(r.data), b''.join(objs))
-        self.assertGreaterEqual(r.calls, len(objs) // 64)
+        self.assertEqual(bytes(r.data), b''.join(big))
+        self.assertGreater(r.calls, 1)
+        self.assertLessEqual(r.calls, len(big) // 64 + 1)
 
     # Write-out triggers.
 

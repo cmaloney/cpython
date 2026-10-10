@@ -130,6 +130,9 @@ typedef struct {
        only set for writers). */
     uint8_t raw_fileio;
     uint8_t raw_vectored;
+    /* Exact bytes written at least this large are kept by reference
+       rather than copied into a block (see buffered_init()). */
+    Py_ssize_t ref_min;
     uint8_t raw_appending;
     /* How many gather() blocks are active on it, in any context (changed
        atomically): while there are some, there is no writing end, so that
@@ -759,7 +762,7 @@ buffered_add_write(buffered *self, PyObject *obj, const char *data,
 {
     assert(nibbler_reading(&self->nib) == NULL);
     assert(nibbler_nbytes(&self->nib) + len <= self->nib.threshold);
-    return nibbler_append(&self->nib, obj, data, len, self->raw_vectored);
+    return nibbler_append(&self->nib, obj, data, len, self->ref_min);
 }
 
 /* How a write out stopped: everything written, the raw stream would
@@ -844,7 +847,7 @@ buffered_write_batches(buffered *self, Py_ssize_t target, const char *data,
     Py_ssize_t limit = self->raw_vectored ? _PyIO_WRITEV_MAX : 1;
     int st = WRITE_DONE;
     if (_PyIO_WRITEV_LONG > _PyIO_WRITEV_MAX && self->raw_vectored
-        && self->raw_fileio && n->list.count >= _PyIO_WRITEV_MAX)
+        && n->list.count >= _PyIO_WRITEV_MAX)
     {
         /* Many morsels: up to IOV_MAX per writev(). */
         limit = _PyIO_WRITEV_LONG;
@@ -1771,7 +1774,7 @@ gather_add(gather *g, PyObject *obj, const char *data, Py_ssize_t len)
     if (len == 0) {
         return 0;
     }
-    if (FT_ATOMIC_LOAD_UINT8_RELAXED(g->stream->raw_vectored)
+    if (len >= FT_ATOMIC_LOAD_SSIZE_RELAXED(g->stream->ref_min)
         && len >= NIBBLER_REF_MIN && obj != NULL
         && PyBytes_CheckExact(obj))
     {
@@ -2954,10 +2957,35 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
            on FileIO itself, or on raw types not derived from it.  (Readers
            skip the lookups.) */
         /* Also read without the lock, by gather(). */
-        FT_ATOMIC_STORE_UINT8_RELAXED(self->raw_vectored, (uint8_t)(
-            writable
+        /* Write several pieces with one _writev() call when the raw stream
+           has one of its own (FileIO's writes them with one writev()), but
+           not RawIOBase's, which only calls write() on each: joining small
+           pieces in a block makes fewer write() calls (1000 writes of 600
+           bytes and 16 bytes to a raw stream with only write(): 39 calls
+           instead of 1000, 1679 instead of 8244 instructions per write).
+           Not on a FileIO subclass, whose _writev() could bypass an
+           overridden write(). */
+        PyObject *writev = (writable
+                            ? _PyType_Lookup(Py_TYPE(raw), &_Py_ID(_writev))
+                            : NULL);
+        int vectored = (
+            writev != NULL
             && (raw_fileio || !PyObject_TypeCheck(raw, state->PyFileIO_Type))
-            && _PyType_Lookup(Py_TYPE(raw), &_Py_ID(_writev)) != NULL));
+            && writev != _PyType_Lookup(state->PyRawIOBase_Type,
+                                        &_Py_ID(_writev)));
+        /* Also read without the lock, by gather(). */
+        FT_ATOMIC_STORE_UINT8_RELAXED(self->raw_vectored, (uint8_t)vectored);
+        /* Keep large writes by reference, to be written straight from
+           them, where that beats copying them into a block: from 512 bytes
+           to a FileIO (one writev() of them); from 2 KiB to other raw
+           streams with a _writev() of their own, whose Python-level call
+           costs more per piece (1000 writes to a SocketIO: by reference,
+           5549 instructions per write at 512 bytes and 6710 at 1 KiB, but
+           3674 and 5168 copied; 9304 and 9205 at 2 KiB; 13298 and 16298
+           at 4 KiB); never otherwise. */
+        FT_ATOMIC_STORE_SSIZE_RELAXED(
+            self->ref_min, (raw_fileio ? NIBBLER_REF_MIN
+                            : vectored ? 2048 : PY_SSIZE_T_MAX));
         self->raw_appending = (
             writable
             && PyObject_TypeCheck(raw, state->PyFileIO_Type)
@@ -3113,10 +3141,16 @@ buffered_write_locked(buffered *self, const morsel *w, Py_ssize_t *done)
             return BUFFERED_WRITE_RETRY;
         }
         /* No room: write out what is pending, and the rest of data with it
-           when one vectored write takes both or it is too large to buffer,
-           without the lock: other threads can queue writes meanwhile. */
+           when it is too large to buffer, or one vectored write takes both
+           (with a Python-level _writev(), only data large enough to be
+           kept by reference, see buffered_init(): smaller data costs less
+           copied into the buffer than as one more piece), without the
+           lock: other threads can queue writes meanwhile. */
         int status;
-        Py_ssize_t direct = rest >= threshold || self->raw_vectored ? rest : 0;
+        Py_ssize_t direct = (rest >= threshold
+                             || (self->raw_vectored
+                                 && (self->raw_fileio || rest >= self->ref_min))
+                             ? rest : 0);
         *done += buffered_write_out(self, pending, data + *done, direct,
                                     &status, 1);
         rest = len - *done;
