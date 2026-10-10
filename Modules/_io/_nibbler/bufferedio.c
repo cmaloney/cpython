@@ -3070,18 +3070,14 @@ _io_BufferedWriter___init___impl(buffered *self, PyObject *raw,
     return buffered_init_writer(self, raw, buffer_size, 0);
 }
 
-/* buffered_write_locked() returns this when another thread is writing out
-   and data doesn't fit: wait for it (it may make room), then enter again,
-   since anything may have changed. */
-#define BUFFERED_WRITE_RETRY 1
-
 /* write() raised an error other than BlockingIOError after `done` bytes of
    its data reached the raw stream: keep the rest pending, as much of it as
    fits, so that flush() writes it, and set the error's characters_written
    to how much of the data was accepted (written or kept).  Without that,
    the caller couldn't tell what to write again.  Returns -1. */
 static int
-buffered_write_failed(buffered *self, const morsel *w, Py_ssize_t done)
+buffered_write_failed(buffered *self, PyObject *obj, const char *data,
+                      Py_ssize_t len, Py_ssize_t done)
 {
     if (done == 0) {
         /* None of the data was taken: the caller can just retry. */
@@ -3090,10 +3086,8 @@ buffered_write_failed(buffered *self, const morsel *w, Py_ssize_t done)
     PyObject *exc = PyErr_GetRaisedException();
     Py_ssize_t room = Py_MAX(0, self->nib.threshold
                                 - nibbler_nbytes(&self->nib));
-    Py_ssize_t keep = Py_MIN(w->len - done, room);
-    if (buffered_add_write(self, w->obj, w->ptr + done,
-                           keep) < 0)
-    {
+    Py_ssize_t keep = Py_MIN(len - done, room);
+    if (buffered_add_write(self, obj, data + done, keep) < 0) {
         _PyErr_ChainExceptions1(exc);
         return -1;
     }
@@ -3108,75 +3102,6 @@ buffered_write_failed(buffered *self, const morsel *w, Py_ssize_t done)
     }
     PyErr_SetRaisedException(exc);
     return -1;
-}
-
-/* The body of write(), with the lock held: buffer the data after *done
-   (the bytes of it written out so far), writing out what is pending first
-   when it doesn't fit.  Called from code that the raw write of this
-   thread's write out runs (such as a signal handler), it buffers all of
-   the data, past the capacity if need be: the write out or the next flush
-   writes it.  Returns 0, -1 on error, or BUFFERED_WRITE_RETRY; the lock
-   stays held. */
-static int
-buffered_write_locked(buffered *self, const morsel *w, Py_ssize_t *done)
-{
-    PyObject *obj = w->obj;
-    const char *data = w->ptr;
-    Py_ssize_t len = w->len;
-    Py_ssize_t threshold = self->nib.threshold;
-    assert(threshold >= 0);
-    for (;;) {
-        Py_ssize_t rest = len - *done;
-        Py_ssize_t pending = nibbler_nbytes(&self->nib);
-        /* Room for the rest of data: buffer it.  (Unbuffered, the threshold
-           is 0: there is never room.) */
-        if (rest < threshold && pending + rest <= threshold) {
-            return buffered_add_write(self, obj, data + *done, rest);
-        }
-        if (nibbler_io_busy(&self->nib)) {
-            if (nibbler_io_is_mine(&self->nib)) {
-                /* gh-118143 */
-                return nibbler_append_copy(&self->nib, data + *done, rest);
-            }
-            return BUFFERED_WRITE_RETRY;
-        }
-        /* No room: write out what is pending, and the rest of data with it
-           when it is too large to buffer, or one vectored write takes both
-           (with a Python-level _writev(), only data large enough to be
-           kept by reference, see buffered_init(): smaller data costs less
-           copied into the buffer than as one more piece), without the
-           lock: other threads can queue writes meanwhile. */
-        int status;
-        Py_ssize_t direct = (rest >= threshold
-                             || (self->raw_vectored
-                                 && (self->raw_fileio || rest >= self->ref_min))
-                             ? rest : 0);
-        *done += buffered_write_out(self, pending, data + *done, direct,
-                                    &status, 1);
-        rest = len - *done;
-        if (status == WRITE_DONE) {
-            if (rest == 0 && nibbler_nbytes(&self->nib) == 0) {
-                /* All written (unbuffered, the usual case). */
-                return 0;
-            }
-            continue;
-        }
-        if (status == WRITE_ERROR) {
-            return buffered_write_failed(self, w, *done);
-        }
-        /* Would block: keep as much of the rest as fits, and report the
-           rest. */
-        Py_ssize_t room = Py_MAX(0, threshold - nibbler_nbytes(&self->nib));
-        if (rest <= room) {
-            return buffered_add_write(self, obj, data + *done, rest);
-        }
-        int errnum = errno;
-        if (buffered_add_write(self, obj, data + *done, room) == 0) {
-            errno = errnum;
-            buffered_set_blocking_error(*done + room);
-        }
-        return -1;
-    }
 }
 
 /* Without the lock: queue data[0:len] at the writing end, if there is one
@@ -3204,39 +3129,103 @@ buffered_write_lockfree(buffered *self, const char *data, Py_ssize_t len,
     return 1;
 }
 
-/* write() of w->ptr[0:w->len], owned by w->obj, with the lock.
-   Returns 0 or -1.  Out of line, so that the lock-free paths before it
-   stay small. */
+/* write() of data[0:len], owned by obj (or NULL), with the lock: buffer
+   it, writing out what is pending first when it doesn't fit.  Called from
+   code that the raw write of this thread's write out runs (such as a
+   signal handler), it buffers all of the data, past the capacity if need
+   be: the write out or the next flush writes it.  Returns 0 or -1.  Out of
+   line, so that the lock-free paths before it stay small. */
 Py_NO_INLINE static int
-buffered_write_view(buffered *self, const morsel *w)
+buffered_write_data(buffered *self, PyObject *obj, const char *data,
+                    Py_ssize_t len)
 {
     if (FT_ATOMIC_LOAD_INT_RELAXED(self->ngather) > 0) {
-        int r = gather_try_write(self, w->obj, w->ptr, w->len);
+        int r = gather_try_write(self, obj, data, len);
         if (r != 0) {
             return r < 0 ? -1 : 0;
         }
     }
-    Py_ssize_t done = 0;
-    for (;;) {
-        if (buffered_enter(self, "write to closed file", WRITING) < 0) {
-            return -1;
-        }
-        int r = buffered_write_locked(self, w, &done);
-        if (r == 0 && FT_ATOMIC_LOAD_INT_RELAXED(self->ngather) == 0) {
-            /* The next writes may need no lock (unless gathering, see
-               "Gathering"). */
-            nibbler_start_appending(&self->nib);
-        }
-        if (r == BUFFERED_WRITE_RETRY
-            && nibbler_wait_io(&self->nib, (PyObject *)self) < 0)
-        {
-            return -1;
-        }
-        buffered_unlock(self);
-        if (r != BUFFERED_WRITE_RETRY) {
-            return r;
-        }
+    if (buffered_enter(self, "write to closed file", WRITING) < 0) {
+        return -1;
     }
+    /* How much of data was written out. */
+    Py_ssize_t done = 0;
+    int r;
+    for (;;) {
+        Py_ssize_t threshold = self->nib.threshold;
+        assert(threshold >= 0);
+        Py_ssize_t rest = len - done;
+        Py_ssize_t pending = nibbler_nbytes(&self->nib);
+        /* Room for the rest of data: buffer it.  (Unbuffered, the threshold
+           is 0: there is never room.) */
+        if (rest < threshold && pending + rest <= threshold) {
+            r = buffered_add_write(self, obj, data + done, rest);
+            break;
+        }
+        if (nibbler_io_busy(&self->nib)) {
+            if (nibbler_io_is_mine(&self->nib)) {
+                /* gh-118143 */
+                r = nibbler_append_copy(&self->nib, data + done, rest);
+                break;
+            }
+            /* Another thread is writing out, which may make room: wait for
+               it, then check again, since anything may have changed. */
+            if (nibbler_wait_io(&self->nib, (PyObject *)self) < 0
+                || buffered_enter_locked(self, "write to closed file",
+                                         WRITING) < 0)
+            {
+                return -1;
+            }
+            continue;
+        }
+        /* No room: write out what is pending, and the rest of data with it
+           when it is too large to buffer, or one vectored write takes both
+           (with a Python-level _writev(), only data large enough to be
+           kept by reference, see buffered_init(): smaller data costs less
+           copied into the buffer than as one more piece), without the
+           lock: other threads can queue writes meanwhile. */
+        int status;
+        Py_ssize_t direct = (rest >= threshold
+                             || (self->raw_vectored
+                                 && (self->raw_fileio || rest >= self->ref_min))
+                             ? rest : 0);
+        done += buffered_write_out(self, pending, data + done, direct,
+                                   &status, 1);
+        rest = len - done;
+        if (status == WRITE_DONE) {
+            if (rest == 0 && nibbler_nbytes(&self->nib) == 0) {
+                /* All written (unbuffered, the usual case). */
+                r = 0;
+                break;
+            }
+            continue;
+        }
+        if (status == WRITE_ERROR) {
+            r = buffered_write_failed(self, obj, data, len, done);
+            break;
+        }
+        /* Would block: keep as much of the rest as fits, and report the
+           rest. */
+        Py_ssize_t room = Py_MAX(0, threshold - nibbler_nbytes(&self->nib));
+        if (rest <= room) {
+            r = buffered_add_write(self, obj, data + done, rest);
+            break;
+        }
+        int errnum = errno;
+        if (buffered_add_write(self, obj, data + done, room) == 0) {
+            errno = errnum;
+            buffered_set_blocking_error(done + room);
+        }
+        r = -1;
+        break;
+    }
+    if (r == 0 && FT_ATOMIC_LOAD_INT_RELAXED(self->ngather) == 0) {
+        /* The next writes may need no lock (unless gathering, see
+           "Gathering"). */
+        nibbler_start_appending(&self->nib);
+    }
+    buffered_unlock(self);
+    return r;
 }
 
 /*[clinic input]
@@ -3276,17 +3265,11 @@ _io_BufferedWriter_readall_impl(buffered *self)
     return NULL;
 }
 
-/* write() of obj with the lock: out of line, so that the lock-free path
-   stays small. */
+/* write() of an object other than exact bytes, through its buffer: out
+   of line, so that the path for bytes stays small. */
 Py_NO_INLINE static PyObject *
-buffered_write(buffered *self, PyObject *obj)
+buffered_write_buffer(buffered *self, PyObject *obj)
 {
-    /* Exact bytes need no buffer export: only obj, buf and len are used. */
-    if (PyBytes_CheckExact(obj)) {
-        morsel w = {obj, PyBytes_AS_STRING(obj), PyBytes_GET_SIZE(obj)};
-        int r = buffered_write_view(self, &w);
-        return r < 0 ? NULL : PyLong_FromSsize_t(w.len);
-    }
     Py_buffer view;
     if (PyObject_GetBuffer(obj, &view, PyBUF_SIMPLE) < 0) {
         return NULL;
@@ -3296,8 +3279,7 @@ buffered_write(buffered *self, PyObject *obj)
         r = buffered_write_lockfree(self, view.buf, view.len, 0);
     }
     if (r == 0) {
-        morsel w = {view.obj, view.buf, view.len};
-        r = buffered_write_view(self, &w);
+        r = buffered_write_data(self, view.obj, view.buf, view.len);
     }
     Py_ssize_t len = view.len;
     PyBuffer_Release(&view);
@@ -3314,16 +3296,18 @@ static PyObject *
 _io_BufferedWriter_write_impl(buffered *self, PyObject *obj)
 /*[clinic end generated code: output=4b5acd5810c0fa55 input=b4d277ddee118f17]*/
 {
-    if (PyBytes_CheckExact(obj)) {
-        Py_ssize_t len = PyBytes_GET_SIZE(obj);
-        int r = (len < NIBBLER_REF_MIN
-                 ? buffered_write_lockfree(self, PyBytes_AS_STRING(obj), len, 0)
-                 : 0);
-        if (r != 0) {
-            return r < 0 ? NULL : PyLong_FromSsize_t(len);
-        }
+    if (!PyBytes_CheckExact(obj)) {
+        return buffered_write_buffer(self, obj);
     }
-    return buffered_write(self, obj);
+    /* Exact bytes need no buffer export. */
+    const char *data = PyBytes_AS_STRING(obj);
+    Py_ssize_t len = PyBytes_GET_SIZE(obj);
+    int r = (len < NIBBLER_REF_MIN
+             ? buffered_write_lockfree(self, data, len, 0) : 0);
+    if (r == 0) {
+        r = buffered_write_data(self, obj, data, len);
+    }
+    return r < 0 ? NULL : PyLong_FromSsize_t(len);
 }
 
 /*
@@ -3482,8 +3466,7 @@ nibbler_text_write(buffered *self, PyObject *obj, const char *data,
     }
     /* The caller's reference is borrowed: raw.write() could drop it. */
     Py_INCREF(self);
-    morsel w = {obj, data, len};
-    r = buffered_write_view(self, &w);
+    r = buffered_write_data(self, obj, data, len);
     Py_DECREF(self);
     return r;
 }
