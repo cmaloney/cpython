@@ -780,10 +780,18 @@ buffered_sync(buffered *self, int unlocked)
 static Py_ssize_t
 buffered_fill(buffered *self, Py_ssize_t size)
 {
+    /* A few bytes are copied aside, so that the block can be reused. */
+    char aside[512];
     morsel keep = {NULL, NULL, 0};
     if (nibbler_unread(&self->nib) > 0) {
         keep = self->nib.list.items[0];
-        Py_INCREF(keep.obj);
+        if (keep.len <= (Py_ssize_t)sizeof(aside)) {
+            memcpy(aside, keep.ptr, keep.len);
+            keep = (morsel){NULL, aside, keep.len};
+        }
+        else {
+            Py_INCREF(keep.obj);
+        }
     }
     assert(keep.len == 0 || keep.len < self->nib.capacity);
     (void)nibbler_drop_unread(&self->nib);
@@ -2493,28 +2501,79 @@ buffered_text_peek_locked(buffered *self, Py_ssize_t need, morsel *m)
     return r;
 }
 
+/* m views another block: out of line, so that _PyIONibbler_view() needs
+   no stack frame. */
+Py_NO_INLINE static int
+nibbler_text_view_block(nibbler_end *e, Py_ssize_t c, _PyIO_Morsel *m)
+{
+    Py_XSETREF(m->obj, Py_NewRef(e->block));
+    m->ptr = PyBytes_AS_STRING(e->block) + c;
+    m->len = e->limit - c;
+    return 1;
+}
+
+int
+_PyIONibbler_view(PyObject *op, _PyIO_Morsel *m)
+{
+    buffered *self = buffered_cast(op);
+    assert(_PyIO_is_nibbler_buffered_type(Py_TYPE(op)));
+    nibbler_end *e = nibbler_end_get(&self->nib, 0);
+    Py_ssize_t c = e == NULL ? -1 : FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
+    if (c < 0 || c == e->limit || self->dict != NULL) {
+        return 0;
+    }
+    if (m->obj != e->block) {
+        return nibbler_text_view_block(e, c, m);
+    }
+    /* m keeps its reference to the block. */
+    m->ptr = PyBytes_AS_STRING(e->block) + c;
+    m->len = e->limit - c;
+    return 1;
+}
+
 int
 _PyIONibbler_peek(PyObject *op, Py_ssize_t need, _PyIO_Morsel *m)
 {
+    assert(need > 0);
+    if (_PyIONibbler_view(op, m) && m->len >= need) {
+        return 0;
+    }
+    /* Not to keep the block from being reused by the fill. */
+    Py_CLEAR(m->obj);
+    *m = (morsel){NULL, NULL, 0};
     buffered *self = buffered_cast(op);
-    assert(_PyIO_is_nibbler_buffered_type(Py_TYPE(op)) && need > 0);
     if (self->dict != NULL) {
         return _PyIO_NIBBLER_NO;
-    }
-    *m = (morsel){NULL, NULL, 0};
-    /* Without the lock when enough is unread. */
-    nibbler_end *e = nibbler_end_get(&self->nib, 0);
-    Py_ssize_t c = e == NULL ? -1 : FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
-    if (c >= 0 && e->limit - c >= need) {
-        *m = (morsel){Py_NewRef(e->block), PyBytes_AS_STRING(e->block) + c,
-                      e->limit - c};
-        return 0;
     }
     return buffered_text_peek_locked(self, need, m);
 }
 
+/* consume with the lock: out of line, so that the lock-free path stays
+   small. */
+Py_NO_INLINE static int
+buffered_text_consume_locked(buffered *self, _PyIO_Morsel *m, Py_ssize_t n)
+{
+    /* The caller's reference may be borrowed, and other threads run while
+       this waits for the lock. */
+    Py_INCREF(self);
+    int r = buffered_lock(self);
+    if (r == 0) {
+        if (nibbler_unread(&self->nib) >= n
+            && self->nib.list.items[0].ptr == m->ptr)
+        {
+            (void)morsels_consume(&self->nib.list, n);
+            m->ptr += n;
+            m->len -= n;
+            r = 1;
+        }
+        buffered_unlock(self);
+    }
+    Py_DECREF(self);
+    return r;
+}
+
 int
-_PyIONibbler_consume(PyObject *op, const _PyIO_Morsel *m, Py_ssize_t n)
+_PyIONibbler_consume(PyObject *op, _PyIO_Morsel *m, Py_ssize_t n)
 {
     buffered *self = buffered_cast(op);
     assert(n <= m->len);
@@ -2528,6 +2587,8 @@ _PyIONibbler_consume(PyObject *op, const _PyIO_Morsel *m, Py_ssize_t n)
     if (e != NULL && e->block == m->obj) {
         Py_ssize_t c = m->ptr - PyBytes_AS_STRING(e->block);
         if (FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(e->pos, &c, c + n)) {
+            m->ptr += n;
+            m->len -= n;
             return 1;
         }
         if (c >= 0) {
@@ -2535,18 +2596,7 @@ _PyIONibbler_consume(PyObject *op, const _PyIO_Morsel *m, Py_ssize_t n)
         }
     }
     /* The end is held, or gone: check the front morsel with the lock. */
-    if (buffered_lock(self) < 0) {
-        return -1;
-    }
-    int r = 0;
-    if (nibbler_unread(&self->nib) >= n
-        && self->nib.list.items[0].ptr == m->ptr)
-    {
-        (void)morsels_consume(&self->nib.list, n);
-        r = 1;
-    }
-    buffered_unlock(self);
-    return r;
+    return buffered_text_consume_locked(self, m, n);
 }
 
 PyObject *

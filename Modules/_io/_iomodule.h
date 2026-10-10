@@ -100,16 +100,22 @@ typedef struct {
 
 /* The unread bytes, without taking them: at least `need` (reading more,
    after them, when fewer are unread) unless the raw stream reached EOF or
-   would block.  *m gets a new reference (obj is NULL when len is 0).
+   would block.  *m is the caller's view of them, kept between calls: a
+   reference (obj, or NULL when len is 0) the caller releases when done.
    Returns _PyIO_NIBBLER_BLOCKED, with what is unread in *m, when the raw
    stream would block before there were `need`; fewer than `need` with 0
    means EOF. */
 #define _PyIO_NIBBLER_BLOCKED 1
 extern int _PyIONibbler_peek(PyObject *buffered, Py_ssize_t need,
                              _PyIO_Morsel *m);
-/* Take the first n bytes of what _PyIONibbler_peek() gave in *m.  Returns
-   1, or 0 (nothing taken) if they are no longer the unread bytes. */
-extern int _PyIONibbler_consume(PyObject *buffered, const _PyIO_Morsel *m,
+/* Like _PyIONibbler_peek() of what is unread, without the lock, without
+   reading and without running any Python code: returns 1, or 0 (*m left
+   as it is) when nothing is unread or the lock is needed. */
+extern int _PyIONibbler_view(PyObject *buffered, _PyIO_Morsel *m);
+/* Take the first n bytes of the view *m from _PyIONibbler_peek(), moving
+   it past them.  Returns 1, or 0 (nothing taken) if they are no longer the
+   unread bytes. */
+extern int _PyIONibbler_consume(PyObject *buffered, _PyIO_Morsel *m,
                                 Py_ssize_t n);
 /* A copy of the n bytes read last (before the unread ones), or NULL
    without an exception when they are no longer buffered. */

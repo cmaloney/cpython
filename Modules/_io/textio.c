@@ -2283,10 +2283,11 @@ textiowrapper_read_chunk_nibbler(textio *self, Py_ssize_t size_hint)
     Py_ssize_t used;
     Py_ssize_t need = 1;
     int final, blocked;
+    _PyIO_Morsel m = {NULL, NULL, 0};
     for (;;) {
-        _PyIO_Morsel m;
         r = _PyIONibbler_peek(buffer, need, &m);
         if (r < 0) {
+            Py_XDECREF(m.obj);
             Py_DECREF(buffer);
             return r;
         }
@@ -2306,17 +2307,18 @@ textiowrapper_read_chunk_nibbler(textio *self, Py_ssize_t size_hint)
         else {
             r = chars == NULL ? -1 : _PyIONibbler_consume(buffer, &m, used);
         }
-        Py_XDECREF(m.obj);
         if (r == 1) {
             break;
         }
         Py_XDECREF(chars);
         if (r < 0) {
+            Py_XDECREF(m.obj);
             Py_DECREF(buffer);
             return -1;
         }
         /* Again with more, or another thread took bytes meanwhile. */
     }
+    Py_XDECREF(m.obj);
     Py_DECREF(buffer);
     chars = textiowrapper_utf8_newlines(self, chars, final);
     if (chars == NULL) {
