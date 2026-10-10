@@ -98,6 +98,8 @@ typedef struct nibbler {
 #endif
     /* NULL for none.  Also read without the lock, see "The open end". */
     struct nibbler_end *end;
+    /* How many ends were made (see nibbler_end.id). */
+    uint64_t ends;
     /* The nibbler_set it is in (NULL for none); in it, the next one and
        the pointer to it.  Changed with the set's mutex held. */
     struct nibbler_set *set;
@@ -300,6 +302,10 @@ typedef struct nibbler_end {
        no end of line (see nibbler_noline()); used with the lock only. */
     Py_ssize_t done;
     int writing;
+    /* Tells this end from the nibbler's others (never reused, as the
+       nibbler's ends count only grows), so that, reading, it and an
+       offset in the block always name the same bytes. */
+    uint64_t id;
 } nibbler_end;
 
 /* Without the lock: the end, if it goes in the direction given. */
@@ -414,7 +420,7 @@ nibbler_new_end(nibbler *n, PyObject *block, Py_ssize_t pos,
         return -1;
     }
     *e = (nibbler_end){Py_NewRef(block), ~pos, limit, writing ? pos : 0,
-                       writing};
+                       writing, ++n->ends};
     nibbler_drop_end(n);
     FT_ATOMIC_STORE_PTR_RELEASE(n->end, e);
     return 0;

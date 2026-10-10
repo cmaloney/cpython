@@ -529,16 +529,21 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
         goto error;
 
     /* wraps into a TextIOWrapper; unbuffered, one that writes through */
+    PyObject *Text_class = iomodule_get_open_type(&state->open_text_type);
+    if (Text_class == NULL) {
+        goto error;
+    }
     if (buffering == 0) {
-        wrapper = PyObject_CallFunction(
-            (PyObject *)state->PyTextIOWrapper_Type, "OsssOO", buffer,
-            encoding, errors, newline, Py_False, Py_True);
+        wrapper = PyObject_CallFunction(Text_class, "OsssOO", buffer,
+                                        encoding, errors, newline, Py_False,
+                                        Py_True);
     }
     else {
         wrapper = PyObject_CallFunction(
-            (PyObject *)state->PyTextIOWrapper_Type, "OsssO", buffer,
-            encoding, errors, newline, line_buffering ? Py_True : Py_False);
+            Text_class, "OsssO", buffer, encoding, errors, newline,
+            line_buffering ? Py_True : Py_False);
     }
+    Py_DECREF(Text_class);
     if (wrapper == NULL)
         goto error;
     result = wrapper;
@@ -672,18 +677,18 @@ PyNumber_AsOff_t(PyObject *item, PyObject *err)
 }
 
 /* Store in types new references to _io._nibbler's BufferedReader,
-   BufferedWriter and BufferedRandom. */
+   BufferedWriter, BufferedRandom and TextIOWrapper. */
 static int
-iomodule_get_nibbler_types(PyObject *module, PyObject *types[3])
+iomodule_get_nibbler_types(PyObject *module, PyObject *types[4])
 {
     PyObject *sub = PyObject_GetAttrString(module, "_nibbler");
     if (sub == NULL) {
         return -1;
     }
     static const char *const names[] = {
-        "BufferedReader", "BufferedWriter", "BufferedRandom",
+        "BufferedReader", "BufferedWriter", "BufferedRandom", "TextIOWrapper",
     };
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         types[i] = PyObject_GetAttrString(sub, names[i]);
         if (types[i] == NULL) {
             for (int j = 0; j < i; j++) {
@@ -697,13 +702,13 @@ iomodule_get_nibbler_types(PyObject *module, PyObject *types[3])
     return 0;
 }
 
-/* Point open() at _io's buffered classes, or with nibbler set, at
-   _io._nibbler's. */
+/* Point open() at _io's buffered and text classes, or with nibbler set,
+   at _io._nibbler's. */
 static int
 iomodule_set_open_impl(PyObject *module, int nibbler)
 {
     _PyIO_State *state = get_io_state(module);
-    PyObject *types[3];
+    PyObject *types[4];
     if (nibbler) {
         if (iomodule_get_nibbler_types(module, types) < 0) {
             return -1;
@@ -713,10 +718,12 @@ iomodule_set_open_impl(PyObject *module, int nibbler)
         types[0] = Py_NewRef(state->PyBufferedReader_Type);
         types[1] = Py_NewRef(state->PyBufferedWriter_Type);
         types[2] = Py_NewRef(state->PyBufferedRandom_Type);
+        types[3] = Py_NewRef(state->PyTextIOWrapper_Type);
     }
     iomodule_set_open_type(&state->open_reader_type, types[0]);
     iomodule_set_open_type(&state->open_writer_type, types[1]);
     iomodule_set_open_type(&state->open_random_type, types[2]);
+    iomodule_set_open_type(&state->open_text_type, types[3]);
     return 0;
 }
 
@@ -726,10 +733,11 @@ static int
 iomodule_set_unbuffered_impl(PyObject *module, int nibbler)
 {
     _PyIO_State *state = get_io_state(module);
-    PyObject *types[3] = {NULL, NULL, NULL};
+    PyObject *types[4] = {NULL, NULL, NULL, NULL};
     if (nibbler && iomodule_get_nibbler_types(module, types) < 0) {
         return -1;
     }
+    Py_XDECREF(types[3]);
     iomodule_set_open_type(&state->open_unbuffered_reader_type, types[0]);
     iomodule_set_open_type(&state->open_unbuffered_writer_type, types[1]);
     iomodule_set_open_type(&state->open_unbuffered_random_type, types[2]);
@@ -756,14 +764,14 @@ _io._set_open_impl
     name: unicode
     /
 
-Make open() use the "_io" or "_nibbler" buffered classes.
+Make open() use the "_io" or "_nibbler" buffered and text classes.
 
 Returns the previous name.  For tests.
 [clinic start generated code]*/
 
 static PyObject *
 _io__set_open_impl_impl(PyObject *module, PyObject *name)
-/*[clinic end generated code: output=da5db966fe58f749 input=7720ca0e2bd32bba]*/
+/*[clinic end generated code: output=da5db966fe58f749 input=a8efd7e301a3bde5]*/
 {
     _PyIO_State *state = get_io_state(module);
     int was_nibbler = (FT_ATOMIC_LOAD_PTR_RELAXED(state->open_reader_type)
@@ -823,6 +831,7 @@ iomodule_traverse(PyObject *mod, visitproc visit, void *arg) {
     Py_VISIT(state->open_reader_type);
     Py_VISIT(state->open_writer_type);
     Py_VISIT(state->open_random_type);
+    Py_VISIT(state->open_text_type);
     Py_VISIT(state->open_unbuffered_reader_type);
     Py_VISIT(state->open_unbuffered_writer_type);
     Py_VISIT(state->open_unbuffered_random_type);
@@ -855,6 +864,7 @@ iomodule_clear(PyObject *mod) {
     Py_CLEAR(state->open_reader_type);
     Py_CLEAR(state->open_writer_type);
     Py_CLEAR(state->open_random_type);
+    Py_CLEAR(state->open_text_type);
     Py_CLEAR(state->open_unbuffered_reader_type);
     Py_CLEAR(state->open_unbuffered_writer_type);
     Py_CLEAR(state->open_unbuffered_random_type);
@@ -972,8 +982,9 @@ iomodule_exec(PyObject *m)
 #undef ADD_TYPE
 
     // _PYTHON_IO_DEFAULT_IMPL=_nibbler (honors -E / -I) makes the
-    // _io._nibbler classes _io's buffered classes, so io.BufferedReader,
-    // isinstance() checks and open() all use them.
+    // _io._nibbler classes _io's buffered and text classes, so
+    // io.BufferedReader, io.TextIOWrapper, isinstance() checks, open() and
+    // the standard streams all use them.
     PyInterpreterState *interp = _PyInterpreterState_GET();
     const PyConfig *config = _PyInterpreterState_GetConfig(interp);
     const char *env = config->use_environment
@@ -1004,7 +1015,7 @@ iomodule_exec(PyObject *m)
         }
         static const char *const names[] = {
             "BufferedReader", "BufferedWriter", "BufferedRandom",
-            "BufferedRWPair",
+            "BufferedRWPair", "TextIOWrapper",
         };
         for (size_t i = 0; i < Py_ARRAY_LENGTH(names); i++) {
             PyObject *cls = PyObject_GetAttrString(sub, names[i]);
