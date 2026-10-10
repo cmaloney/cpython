@@ -3458,7 +3458,7 @@ buffered_text_peek_locked(buffered *self, Py_ssize_t need, morsel *m,
     /* Not even what is read ahead after close() (unlike reads). */
     int r = buffered_check_closed(self, "I/O operation on closed file.");
     if (r < 0) {
-        buffered_unlock(self);
+        buffered_leave(self);
         return -1;
     }
     if (need > self->nib.capacity) {
@@ -3551,15 +3551,6 @@ _PyIONibbler_advance(PyObject *op, uint64_t key, Py_ssize_t off,
     return buffered_text_advance_locked(self, key, off, n);
 }
 
-/* Is the raw stream an exact FileIO that is closed?  Then nothing is
-   appended without the lock (writes raise instead). */
-static inline int
-buffered_fileio_closed(buffered *self)
-{
-    return (self->raw_fileio
-            && _PyFileIO_closed(FT_ATOMIC_LOAD_PTR_RELAXED(self->raw)));
-}
-
 int
 _PyIONibbler_write(PyObject *op, PyObject *obj, const char *data,
                    Py_ssize_t len)
@@ -3587,9 +3578,12 @@ _PyIONibbler_reserve(PyObject *op, Py_ssize_t len, void **end)
     buffered *self = buffered_cast(op);
     nibbler_end *e;
     Py_ssize_t r;
+    /* (The caller checked that it is open: as with write(), data written
+       once an exact FileIO was closed by itself meanwhile is queued.  Its
+       raw_fileio can't be read before reserving, which keeps __init__()
+       from changing it.) */
     if (buffered_dict(self) == NULL && len < NIBBLER_REF_MIN
         && (e = nibbler_end_get(&self->nib, 1)) != NULL
-        && !buffered_fileio_closed(self)
         && (r = nibbler_reserve(e, len)) >= 0)
     {
         *end = e;
@@ -3618,15 +3612,8 @@ _PyIONibbler_closed(PyObject *op)
     if (raw == NULL) {
         return -1;
     }
-    int r;
-    if (self->raw_fileio) {
-        r = _PyFileIO_closed(raw);
-    }
-    else {
-        PyObject *res = PyObject_GetAttr(raw, &_Py_ID(closed));
-        r = res == NULL ? -1 : PyObject_IsTrue(res);
-        Py_XDECREF(res);
-    }
+    /* Without the lock: raw_fileio may be another raw stream's. */
+    int r = buffered_ref_closed(self, raw);
     Py_DECREF(raw);
     return r;
 }
