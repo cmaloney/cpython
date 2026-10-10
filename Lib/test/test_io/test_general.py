@@ -322,8 +322,6 @@ class IOTest:
     def test_readline_size_across_peeks(self):
         # readline(size) returns at most size bytes when the line spans
         # several peek() results.
-        if self.is_C:
-            self.skipTest("_io's IOBase.readline(size) overshoots size too")
         class R(self.IOBase):
             def __init__(self, data):
                 self.data = data
