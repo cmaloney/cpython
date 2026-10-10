@@ -10,6 +10,7 @@ import _pyio as pyio
 from _io import _nibbler
 
 from test.support import os_helper, threading_helper
+from test.support.script_helper import assert_python_ok
 
 
 class DefaultWritevTest:
@@ -155,6 +156,14 @@ class SocketIOWritevTest(unittest.TestCase):
         except BlockingIOError:
             pass
         self.assertEqual(bytes(received), b"".join(parts)[:sent])
+
+    def test_iov_max_not_asked_at_import(self):
+        # "import socket" doesn't call sysconf(); the first _writev() does.
+        assert_python_ok("-c", "import socket; "
+                         "assert socket._IOV_MAX is None, socket._IOV_MAX")
+        f = socket.SocketIO(self.a, "w")
+        self.assertEqual(f._writev([b"x"]), 1)
+        self.assertGreater(socket._IOV_MAX, 0)
 
     def test_closed(self):
         f = socket.SocketIO(self.a, "w")

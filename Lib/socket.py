@@ -708,13 +708,19 @@ if defined on the platform; otherwise, the default is AF_INET.
 
 _blocking_errnos = { EAGAIN, EWOULDBLOCK }
 
-# Most buffers one sendmsg() takes.
-try:
-    _IOV_MAX = os.sysconf("SC_IOV_MAX")
-except (AttributeError, OSError, ValueError):
-    _IOV_MAX = 16
-if _IOV_MAX <= 0:
-    _IOV_MAX = 16
+# Most buffers one sendmsg() takes: see _iov_max().
+_IOV_MAX = None
+
+def _iov_max():
+    # Asked on first use rather than on every "import socket".
+    global _IOV_MAX
+    if _IOV_MAX is None:
+        try:
+            n = os.sysconf("SC_IOV_MAX")
+        except (AttributeError, OSError, ValueError):
+            n = 16
+        _IOV_MAX = n if n > 0 else 16
+    return _IOV_MAX
 
 class SocketIO(io.RawIOBase):
 
@@ -801,7 +807,7 @@ class SocketIO(io.RawIOBase):
         sendmsg = getattr(self._sock, "sendmsg", None)
         if sendmsg is not None:
             # Writing only the first ones is a partial write.
-            buffers = list(buffers)[:_IOV_MAX]
+            buffers = list(buffers)[:_iov_max()]
             try:
                 return sendmsg(buffers)
             except NotImplementedError:
