@@ -133,7 +133,8 @@ typedef struct {
     /* Fixed by __init__(): raw exactly FileIO (call its C implementation
        directly), raw has a vectored _writev() method, raw is a FileIO
        opened in append mode (it writes at the end, whatever the position;
-       only set for writers). */
+       only set for writers).  The first two are also read without the
+       lock, so stored atomically. */
     uint8_t raw_fileio;
     uint8_t raw_vectored;
     /* Exact bytes written at least this large are kept by reference
@@ -3060,7 +3061,8 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
                                   err == 0 ? buffer_size : 0);
     self->nib.threshold = err == 0 ? threshold : 0;
     if (err == 0) {
-        self->raw_fileio = (uint8_t)raw_fileio;
+        /* Also read without the lock, by small writes. */
+        FT_ATOMIC_STORE_UINT8_RELAXED(self->raw_fileio, (uint8_t)raw_fileio);
         /* Use _writev() only where it can't bypass an overridden write():
            on FileIO itself, or on raw types not derived from it.  (Readers
            skip the lookups.) */
@@ -3230,7 +3232,9 @@ buffered_write_lockfree(buffered *self, const char *data, Py_ssize_t len,
        nothing can write them out any more.  (Other raw streams: see
        buffered_check_closed().) */
     PyObject *raw = FT_ATOMIC_LOAD_PTR_RELAXED(self->raw);
-    if (!closed_checked && self->raw_fileio && _PyFileIO_closed(raw)) {
+    if (!closed_checked && FT_ATOMIC_LOAD_UINT8_RELAXED(self->raw_fileio)
+        && _PyFileIO_closed(raw))
+    {
         if (!nibbler_unreserve(e, r, len)) {
             nibbler_commit(e, r, data, len);
         }

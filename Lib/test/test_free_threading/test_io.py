@@ -495,6 +495,7 @@ class NibblerReinitTest(TestCase):
                 f.write(b"g" * 600)
 
         users = [lambda: f.write(b"x" * 10),
+                 lambda: f.write(bytearray(b"z" * 10)),
                  lambda: f.write(b"y" * 600),
                  lambda: t.write("text\n"),
                  lambda: t.write("\xe9t\xe9\n"),
