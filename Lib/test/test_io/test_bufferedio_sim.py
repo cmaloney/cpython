@@ -1,15 +1,128 @@
 """Behavioral tests for the buffered I/O layer under realistic workloads.
 
+* Simulated slow and misbehaving devices: short reads and writes, "would
+  block" (None) results, EINTR, transient errors, and real pipes.
 * Concurrent readers and writers sharing one buffered object.
 
 Each test class runs against the C (_io) and Python (_pyio)
 implementations.  Behavior differences are gated on is_C (see utils.py).
 """
+import errno
+import random
 import threading
 import unittest
 
 from test.support import os_helper, threading_helper
 from .utils import CTestCase, PyTestCase
+
+
+# --- Scripted raw devices --------------------------------------------------
+#
+# A "plan" scripts what each raw call does; once the plan is exhausted every
+# call is fully satisfied.  Plan steps:
+#   int n           transfer at most n bytes (a short read/write)
+#   None            would block: readinto()/write() return None
+#   an exception    raised from the call (then the call is not performed)
+
+def _next_step(plan):
+    return plan.pop(0) if plan else -1
+
+
+def make_scripted_writer(base):
+    class ScriptedWriter(base):
+        def __init__(self, plan=()):
+            self.received = bytearray()
+            self.plan = list(plan)
+            self.calls = 0
+
+        def writable(self):
+            return True
+
+        def write(self, b):
+            self.calls += 1
+            step = _next_step(self.plan)
+            if step is None:
+                return None
+            if isinstance(step, BaseException):
+                raise step
+            with memoryview(b) as view:
+                n = len(view) if step < 0 else min(step, len(view))
+                self.received += view[:n]
+            return n
+
+    return ScriptedWriter
+
+
+def sample_data(size, seed=0):
+    rng = random.Random(seed)
+    words = [b"alpha", b"beta", b"gamma", b"delta", b"\n", b"\r\n", b" ",
+             b"\x00\xff", b"line\n"]
+    out = bytearray()
+    while len(out) < size:
+        out += rng.choice(words)
+    return bytes(out[:size])
+
+
+# --- Simulated slow / misbehaving devices ------------------------------------
+
+class SlowDeviceTest:
+    """Buffered objects over raw devices that transfer a little at a time."""
+
+    def scripted_writer(self, plan=()):
+        return make_scripted_writer(self.RawIOBase)(plan)
+
+    # Writing
+
+    def test_write_error_keeps_rest_that_fits(self):
+        # An error (other than BlockingIOError) after part of write()'s
+        # data was written keeps the rest pending when it fits in the
+        # buffer: write() raises, and flush() writes the rest.
+        data = sample_data(100)
+        raw = self.scripted_writer([36, OSError(errno.EIO, "EIO")])
+        f = self.BufferedWriter(raw, 64)
+        with self.assertRaises(OSError) as cm:
+            f.write(data)
+        self.assertNotIsInstance(cm.exception, BlockingIOError)
+        self.assertEqual(cm.exception.errno, errno.EIO)
+        self.assertEqual(cm.exception.characters_written, 100)
+        self.assertEqual(bytes(raw.received), data[:36])
+        f.flush()
+        self.assertEqual(bytes(raw.received), data)
+
+    def test_write_error_keeps_what_fits(self):
+        # When the rest doesn't fit, as much of it as fits is kept, and
+        # characters_written says how much of the data was accepted
+        # (written or kept): the caller writes the rest again.
+        data = sample_data(200)
+        raw = self.scripted_writer([30, TimeoutError("timed out")])
+        f = self.BufferedWriter(raw, 64)
+        with self.assertRaises(TimeoutError) as cm:
+            f.write(data)
+        n = cm.exception.characters_written
+        self.assertEqual(n, 30 + 64)
+        f.write(data[n:])
+        f.flush()
+        self.assertEqual(bytes(raw.received), data)
+
+    def test_write_interrupted_keeps_rest(self):
+        # The same for an exception that isn't an OSError (such as one a
+        # signal handler raises), which has no characters_written.
+        data = sample_data(100)
+        raw = self.scripted_writer([36, KeyboardInterrupt()])
+        f = self.BufferedWriter(raw, 64)
+        with self.assertRaises(KeyboardInterrupt) as cm:
+            f.write(data)
+        self.assertNotHasAttr(cm.exception, "characters_written")
+        f.flush()
+        self.assertEqual(bytes(raw.received), data)
+
+
+class CSlowDeviceTest(SlowDeviceTest, CTestCase):
+    pass
+
+
+class PySlowDeviceTest(SlowDeviceTest, PyTestCase):
+    pass
 
 
 # --- Positioning within the buffer ---------------------------------------------

@@ -2291,7 +2291,7 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
         Py_ssize_t n = _bufferedwriter_raw_write(
             self, (char *) buffer->buf + written, buffer->len - written);
         if (n == -1) {
-            goto error;
+            goto write_failed;
         } else if (n == -2) {
             /* Write failed because raw file is non-blocking */
             if (remaining > self->buffer_size) {
@@ -2315,7 +2315,7 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
            signal (see write(2)).  We must run signal handlers before
            blocking another time, possibly indefinitely. */
         if (PyErr_CheckSignals() < 0)
-            goto error;
+            goto write_failed;
     }
     if (self->readable)
         _bufferedreader_reset_buf(self);
@@ -2335,6 +2335,35 @@ end:
 error:
     LEAVE_BUFFERED(self)
     return res;
+
+write_failed:
+    /* An error other than BlockingIOError after `written` bytes reached
+       the raw stream: keep as much of the rest pending as fits (the
+       buffer is empty), so that flush() writes it, and set the error's
+       characters_written to how much of the data was accepted.  Without
+       that, the caller couldn't tell what to write again. */
+    if (written > 0) {
+        PyObject *exc = PyErr_GetRaisedException();
+        Py_ssize_t keep = Py_MIN(remaining, self->buffer_size);
+        if (self->readable)
+            _bufferedreader_reset_buf(self);
+        memcpy(self->buffer, (char *) buffer->buf + written, keep);
+        self->write_pos = 0;
+        self->write_end = keep;
+        ADJUST_POSITION(self, keep);
+        self->raw_pos = 0;
+        if (PyErr_GivenExceptionMatches(exc, PyExc_OSError)) {
+            PyObject *n = PyLong_FromSsize_t(written + keep);
+            if (n == NULL
+                || PyObject_SetAttrString(exc, "characters_written", n) < 0)
+            {
+                PyErr_Clear();
+            }
+            Py_XDECREF(n);
+        }
+        PyErr_SetRaisedException(exc);
+    }
+    goto error;
 }
 
 

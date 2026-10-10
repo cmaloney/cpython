@@ -643,8 +643,21 @@ I/O base classes
       data needed to be written to the raw stream but it couldn't accept
       all the data without blocking.
 
+      If another error is raised after part of *b* was written to the raw
+      stream, :class:`BufferedWriter` and :class:`BufferedRandom` keep as
+      much of the rest of *b* as fits in the buffer, for :meth:`flush` to
+      write.  If the error is an :exc:`OSError`, its
+      :attr:`~BlockingIOError.characters_written` attribute is then set to
+      the number of bytes of *b* taken (written or buffered): the rest
+      should be written again.
+
       The caller may release or mutate *b* after this method returns,
       so the implementation should only access *b* during the method call.
+
+      .. versionchanged:: next
+         :class:`BufferedWriter` and :class:`BufferedRandom` keep the rest
+         of *b* that fits in the buffer when an error follows a partial
+         write, and set :attr:`~BlockingIOError.characters_written`.
 
 
 Raw file I/O

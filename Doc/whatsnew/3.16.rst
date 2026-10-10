@@ -467,6 +467,14 @@ io
 * Add :meth:`io.BytesIO.peek` method to read without advancing position.
   (Contributed by Marcel Martin in :gh:`90533`.)
 
+* When an error other than :exc:`BlockingIOError` follows a partial write,
+  :meth:`io.BufferedWriter.write` and :meth:`io.BufferedRandom.write` now
+  keep as much of the unwritten data as fits in the buffer, and set the
+  :attr:`~BlockingIOError.characters_written` attribute of an
+  :exc:`OSError` to the number of bytes taken, so that the caller knows
+  what to write again.
+  (Contributed by Cody Maloney.)
+
 
 ipaddress
 ---------
