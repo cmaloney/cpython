@@ -2394,6 +2394,54 @@ class LockReleaseTest:
                 self.assertGreater(n, last.get(t, -1))
                 last[t] = n
 
+    @threading_helper.requires_working_threading()
+    def test_shutdown_takeover_in_reentrant_call(self):
+        # While finalizing, a call made with the lock held (from raw.closed
+        # here) takes the I/O role over from a daemon thread blocked writing
+        # out, but can't have the lock, and raises.  The bytes in flight
+        # given to the gone thread are dropped by the next holder of both.
+        code = """
+            import sys
+            from threading import Thread
+
+            GATED = {'write'}
+
+            class Raw(GatedRaw):
+                calls = 0
+
+                @property
+                def closed(self, sys=sys):
+                    if sys.is_finalizing() and not self.calls:
+                        self.calls += 1
+                        try:
+                            f.tell()
+                        except RuntimeError:
+                            os.write(1, b'reentrant ')
+                    return False
+
+            f = BufferedRandom(Raw(), 16)
+
+            class Out:
+                def write(self, s):
+                    return len(s)
+
+                def flush(self, f=f, sys=sys):
+                    if sys.is_finalizing():
+                        f.write(b'late')
+                        f.tell()
+                        f.flush()
+
+            sys.stdout = Out()
+
+            def holder():
+                f.write(b'D' * 10)
+                f.flush()
+
+            Thread(target=holder, daemon=True).start()
+            entered.wait()
+            """
+        self.assertEqual(self.run_child(code), (0, b"reentrant late", ""))
+
     def check_fork(self, gated, holder_op):
         code = f"""
             import warnings

@@ -77,6 +77,10 @@ typedef struct nibbler {
        the front given to a raw call. */
     nibbler_mutex io;
     Py_ssize_t inflight;
+    /* Set, with the I/O role, when it was taken over (see "Locking") but
+       the lock could not be had to drop the bytes in flight: the next
+       holder of both drops them. */
+    uint8_t drop_inflight;
 
     /* The block size, which reads fill and small appends are copied into.
        Also read without the lock (FT_ATOMIC relaxed). */
@@ -640,6 +644,7 @@ nibbler_drop_inflight(nibbler *n)
 {
     (void)morsels_consume(&n->list, n->inflight);
     n->inflight = 0;
+    n->drop_inflight = 0;
 }
 
 /* Take the I/O role, then the lock; a signal handler raising interrupts
@@ -652,10 +657,15 @@ nibbler_lock_io(nibbler *n, PyObject *obj)
         return -1;
     }
     if (nibbler_lock(n, obj) < 0) {
+        /* Only a reentrant call fails while finalizing: this thread holds
+           the lock further up its stack, in the middle of something. */
+        if (taken_over) {
+            n->drop_inflight = 1;
+        }
         nibbler_mutex_unlock(&n->io);
         return -1;
     }
-    if (taken_over) {
+    if (taken_over || n->drop_inflight) {
         nibbler_drop_inflight(n);
     }
     return 0;
@@ -713,6 +723,9 @@ nibbler_take_io(nibbler *n, PyObject *obj)
 {
     PyThreadState *tstate = _PyThreadState_GET();
     if (nibbler_mutex_trylock(&n->io, tstate)) {
+        if (n->drop_inflight) {
+            nibbler_drop_inflight(n);
+        }
         return NIBBLER_IO_TAKEN;
     }
     return nibbler_take_io_wait(n, obj, tstate);
