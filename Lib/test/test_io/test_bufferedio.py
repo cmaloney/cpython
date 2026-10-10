@@ -1589,6 +1589,52 @@ class BufferedRandomTest(BufferedReaderTest, BufferedWriterTest):
         self.assertEqual(bufio.write(b"BB"), 2) # the write buffer increases
         self.assertEqual(bufio.truncate(), 4)
 
+    def test_truncate_drops_read_ahead(self):
+        # Bytes cut away are not read back, and the next write goes to
+        # the position.
+        raw = self.BytesIO(b"0123456789" * 3)
+        bufio = self.tp(raw, 100)
+        self.assertEqual(bufio.read(3), b"012")
+        self.assertEqual(bufio.truncate(), 3)
+        self.assertEqual(bufio.tell(), 3)
+        self.assertEqual(bufio.read(), b"")
+        bufio.write(b"X")
+        bufio.flush()
+        self.assertEqual(raw.getvalue(), b"012X")
+
+        raw = self.BytesIO(b"0123456789" * 3)
+        bufio = self.tp(raw, 100)
+        self.assertEqual(bufio.read(3), b"012")
+        self.assertEqual(bufio.truncate(5), 5)
+        self.assertEqual(bufio.tell(), 3)
+        self.assertEqual(bufio.read(), b"34")
+
+    def test_truncate_below_position(self):
+        # The position is not changed: reads return nothing, and a write
+        # lands at the position, after a gap of zero bytes.
+        for prep in ("read", "write", "seek", "readall"):
+            with self.subTest(prep=prep):
+                raw = self.BytesIO(b"0123456789abcdefghij")
+                bufio = self.tp(raw, 100)
+                if prep == "read":
+                    bufio.read(8)
+                elif prep == "write":
+                    bufio.write(b"x" * 8)
+                elif prep == "seek":
+                    bufio.seek(8)
+                else:
+                    bufio.read()
+                pos = bufio.tell()
+                self.assertEqual(bufio.truncate(3), 3)
+                self.assertEqual(bufio.tell(), pos)
+                self.assertEqual(bufio.read(), b"")
+                self.assertEqual(bufio.write(b"Z"), 1)
+                self.assertEqual(bufio.tell(), pos + 1)
+                bufio.flush()
+                head = b"xxx" if prep == "write" else b"012"
+                self.assertEqual(raw.getvalue(),
+                                 head + b"\0" * (pos - 3) + b"Z")
+
     def test_misbehaved_io(self):
         BufferedReaderTest.test_misbehaved_io(self)
         BufferedWriterTest.test_misbehaved_io(self)
