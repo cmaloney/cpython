@@ -1393,6 +1393,11 @@ class BufferedWriter(_BufferedIOMixin):
                         del self._write_buf[keep:]
                         if isinstance(e, OSError):
                             e.characters_written = written - unwritten + keep
+                    else:
+                        # The error came before any of b was written: take
+                        # none of it, as C does (a caller retrying would
+                        # write it twice).
+                        del self._write_buf[unwritten - written:]
                     raise
             return written
 

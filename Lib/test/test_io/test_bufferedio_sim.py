@@ -882,6 +882,20 @@ class SlowDeviceTest:
         f.flush()
         self.assertEqual(bytes(raw.received), data)
 
+    def test_write_error_before_data_takes_none(self):
+        # An error while writing the data pending before write()'s data
+        # takes none of it: write() raises without characters_written,
+        # and only the earlier data stays pending.
+        raw = self.scripted_writer([2, OSError(errno.EIO, "EIO")])
+        f = self.BufferedWriter(raw, 64)
+        f.write(b"abc")
+        with self.assertRaises(OSError) as cm:
+            f.write(b"x" * 100)
+        self.assertEqual(cm.exception.errno, errno.EIO)
+        self.assertNotHasAttr(cm.exception, "characters_written")
+        f.flush()
+        self.assertEqual(bytes(raw.received), b"abc")
+
     def test_write_interrupted_keeps_rest(self):
         # The same for an exception that isn't an OSError (such as one a
         # signal handler raises), which has no characters_written.
