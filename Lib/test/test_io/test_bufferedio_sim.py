@@ -403,8 +403,6 @@ class SlowDeviceTest:
         self.assertEqual(out, data)
 
     def test_text_read_would_block_keeps_partial_char(self):
-        if self.is_stock_C:
-            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # A raw stream that would block in the middle of a multibyte
         # character: its first bytes stay buffered for the next read,
         # instead of being decoded as if at EOF.
