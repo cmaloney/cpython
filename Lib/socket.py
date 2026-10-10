@@ -704,6 +704,14 @@ if defined on the platform; otherwise, the default is AF_INET.
 
 _blocking_errnos = { EAGAIN, EWOULDBLOCK }
 
+# Most buffers one sendmsg() takes.
+try:
+    _IOV_MAX = os.sysconf("SC_IOV_MAX")
+except (AttributeError, OSError, ValueError):
+    _IOV_MAX = 16
+if _IOV_MAX <= 0:
+    _IOV_MAX = 16
+
 class SocketIO(io.RawIOBase):
 
     """Raw I/O implementation for stream sockets.
@@ -770,6 +778,32 @@ class SocketIO(io.RawIOBase):
             if e.errno in _blocking_errnos:
                 return None
             raise
+
+    def _writev(self, buffers):
+        """Write a sequence of buffers, in order, with one sendmsg() call
+        where the socket has it (like write(): returns the number of bytes
+        written, which may be fewer than all of them, or None if the socket
+        is non-blocking and no bytes could be written).
+
+        Private: used by buffered I/O to write several pieces without
+        joining them first.
+        """
+        self._checkClosed()
+        self._checkWritable()
+        sendmsg = getattr(self._sock, "sendmsg", None)
+        if sendmsg is not None:
+            # Writing only the first ones is a partial write.
+            buffers = list(buffers)[:_IOV_MAX]
+            try:
+                return sendmsg(buffers)
+            except NotImplementedError:
+                # SSLSocket has sendmsg() but can't send with it.
+                pass
+            except error as e:
+                if e.errno in _blocking_errnos:
+                    return None
+                raise
+        return super()._writev(buffers)
 
     def readable(self):
         """True if the SocketIO is open for reading.

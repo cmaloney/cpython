@@ -22,6 +22,9 @@
 #ifdef HAVE_FCNTL_H
 #  include <fcntl.h>              // open()
 #endif
+#ifdef HAVE_SYS_UIO_H
+#  include <sys/uio.h>            // writev()
+#endif
 
 #include "_iomodule.h"
 
@@ -1055,11 +1058,173 @@ _io_FileIO_write_impl(fileio *self, PyTypeObject *cls, Py_buffer *b)
     return PyLong_FromSsize_t(n);
 }
 
+/* Vectored writes for the buffered layer when its raw stream is exactly
+   FileIO, without the method call and argument conversion of _writev().
+   _PyFileIO_writev() returns the byte count, -2 when a non-blocking file
+   descriptor would block, or -1 with an exception set. */
+
+/* Raise like the methods do unless the file is open for the access.
+   Return the file descriptor to use, or -1 with an exception set. */
+static int
+fileio_check_io(fileio *self, int writing)
+{
+    int fd = FT_ATOMIC_LOAD_INT_RELAXED(self->fd);
+    if (fd < 0) {
+        err_closed();
+        return -1;
+    }
+    if (writing ? !self->writable : !self->readable) {
+        _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
+        err_mode(state, writing ? "writing" : "reading");
+        return -1;
+    }
+    return fd;
+}
+
+#ifndef HAVE_WRITEV
+static Py_ssize_t
+fileio_io_result(Py_ssize_t n)
+{
+    if (n < 0) {
+        if (errno == EAGAIN) {
+            PyErr_Clear();
+            return -2;
+        }
+        return -1;
+    }
+    return n;
+}
+#endif
+
+Py_ssize_t
+_PyFileIO_writev(PyObject *op, const _PyIO_Span *spans, Py_ssize_t cnt)
+{
+    int fd = fileio_check_io(PyFileIO_CAST(op), 1);
+    if (fd < 0) {
+        return -1;
+    }
+#ifdef HAVE_WRITEV
+    /* Writing less than everything is a valid partial write: at most
+       _PyIO_WRITEV_LONG (and IOV_MAX) spans, and like _Py_write() at most
+       _PY_WRITE_MAX bytes in total (macOS fails larger writes). */
+    struct iovec stack[_PyIO_WRITEV_MAX];
+    struct iovec *iov = stack;
+    cnt = Py_MIN(cnt, _PyIO_WRITEV_LONG);
+#ifdef IOV_MAX
+    cnt = Py_MIN(cnt, IOV_MAX);
+#endif
+    if (cnt > _PyIO_WRITEV_MAX) {
+        iov = PyMem_New(struct iovec, cnt);
+        if (iov == NULL) {
+            PyErr_NoMemory();
+            return -1;
+        }
+    }
+    size_t room = _PY_WRITE_MAX;
+    Py_ssize_t i = 0;
+    for (; i < cnt && room > 0; i++) {
+        size_t len = Py_MIN((size_t)spans[i].len, room);
+        iov[i].iov_base = (void *)spans[i].ptr;
+        iov[i].iov_len = len;
+        room -= len;
+    }
+    cnt = i;
+    Py_ssize_t n;
+    int err, async_err = 0;
+    do {
+        Py_BEGIN_ALLOW_THREADS
+        errno = 0;
+        n = writev(fd, iov, (int)cnt);
+        err = errno;
+        Py_END_ALLOW_THREADS
+    } while (n < 0 && err == EINTR && !(async_err = PyErr_CheckSignals()));
+    if (iov != stack) {
+        PyMem_Free(iov);
+    }
+    if (n < 0) {
+        if (async_err) {
+            return -1;
+        }
+        errno = err;
+        if (err == EAGAIN) {
+            return -2;
+        }
+        PyErr_SetFromErrno(PyExc_OSError);
+        return -1;
+    }
+    return n;
+#else
+    /* No writev(): writing only the first span is a valid partial write. */
+    return fileio_io_result(_Py_write(fd, spans[0].ptr, spans[0].len));
+#endif
+}
+
 int
 _PyFileIO_appending(PyObject *op)
 {
     return PyFileIO_CAST(op)->appending;
 }
+
+#ifdef HAVE_WRITEV
+/*[clinic input]
+_io.FileIO._writev
+    buffers: object
+    /
+
+Write a sequence of buffers with a single writev(2) call.
+
+Each buffer must be an object supporting the contiguous buffer
+protocol. Like write(), only one system call is made; not all
+data may be written. Returns the number of bytes written. In
+non-blocking mode, returns None if the write would block.
+
+Private: used by buffered I/O to write gathered buffers without
+an extra copy into contiguous memory. The shape of a public
+vectored write API is not yet settled.
+[clinic start generated code]*/
+
+static PyObject *
+_io_FileIO__writev_impl(fileio *self, PyObject *buffers)
+/*[clinic end generated code: output=7473168dfb1a9f6a input=9fde7a6149feba4b]*/
+{
+    if (fileio_check_io(self, 1) < 0) {
+        return NULL;
+    }
+    /* A tuple snapshot: getting a buffer can run code that changes a list. */
+    PyObject *seq = PySequence_Tuple(buffers);
+    if (seq == NULL) {
+        return NULL;
+    }
+    /* Only the first _PyIO_WRITEV_MAX buffers are written, as a partial
+       write, which also keeps the count within IOV_MAX. */
+    Py_ssize_t cnt = Py_MIN(PyTuple_GET_SIZE(seq), _PyIO_WRITEV_MAX);
+    Py_buffer views[_PyIO_WRITEV_MAX];
+    _PyIO_Span spans[_PyIO_WRITEV_MAX];
+    Py_ssize_t nviews = 0;
+    PyObject *res = NULL;
+    for (; nviews < cnt; nviews++) {
+        PyObject *item = PyTuple_GET_ITEM(seq, nviews);
+        if (PyObject_GetBuffer(item, &views[nviews], PyBUF_SIMPLE) < 0) {
+            goto done;
+        }
+        spans[nviews] = (_PyIO_Span){views[nviews].buf, views[nviews].len};
+    }
+    Py_ssize_t n = _PyFileIO_writev((PyObject *)self, spans, cnt);
+    if (n >= 0) {
+        res = PyLong_FromSsize_t(n);
+    }
+    else if (n == -2) {
+        res = Py_NewRef(Py_None);
+    }
+
+done:
+    for (Py_ssize_t i = 0; i < nviews; i++) {
+        PyBuffer_Release(&views[i]);
+    }
+    Py_DECREF(seq);
+    return res;
+}
+#endif /* HAVE_WRITEV */
 
 /* XXX Windows support below is likely incomplete */
 
@@ -1386,6 +1551,7 @@ static PyMethodDef fileio_methods[] = {
     _IO_FILEIO_READALL_METHODDEF
     _IO_FILEIO_READINTO_METHODDEF
     _IO_FILEIO_WRITE_METHODDEF
+    _IO_FILEIO__WRITEV_METHODDEF
     _IO_FILEIO_SEEK_METHODDEF
     _IO_FILEIO_TELL_METHODDEF
     _IO_FILEIO_TRUNCATE_METHODDEF
