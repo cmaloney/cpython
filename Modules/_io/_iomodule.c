@@ -78,14 +78,16 @@ iomodule_get_open_type(PyTypeObject **slot)
     return _Py_XGetRef((PyObject **)slot);
 }
 
-static void
-iomodule_set_open_type(PyTypeObject **slot, PyObject *type)
+/* Store type (stolen) in slot; return the type it replaces (a new
+   reference, or NULL). */
+static PyObject *
+iomodule_swap_open_type(PyTypeObject **slot, PyObject *type)
 {
     if (type != NULL) {
         /* Lets iomodule_get_open_type() take references to it. */
         _PyObject_SetMaybeWeakref(type);
     }
-    Py_XDECREF(_Py_atomic_exchange_ptr(slot, type));
+    return _Py_atomic_exchange_ptr(slot, type);
 }
 #else
 static PyObject *
@@ -94,12 +96,20 @@ iomodule_get_open_type(PyTypeObject **slot)
     return Py_XNewRef(*slot);
 }
 
+static PyObject *
+iomodule_swap_open_type(PyTypeObject **slot, PyObject *type)
+{
+    PyObject *old = (PyObject *)*slot;
+    *slot = (PyTypeObject *)type;
+    return old;
+}
+#endif
+
 static void
 iomodule_set_open_type(PyTypeObject **slot, PyObject *type)
 {
-    Py_XSETREF(*slot, (PyTypeObject *)type);
+    Py_XDECREF(iomodule_swap_open_type(slot, type));
 }
-#endif
 
 /*
  * The main open() function
@@ -719,7 +729,10 @@ iomodule_get_nibbler_types(PyObject *module, PyObject *types[4])
 }
 
 /* Point open() at _io's buffered and text classes, or with nibbler set,
-   at _io._nibbler's. */
+   at _io._nibbler's.  Returns whether the reader class it replaced was
+   _io._nibbler's, or -1 on error.  The four classes are not replaced at
+   once: a concurrent open() may get a buffered object of one and a
+   TextIOWrapper of the other, which work together. */
 static int
 iomodule_set_open_impl(PyObject *module, int nibbler)
 {
@@ -736,15 +749,20 @@ iomodule_set_open_impl(PyObject *module, int nibbler)
         types[2] = Py_NewRef(state->PyBufferedRandom_Type);
         types[3] = Py_NewRef(state->PyTextIOWrapper_Type);
     }
-    iomodule_set_open_type(&state->open_reader_type, types[0]);
+    PyObject *old = iomodule_swap_open_type(&state->open_reader_type,
+                                            types[0]);
+    int was_nibbler = (old != NULL
+                       && old != (PyObject *)state->PyBufferedReader_Type);
+    Py_XDECREF(old);
     iomodule_set_open_type(&state->open_writer_type, types[1]);
     iomodule_set_open_type(&state->open_random_type, types[2]);
     iomodule_set_open_type(&state->open_text_type, types[3]);
-    return 0;
+    return was_nibbler;
 }
 
 /* Make open(buffering=0) return the raw file, or with nibbler set, wrap it
-   in _io._nibbler's classes with buffer size 0. */
+   in _io._nibbler's classes with buffer size 0.  Returns whether it
+   wrapped it before, or -1 on error. */
 static int
 iomodule_set_unbuffered_impl(PyObject *module, int nibbler)
 {
@@ -754,10 +772,13 @@ iomodule_set_unbuffered_impl(PyObject *module, int nibbler)
         return -1;
     }
     Py_XDECREF(types[3]);
-    iomodule_set_open_type(&state->open_unbuffered_reader_type, types[0]);
+    PyObject *old = iomodule_swap_open_type(
+        &state->open_unbuffered_reader_type, types[0]);
+    int was_nibbler = old != NULL;
+    Py_XDECREF(old);
     iomodule_set_open_type(&state->open_unbuffered_writer_type, types[1]);
     iomodule_set_open_type(&state->open_unbuffered_random_type, types[2]);
-    return 0;
+    return was_nibbler;
 }
 
 /* Parse the name of an implementation: 1 for "_nibbler", 0 for "_io", -1
@@ -789,11 +810,10 @@ static PyObject *
 _io__set_open_impl_impl(PyObject *module, PyObject *name)
 /*[clinic end generated code: output=da5db966fe58f749 input=a8efd7e301a3bde5]*/
 {
-    _PyIO_State *state = get_io_state(module);
-    int was_nibbler = (FT_ATOMIC_LOAD_PTR_RELAXED(state->open_reader_type)
-                       != state->PyBufferedReader_Type);
     int nibbler = iomodule_parse_impl(name);
-    if (nibbler < 0 || iomodule_set_open_impl(module, nibbler) < 0) {
+    int was_nibbler = nibbler < 0 ? -1 : iomodule_set_open_impl(module,
+                                                                nibbler);
+    if (was_nibbler < 0) {
         return NULL;
     }
     return PyUnicode_FromString(was_nibbler ? "_nibbler" : "_io");
@@ -815,11 +835,10 @@ static PyObject *
 _io__set_unbuffered_impl_impl(PyObject *module, PyObject *name)
 /*[clinic end generated code: output=b7203c8226b4eb18 input=d3251f2c9b3103e5]*/
 {
-    _PyIO_State *state = get_io_state(module);
-    int was_nibbler = (FT_ATOMIC_LOAD_PTR_RELAXED(
-                           state->open_unbuffered_reader_type) != NULL);
     int nibbler = iomodule_parse_impl(name);
-    if (nibbler < 0 || iomodule_set_unbuffered_impl(module, nibbler) < 0) {
+    int was_nibbler = nibbler < 0 ? -1 : iomodule_set_unbuffered_impl(
+                                             module, nibbler);
+    if (was_nibbler < 0) {
         return NULL;
     }
     return PyUnicode_FromString(was_nibbler ? "_nibbler" : "_io");
