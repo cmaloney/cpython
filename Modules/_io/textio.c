@@ -2601,6 +2601,18 @@ native_fast_view(textio *self, PyObject *buffer)
     return 1;
 }
 
+/* _PyIONibbler_peek() into the view, keeping what is known of its bytes
+   if it needs no fill (which may reuse the block for other bytes). */
+static int
+native_peek(textio *self, PyObject *buffer, Py_ssize_t need)
+{
+    if (native_fast_view(self, buffer) && self->view.len >= need) {
+        return 0;
+    }
+    self->ascii.to = self->cr.to = NULL;
+    return _PyIONibbler_peek(buffer, need, &self->view);
+}
+
 /* The fast path of readline() (no limit) for a line that ends with "\n"
    in the buffer already, and has no "\r" for universal newlines: the line,
    or NULL, with an exception set or not (then native_readline()). */
@@ -2619,8 +2631,24 @@ native_readline_fast(textio *self, PyObject *buffer)
     Py_ssize_t len = lf - s + 1;
     const char *bad = native_clean(self, s, lf);
     PyObject *line;
+    int seen = SEEN_LF;
     if (bad == lf) {
         line = native_ascii_str(s, len);
+    }
+    else if (self->readuniversal && bad == lf - 1 && *bad == '\r') {
+        /* ASCII ending with "\r\n". */
+        seen = SEEN_CRLF;
+        if (!self->readtranslate) {
+            line = native_ascii_str(s, len);
+        }
+        else if (len == 2) {
+            line = PyUnicode_FromOrdinal('\n');
+        }
+        else if ((line = PyUnicode_New(len - 1, 127)) != NULL) {
+            Py_UCS1 *data = PyUnicode_1BYTE_DATA(line);
+            memcpy(data, s, len - 2);
+            data[len - 2] = '\n';
+        }
     }
     else if (self->readuniversal
              && native_first(self, &self->cr, 1, bad, lf) != lf)
@@ -2631,10 +2659,12 @@ native_readline_fast(textio *self, PyObject *buffer)
         /* Not ASCII, but whole characters: the line ends with "\n". */
         line = native_nonascii_str(self, s, len, NULL);
     }
-    /* Not translated, it may be the "\n" of a "\r\n" noted before. */
-    int seen = (!self->readuniversal ? 0
-                : len == 1 && !self->readtranslate && native_after_cr(m) ? 0
-                : SEEN_LF);
+    if (!self->readuniversal
+        || (len == 1 && !self->readtranslate && native_after_cr(m)))
+    {
+        /* Not translated, it may be the "\n" of a "\r\n" noted before. */
+        seen = 0;
+    }
     if (line != NULL && _PyIONibbler_consume(buffer, m, len) != 1) {
         Py_CLEAR(line);
     }
@@ -2642,6 +2672,58 @@ native_readline_fast(textio *self, PyObject *buffer)
         nldecoder_object_CAST(self->decoder)->seennl |= seen;
     }
     return line;
+}
+
+/* native_read_fast() of ASCII with "\r"s to translate: "\r\n" and "\r"
+   become "\n". */
+static PyObject *
+native_read_translated(textio *self, PyObject *buffer, Py_ssize_t n)
+{
+    _PyIO_Morsel *m = &self->view;
+    const char *s = m->ptr, *end = s + m->len, *p = s;
+    /* n characters take 2 * n bytes at most. */
+    const char *e = s + Py_MIN(m->len, 2 * n);
+    if (native_first(self, &self->ascii, 0, s, e) != e) {
+        return NULL;
+    }
+    PyObject *res = PyUnicode_New(n, 127);
+    if (res == NULL) {
+        return NULL;
+    }
+    nldecoder_object *dec = nldecoder_object_CAST(self->decoder);
+    int seen = 0;
+    Py_UCS1 *out = PyUnicode_1BYTE_DATA(res), *o = out;
+    while (o - out < n) {
+        const char *cr = native_first(self, &self->cr, 1, p, e);
+        Py_ssize_t run = Py_MIN(cr - p, n - (o - out));
+        if (!((dec->seennl | seen) & SEEN_LF) && memchr(p, '\n', run)) {
+            seen |= SEEN_LF;
+        }
+        memcpy(o, p, run);
+        o += run;
+        p += run;
+        if (o - out == n || p == e || p + 1 == end) {
+            /* Done, or what follows the "\r" isn't there yet. */
+            break;
+        }
+        int crlf = p[1] == '\n';
+        seen |= crlf ? SEEN_CRLF : SEEN_CR;
+        *o++ = '\n';
+        p += 1 + crlf;
+    }
+    if (o == out) {
+        Py_DECREF(res);
+        return NULL;
+    }
+    if (o - out < n && PyUnicode_Resize(&res, o - out) < 0) {
+        return NULL;
+    }
+    if (_PyIONibbler_consume(buffer, m, p - s) != 1) {
+        Py_DECREF(res);
+        return NULL;
+    }
+    dec->seennl |= seen;
+    return res;
 }
 
 /* The fast path of read(n): up to n characters there in the buffer
@@ -2661,6 +2743,9 @@ native_read_fast(textio *self, PyObject *buffer, Py_ssize_t n)
     PyObject *res;
     if (bad == s + len) {
         res = native_ascii_str(s, len);
+    }
+    else if (self->readtranslate && *bad == '\r') {
+        return native_read_translated(self, buffer, n);
     }
     else {
         /* Not ASCII from bad on (or a "\r"): n characters may take more
@@ -2753,10 +2838,8 @@ native_readline(textio *self, Py_ssize_t limit)
     _PyIO_Morsel *m = &self->view;
     PyObject *line = NULL;
     Py_ssize_t need = 1, start = 0;
-    /* Peeking may move the view to another block. */
-    self->ascii.to = self->cr.to = NULL;
     for (;;) {
-        int r = _PyIONibbler_peek(buffer, need, m);
+        int r = native_peek(self, buffer, need);
         if (r < 0) {
             break;
         }
@@ -2974,10 +3057,8 @@ native_read(textio *self, Py_ssize_t n, PyObject **chars)
     _PyIO_Morsel *m = &self->view;
     Py_ssize_t need = 1;
     int r;
-    /* Peeking may move the view to another block. */
-    self->ascii.to = self->cr.to = NULL;
     for (;;) {
-        r = _PyIONibbler_peek(buffer, need, m);
+        r = native_peek(self, buffer, need);
         if (r < 0) {
             break;
         }

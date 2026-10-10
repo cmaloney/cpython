@@ -690,6 +690,8 @@ class TextIOWrapperTest:
                         self.assertEqual(getattr(f, name)(n),
                                          getattr(expected, name)(n))
                     self.assertEqual(f.read(), expected.read())
+                    if newline != "\r\n":
+                        self.assertEqual(f.newlines, expected.newlines)
 
     def test_truncate_below_position(self):
         # As for binary files, the position is not changed: reads return
