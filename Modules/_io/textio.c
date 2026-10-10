@@ -724,6 +724,17 @@ struct textio
      * snapshot point.  We use this to reconstruct decoder states in tell().
      */
     PyObject *snapshot;
+    /* How many bytes of the snapshot's input the decoder held before the
+       last chunk was read (the rest is the chunk). */
+    Py_ssize_t snap_held;
+    /* The snapshot of where the last line that spanned chunks started (see
+       line_snapshot_reset()), or NULL.  A field rather than a local, and
+       left in place when readline() returns, so that it costs readline()
+       nothing for lines within a chunk. */
+    PyObject *line_snap;
+    /* The raw stream is a FileIO on a regular file: reads never find
+       "would block", so readline() needs no line_snap. */
+    char regular;
     /* Bytes-to-characters ratio for the current chunk. Serves as input for
        the heuristic in tell(). */
     double b2cratio;
@@ -1231,8 +1242,10 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
     Py_CLEAR(self->decoded_chars);
     Py_CLEAR(self->pending_bytes);
     Py_CLEAR(self->snapshot);
+    Py_CLEAR(self->line_snap);
     Py_CLEAR(self->errors);
     Py_CLEAR(self->raw);
+    self->regular = 0;
     self->decoded_chars_used = 0;
     self->pending_bytes_count = 0;
     self->encodefunc = NULL;
@@ -1308,8 +1321,10 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
             goto error;
         /* Cache the raw FileIO object to speed up 'closed' checks */
         if (raw != NULL) {
-            if (Py_IS_TYPE(raw, state->PyFileIO_Type))
+            if (Py_IS_TYPE(raw, state->PyFileIO_Type)) {
                 self->raw = raw;
+                self->regular = _PyFileIO_regular(raw);
+            }
             else
                 Py_DECREF(raw);
         }
@@ -1534,6 +1549,7 @@ textiowrapper_clear(PyObject *op)
     Py_CLEAR(self->decoded_chars);
     Py_CLEAR(self->pending_bytes);
     Py_CLEAR(self->snapshot);
+    Py_CLEAR(self->line_snap);
     Py_CLEAR(self->errors);
     Py_CLEAR(self->raw);
 
@@ -1570,6 +1586,7 @@ textiowrapper_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->decoded_chars);
     Py_VISIT(self->pending_bytes);
     Py_VISIT(self->snapshot);
+    Py_VISIT(self->line_snap);
     Py_VISIT(self->errors);
     Py_VISIT(self->raw);
 
@@ -2019,6 +2036,10 @@ textiowrapper_get_decoded_chars(textio *self, Py_ssize_t n)
 
 /* Read and decode the next chunk of data from the BufferedReader.
  */
+/* textiowrapper_read_chunk() result: the buffer would block before any
+   character was decoded (0 is EOF, 1 is characters decoded). */
+#define TEXTIO_BLOCKED 2
+
 static int
 textiowrapper_read_chunk(textio *self, Py_ssize_t size_hint)
 {
@@ -2133,6 +2154,7 @@ textiowrapper_read_chunk(textio *self, Py_ssize_t size_hint)
          * next input to be decoded is dec_buffer + input_chunk.
          */
         PyObject *next_input = dec_buffer;
+        self->snap_held = PyBytes_GET_SIZE(dec_buffer);
         PyBytes_Concat(&next_input, input_chunk);
         dec_buffer = NULL; /* Reference lost to PyBytes_Concat */
         if (next_input == NULL) {
@@ -2147,6 +2169,9 @@ textiowrapper_read_chunk(textio *self, Py_ssize_t size_hint)
     }
     Py_DECREF(input_chunk);
 
+    if (eof && blocked) {
+        return TEXTIO_BLOCKED;
+    }
     return (eof == 0);
 
   fail:
@@ -2239,6 +2264,14 @@ _io_TextIOWrapper_read_impl(textio *self, Py_ssize_t n)
                     continue;
                 }
                 goto fail;
+            }
+            if (res == TEXTIO_BLOCKED) {
+                if (remaining == n) {
+                    /* Nothing to return: "" would mean EOF. */
+                    _PyIO_set_read_blocking_error();
+                    goto fail;
+                }
+                break;
             }
             if (res == 0)  /* EOF */
                 break;
@@ -2381,6 +2414,194 @@ _PyIO_find_line_ending(
     }
 }
 
+/* Without a limit, a partial line that would block is kept for the next
+   readline() (which raises BlockingIOError) until it is this many times
+   the chunk size: then it is returned as it is. */
+#define READLINE_KEEP_MAX 64
+
+/* While readline() reads a line spanning chunks, the tell() snapshot of
+   where the line started: if the stream would block before the line ends,
+   the line is kept for the next call, so the position must stay at its
+   start.  Built only when telling, and only when a line spans chunks, as a
+   list: [decoded_chars the line started in, the line's start in it, the
+   decoder flags at the snapshot point, then the input bytes after the
+   snapshot point].  The functions are kept out of line, so that readline()
+   stays small for lines within a chunk. */
+enum { LS_DEC, LS_START, LS_FLAGS, LS_INPUT };
+
+/* Before reading the next chunk with nothing of the line put aside yet:
+   make line_snap the snapshot of the line from start in decoded_chars, or
+   NULL if not telling. */
+Py_NO_INLINE static int
+line_snapshot_reset(textio *self, Py_ssize_t start)
+{
+    PyObject *ls = NULL;
+    if (self->telling && self->snapshot != NULL) {
+        PyObject *pos;
+        ls = PyList_New(4);
+        if (ls == NULL) {
+            return -1;
+        }
+        PyList_SET_ITEM(ls, LS_DEC, Py_NewRef(self->decoded_chars));
+        if ((pos = PyLong_FromSsize_t(start)) == NULL) {
+            Py_DECREF(ls);
+            return -1;
+        }
+        PyList_SET_ITEM(ls, LS_START, pos);
+        /* (dec_flags, next_input), see textiowrapper_read_chunk(). */
+        assert(PyTuple_Check(self->snapshot));
+        PyList_SET_ITEM(ls, LS_FLAGS,
+                        Py_NewRef(PyTuple_GET_ITEM(self->snapshot, 0)));
+        PyList_SET_ITEM(ls, LS_INPUT,
+                        Py_NewRef(PyTuple_GET_ITEM(self->snapshot, 1)));
+    }
+    Py_XSETREF(self->line_snap, ls);
+    return 0;
+}
+
+/* Add the chunk just read to the line snapshot ls. */
+Py_NO_INLINE static int
+line_snapshot_extend(textio *self, PyObject *ls)
+{
+    if (self->snapshot == NULL) {
+        /* Not telling any more: no snapshot of the line either. */
+        Py_CLEAR(self->line_snap);
+        return 0;
+    }
+    PyObject *input = PyTuple_GET_ITEM(self->snapshot, 1);
+    Py_ssize_t held = self->snap_held;
+    PyObject *chunk = PyBytes_FromStringAndSize(
+        PyBytes_AS_STRING(input) + held, PyBytes_GET_SIZE(input) - held);
+    if (chunk == NULL) {
+        return -1;
+    }
+    int r = PyList_Append(ls, chunk);
+    Py_DECREF(chunk);
+    return r;
+}
+
+/* readline() would block (or raised) after the partial line: keep it
+   (chunks, then remaining, either may be NULL) as the decoded chars for
+   the next call, with the position at its start (from the line snapshot
+   ls, or NULL: then tell() can't work until the next seek()). */
+Py_NO_INLINE static int
+textiowrapper_keep_line(textio *self, PyObject *ls, PyObject *chunks,
+                        PyObject *remaining)
+{
+    PyObject *parts = PyList_New(0);
+    if (parts == NULL) {
+        return -1;
+    }
+    PyObject *line = NULL, *input = NULL;
+    Py_ssize_t start = 0;
+    if (ls != NULL) {
+        start = PyLong_AsSsize_t(PyList_GET_ITEM(ls, LS_START));
+        PyObject *head = PyUnicode_Substring(PyList_GET_ITEM(ls, LS_DEC),
+                                             0, start);
+        if (head == NULL || PyList_Append(parts, head) < 0) {
+            Py_XDECREF(head);
+            goto error;
+        }
+        Py_DECREF(head);
+        PyObject *inputs = PyList_GetSlice(ls, LS_INPUT, PY_SSIZE_T_MAX);
+        if (inputs == NULL) {
+            goto error;
+        }
+        input = PyBytes_Join(Py_GetConstant(Py_CONSTANT_EMPTY_BYTES), inputs);
+        Py_DECREF(inputs);
+        if (input == NULL) {
+            goto error;
+        }
+    }
+    if (chunks != NULL && PyList_SetSlice(parts, PY_SSIZE_T_MAX,
+                                          PY_SSIZE_T_MAX, chunks) < 0)
+    {
+        goto error;
+    }
+    if (remaining != NULL && PyList_Append(parts, remaining) < 0) {
+        goto error;
+    }
+    line = PyUnicode_Join(&_Py_STR(empty), parts);
+    if (line == NULL) {
+        goto error;
+    }
+    if (ls != NULL) {
+        Py_ssize_t nbytes = PyBytes_GET_SIZE(input);
+        PyObject *snapshot = Py_BuildValue("ON", PyList_GET_ITEM(ls, LS_FLAGS),
+                                           input);
+        input = NULL;
+        if (snapshot == NULL) {
+            goto error;
+        }
+        Py_XSETREF(self->snapshot, snapshot);
+        Py_CLEAR(self->line_snap);
+        Py_ssize_t nchars = PyUnicode_GET_LENGTH(line);
+        textiowrapper_set_decoded_chars(self, line);
+        self->decoded_chars_used = start;
+        self->b2cratio = nchars > 0 ? (double)nbytes / nchars : 0.0;
+    }
+    else {
+        Py_CLEAR(self->snapshot);
+        textiowrapper_set_decoded_chars(self, line);
+        self->telling = 0;
+    }
+    Py_DECREF(parts);
+    return 0;
+
+error:
+    Py_DECREF(parts);
+    Py_XDECREF(input);
+    Py_XDECREF(line);
+    return -1;
+}
+
+/* readline() would block before the end of the line, with chunked chars
+   in chunks and then remaining (either may be NULL): keep them for the next
+   call and raise BlockingIOError, since "" would mean EOF.  Returns 0
+   (the line is returned as it is, as at EOF) only when it has grown too
+   long to keep. */
+Py_NO_INLINE static int
+textiowrapper_readline_blocked(textio *self, PyObject *chunks,
+                               PyObject *remaining, Py_ssize_t chunked,
+                               Py_ssize_t limit)
+{
+    if (remaining != NULL) {
+        chunked += PyUnicode_GET_LENGTH(remaining);
+    }
+    if (limit < 0 && chunked >= READLINE_KEEP_MAX * self->chunk_size) {
+        return 0;
+    }
+    if ((remaining != NULL || chunks != NULL)
+        && textiowrapper_keep_line(self, self->line_snap, chunks,
+                                   remaining) < 0)
+    {
+        return -1;
+    }
+    _PyIO_set_read_blocking_error();
+    return -1;
+}
+
+/* Reading the next chunk of a line raised: keep the partial line for the
+   next call, as the buffer keeps what it read (such as before a socket
+   timeout, gh-51571).  With the snapshot of its start only after an
+   OSError, raised before the buffer gave out the chunk: after another
+   error (from the decoder, say) the chunk was consumed, so tell() can't
+   work until the next seek().  Keeps the raised exception. */
+Py_NO_INLINE static void
+textiowrapper_readline_error(textio *self, PyObject *chunks,
+                             PyObject *remaining)
+{
+    PyObject *exc = PyErr_GetRaisedException();
+    PyObject *ls = PyErr_GivenExceptionMatches(exc, PyExc_OSError)
+                   ? self->line_snap : NULL;
+    if (textiowrapper_keep_line(self, ls, chunks, remaining) < 0) {
+        _PyErr_ChainExceptions1(exc);
+    }
+    else {
+        PyErr_SetRaisedException(exc);
+    }
+}
+
 static PyObject *
 _textiowrapper_readline(textio *self, Py_ssize_t limit)
 {
@@ -2412,15 +2633,37 @@ _textiowrapper_readline(textio *self, Py_ssize_t limit)
                 if (_PyIO_trap_eintr()) {
                     continue;
                 }
+                if (remaining != NULL || chunks != NULL) {
+                    textiowrapper_readline_error(self, chunks, remaining);
+                }
                 goto error;
             }
-            if (res == 0)
+            /* Part of the line was put aside after line_snap was reset
+               (else it may be an older line's). */
+            if ((chunks != NULL || remaining != NULL)
+                && self->line_snap != NULL
+                && line_snapshot_extend(self, self->line_snap) < 0)
+            {
+                goto error;
+            }
+            if (res != 1)
                 break;
         }
-        if (res == 0) {
-            /* end of file */
+        if (res != 1) {
+            if (res == TEXTIO_BLOCKED
+                && textiowrapper_readline_blocked(self, chunks, remaining,
+                                                  chunked, limit) < 0)
+            {
+                goto error;
+            }
+            /* End of file, or would block with a partial line too long to
+               keep, which is returned.  If it would block, keep the
+               snapshot: the decoder may hold a partial character or a
+               pending \r, which tell() must count as unread. */
             textiowrapper_set_decoded_chars(self, NULL);
-            Py_CLEAR(self->snapshot);
+            if (res != TEXTIO_BLOCKED) {
+                Py_CLEAR(self->snapshot);
+            }
             start = endpos = offset_to_buffer = 0;
             break;
         }
@@ -2463,6 +2706,14 @@ _textiowrapper_readline(textio *self, Py_ssize_t limit)
             /* Didn't find line ending, but reached length limit */
             endpos = start + limit - chunked;
             break;
+        }
+
+        /* Reading the next chunk replaces the snapshot: keep the one of
+           the chunk the line started in (nothing put aside before). */
+        if (chunks == NULL && offset_to_buffer == 0 && !self->regular
+            && line_snapshot_reset(self, start) < 0)
+        {
+            goto error;
         }
 
         if (endpos > start) {

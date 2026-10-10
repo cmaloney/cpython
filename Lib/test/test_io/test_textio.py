@@ -1093,7 +1093,14 @@ class TextIOWrapperTest:
             with self.open(r, "r", encoding="utf-8", closefd=False) as t:
                 os.write(w, b"a\xc3")
                 self.assertEqual(t.read(5), "a")
-                os.write(w, b"\xa9b\ncd\n")
+                # Nothing to return: "" would mean EOF.
+                self.assertRaises(BlockingIOError, t.read, 5)
+                self.assertRaises(BlockingIOError, t.readline)
+                os.write(w, b"\xa9b")
+                # A partial line is kept for the next call.
+                self.assertRaises(BlockingIOError, t.readline)
+                self.assertRaises(BlockingIOError, next, t)
+                os.write(w, b"\ncd\n")
                 self.assertEqual(t.readline(), "\xe9b\n")
                 self.assertEqual(t.read(3), "cd\n")
                 os.close(w)
@@ -1108,8 +1115,6 @@ class TextIOWrapperTest:
     # read in amounts equal to TextIOWrapper._CHUNK_SIZE which is 128.
 
     def test_read_would_block_raises(self):
-        if self.is_stock_C:
-            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # gh-57531: when the stream would block before any character is
         # available, read(n), readline() and iteration raise
         # BlockingIOError, as read() does: "" means EOF.  What there is is
@@ -1131,8 +1136,6 @@ class TextIOWrapperTest:
         self.assertEqual(t.readline(), "")
 
     def test_readlines_would_block(self):
-        if self.is_stock_C:
-            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # readlines() that would block returns the complete lines so far
         # and keeps the partial last line for the next call; with none,
         # it raises BlockingIOError, as readline() does.
@@ -1153,8 +1156,6 @@ class TextIOWrapperTest:
         self.assertEqual(t.readlines(100), [])
 
     def test_readline_would_block_keeps_partial_line(self):
-        if self.is_stock_C:
-            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # A readline() that would block before the end of the line raises
         # BlockingIOError and keeps the partial line for the next call.
         raw = self.MockRawIO((b"ab", None, b"c", None, b"d\nef", None,
@@ -1190,8 +1191,6 @@ class TextIOWrapperTest:
         self.assertEqual(t.readline(), "x" * 63 + "y\n")
 
     def test_tell_after_readline_would_block(self):
-        if self.is_stock_C:
-            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # A readline() that would block after a partial line keeps the
         # decoder's held bytes (a partial character) or pending \r in the
         # tell() position, so seek(tell()) then read() loses nothing.
@@ -1254,9 +1253,20 @@ class TextIOWrapperTest:
                             t.seek(pos)
                         self.assertEqual(line + t.read(), expected)
 
+    def test_readline_decode_error_keeps_partial_line(self):
+        # A decode error while reading the rest of a line keeps the part
+        # read before it, but tell() can't work until the next seek():
+        # the buffer is past the bytes that failed.
+        if self.is_nibbler:
+            self.skipTest("_io._nibbler.TextIOWrapper's readline() returns "
+                          "'' at invalid UTF-8 (reported)")
+        raw = self.MockRawIO((b"ab", b"\xff\n", b"cd\n"))
+        t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
+        self.assertRaises(UnicodeDecodeError, t.readline)
+        self.assertRaises(OSError, t.tell)
+        self.assertEqual(t.readline(), "abcd\n")
+
     def test_tell_after_next_would_block(self):
-        if self.is_stock_C:
-            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # A BlockingIOError from next() doesn't leave tell() disabled as
         # during iteration: it reports the position after the last line,
         # counting what the decoder holds as unread.

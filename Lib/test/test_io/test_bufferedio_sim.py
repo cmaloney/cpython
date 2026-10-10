@@ -415,8 +415,6 @@ class SlowDeviceTest:
         self.assertEqual(f.read(10), "")
 
     def test_text_readline_error_keeps_partial_line(self):
-        if self.is_stock_C:
-            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # gh-51571: a raw read that raises (such as a socket timeout) in the
         # middle of a line loses nothing: the next readline() returns the
         # whole line.
