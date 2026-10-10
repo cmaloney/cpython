@@ -10,8 +10,7 @@
 
 Each test class runs against the C (_io), Python (_pyio) and C nibbler
 (_io._nibbler) implementations.  Behavior differences are gated on
-capability attributes (see utils.py); is_C only picks error messages and
-known _pyio quirks.
+is_nibbler, is_C and is_stock_C (see utils.py).
 """
 import array
 import errno
@@ -362,7 +361,7 @@ class SlowDeviceTest:
         self.assertEqual(out, data)
 
     def test_peek_reads_to_size(self):
-        if not self.peek_reads_to_size:
+        if self.is_stock_C:
             self.skipTest("peek() returns the read-ahead, however short")
         # gh-50061: peek(n) returns at least min(n, buffer size) bytes when
         # the raw stream has them, with at most one raw read.
@@ -405,7 +404,7 @@ class SlowDeviceTest:
         self.assertEqual(out, data)
 
     def test_text_read_would_block_keeps_partial_char(self):
-        if self.stock_c_text:
+        if self.is_stock_C:
             self.skipTest("_io.TextIOWrapper is as upstream has it")
         # A raw stream that would block in the middle of a multibyte
         # character: its first bytes stay buffered for the next read,
@@ -419,7 +418,7 @@ class SlowDeviceTest:
         self.assertEqual(f.read(10), "")
 
     def test_text_readline_error_keeps_partial_line(self):
-        if self.stock_c_text:
+        if self.is_stock_C:
             self.skipTest("_io.TextIOWrapper is as upstream has it")
         # gh-51571: a raw read that raises (such as a socket timeout) in the
         # middle of a line loses nothing: the next readline() returns the
@@ -434,7 +433,7 @@ class SlowDeviceTest:
     def test_read_all_error_keeps_data(self):
         # read() of a raw stream with only RawIOBase.readall() keeps what
         # it read before a raw read raised.
-        if not self.keeps_data_on_raw_error:
+        if not self.is_nibbler:
             self.skipTest("data read before a raw error is lost")
         data = sample_data(100)
         raw = self.scripted_reader(data, [30, 20, TimeoutError("timed out")])
@@ -443,8 +442,148 @@ class SlowDeviceTest:
         self.assertRaises(TimeoutError, f.read)
         self.assertEqual(f.read(), data[5:])
 
+    def test_read_all_memory_error_keeps_data(self):
+        # A MemoryError while read() puts the read-ahead and the rest of
+        # the stream together loses neither: the next read() returns all.
+        if not self.is_nibbler:
+            self.skipTest("data is lost on MemoryError")
+        if support.Py_GIL_DISABLED:
+            # One failed allocation is retried there.
+            self.skipTest("can't make one allocation fail")
+        _testcapi = import_helper.import_module('_testcapi')
+        data = sample_data(5_000)
+
+        class PoppingRaw(self.RawIOBase):
+            # Hands out prebuilt parts with pop(), which can't fail for lack
+            # of memory once called: only the buffered layer can lose data.
+            def __init__(self, parts):
+                self.parts = parts[::-1]
+            def readable(self):
+                return True
+            def readinto(self, b):
+                part = self.parts.pop()
+                b[:len(part)] = part
+                return len(part)        # 16: a cached int
+            def read(self, size=-1):
+                # RawIOBase.readall() calls this.
+                return self.parts.pop() if self.parts else b""
+
+        class ReadAllRaw(PoppingRaw):
+            # The rest comes in one piece.
+            readall = PoppingRaw.read
+
+        parts = [data[:16], data[16:1000], data[1000:3000], data[3000:]]
+        raws = {
+            "readall": lambda: ReadAllRaw([data[:16], data[16:]]),
+            "read chunks": lambda: PoppingRaw(parts),
+            # Seekable: positions count what was kept.
+            "seekable": lambda: self.BytesIO(data),
+        }
+        for name, make_raw in raws.items():
+            with self.subTest(raw=name):
+                # Fail each allocation in turn (a few are retried).
+                failures = 0
+                for start in range(300):
+                    f = self.BufferedReader(make_raw(), 16)
+                    self.assertEqual(f.read(5), data[:5])
+                    try:
+                        got = _testcapi.call_with_nomemory(start, start + 1,
+                                                           f.read)
+                    except MemoryError:
+                        failures += 1
+                        got = b""
+                        if name == "seekable":
+                            self.assertEqual(f.tell(), 5)
+                            f.seek(-2, 1)
+                            self.assertEqual(f.read(2), data[3:5])
+                    self.assertEqual(got + f.read(), data[5:], start)
+                self.assertGreater(failures, 0)
+
+    def test_readline_long_line_trickling_in_is_linear(self):
+        # A line that arrives a little at a time, the raw stream blocking in
+        # between, is kept by readline() (which returns None) until it is
+        # whole: keeping it, and looking for its end, takes time linear in
+        # its length, not quadratic.
+        if not self.is_nibbler:
+            self.skipTest("copies the partial line on each call")
+        step = 100
+
+        class Trickle(self.RawIOBase):
+            def __init__(self, data):
+                self.data = data
+                self.pos = 0
+                self.block = False
+            def readable(self):
+                return True
+            def readinto(self, b):
+                self.block = not self.block
+                if self.block:
+                    return None
+                n = min(len(b), step, len(self.data) - self.pos)
+                b[:n] = self.data[self.pos:self.pos + n]
+                self.pos += n
+                return n
+
+        def read_line(size):
+            line = b"x" * (size - 1) + b"\n"
+            f = self.BufferedReader(Trickle(line), 1 << 16)
+            start = time.perf_counter()
+            while (got := f.readline()) is None:
+                pass
+            elapsed = time.perf_counter() - start
+            self.assertEqual(got, line)
+            return elapsed
+
+        # 8 times longer: about 8 times slower if linear, 64 if quadratic.
+        # (Without the garbage collector, whose passes cost more as the
+        # heap grows.)
+        with support.disable_gc():
+            small = min(read_line(64 * 1024) for _ in range(3))
+            large = min(read_line(512 * 1024) for _ in range(3))
+        self.assertLess(large, 24 * small)
+
+    def test_readline_after_seek_back_over_partial_line(self):
+        # A readline() that kept a partial line (here because the raw
+        # stream raised) remembers where it looked for the end of the
+        # line; seeking back inside the read-ahead must not skip an end of
+        # line before that.
+        if not self.is_nibbler:
+            self.skipTest("data read before a raw error is lost")
+        data = b"ab\ncdefgh\nij\n"
+
+        class Raw(self.RawIOBase):
+            def __init__(self):
+                self.pos = 0
+                self.plan = [9, TimeoutError("timed out")]
+            def readable(self):
+                return True
+            def seekable(self):
+                return True
+            def tell(self):
+                return self.pos
+            def seek(self, pos, whence=0):
+                self.pos = pos if whence == 0 else self.pos + pos
+                return self.pos
+            def readinto(self, b):
+                step = self.plan.pop(0) if self.plan else len(b)
+                if isinstance(step, BaseException):
+                    raise step
+                chunk = data[self.pos:self.pos + min(step, len(b))]
+                b[:len(chunk)] = chunk
+                self.pos += len(chunk)
+                return len(chunk)
+
+        f = self.BufferedReader(Raw(), 64)
+        self.assertEqual(f.readline(), b"ab\n")
+        self.assertRaises(TimeoutError, f.readline)
+        self.assertEqual(f.seek(0), 0)
+        self.assertEqual(f.readline(), b"ab\n")
+        self.assertEqual(f.readline(), b"cdefgh\n")
+        self.assertEqual(f.readline(), b"ij\n")
+        self.assertEqual(f.readline(), b"")
+
     def test_read_eintr_is_retried(self):
-        if not self.retries_raw_eintr:
+        if not self.is_C:
             self.skipTest("buffered layer does not retry raw EINTR")
         data = sample_data(1_000)
         plan = [eintr(), 10, eintr(), eintr(), 5, eintr()] * 20
@@ -467,7 +606,7 @@ class SlowDeviceTest:
         self.assertEqual(bytes(got), data)
 
     def test_read_error_keeps_partial_data(self):
-        if not self.keeps_data_on_raw_error:
+        if not self.is_nibbler:
             self.skipTest("data read before a raw error is lost")
         # gh-51571: a raw error (such as a socket timeout) in the middle of
         # a readline() or read(n) loses none of the data read before it.
@@ -626,7 +765,7 @@ class SlowDeviceTest:
         # that or twice is a no-op.
         self.addCleanup(os_helper.unlink, os_helper.TESTFN)
         for unbuffered in (False, True):
-            if unbuffered and not self.supports_buffer_size_zero:
+            if unbuffered and not self.is_nibbler:
                 continue
             size = 0 if unbuffered else 16
             with self.subTest(buffer_size=size):
@@ -692,7 +831,7 @@ class SlowDeviceTest:
         self.assertTrue(raw.closed)
 
     def test_write_eintr_is_retried(self):
-        if not self.retries_raw_eintr:
+        if not self.is_C:
             self.skipTest("buffered layer does not retry raw EINTR")
         plan = [eintr(), 3, eintr(), eintr(), 50] * 100
         raw = self.scripted_writer(plan)
@@ -758,7 +897,7 @@ class SlowDeviceTest:
         self.assertEqual(bytes(raw.received), data)
 
     def test_size_zero_write_error_reports_written(self):
-        if not self.supports_buffer_size_zero:
+        if not self.is_nibbler:
             self.skipTest("buffer_size=0 not supported")
         data = sample_data(100)
         raw = self.scripted_writer([30, OSError(errno.EIO, "EIO")])
@@ -794,7 +933,7 @@ class SlowDeviceTest:
                 self.assertEqual(raw.received, b"")
 
     def test_text_close_flush_error_no_retry(self):
-        if self.stock_c_text:
+        if self.is_stock_C:
             self.skipTest("_io.TextIOWrapper is as upstream has it")
         # TextIOWrapper.close() doesn't write the data again through the
         # close() of its buffer either.
@@ -877,7 +1016,7 @@ class SlowDeviceTest:
     # buffer_size=0: no internal buffer, but partial transfers are retried.
 
     def check_buffer_size_zero(self):
-        if not self.supports_buffer_size_zero:
+        if not self.is_nibbler:
             self.skipTest("buffer_size=0 not supported")
 
     def test_size_zero_write_retries(self):
@@ -1068,7 +1207,7 @@ class TextTest:
 
     def setUp(self):
         super().setUp()
-        if not self.text_uses_buffer_directly:
+        if not self.is_nibbler:
             self.skipTest("text keeps bytes of its own")
 
     def test_text_and_buffer_writes_keep_order(self):
@@ -1221,7 +1360,7 @@ class PositionTest:
             self.assertEqual(block, expected)
 
     def test_raw_keeping_write_view(self):
-        if not self.isolates_raw_views:
+        if not self.is_nibbler:
             self.skipTest("buffer memory is reused under raw views")
         # A raw stream that keeps the views given to write() sees data that
         # stays as written.
@@ -1241,7 +1380,7 @@ class PositionTest:
             self.assertEqual(bytes(view), copy)
 
     def test_raw_keeping_read_view(self):
-        if not self.isolates_raw_views:
+        if not self.is_nibbler:
             self.skipTest("buffer memory is reused under raw views")
         # gh-60198, gh-157075: a raw stream that keeps the views given to
         # readinto(), and views made from them, and writes through them
@@ -1346,8 +1485,6 @@ class PositionTest:
         self.assertEqual(bytes(raw.buf), b"abcdefghij")
 
     def test_append_mode_write_after_read(self):
-        if not self.keeps_reads_on_append:
-            self.skipTest("writes in append mode overwrite read data")
         # gh-64281: a raw stream in append mode writes at the end of the
         # file whatever the position, so data read before a write must
         # still read back as it is in the file.
@@ -1367,8 +1504,6 @@ class PositionTest:
             self.assertEqual(f.read(), b"testestAB")
 
     def test_append_mode_tell_after_write(self):
-        if not self.tells_append_position:
-            self.skipTest("tell() counts appended writes from the position")
         # gh-80592: a write to a raw file in append mode goes to the end of
         # the file, so tell() is the end of the file after it.
         self.addCleanup(os_helper.unlink, os_helper.TESTFN)
@@ -1582,7 +1717,7 @@ class WriteOutTest:
 
     def setUp(self):
         super().setUp()
-        if not self.queues_writes_during_io:
+        if not self.is_nibbler:
             self.skipTest("the lock is held across raw writes")
 
     def gated(self, buffer_size=16):
@@ -1673,7 +1808,7 @@ class WriteOutTest:
         self.assertEqual(bytes(raw.out), b"a" * 20 + b"c")
 
     def test_raw_write_calling_large_write(self):
-        if not self.buffers_reentrant_writes:
+        if not self.is_nibbler:
             self.skipTest("raises RuntimeError")
         # gh-118143: a signal handler printing while the raw write it
         # interrupted runs, with more than the buffer holds.  The data is
@@ -1694,7 +1829,7 @@ class WriteOutTest:
 
     @unittest.skipUnless(hasattr(signal, "setitimer"), "requires setitimer")
     def test_signal_handler_printing_during_writes(self):
-        if not self.buffers_reentrant_writes:
+        if not self.is_nibbler:
             self.skipTest("raises RuntimeError")
         # gh-112608: a signal handler that print()s to a file while the
         # main code writes to it, with signals arriving during write outs
@@ -1942,7 +2077,7 @@ class ReentrantCallTest:
             self.assertEqual(raw.out, b"012")
 
     def test_seek_target_closing(self):
-        if not self.survives_reentrant_close:
+        if not self.is_nibbler:
             self.skipTest("crashes (gh-143375)")
         # gh-143375: the target closing the object while seek() has a
         # partly written buffer to write out.
@@ -2099,19 +2234,62 @@ class LockReleaseTest:
         self.check_shutdown("f.write('.'); f.flush()", waiters=3)
 
     @threading_helper.requires_working_threading()
-    @support.requires_fork()
-    def test_fork_while_other_thread_holds_lock(self):
-        code = """
+    def test_shutdown_with_daemons_writing(self):
+        # Daemon threads write to sys.stdout's buffer as fast as they can
+        # while the main thread exits.  (Not through the TextIOWrapper:
+        # on free-threaded builds a daemon thread can hang holding its
+        # critical section, which flushing sys.stdout at exit then waits
+        # for.)  Finalizing takes the lock over only from
+        # threads that can never run again (they hang as soon as they
+        # attach), so the output stays whole: every line complete, each
+        # thread's in order, and the main thread's last line written.
+        if not self.is_nibbler:
+            self.skipTest("only _io._nibbler takes over such locks")
+        code = textwrap.dedent("""
+            import sys, threading
+            started = threading.Barrier(5)
+            def daemon(i):
+                started.wait()
+                n = 0
+                while True:
+                    sys.stdout.buffer.write(b"d%d:%08d\\n" % (i, n))
+                    n += 1
+                    if n % 7 == 0:
+                        sys.stdout.buffer.flush()
+            for i in range(4):
+                threading.Thread(target=daemon, args=(i,), daemon=True).start()
+            started.wait()
+            sys.stdout.buffer.write(b"main:end\\n")
+            """)
+        env = dict(os.environ, _PYTHON_IO_DEFAULT_IMPL="_nibbler")
+        for _ in range(5):
+            proc = subprocess.run([sys.executable, "-c", code], env=env,
+                                  capture_output=True,
+                                  timeout=support.SHORT_TIMEOUT)
+            self.assertEqual((proc.returncode, proc.stderr), (0, b""))
+            lines = proc.stdout.decode().split("\n")
+            self.assertEqual(lines.pop(), "")
+            self.assertIn("main:end", lines)
+            last = {}
+            for line in lines:
+                if line == "main:end":
+                    continue
+                self.assertRegex(line, r"\Ad[0-3]:\d{8}\Z")
+                t, n = line[1], int(line[3:])
+                self.assertGreater(n, last.get(t, -1))
+                last[t] = n
+
+    def check_fork(self, gated, holder_op):
+        code = f"""
             import warnings
             from threading import Thread
             warnings.simplefilter('ignore', DeprecationWarning)
 
-            GATED = {'write'}
+            GATED = {{{gated!r}}}
             f = BufferedRandom(GatedRaw())
 
             def holder():
-                f.write(b'.')
-                f.flush()
+                {holder_op}
 
             Thread(target=holder, daemon=True).start()
             entered.wait()
@@ -2124,6 +2302,19 @@ class LockReleaseTest:
             os.write(1, b'exit %d' % status)
             """
         self.assertEqual(self.run_child(code), (0, b"child exit 0", ""))
+
+    @threading_helper.requires_working_threading()
+    @support.requires_fork()
+    def test_fork_while_other_thread_holds_lock(self):
+        # The gone thread holds the lock, in a raw seek().
+        self.check_fork('seek', "f.seek(1)")
+
+    @threading_helper.requires_working_threading()
+    @support.requires_fork()
+    def test_fork_while_other_thread_writes_out(self):
+        # The gone thread holds the I/O role, in a raw write() made without
+        # the lock.
+        self.check_fork('write', "f.write(b'.'); f.flush()")
 
     @threading_helper.requires_working_threading()
     @unittest.skipUnless(hasattr(signal, "pthread_kill"),
@@ -2271,7 +2462,7 @@ class ConcurrentAccessTest:
         closing = threading.Event()
         errors = []
         # (_pyio's raw calls can fail on the file descriptor being closed.)
-        closed_errors = ValueError if self.tells_are_atomic else (
+        closed_errors = ValueError if self.is_nibbler else (
             ValueError, OSError)
 
         def writer(tid):
@@ -2295,7 +2486,7 @@ class ConcurrentAccessTest:
                         f.flush()
                     elif op == "tell":
                         pos = f.tell()
-                        if pos < last and self.tells_are_atomic:
+                        if pos < last and self.is_nibbler:
                             errors.append((last, pos))
                         last = pos
                     elif op == "seek":
@@ -2326,7 +2517,7 @@ class ConcurrentAccessTest:
         with open(os_helper.TESTFN, "rb") as result:
             lines = result.read().splitlines(keepends=True)
         everything = [r for w in written for r in w]
-        if self.keeps_writes_racing_close:
+        if self.is_nibbler:
             self.assertEqual(sorted(lines), sorted(everything))
         else:
             # A write racing close() can't be shown to come before it, so
@@ -2337,7 +2528,7 @@ class ConcurrentAccessTest:
             mine = [r for r in lines if r.startswith(prefix)]
             if not self.is_C:
                 self.assertEqual(mine, sorted(mine))
-            elif self.keeps_writes_racing_close:
+            elif self.is_nibbler:
                 self.assertEqual(mine, written[t])
             else:
                 # Only the last writes, those racing close(), can be lost.
@@ -2373,7 +2564,7 @@ class ConcurrentAccessTest:
                                               buffering)
 
     def test_concurrent_readline_gets_each_line_once(self):
-        if not self.reads_are_atomic:
+        if not self.is_C:
             self.skipTest("readline() can split lines between threads")
         for buffering in (1000, 24):
             with self.subTest(buffering=buffering):
@@ -2381,7 +2572,7 @@ class ConcurrentAccessTest:
                                               buffering)
 
     def test_concurrent_readinto_gets_each_record_once(self):
-        if not self.reads_are_atomic:
+        if not self.is_C:
             self.skipTest("readinto() can split records between threads")
 
         def readinto(f):

@@ -556,7 +556,7 @@ class TextIOWrapperTest:
                 f.close()
 
     def test_truncate_after_read(self):
-        if self.stock_c_text:
+        if self.is_stock_C:
             self.skipTest("_io.TextIOWrapper is as upstream has it")
         # gh-70346: truncate() without a size cuts at the text position,
         # where the next write would go, not where the buffer read up to.
@@ -615,7 +615,7 @@ class TextIOWrapperTest:
         # position, so a write (or truncate()) after a read acts there, as
         # after seek(tell()).  (Elsewhere a write after a read goes where the
         # buffer read up to.)
-        if not self.text_reads_in_place:
+        if not self.is_nibbler:
             self.skipTest("text reads ahead of its position")
         big = "".join(f"line {i:05}\n" for i in range(3000))
         def check(enc, newline, text, read, written, after, rest):
@@ -713,7 +713,7 @@ class TextIOWrapperTest:
                         self.assertEqual(f.newlines, "\r\n")
 
     def test_truncate_below_position(self):
-        if self.stock_c_text:
+        if self.is_stock_C:
             self.skipTest("_io.TextIOWrapper is as upstream has it")
         # As for binary files, the position is not changed: reads return
         # nothing, and a write lands at the position, after a gap of zero
@@ -795,7 +795,7 @@ class TextIOWrapperTest:
         f.seek(0)
         for i, line in enumerate(f):
             self.assertEqual(line, "\xff\n")
-            if self.tells_while_iterating:
+            if self.is_nibbler:
                 # gh-81217
                 self.assertEqual(f.tell(), (p1, p2)[i])
             else:
@@ -824,7 +824,7 @@ class TextIOWrapperTest:
             self.assertEqual(f.read(), "ne3\n")
 
     def test_tell_after_next_and_flush(self):
-        if self.stock_c_text:
+        if self.is_stock_C:
             self.skipTest("_io.TextIOWrapper is as upstream has it")
         # flush() while iterating doesn't make tell() use a snapshot that
         # wasn't kept: it gives the position, or raises as it does while
@@ -834,7 +834,7 @@ class TextIOWrapperTest:
         with self.open(os_helper.TESTFN, "r+", encoding="utf-8") as f:
             self.assertEqual(next(f), "a\n")
             f.flush()
-            if self.tells_while_iterating:
+            if self.is_nibbler:
                 self.assertEqual(f.tell(), 2)
             else:
                 self.assertRaisesRegex(OSError, "disabled by next",
@@ -848,7 +848,7 @@ class TextIOWrapperTest:
             self.assertEqual(f.readline(), "bc\n")
 
     def test_tell_while_iterating(self):
-        if not self.tells_while_iterating:
+        if not self.is_nibbler:
             self.skipTest("next() disables tell()")
         # gh-81217: tell() inside a for loop gives positions that seek()
         # goes back to.
@@ -973,7 +973,7 @@ class TextIOWrapperTest:
             self.assertEqual(remaining, "")
 
     def test_tell_after_seek_with_chars_to_skip(self):
-        if self.stock_c_text:
+        if self.is_stock_C:
             self.skipTest("_io.TextIOWrapper is as upstream has it")
         # seek() to a cookie with characters to skip feeds the decoder a
         # new snapshot; tell() must not estimate positions inside it with
@@ -1048,7 +1048,7 @@ class TextIOWrapperTest:
 
     # read in amounts equal to TextIOWrapper._CHUNK_SIZE which is 128.
     def test_read_would_block_keeps_partial_char(self):
-        if self.stock_c_text:
+        if self.is_stock_C:
             self.skipTest("_io.TextIOWrapper is as upstream has it")
         # gh-57531: a raw stream that would block in the middle of a
         # multibyte character: its first bytes are kept for the next read,
@@ -1061,7 +1061,7 @@ class TextIOWrapperTest:
         self.assertEqual(t.read(10), "")
 
     def test_read_would_block_raises(self):
-        if self.stock_c_text:
+        if self.is_stock_C:
             self.skipTest("_io.TextIOWrapper is as upstream has it")
         # gh-57531: when the stream would block before any character is
         # available, read(n), readline() and iteration raise
@@ -1084,7 +1084,7 @@ class TextIOWrapperTest:
         self.assertEqual(t.readline(), "")
 
     def test_readlines_would_block(self):
-        if self.stock_c_text:
+        if self.is_stock_C:
             self.skipTest("_io.TextIOWrapper is as upstream has it")
         # readlines() that would block returns the complete lines so far
         # and keeps the partial last line for the next call; with none,
@@ -1106,7 +1106,7 @@ class TextIOWrapperTest:
         self.assertEqual(t.readlines(100), [])
 
     def test_readline_would_block_keeps_partial_line(self):
-        if self.stock_c_text:
+        if self.is_stock_C:
             self.skipTest("_io.TextIOWrapper is as upstream has it")
         # A readline() that would block before the end of the line raises
         # BlockingIOError and keeps the partial line for the next call.
@@ -1143,7 +1143,7 @@ class TextIOWrapperTest:
         self.assertEqual(t.readline(), "x" * 63 + "y\n")
 
     def test_tell_after_readline_would_block(self):
-        if self.stock_c_text:
+        if self.is_stock_C:
             self.skipTest("_io.TextIOWrapper is as upstream has it")
         # A readline() that would block after a partial line keeps the
         # decoder's held bytes (a partial character) or pending \r in the
@@ -1208,7 +1208,7 @@ class TextIOWrapperTest:
                         self.assertEqual(line + t.read(), expected)
 
     def test_tell_after_next_would_block(self):
-        if self.stock_c_text:
+        if self.is_stock_C:
             self.skipTest("_io.TextIOWrapper is as upstream has it")
         # A BlockingIOError from next() doesn't leave tell() disabled as
         # during iteration: it reports the position after the last line,
@@ -1387,7 +1387,7 @@ class TextIOWrapperTest:
                 self.assertEqual(f.read(), 'aaaxxx'.encode(charset))
 
     def test_read_write_bom(self):
-        if self.stock_c_text:
+        if self.is_stock_C:
             self.skipTest("_io.TextIOWrapper is as upstream has it")
         # Same test, but writing after reading to the end: the encoder
         # isn't at the start of the stream any more.
@@ -1938,7 +1938,7 @@ class TextIOWrapperTest:
         (100 << (12 * 8)) | (0x7FFFFFFF << (16 * 8))
     ])
     def test_seek_reject_invalid_chars_to_skip(self, cookie_value):
-        if self.stock_c_text or not self.is_C:
+        if self.is_stock_C or not self.is_C:
             # (_pyio's seek() doesn't reject these.)
             self.skipTest("_io.TextIOWrapper is as upstream has it")
         # See https://github.com/python/cpython/issues/153662
@@ -1951,7 +1951,7 @@ class TextIOWrapperTest:
             tio.seek(cookie_value)
 
     def test_seek_cookie_out_of_range(self):
-        if self.stock_c_text:
+        if self.is_stock_C:
             self.skipTest("_io.TextIOWrapper is as upstream has it")
         # gh-91112: a cookie that tell() can't have returned is an error,
         # instead of silently being another position.
@@ -1969,7 +1969,7 @@ class TextIOWrapperTest:
                         f.seek(cookie)
 
     def test_close_and_detach_finish_encoder(self):
-        if self.stock_c_text:
+        if self.is_stock_C:
             self.skipTest("_io.TextIOWrapper is as upstream has it")
         # gh-79792: the incremental encoder gets final=True, so the idna
         # codec writes its last label.
@@ -2084,7 +2084,7 @@ class CTextIOWrapperTest(TextIOWrapperTest, CTestCase):
             del t._CHUNK_SIZE
 
     def test_internal_buffer_size(self):
-        if self.text_uses_buffer_directly:
+        if self.is_nibbler:
             self.skipTest("text keeps no bytes of its own")
         # bpo-43260: TextIOWrapper's internal buffer should not store
         # data larger than chunk size.
@@ -2113,7 +2113,7 @@ class CTextIOWrapperTest(TextIOWrapperTest, CTestCase):
         self.assertEqual([b"abcdef", b"ghi", b"x"*chunk_size], buf._write_stack)
 
     def test_issue119506(self):
-        if self.text_uses_buffer_directly:
+        if self.is_nibbler:
             self.skipTest("text keeps no bytes of its own")
         chunk_size = 8192
 
@@ -2199,7 +2199,7 @@ class CTextIOWrapperTest(TextIOWrapperTest, CTestCase):
         # Should not crash.  (Where text goes to the buffer at once, the
         # write detaches.)
         with self.subTest('read via writeflush'):
-            if self.text_uses_buffer_directly:
+            if self.is_nibbler:
                 return
             make_text(DetachOnWrite(self.MockRawIO()))
             wrapper.write('x')

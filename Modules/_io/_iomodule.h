@@ -57,8 +57,15 @@ extern int _PyFileIO_closed(PyObject *self);
    block, or -1 with an exception set. */
 extern Py_ssize_t _PyFileIO_readinto(PyObject *self, char *buf,
                                      Py_ssize_t len);
-/* Most buffers passed to one vectored write. */
+/* Most buffers passed to one vectored write, with arrays on the stack;
+   _PyIO_WRITEV_LONG (IOV_MAX), with arrays on the heap, for callers with
+   more. */
 enum { _PyIO_WRITEV_MAX = 64 };
+#if defined(IOV_MAX) && IOV_MAX > 64
+#  define _PyIO_WRITEV_LONG IOV_MAX
+#else
+#  define _PyIO_WRITEV_LONG _PyIO_WRITEV_MAX
+#endif
 
 /* A run of bytes for a vectored write. */
 typedef struct {
