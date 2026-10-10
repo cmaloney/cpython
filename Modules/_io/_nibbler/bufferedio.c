@@ -3227,16 +3227,20 @@ buffered_write_lockfree(buffered *self, const char *data, Py_ssize_t len,
     if (e == NULL || (r = nibbler_reserve(e, len)) < 0) {
         return 0;
     }
-    /* Until committed, nothing can replace raw.  Data written once an
-       exact FileIO was closed by itself is queued too: nothing can write it
-       out any more.  (Other raw streams: see buffered_check_closed().) */
+    /* Until committed, nothing can replace raw.  When an exact FileIO was
+       closed by itself, the bytes are given back, unless other threads
+       reserved bytes after them meanwhile: then they are queued too, and
+       nothing can write them out any more.  (Other raw streams: see
+       buffered_check_closed().) */
     PyObject *raw = FT_ATOMIC_LOAD_PTR_RELAXED(self->raw);
-    int closed = !closed_checked && self->raw_fileio && _PyFileIO_closed(raw);
-    nibbler_commit(e, r, data, len);
-    if (closed) {
+    if (!closed_checked && self->raw_fileio && _PyFileIO_closed(raw)) {
+        if (!nibbler_unreserve(e, r, len)) {
+            nibbler_commit(e, r, data, len);
+        }
         PyErr_SetString(PyExc_ValueError, "write to closed file");
         return -1;
     }
+    nibbler_commit(e, r, data, len);
     return 1;
 }
 

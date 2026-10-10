@@ -740,6 +740,9 @@ class SlowDeviceTest:
         msg = "write to closed file" if self.is_C else "closed file"
         with self.assertRaisesRegex(ValueError, msg):
             f.write(b"c")
+        # The failed write left nothing queued.
+        if hasattr(f, "_discard_writes"):
+            self.assertEqual(f._discard_writes(), 2)
 
     def test_write_after_other_raw_closed(self):
         # Raw streams other than FileIO say whether they are closed when

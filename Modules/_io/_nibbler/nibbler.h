@@ -472,6 +472,16 @@ nibbler_reserve(nibbler_end *e, Py_ssize_t len)
     }
 }
 
+/* Without the lock: give back the len bytes reserved at offset r, instead
+   of committing them, if nothing was reserved after them.  Returns 1 if
+   so, else 0 (then nibbler_commit() must follow). */
+static inline int
+nibbler_unreserve(nibbler_end *e, Py_ssize_t r, Py_ssize_t len)
+{
+    Py_ssize_t expected = r + len;
+    return FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(e->pos, &expected, r);
+}
+
 /* Copy data[0:len] to the bytes reserved at offset r. */
 static inline void
 nibbler_commit(nibbler_end *e, Py_ssize_t r, const char *data,
