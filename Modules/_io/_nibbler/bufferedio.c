@@ -43,11 +43,9 @@ typedef struct {
     PyTypeObject *Gather_Type;
     PyObject *gather_var;
     /* The nibblers of the initialized buffered objects: in the child of a
-       fork, buffered_after_fork() releases their mutexes that other
-       threads held.  Once it is registered with os.register_at_fork(),
-       fork_hook is set (atomically). */
+       fork, _PyIO_AfterForkChild() releases their mutexes that other
+       threads held. */
     nibbler_set nibblers;
-    uint8_t fork_hook;
 } nibblermodule_state;
 
 static struct PyModuleDef _PyIO_nibbler_Module;
@@ -2130,73 +2128,27 @@ gather_new(buffered *self, Py_ssize_t limit)
  * Tracking for fork
  */
 
-#ifdef HAVE_FORK
-/* Run by os.register_at_fork() in the child of a fork: release the mutexes
-   of the buffered objects that threads gone in the fork held (see
-   "Locking" in nibbler.h). */
-static PyObject *
-buffered_after_fork(PyObject *module, PyObject *Py_UNUSED(dummy))
+/* Called by PyOS_AfterFork_Child() in the child of a fork, before any
+   Python after-fork hook (which may use these objects): release the
+   mutexes of the buffered objects that threads gone in the fork held (see
+   "Locking" in nibbler.h).  Finds the module with PyState_FindModule(),
+   which runs no code. */
+void
+_PyIO_AfterForkChild(void)
 {
-    nibbler_set_after_fork(&get_nibblermodule_state(module)->nibblers);
-    Py_RETURN_NONE;
-}
-
-static PyMethodDef buffered_after_fork_def = {
-    "_after_fork_in_child", buffered_after_fork, METH_NOARGS,
-    "Release the locks that threads gone in a fork held."
-};
-
-/* Register buffered_after_fork() when the first buffered object is
-   initialized, as select.kqueue registers its own hook.  Failing only
-   warns: then a fork while another thread holds a lock leaves the object
-   unusable in the child, as with _io's own classes. */
-static void
-buffered_register_at_fork(PyObject *module)
-{
-    PyObject *exc = PyErr_GetRaisedException();
-    PyObject *func = PyImport_ImportModuleAttrString("posix",
-                                                     "register_at_fork");
-    PyObject *hook = func != NULL
-        ? PyCFunction_New(&buffered_after_fork_def, module) : NULL;
-    PyObject *kwargs = hook != NULL
-        ? Py_BuildValue("{sO}", "after_in_child", hook) : NULL;
-    PyObject *res = kwargs != NULL
-        ? PyObject_Call(func, Py_GetConstant(Py_CONSTANT_EMPTY_TUPLE), kwargs)
-        : NULL;
-    if (res == NULL) {
-        PyObject *err = PyErr_GetRaisedException();
-        if (PyErr_WarnFormat(PyExc_RuntimeWarning, 1,
-                             "registering the after-fork handler of "
-                             "_io._nibbler failed: %R", err) < 0)
-        {
-            PyErr_Clear();
-        }
-        Py_DECREF(err);
+    PyObject *module = PyState_FindModule(&_PyIO_nibbler_Module);
+    if (module != NULL) {
+        nibbler_set_after_fork(&get_nibblermodule_state(module)->nibblers);
     }
-    Py_XDECREF(res);
-    Py_XDECREF(kwargs);
-    Py_XDECREF(hook);
-    Py_XDECREF(func);
-    PyErr_SetRaisedException(exc);
 }
-#endif
 
 /* Add self, once, to the nibblers that the child of a fork releases. */
 static void
 buffered_track(buffered *self)
 {
-    PyObject *module = PyType_GetModuleByDef(Py_TYPE(self),
-                                             &_PyIO_nibbler_Module);
-    nibblermodule_state *st = get_nibblermodule_state(module);
-#ifdef HAVE_FORK
-    uint8_t expected = 0;
-    if (!FT_ATOMIC_LOAD_UINT8_RELAXED(st->fork_hook)
-        && _Py_atomic_compare_exchange_uint8(&st->fork_hook, &expected, 1))
-    {
-        buffered_register_at_fork(module);
-    }
-#endif
-    nibbler_set_add(&st->nibblers, &self->nib);
+    nibbler_set_add(
+        &find_nibblermodule_state_by_def(Py_TYPE(self))->nibblers,
+        &self->nib);
 }
 
 /*
@@ -4421,6 +4373,12 @@ _PyIO_create_nibbler_submodule(PyObject *io_module, int as_io)
     }
     state->gather_var = PyContextVar_New("_io._nibbler.gather", NULL);
     if (state->gather_var == NULL) {
+        Py_DECREF(mod);
+        return NULL;
+    }
+
+    /* For _PyIO_AfterForkChild(). */
+    if (PyState_AddModule(mod, &_PyIO_nibbler_Module) < 0) {
         Py_DECREF(mod);
         return NULL;
     }

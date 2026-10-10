@@ -2352,6 +2352,34 @@ class LockReleaseTest:
 
     @threading_helper.requires_working_threading()
     @support.requires_fork()
+    def test_fork_with_earlier_after_fork_hook(self):
+        # The locks are released before any Python after-fork hook runs,
+        # also one registered before the first buffered object was made.
+        code = """
+            import signal, warnings
+            from threading import Thread
+            warnings.simplefilter('ignore', DeprecationWarning)
+
+            GATED = {'readinto'}
+
+            def child_hook():
+                signal.alarm(10)    # in case it hangs
+                os.write(1, b'tell %d ' % f.tell())
+
+            os.register_at_fork(after_in_child=child_hook)
+            f = BufferedRandom(GatedRaw())
+            Thread(target=f.read, args=(1,), daemon=True).start()
+            entered.wait()
+            pid = os.fork()
+            if pid == 0:
+                os._exit(0)
+            status = os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])
+            os.write(1, b'exit %d' % status)
+            """
+        self.assertEqual(self.run_child(code), (0, b"tell 0 exit 0", ""))
+
+    @threading_helper.requires_working_threading()
+    @support.requires_fork()
     def test_fork_while_other_thread_writes_out_to_fileio(self):
         # The gone thread writes out to a FileIO without the lock, which
         # leaves the writing end open: the child drops the bytes in flight
