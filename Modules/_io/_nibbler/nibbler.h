@@ -36,6 +36,8 @@
 #include "pycore_pymem.h"               // _PyMem_FreeDelayed()
 #include "pycore_pylifecycle.h"         // _Py_IsInterpreterFinalizing()
 #include "pycore_pystate.h"             // _PyThreadState_GET()
+#include "pycore_qsbr.h"                // _Py_qsbr_advance()
+#include "pycore_tstate.h"              // _PyThreadStateImpl
 
 /* Compare-and-swap in the style of pycore_pyatomic_ft_wrappers.h (which
    has none): atomic on free-threaded builds, a plain compare and store
@@ -97,6 +99,14 @@ typedef struct nibbler {
     /* NULL until needed.  Also read without the lock (FT_ATOMIC relaxed),
        so stored atomically. */
     PyObject *block;
+#ifdef Py_GIL_DISABLED
+    /* Threads without the lock may read the block through an end until
+       this QSBR goal (0: none), and the block used before it, kept to be
+       used again, with its own goal (see nibbler_fresh_block()). */
+    uint64_t block_goal;
+    PyObject *spare;
+    uint64_t spare_goal;
+#endif
     /* NULL for none.  Also read without the lock, see "The open end". */
     struct nibbler_end *end;
     /* The nibbler_set it is in (NULL for none); in it, the next one and
@@ -394,11 +404,24 @@ static void
 nibbler_drop_end(nibbler *n)
 {
     nibbler_end *e = n->end;
-    if (e != NULL) {
-        FT_ATOMIC_STORE_PTR_RELEASE(n->end, NULL);
-        _PyObject_XDecRefDelayed(e->block);
-        _PyMem_FreeDelayed(e, sizeof(*e));
+    if (e == NULL) {
+        return;
     }
+    FT_ATOMIC_STORE_PTR_RELEASE(n->end, NULL);
+#ifdef Py_GIL_DISABLED
+    if (e->block == n->block) {
+        /* The nibbler keeps it alive, but must not write over it until
+           no thread can still be reading it through e. */
+        n->block_goal = _Py_qsbr_advance(
+            ((_PyThreadStateImpl *)_PyThreadState_GET())->qsbr->shared);
+        Py_DECREF(e->block);
+    }
+    else
+#endif
+    {
+        _PyObject_XDecRefDelayed(e->block);
+    }
+    _PyMem_FreeDelayed(e, sizeof(*e));
 }
 
 /* Publish a new end over block, held at pos until the lock is released,
@@ -977,13 +1000,21 @@ nibbler_move(nibbler *n, Py_off_t offset)
  */
 
 /* Replace the block with block (a new reference, or NULL), releasing the
-   old one.  __sizeof__() reads the pointer without the lock, so every
-   store to it goes through here. */
+   old one, which is not used again.  (__sizeof__() reads the pointer
+   without the lock: every store to it is atomic.) */
 static inline void
 nibbler_set_block(nibbler *n, PyObject *block)
 {
     PyObject *old = n->block;
     FT_ATOMIC_STORE_PTR_RELAXED(n->block, block);
+#ifdef Py_GIL_DISABLED
+    if (n->block_goal != 0) {
+        /* Threads may still be reading it (see nibbler_drop_end()). */
+        n->block_goal = 0;
+        _PyObject_XDecRefDelayed(old);
+        return;
+    }
+#endif
     Py_XDECREF(old);
 }
 
@@ -994,6 +1025,10 @@ nibbler_free(nibbler *n)
     nibbler_drop_end(n);
     morsels_free(&n->list);
     nibbler_set_block(n, NULL);
+#ifdef Py_GIL_DISABLED
+    _PyObject_XDecRefDelayed(n->spare);
+    n->spare = NULL;
+#endif
 }
 
 static inline Py_ssize_t
@@ -1010,14 +1045,62 @@ nibbler_new_block(nibbler *n)
     return PyBytes_FromStringAndSize(NULL, n->capacity);
 }
 
-/* The block, when nothing but this nibbler references it (then all of it
-   can be overwritten); else a new one.  Either way, the end is dropped. */
+/* Can block, whose readers without the lock have the given QSBR goal (see
+   nibbler_drop_end()), be written over: does nothing else reference it,
+   and can no thread still read it? */
+static inline int
+nibbler_block_free(PyObject *block, uint64_t goal)
+{
+    if (!_PyObject_IsUniquelyReferenced(block)) {
+        return 0;
+    }
+#ifdef Py_GIL_DISABLED
+    if (goal != 0 && !_Py_qsbr_poll(
+            ((_PyThreadStateImpl *)_PyThreadState_GET())->qsbr, goal))
+    {
+        return 0;
+    }
+#endif
+    return 1;
+}
+
+/* A block that all of can be written over: the block, when it can be
+   (see nibbler_block_free()), else a new one.  Either way, the end is
+   dropped.
+
+   With the GIL, dropping the end releases its reference at once, so the
+   block is used again unless the bytes were handed out.  On free-threaded
+   builds, threads without the lock may still be reading the block of the
+   end just dropped: the block used before it is kept as a spare, and used
+   again once none can (the next time, as a rule: raw calls detach, which
+   is a quiescent state). */
 static PyObject *
 nibbler_fresh_block(nibbler *n)
 {
     assert(n->capacity > 0);
     nibbler_drop_end(n);
-    if (n->block == NULL || !_PyObject_IsUniquelyReferenced(n->block)) {
+#ifdef Py_GIL_DISABLED
+    if (n->block != NULL && nibbler_block_free(n->block, n->block_goal)) {
+        n->block_goal = 0;
+        return n->block;
+    }
+    PyObject *block = n->spare;
+    if (block == NULL || !nibbler_block_free(block, n->spare_goal)) {
+        block = nibbler_new_block(n);
+        if (block == NULL) {
+            return NULL;
+        }
+        /* The spare it replaces may still be read. */
+        _PyObject_XDecRefDelayed(n->spare);
+    }
+    /* The block becomes the spare. */
+    n->spare = n->block;
+    n->spare_goal = n->block_goal;
+    FT_ATOMIC_STORE_PTR_RELAXED(n->block, block);
+    n->block_goal = 0;
+    return block;
+#else
+    if (n->block == NULL || !nibbler_block_free(n->block, 0)) {
         PyObject *block = nibbler_new_block(n);
         if (block == NULL) {
             return NULL;
@@ -1025,6 +1108,7 @@ nibbler_fresh_block(nibbler *n)
         nibbler_set_block(n, block);
     }
     return n->block;
+#endif
 }
 
 /* Append a copy of data[0:len] in a bytes object of its own, past the
