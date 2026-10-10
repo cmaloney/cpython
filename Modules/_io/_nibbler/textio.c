@@ -83,19 +83,20 @@ enum { SEEN_CR = 1, SEEN_LF = 2, SEEN_CRLF = 4 };
 /* The characters decoded at the position: chars[ci:].  With a native
    codec, while the buffer's unread bytes are those named by key at offset
    koff in their block, of which the first kbytes made them; with the
-   decoder, always.  cr_at: where the first "\r" of chars at or after ci
-   is (none: its length), if not below ci.  dwide: chars has some from
-   U+0800 on.  skip_lf: the "\n" at the position ends a "\r\n" already
-   seen.  ver counts the changes. */
+   decoder, always.  cr_at: the byte offset in chars' data of the first
+   "\r" at or after ci (none: its end), if not below ci's; hi_at, of 1 byte
+   chars, the index of the first not ASCII at or after ci, likewise.
+   skip_lf: the "\n" at the position ends a "\r\n" already seen.  ver
+   counts the changes. */
 typedef struct {
     PyObject *chars;
     Py_ssize_t ci;
     Py_ssize_t cr_at;
+    Py_ssize_t hi_at;
     uint64_t key;
     Py_ssize_t koff;
     Py_ssize_t kbytes;
     uint64_t ver;
-    uint8_t dwide;
     uint8_t skip_lf;
 } tcache;
 
@@ -115,6 +116,7 @@ typedef struct {
     char nib;                   /* the store is the buffer itself */
     char nib_ok;                /* the buffer can be the store */
     char codec;                 /* CODEC_* for reads */
+    char escapes;               /* errors is "surrogateescape" */
     char enc;                   /* CODEC_* for writes (CHARMAP: ASCII only) */
     char encoding_start_of_stream;  /* the encoder may write a BOM */
     char encoder_used;          /* the encoder needs final=True at the end */
@@ -308,7 +310,12 @@ typedef struct {
     char lockfree;      /* without the critical section */
     char retry;         /* error: do it with the critical section */
     Py_ssize_t held;    /* bytes of m the decoder held (it forgot them) */
-    tcache c;           /* this call's copy of the cache */
+    /* The cache as this call knows it: a copy (copy), with free threading
+       (see "Locking"); with the GIL, the cache itself. */
+    tcache *c;
+#ifdef Py_GIL_DISABLED
+    tcache copy;
+#endif
 } store;
 
 /* rbuf's key: not one the buffer gives. */
@@ -347,9 +354,13 @@ store_forget(store *st)
  * use them (delayed, on free-threaded builds).
  */
 
-/* Copy the cache into c, with a reference to its chars. */
-static void
-cache_get(textio *self, tcache *c)
+/* The cache as st's call knows it, st->c: with free threading, a copy,
+   with a reference to its chars.  With the GIL, which other threads take
+   only where calls wait for the buffer, the cache itself: what a call
+   works on then changes only where a copy would turn out to be out of
+   date, which the call checks (see text_read_impl()). */
+static tcache *
+cache_get(textio *self, tcache *copy)
 {
 #ifdef Py_GIL_DISABLED
     for (;;) {
@@ -362,31 +373,39 @@ cache_get(textio *self, tcache *c)
         PyObject *chars = _Py_atomic_load_ptr_relaxed(&t->chars);
         /* Alive: it is freed only after a delay this thread is inside. */
         Py_XINCREF(chars);
-        *c = (tcache){
+        *copy = (tcache){
             chars,
             _Py_atomic_load_ssize_relaxed(&t->ci),
             _Py_atomic_load_ssize_relaxed(&t->cr_at),
+            _Py_atomic_load_ssize_relaxed(&t->hi_at),
             _Py_atomic_load_uint64_relaxed(&t->key),
             _Py_atomic_load_ssize_relaxed(&t->koff),
             _Py_atomic_load_ssize_relaxed(&t->kbytes),
             _Py_atomic_load_uint64_relaxed(&t->ver),
-            _Py_atomic_load_uint8_relaxed(&t->dwide),
             _Py_atomic_load_uint8_relaxed(&t->skip_lf),
         };
         _Py_atomic_fence_acquire();
         if (_Py_atomic_load_uint32_relaxed(&self->cseq) == seq) {
-            return;
+            return copy;
         }
         Py_XDECREF(chars);
     }
 #else
-    *c = self->cache;
-    Py_XINCREF(c->chars);
+    (void)copy;
+    return &self->cache;
 #endif
 }
 
-/* Make c the cache, unless it changed since c was taken from it (then c
-   is no more than this call's).  A copy of c's chars is kept. */
+static inline void
+cache_release(tcache *c)
+{
+#ifdef Py_GIL_DISABLED
+    Py_CLEAR(c->chars);
+#endif
+}
+
+/* Make the copy c the cache, unless that changed since c was taken (then c
+   is no more than this call's). */
 static void
 cache_put(textio *self, tcache *c)
 {
@@ -398,40 +417,44 @@ cache_put(textio *self, tcache *c)
         _Py_yield();
         seq = _Py_atomic_load_uint32_relaxed(&self->cseq);
     }
-#endif
     if (self->cache.ver == c->ver) {
         tcache *t = &self->cache;
         PyObject *old = t->chars;
         c->ver++;
         Py_XINCREF(c->chars);
-#ifdef Py_GIL_DISABLED
         /* Atomically, for cache_get() reading meanwhile. */
         _Py_atomic_store_ptr_relaxed(&t->chars, c->chars);
         _Py_atomic_store_ssize_relaxed(&t->ci, c->ci);
         _Py_atomic_store_ssize_relaxed(&t->cr_at, c->cr_at);
+        _Py_atomic_store_ssize_relaxed(&t->hi_at, c->hi_at);
         _Py_atomic_store_uint64_relaxed(&t->key, c->key);
         _Py_atomic_store_ssize_relaxed(&t->koff, c->koff);
         _Py_atomic_store_ssize_relaxed(&t->kbytes, c->kbytes);
         _Py_atomic_store_uint64_relaxed(&t->ver, c->ver);
-        _Py_atomic_store_uint8_relaxed(&t->dwide, c->dwide);
         _Py_atomic_store_uint8_relaxed(&t->skip_lf, c->skip_lf);
-#else
-        *t = *c;
-#endif
         TEXT_DECREF_LATER(old);
     }
-#ifdef Py_GIL_DISABLED
     _Py_atomic_store_uint32_release(&self->cseq, seq + 2);
+#else
+    (void)self;
+    (void)c;
 #endif
 }
 
-/* Drop the copy's characters. */
+#ifdef Py_GIL_DISABLED
+#  define STORE_COPY(st) (&(st)->copy)
+#else
+#  define STORE_COPY(st) NULL
+#endif
+
+/* Drop the characters. */
 static void
 cache_clear(tcache *c)
 {
     Py_CLEAR(c->chars);
     c->ci = 0;
     c->cr_at = -1;
+    c->hi_at = -1;
     c->skip_lf = 0;
 }
 
@@ -439,10 +462,11 @@ cache_clear(tcache *c)
 static void
 textio_drop_chars(textio *self)
 {
-    tcache c;
-    cache_get(self, &c);
-    cache_clear(&c);
-    cache_put(self, &c);
+    tcache copy;
+    tcache *c = cache_get(self, &copy);
+    cache_clear(c);
+    cache_put(self, c);
+    cache_release(c);
     Py_CLEAR(self->dspan);
 }
 
@@ -462,8 +486,8 @@ store_use_methods(textio *self, store *st, int for_good)
     self->nib_ok &= !for_good;
     FT_ATOMIC_STORE_UINT8_RELAXED(self->lockfree, 0);
     if (self->codec != CODEC_DECODER) {
-        cache_clear(&st->c);
-        cache_put(self, &st->c);
+        cache_clear(st->c);
+        cache_put(self, st->c);
     }
 }
 
@@ -709,62 +733,192 @@ store_write(textio *self, PyObject *buffer, PyObject *obj, const char *data,
  * Decoding
  */
 
-/* Characters at or above 0x800 in the UCS-2 data p[0:k]? */
-static int
-ucs2_has_wide(const Py_UCS2 *p, Py_ssize_t k)
+/* The UTF-8 bytes of chars[i:i+k] beyond one per character: those of
+   characters from 0x80 on (and again from 0x800 on), counted a word, or a
+   vector of 16 bytes where the compiler has them, at a time (summed by
+   lanes, below their overflow). */
+#if defined(__GNUC__) || defined(__clang__)
+typedef uint16_t text_v16 __attribute__((vector_size(16)));
+typedef int8_t text_v8 __attribute__((vector_size(16)));
+#  define TEXT_VECTORS 1
+#endif
+
+static inline Py_ssize_t
+utf8_extra_ucs1(const Py_UCS1 *p, Py_ssize_t k)
 {
-    Py_UCS2 any = 0;
-    for (Py_ssize_t j = 0; j < k; j++) {
-        any |= p[j];
+    /* The top bits, 4 words at a time (each byte of the sum is at most
+       4), then the bytes of the sum by multiplying; the last bytes in the
+       word ending with them (if there is one). */
+    const uint64_t h = 0x8080808080808080ull;
+    const uint64_t ones = 0x0101010101010101ull;
+    Py_ssize_t n = 0, j = 0;
+#ifdef TEXT_VECTORS
+    if (k >= 16) {
+        /* 15 vectors at most per sum (14 and the last), so that its
+           lanes add up to a byte. */
+        while (j + 16 <= k) {
+            text_v8 acc = {0};
+            Py_ssize_t stop = Py_MIN(k, j + 16 * 14);
+            for (; j + 32 <= stop; j += 32) {
+                text_v8 v[2];
+                memcpy(v, p + j, 32);
+                acc += (text_v8)(v[0] < 0) + (text_v8)(v[1] < 0);
+            }
+            if (j + 16 <= stop) {
+                text_v8 v;
+                memcpy(&v, p + j, 16);
+                acc += (text_v8)(v < 0);
+                j += 16;
+            }
+            if (j + 16 > k && j < k) {
+                /* The last ones, in the 16 ending with them. */
+                const text_v8 lane = {0, 1, 2, 3, 4, 5, 6, 7,
+                                      8, 9, 10, 11, 12, 13, 14, 15};
+                text_v8 v;
+                memcpy(&v, p + k - 16, 16);
+                acc += ((text_v8)(v < 0)
+                        & (text_v8)(lane >= (int8_t)(16 - (k - j))));
+                j = k;
+            }
+            acc = -acc;
+            uint64_t w[2];
+            memcpy(w, &acc, 16);
+            n += (Py_ssize_t)(((w[0] + w[1]) * ones) >> 56);
+        }
+        return n;
     }
-    return any >= 0x800;
+#endif
+    for (; j + 32 <= k; j += 32) {
+        uint64_t w[4];
+        memcpy(w, p + j, 32);
+        uint64_t sum = (((w[0] & h) >> 7) + ((w[1] & h) >> 7)
+                        + ((w[2] & h) >> 7) + ((w[3] & h) >> 7));
+        n += (Py_ssize_t)((sum * ones) >> 56);
+    }
+    for (; j + 8 <= k; j += 8) {
+        uint64_t w;
+        memcpy(&w, p + j, 8);
+        n += (Py_ssize_t)((((w & h) >> 7) * ones) >> 56);
+    }
+    if (j < k && k >= 8) {
+        uint64_t w;
+        memcpy(&w, p + k - 8, 8);
+#if PY_LITTLE_ENDIAN
+        w >>= 8 * (8 - (k - j));
+#else
+        w <<= 8 * (8 - (k - j));
+#endif
+        return n + (Py_ssize_t)(((((w & h) >> 7)) * ones) >> 56);
+    }
+    for (; j < k; j++) {
+        n += p[j] >> 7;
+    }
+    return n;
 }
 
-/* The UTF-8 bytes of chars[i:i+k] (surrogates were bytes escaped with
-   surrogateescape: one each).  Unless wide (characters from U+0800 on in
-   chars), characters above 0x7f take two bytes: count them (in 16-bit
-   sums, which vectorize well). */
-static Py_ssize_t
-utf8_bytes(PyObject *chars, int wide, Py_ssize_t i, Py_ssize_t k)
+static inline Py_ssize_t
+utf8_extra_ucs2(const Py_UCS2 *p, Py_ssize_t k)
 {
-    Py_ssize_t n = k;
+    Py_ssize_t n = 0, j = 0;
+#ifdef TEXT_VECTORS
+    while (j + 8 <= k) {
+        text_v16 acc = {0};
+        Py_ssize_t stop = Py_MIN(k, j + 8 * 2048);
+        for (; j + 8 <= stop; j += 8) {
+            text_v16 v;
+            memcpy(&v, p + j, 16);
+            acc -= (text_v16)(v >= 0x80) + (text_v16)(v >= 0x800);
+        }
+        uint64_t w[2];
+        memcpy(w, &acc, 16);
+        n += (Py_ssize_t)(((w[0] + w[1]) * 0x0001000100010001ull) >> 48);
+    }
+    if (j < k && k >= 8) {
+        /* The last ones, in the 8 ending with them. */
+        const text_v16 lane = {0, 1, 2, 3, 4, 5, 6, 7};
+        text_v16 v;
+        memcpy(&v, p + k - 8, 16);
+        text_v16 c = (((text_v16)(v >= 0x80) + (text_v16)(v >= 0x800))
+                      & (text_v16)(lane >= (uint16_t)(8 - (k - j))));
+        uint64_t w[2];
+        /* Each lane is 0, 0xffff or 0xfffe: negate them. */
+        c = -c;
+        memcpy(w, &c, 16);
+        return n + (Py_ssize_t)(((w[0] + w[1]) * 0x0001000100010001ull)
+                                >> 48);
+    }
+#endif
+    for (; j < k; j++) {
+        n += (p[j] >= 0x80) + (p[j] >= 0x800);
+    }
+    return n;
+}
+
+/* The UTF-8 bytes of chars[i:i+k].  Surrogates (with escapes) were bytes
+   escaped with surrogateescape: one each. */
+static inline Py_ssize_t
+utf8_bytes(PyObject *chars, int escapes, Py_ssize_t i, Py_ssize_t k)
+{
     if (PyUnicode_IS_ASCII(chars)) {
-        return n;
+        return k;
     }
     const void *data = PyUnicode_DATA(chars);
     int kind = PyUnicode_KIND(chars);
     if (kind == PyUnicode_1BYTE_KIND) {
-        const Py_UCS1 *p = (const Py_UCS1 *)data + i;
-        const uint64_t highs = 0x8080808080808080ull;
-        Py_ssize_t j = 0;
-        for (; j + 8 <= k; j += 8) {
-            uint64_t w;
-            memcpy(&w, p + j, 8);
-            n += (((w & highs) >> 7) * 0x0101010101010101ull) >> 56;
-        }
-        for (; j < k; j++) {
-            n += p[j] >> 7;
-        }
+        return k + utf8_extra_ucs1((const Py_UCS1 *)data + i, k);
     }
-    else if (kind == PyUnicode_2BYTE_KIND && !wide) {
-        const Py_UCS2 *p = (const Py_UCS2 *)data + i;
-        for (Py_ssize_t j = 0; j < k; j += 0x4000) {
-            Py_ssize_t m = Py_MIN(k - j, 0x4000);
-            uint16_t sum = 0;
-            for (Py_ssize_t q = 0; q < m; q++) {
-                sum += p[j + q] >= 0x80;
-            }
-            n += sum;
-        }
+    if (kind == PyUnicode_2BYTE_KIND && !escapes) {
+        return k + utf8_extra_ucs2((const Py_UCS2 *)data + i, k);
     }
-    else {
-        for (Py_ssize_t j = i; j < i + k; j++) {
-            Py_UCS4 c = PyUnicode_READ(kind, data, j);
-            n += (c >= 0x80) + (c >= 0x800) + (c >= 0x10000)
-                 - 2 * Py_UNICODE_IS_SURROGATE(c);
-        }
+    Py_ssize_t n = k;
+    for (Py_ssize_t j = i; j < i + k; j++) {
+        Py_UCS4 c = PyUnicode_READ(kind, data, j);
+        n += (c >= 0x80) + (c >= 0x800) + (c >= 0x10000)
+             - 2 * Py_UNICODE_IS_SURROGATE(c);
     }
     return n;
+}
+
+/* hi_at (see tcache) from i, the cache's position, with 1 byte chars. */
+static inline Py_ssize_t
+text_ascii_end(tcache *c, Py_ssize_t i)
+{
+    if (c->hi_at < i) {
+        const Py_UCS1 *p = PyUnicode_1BYTE_DATA(c->chars);
+        Py_ssize_t len = PyUnicode_GET_LENGTH(c->chars), j = i;
+        for (; j + 8 <= len; j += 8) {
+            uint64_t w;
+            memcpy(&w, p + j, 8);
+            if (w & 0x8080808080808080ull) {
+                break;
+            }
+        }
+        for (; j < len && p[j] < 0x80; j++) {
+        }
+        c->hi_at = j;
+    }
+    return c->hi_at;
+}
+
+/* The UTF-8 bytes of the cache's chars[i:i+k]: all it has left, or
+   counted. */
+static inline Py_ssize_t
+text_bytes(textio *self, tcache *c, Py_ssize_t i, Py_ssize_t k)
+{
+    if (PyUnicode_IS_ASCII(c->chars)) {
+        return k;
+    }
+    if (i + k == PyUnicode_GET_LENGTH(c->chars)) {
+        return c->kbytes;
+    }
+    if (PyUnicode_KIND(c->chars) == PyUnicode_1BYTE_KIND) {
+        /* From the first not ASCII. */
+        Py_ssize_t hi = text_ascii_end(c, i);
+        return (i + k <= hi ? k
+                : k + utf8_extra_ucs1(PyUnicode_1BYTE_DATA(c->chars) + hi,
+                                      i + k - hi));
+    }
+    return utf8_bytes(c->chars, self->escapes, i, k);
 }
 
 /* A native codec's decoding of s[0:len] (but a partial character at the
@@ -778,9 +932,18 @@ native_decode(textio *self, const char *s, Py_ssize_t len, int final,
                           : PyUnicode_AsUTF8(self->errors));
     *used = len;
     switch (self->codec) {
-    case CODEC_UTF8:
-        return PyUnicode_DecodeUTF8Stateful(s, len, errors,
-                                            final ? NULL : used);
+    case CODEC_UTF8: {
+        /* Not final, so as not to count the characters first (as the
+           decoder does when final), which costs more than it saves; but
+           bytes left at the end are an error then. */
+        PyObject *chars = PyUnicode_DecodeUTF8Stateful(s, len, errors, used);
+        if (chars != NULL && final && *used < len) {
+            Py_SETREF(chars, PyUnicode_DecodeUTF8Stateful(s, len, errors,
+                                                          NULL));
+            *used = len;
+        }
+        return chars;
+    }
     case CODEC_LATIN1:
         return PyUnicode_DecodeLatin1(s, len, errors);
     case CODEC_ASCII:
@@ -909,11 +1072,11 @@ static int
 text_valid(textio *self, store *st)
 {
     /* Not looked at the store yet: assumed (text_commit() finds out). */
-    return (st->c.chars != NULL
+    return (st->c->chars != NULL
             && (self->codec == CODEC_DECODER || !st->peeked
-                || (st->m.obj != NULL && st->key == st->c.key
+                || (st->m.obj != NULL && st->key == st->c->key
                     && st->m.ptr - PyBytes_AS_STRING(st->m.obj)
-                       == st->c.koff)));
+                       == st->c->koff)));
 }
 
 /* How many characters there are at the position, decoded. */
@@ -921,7 +1084,7 @@ static Py_ssize_t
 text_avail(textio *self, store *st)
 {
     return (text_valid(self, st)
-            ? PyUnicode_GET_LENGTH(st->c.chars) - st->c.ci : 0);
+            ? PyUnicode_GET_LENGTH(st->c->chars) - st->c->ci : 0);
 }
 
 /* Where a UnicodeDecodeError found invalid bytes. */
@@ -949,7 +1112,7 @@ native_more(textio *self, store *st)
         }
         return 1;
     }
-    Py_ssize_t covered = text_valid(self, st) ? st->c.kbytes : 0;
+    Py_ssize_t covered = text_valid(self, st) ? st->c->kbytes : 0;
     if (st->m.obj != NULL && covered < st->m.len) {
         /* A bigger span from the position: twice as much (and a whole
            character more), so that a long line is decoded O(1) times. */
@@ -982,18 +1145,15 @@ native_more(textio *self, store *st)
         if (chars == NULL) {
             return -1;
         }
-        Py_XSETREF(st->c.chars, chars);
-        st->c.ci = 0;
-        st->c.cr_at = -1;
-        st->c.dwide = (PyUnicode_KIND(chars) == PyUnicode_4BYTE_KIND
-                       || (PyUnicode_KIND(chars) == PyUnicode_2BYTE_KIND
-                           && ucs2_has_wide(PyUnicode_2BYTE_DATA(chars),
-                                            PyUnicode_GET_LENGTH(chars))));
-        st->c.key = st->key;
-        st->c.koff = st->m.ptr - PyBytes_AS_STRING(st->m.obj);
-        st->c.kbytes = used;
-        st->c.skip_lf = 0;
-        cache_put(self, &st->c);
+        Py_XSETREF(st->c->chars, chars);
+        st->c->ci = 0;
+        st->c->cr_at = -1;
+        st->c->hi_at = -1;
+        st->c->key = st->key;
+        st->c->koff = st->m.ptr - PyBytes_AS_STRING(st->m.obj);
+        st->c->kbytes = used;
+        st->c->skip_lf = 0;
+        cache_put(self, st->c);
         if (used > covered) {
             return 1;
         }
@@ -1006,7 +1166,7 @@ native_more(textio *self, store *st)
         return -1;
     }
     /* More bytes, or the same in another block (to decode again). */
-    return (text_valid(self, st) ? st->c.kbytes : 0) < st->m.len;
+    return (text_valid(self, st) ? st->c->kbytes : 0) < st->m.len;
 }
 
 /* The codec's decoder: decode the bytes after those it held (left in the
@@ -1060,30 +1220,32 @@ decoder_more(textio *self, store *st)
     /* The bytes are taken: their characters go after the cache's (which
        another thread may have changed while this one waited for the
        buffer). */
-    Py_CLEAR(st->c.chars);
-    cache_get(self, &st->c);
-    if (st->c.chars == NULL || self->dspan == NULL
-        || st->c.ci == PyUnicode_GET_LENGTH(st->c.chars))
+    cache_release(st->c);
+    st->c = cache_get(self, STORE_COPY(st));
+    if (st->c->chars == NULL || self->dspan == NULL
+        || st->c->ci == PyUnicode_GET_LENGTH(st->c->chars))
     {
-        Py_XSETREF(st->c.chars, chars);
+        Py_XSETREF(st->c->chars, chars);
         Py_XSETREF(self->dspan, bytes);
-        st->c.ci = 0;
+        st->c->ci = 0;
         self->dflags = self->flags;
-        st->c.cr_at = -1;
+        st->c->cr_at = -1;
+        st->c->hi_at = -1;
     }
     else {
-        PyUnicode_Append(&st->c.chars, chars);
+        PyUnicode_Append(&st->c->chars, chars);
         PyBytes_ConcatAndDel(&self->dspan, bytes);
-        st->c.cr_at = -1;
+        st->c->cr_at = -1;
+        st->c->hi_at = -1;
         Py_DECREF(chars);
-        if (st->c.chars == NULL || self->dspan == NULL) {
-            cache_clear(&st->c);
+        if (st->c->chars == NULL || self->dspan == NULL) {
+            cache_clear(st->c);
             textio_drop_chars(self);
             return -1;
         }
     }
     self->flags = flags;
-    cache_put(self, &st->c);
+    cache_put(self, st->c);
     return 1;
 }
 
@@ -1094,7 +1256,7 @@ static inline int
 text_at_end(textio *self, store *st, Py_ssize_t avail)
 {
     return st->eof && (self->codec == CODEC_DECODER ? st->m.len == 0
-                       : avail == 0 || st->c.kbytes == st->m.len);
+                       : avail == 0 || st->c->kbytes == st->m.len);
 }
 
 Py_NO_INLINE static Py_ssize_t
@@ -1130,16 +1292,16 @@ text_more(textio *self, store *st, Py_ssize_t have)
 static int
 text_commit(textio *self, store *st, Py_ssize_t k)
 {
-    Py_ssize_t ci = st->c.ci;
+    Py_ssize_t ci = st->c->ci;
     if (self->codec != CODEC_DECODER) {
         Py_ssize_t b = (self->codec == CODEC_UTF8
-                        ? utf8_bytes(st->c.chars, st->c.dwide, ci, k) : k);
-        int r = store_advance(self, st, st->c.key, st->c.koff, b);
+                        ? text_bytes(self, st->c, ci, k) : k);
+        int r = store_advance(self, st, st->c->key, st->c->koff, b);
         if (r == 0) {
             /* Another thread took bytes: look at them afresh (not
                trusting the cache, which it may not have updated). */
-            Py_CLEAR(st->c.chars);
-            cache_get(self, &st->c);
+            cache_release(st->c);
+            st->c = cache_get(self, STORE_COPY(st));
             store_forget(st);
             if (store_peek(self, st, 1) < 0) {
                 return -1;
@@ -1148,11 +1310,11 @@ text_commit(textio *self, store *st, Py_ssize_t k)
         if (r <= 0) {
             return r;
         }
-        st->c.koff += b;
-        st->c.kbytes -= b;
+        st->c->koff += b;
+        st->c->kbytes -= b;
     }
-    st->c.ci = ci + k;
-    cache_put(self, &st->c);
+    st->c->ci = ci + k;
+    cache_put(self, st->c);
     FT_ATOMIC_STORE_UINT8_RELAXED(self->decoded, 1);
     /* With room again, the buffer may take more. */
     st->status = 0;
@@ -1191,19 +1353,20 @@ find_char(int kind, const char *s, const char *end, Py_UCS4 ch)
     return NULL;
 }
 
-/* The first "\r" in s[0:end) of chars' data, or NULL.  Where the next one
-   is is kept, so that "\r"-less text is looked at once. */
-static const char *
+/* The first "\r" in s[0:end) of chars' data, or NULL, s being the
+   position (or where a search for a line's end resumes, with none before
+   it).  Where the next one is is kept, so that "\r"-less text is looked
+   at once. */
+static inline const char *
 find_cr(tcache *c, int kind, const char *s, const char *end)
 {
     const char *base = PyUnicode_DATA(c->chars);
-    if (c->cr_at < (s - base) / kind) {
-        Py_ssize_t len = PyUnicode_GET_LENGTH(c->chars);
-        const char *cr = find_char(kind, s, base + len * kind, '\r');
-        c->cr_at = cr ? (cr - base) / kind : len;
+    if (c->cr_at < s - base) {
+        Py_ssize_t len = PyUnicode_GET_LENGTH(c->chars) * kind;
+        const char *cr = find_char(kind, s, base + len, '\r');
+        c->cr_at = cr ? cr - base : len;
     }
-    const char *cr = base + c->cr_at * kind;
-    return cr < end ? cr : NULL;
+    return base + c->cr_at < end ? base + c->cr_at : NULL;
 }
 
 /* The length of the first line of s[0:end), with its newline, or -1 if
@@ -1232,6 +1395,42 @@ find_line(textio *self, tcache *c, int kind, const char *s, const char *end,
     return e;
 }
 
+/* res (stolen) with "\r\n" and "\r" made "\n": out characters. */
+static PyObject *
+text_translate(PyObject *res, Py_ssize_t out)
+{
+    if (res == NULL) {
+        return NULL;
+    }
+    PyObject *t = PyUnicode_New(out, PyUnicode_MAX_CHAR_VALUE(res));
+    if (t != NULL) {
+        /* Runs between "\r"s copied whole (t has the kind of res). */
+        int kind = PyUnicode_KIND(res);
+        const char *r = PyUnicode_DATA(res);
+        const char *rend = r + PyUnicode_GET_LENGTH(res) * kind;
+        char *o = PyUnicode_DATA(t);
+        assert(PyUnicode_KIND(t) == kind);
+        while (r < rend) {
+            const char *cr = find_char(kind, r, rend, '\r');
+            const char *stop = cr ? cr : rend;
+            memcpy(o, r, stop - r);
+            o += stop - r;
+            if (cr == NULL) {
+                break;
+            }
+            PyUnicode_WRITE(kind, o, 0, '\n');
+            o += kind;
+            r = cr + kind;
+            if (r < rend && PyUnicode_READ(kind, r, 0) == '\n') {
+                r += kind;
+            }
+        }
+        assert(o == (char *)PyUnicode_DATA(t) + out * kind);
+    }
+    Py_DECREF(res);
+    return t;
+}
+
 /* The text of the characters at the position, chars[i:i+avail]: up to
    `want` characters of it (-1: no limit), or with `line` up to the end of
    the first line.  With universal newlines, a "\r" is taken only once what
@@ -1243,8 +1442,8 @@ static PyObject *
 text_take(textio *self, store *st, Py_ssize_t avail, Py_ssize_t want, int line,
           int eof, Py_ssize_t *scanned, Py_ssize_t *k, int *found)
 {
-    PyObject *chars = st->c.chars;
-    Py_ssize_t i = st->c.ci;
+    PyObject *chars = st->c->chars;
+    Py_ssize_t i = st->c->ci;
     int kind = PyUnicode_KIND(chars);
     const char *s = (const char *)PyUnicode_DATA(chars) + i * kind;
     const char *end = s + avail * kind;
@@ -1254,7 +1453,7 @@ text_take(textio *self, store *st, Py_ssize_t avail, Py_ssize_t want, int line,
     *found = 0;
     if (line) {
         Py_ssize_t resume = 0;
-        Py_ssize_t e = find_line(self, &st->c, kind, s + *scanned * kind, end,
+        Py_ssize_t e = find_line(self, st->c, kind, s + *scanned * kind, end,
                                  &resume);
         if (e >= 0) {
             n = *scanned + e;
@@ -1275,7 +1474,7 @@ text_take(textio *self, store *st, Py_ssize_t avail, Py_ssize_t want, int line,
             Py_UCS4 c = AT(n - 1);
             if (c == '\n') {
                 seen = (n > 1 && AT(n - 2) == '\r') ? SEEN_CRLF
-                       : (n == 1 && st->c.skip_lf) ? 0 : SEEN_LF;
+                       : (n == 1 && st->c->skip_lf) ? 0 : SEEN_LF;
                 if (seen == SEEN_CRLF && self->readtranslate) {
                     out--;
                     translate = 1;
@@ -1300,12 +1499,12 @@ text_take(textio *self, store *st, Py_ssize_t avail, Py_ssize_t want, int line,
     else {
         Py_ssize_t lim = want < 0 ? avail : Py_MIN(avail, want);
         const char *cr = (self->readuniversal
-                          ? find_cr(&st->c, kind, s, s + lim * kind) : NULL);
+                          ? find_cr(st->c, kind, s, s + lim * kind) : NULL);
         n = out = cr ? (cr - s) / kind : lim;
         if (self->readuniversal
             && !(FT_ATOMIC_LOAD_UINT8_RELAXED(self->seennl) & SEEN_LF))
         {
-            Py_ssize_t from = st->c.skip_lf && n > 0 && AT(0) == '\n';
+            Py_ssize_t from = st->c->skip_lf && n > 0 && AT(0) == '\n';
             if (find_char(kind, s + from * kind, s + n * kind, '\n')) {
                 seen |= SEEN_LF;
             }
@@ -1329,7 +1528,7 @@ text_take(textio *self, store *st, Py_ssize_t avail, Py_ssize_t want, int line,
             }
             Py_ssize_t left = want < 0 ? avail - n
                               : Py_MIN(avail - n, want - out);
-            cr = find_cr(&st->c, kind, s + n * kind, s + (n + left) * kind);
+            cr = find_char(kind, s + n * kind, s + (n + left) * kind, '\r');
             Py_ssize_t run = cr ? (cr - s) / kind - n : left;
             if (!(FT_ATOMIC_LOAD_UINT8_RELAXED(self->seennl) & SEEN_LF)
                 && !(seen & SEEN_LF)
@@ -1346,30 +1545,184 @@ text_take(textio *self, store *st, Py_ssize_t avail, Py_ssize_t want, int line,
         return NULL;
     }
     SEENNL_ADD(self, seen);
-    st->c.skip_lf = skip_lf;
+    st->c->skip_lf = skip_lf;
     PyObject *res = PyUnicode_Substring(chars, i, i + n);
     if (res == NULL || !translate) {
         return res;
     }
-    /* Translated: "\r\n" and "\r" become "\n". */
-    PyObject *t = PyUnicode_New(out, PyUnicode_MAX_CHAR_VALUE(res));
-    if (t != NULL) {
-        int tkind = PyUnicode_KIND(t);
-        void *tdata = PyUnicode_DATA(t);
-        Py_ssize_t o = 0;
-        for (Py_ssize_t j = 0; j < n; j++) {
-            Py_UCS4 c = AT(j);
-            if (c == '\r') {
-                c = '\n';
-                j += j + 1 < n && AT(j + 1) == '\n';
-            }
-            PyUnicode_WRITE(tkind, tdata, o++, c);
-        }
-        assert(o == out);
-    }
-    Py_DECREF(res);
-    return t;
+    return text_translate(res, out);
 #undef AT
+}
+
+/* A str of 1 byte chars s[0:k], with one not ASCII or not (known from
+   hi_at, so that they aren't looked at again). */
+static PyObject *
+text_ucs1(const char *s, Py_ssize_t k, int high)
+{
+    if (!high || k == 1) {
+        return (k == 1 ? PyUnicode_FromOrdinal((Py_UCS1)s[0])
+                : _PyUnicode_FromASCII(s, k));
+    }
+    PyObject *text = PyUnicode_New(k, 0xff);
+    if (text != NULL) {
+        memcpy(PyUnicode_1BYTE_DATA(text), s, k);
+    }
+    return text;
+}
+
+/* chars[i:i+k], a line ending with "\r\n", with "\n" for it. */
+static PyObject *
+text_crlf(PyObject *chars, Py_ssize_t i, Py_ssize_t k)
+{
+    Py_UCS4 max = (PyUnicode_IS_ASCII(chars) ? 127
+                   : _PyUnicode_FindMaxChar(chars, i, i + k - 2));
+    PyObject *text = PyUnicode_New(k - 1, Py_MAX(max, (Py_UCS4)127));
+    if (text != NULL) {
+        _PyUnicode_FastCopyCharacters(text, 0, chars, i, k - 2);
+        PyUnicode_WRITE(PyUnicode_KIND(text), PyUnicode_DATA(text), k - 2,
+                        '\n');
+    }
+    return text;
+}
+
+/* For text_quick(): how many of the avail characters at s (cr the first
+   "\r") translate to n, or -1 if they don't tell (a "\r" last).  Notes
+   the newlines in *seen. */
+static Py_ssize_t
+text_quick_crs(textio *self, int kind, const char *s,
+               Py_ssize_t avail, Py_ssize_t n, const char *cr, int *seen)
+{
+    int shift = kind >> 1;
+    int lf = FT_ATOMIC_LOAD_UINT8_RELAXED(self->seennl) & SEEN_LF;
+    Py_ssize_t i = 0, out = 0;
+    for (;;) {
+        Py_ssize_t run = cr ? ((cr - s) >> shift) - i : n - out;
+        if (!lf && find_char(kind, s + (i << shift), s + ((i + run) << shift),
+                             '\n'))
+        {
+            lf = *seen |= SEEN_LF;
+        }
+        i += run;
+        out += run;
+        if (cr == NULL) {
+            return i;
+        }
+        if (i + 1 >= avail) {
+            return -1;
+        }
+        int crlf = PyUnicode_READ(kind, s, i + 1) == '\n';
+        *seen |= crlf ? SEEN_CRLF : SEEN_CR;
+        i += 1 + crlf;
+        if (++out == n) {
+            return i;
+        }
+        Py_ssize_t lim = Py_MIN(avail, i + (n - out));
+        cr = find_char(kind, s + (i << shift), s + (lim << shift), '\r');
+        if (cr == NULL && lim - i < n - out) {
+            return -1;
+        }
+    }
+}
+
+/* The first step of text_read_impl() in the usual case: the decoded
+   characters have all of the text, and it has no "\r" (that newlines
+   would translate, or wait for), so that nothing but noting a "\n" is left
+   of text_take()'s work.  Returns the text, or NULL, with an exception set
+   or not (then text_read_impl() goes on as if this wasn't tried). */
+static inline PyObject *
+text_quick(textio *self, PyObject *buffer, Py_ssize_t n, int line)
+{
+#ifdef Py_GIL_DISABLED
+    tcache copy;
+    tcache *c = cache_get(self, &copy);
+#else
+    tcache *c = cache_get(self, NULL);
+#endif
+    PyObject *chars = c->chars;
+    PyObject *text = NULL;
+    if (chars == NULL) {
+        goto done;
+    }
+    int kind = PyUnicode_KIND(chars);
+    int shift = kind >> 1;      /* log2(kind) */
+    const char *base = _PyUnicode_COMPACT_DATA(chars);
+    Py_ssize_t ci = c->ci, len = PyUnicode_GET_LENGTH(chars);
+    const char *s = base + (ci << shift);
+    Py_ssize_t k;
+    int seen = 0, crlf = 0;
+    if (line) {
+        const char *lf, *cr;
+        if (n >= 0 || !self->readuniversal
+            || (lf = find_char(kind, s, base + (len << shift), '\n')) == NULL)
+        {
+            goto done;
+        }
+        k = ((lf - s) >> shift) + 1;
+        if ((cr = find_cr(c, kind, s, lf)) == NULL) {
+            seen = k == 1 && c->skip_lf ? 0 : SEEN_LF;
+        }
+        else if (cr + kind == lf) {
+            /* Ends with its only "\r", in "\r\n". */
+            seen = SEEN_CRLF;
+            crlf = self->readtranslate;
+        }
+        else {
+            goto done;
+        }
+    }
+    else {
+        k = n;
+        if (n <= 0 || len - ci < n) {
+            goto done;
+        }
+        const char *cr = (self->readuniversal
+                          ? find_cr(c, kind, s, s + (k << shift)) : NULL);
+        if (cr != NULL) {
+            /* Translated, n characters from more. */
+            if (!self->readtranslate || c->skip_lf
+                || (k = text_quick_crs(self, kind, s, len - ci, n, cr,
+                                       &seen)) < 0)
+            {
+                goto done;
+            }
+            crlf = 1;
+        }
+        else {
+            Py_ssize_t from = (c->skip_lf
+                               && PyUnicode_READ(kind, s, 0) == '\n');
+            if (self->readuniversal
+                && !(FT_ATOMIC_LOAD_UINT8_RELAXED(self->seennl) & SEEN_LF)
+                && find_char(kind, s + (from << shift), s + (k << shift),
+                             '\n'))
+            {
+                seen = SEEN_LF;
+            }
+        }
+    }
+    /* Taking the bytes finds out whether the characters are theirs. */
+    Py_ssize_t b = (self->codec == CODEC_UTF8
+                    ? text_bytes(self, c, ci, k) : k);
+    int r = _PyIONibbler_advance(buffer, c->key, c->koff, b);
+    if (r == 1) {
+        text = (crlf ? (line ? text_crlf(chars, ci, k)
+                        : text_translate(PyUnicode_Substring(chars, ci,
+                                                             ci + k), n))
+                : kind == PyUnicode_1BYTE_KIND && c->hi_at >= ci
+                ? text_ucs1(base + ci, k, ci + k > c->hi_at)
+                : PyUnicode_Substring(chars, ci, ci + k));
+        c->ci = ci + k;
+        c->koff += b;
+        c->kbytes -= b;
+        c->skip_lf = 0;
+        cache_put(self, c);
+        FT_ATOMIC_STORE_UINT8_RELAXED(self->decoded, 1);
+        if ((FT_ATOMIC_LOAD_UINT8_RELAXED(self->seennl) & seen) != seen) {
+            SEENNL_ADD(self, seen);
+        }
+    }
+done:
+    cache_release(c);
+    return text;
 }
 
 /* read(n) (n < 0: all), or with line, readline(n); with lockfree, without
@@ -1380,14 +1733,23 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
 {
     /* With native codecs the buffer checks that it is open when the bytes
        are looked at or taken. */
-    int peeks = textio_exact(self) && self->nib_ok
-                && self->codec != CODEC_DECODER;
-    store st = {.buffer = peeks ? textio_buffer(self) : textio_ready(self),
-                .all = n < 0 && !line, .lockfree = lockfree};
-    if (st.buffer == NULL) {
+    int peeks = lockfree || (textio_exact(self) && self->nib_ok
+                             && self->codec != CODEC_DECODER);
+    PyObject *buffer = peeks ? textio_buffer(self) : textio_ready(self);
+    if (buffer == NULL) {
         return NULL;
     }
-    cache_get(self, &st.c);
+    if (!lockfree && peeks && self->nib && self->codec != CODEC_DECODER
+        && n != 0)
+    {
+        PyObject *text = text_quick(self, buffer, n, line);
+        if (text != NULL || PyErr_Occurred()) {
+            Py_DECREF(buffer);
+            return text;
+        }
+    }
+    store st = {.buffer = buffer, .all = n < 0 && !line,
+                .lockfree = lockfree};
     if (!self->readable) {
         Py_DECREF(st.buffer);
         return textio_unsupported(self, "not readable");
@@ -1399,6 +1761,7 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
             return NULL;
         }
     }
+    st.c = cache_get(self, STORE_COPY(&st));
     /* The text so far: res, then in writer once there are two pieces. */
     PyObject *res = NULL;
     _PyUnicodeWriter writer;
@@ -1412,13 +1775,13 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
             st.at_end = text_at_end(self, &st, avail);
         }
         else {
-            uint64_t key = st.c.key;
-            Py_ssize_t koff = st.c.koff, ci = st.c.ci;
+            uint64_t key = st.c->key;
+            Py_ssize_t koff = st.c->koff, ci = st.c->ci;
             if ((avail = text_more(self, &st, have)) < 0) {
                 goto error;
             }
             if ((have || scanned)
-                && (st.c.key != key || st.c.koff != koff || st.c.ci != ci))
+                && (st.c->key != key || st.c->koff != koff || st.c->ci != ci))
             {
                 /* Other characters (another thread read meanwhile, or
                    decoded again): look at them afresh. */
@@ -1450,12 +1813,14 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
         {
             /* The buffer can't hold more of the line, or it is too long to
                keep for the next call: take it so far, but a last "\r"
-               (that may begin a "\r\n": the buffer holds 8 bytes or more,
-               so that there are others). */
-            k = avail - (self->readuniversal && avail > 1
-                         && PyUnicode_READ_CHAR(st.c.chars,
-                                                st.c.ci + avail - 1) == '\r');
-            text = PyUnicode_Substring(st.c.chars, st.c.ci, st.c.ci + k);
+               (that may begin a "\r\n", universal or the newline: the
+               buffer holds 8 bytes or more, so that there are others). */
+            k = avail - ((self->readuniversal
+                          || PyUnicode_GET_LENGTH(self->readnl) == 2)
+                         && avail > 1
+                         && PyUnicode_READ_CHAR(st.c->chars,
+                                                st.c->ci + avail - 1) == '\r');
+            text = PyUnicode_Substring(st.c->chars, st.c->ci, st.c->ci + k);
             if (text == NULL) {
                 goto error;
             }
@@ -1505,14 +1870,14 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
     }
     store_release(&st);
     Py_DECREF(st.buffer);
-    Py_XDECREF(st.c.chars);
+    cache_release(st.c);
     return (pieces > 1 ? _PyUnicodeWriter_Finish(&writer)
             : res ? res : Py_GetConstant(Py_CONSTANT_EMPTY_STR));
 
 error:
     store_release(&st);
     Py_DECREF(st.buffer);
-    Py_XDECREF(st.c.chars);
+    cache_release(st.c);
     Py_XDECREF(res);
     if (pieces > 1) {
         _PyUnicodeWriter_Dealloc(&writer);
@@ -1528,6 +1893,24 @@ text_read(textio *self, Py_ssize_t n, int line)
 {
     PyObject *res;
     if (FT_ATOMIC_LOAD_UINT8_RELAXED(self->lockfree)) {
+        /* (Without it, text_read_impl() raises.)  With the GIL, borrowed:
+           nothing text_quick() does before it is done with the buffer
+           lets other code run. */
+#ifdef Py_GIL_DISABLED
+        PyObject *buffer = (n != 0 && FT_ATOMIC_LOAD_UINT8_RELAXED(self->ok)
+                            ? text_get(&self->buffer) : NULL);
+#else
+        PyObject *buffer = n != 0 && self->ok ? self->buffer : NULL;
+#endif
+        if (buffer != NULL) {
+            res = text_quick(self, buffer, n, line);
+#ifdef Py_GIL_DISABLED
+            Py_DECREF(buffer);
+#endif
+            if (res != NULL || PyErr_Occurred()) {
+                return res;
+            }
+        }
         int retry = 0;
         res = text_read_impl(self, n, line, 1, &retry);
         if (!retry) {
@@ -2008,7 +2391,7 @@ static int
 text_skip(textio *self, PyObject *buffer, Py_ssize_t n)
 {
     store st = {.buffer = buffer};
-    cache_get(self, &st.c);
+    st.c = cache_get(self, STORE_COPY(&st));
     while (n > 0) {
         Py_ssize_t avail = text_more(self, &st, 0);
         if (avail <= 0) {
@@ -2024,7 +2407,7 @@ text_skip(textio *self, PyObject *buffer, Py_ssize_t n)
         }
         n -= r ? Py_MIN(n, avail) : 0;
     }
-    Py_XDECREF(st.c.chars);
+    cache_release(st.c);
     store_release(&st);
     return n > 0 ? -1 : 0;
 }
@@ -2674,6 +3057,8 @@ text_set_codec(textio *self, PyObject *buffer, PyObject *codec_info,
                     && PyUnicode_CompareWithASCIIString(self->errors,
                                                         "replace") == 0));
     self->codec = codec == CODEC_LATIN1 || same ? codec : CODEC_DECODER;
+    self->escapes = PyUnicode_CompareWithASCIIString(self->errors,
+                                                     "surrogateescape") == 0;
 
     int r = textio_call_bool(buffer, &_Py_ID(readable));
     self->readable = r > 0;
@@ -2855,7 +3240,8 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
 
     (void)textiowrapper_clear((PyObject *)self);
     self->rpos = 0;
-    self->cache = (tcache){.cr_at = -1, .ver = self->cache.ver + 1};
+    self->cache = (tcache){.cr_at = -1, .hi_at = -1,
+                           .ver = self->cache.ver + 1};
     self->seennl = self->decoded = 0;
     text_swap(&self->encoding, text_encoding(encoding));
     if (self->encoding == NULL) {

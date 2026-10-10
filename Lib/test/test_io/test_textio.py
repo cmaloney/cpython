@@ -443,6 +443,26 @@ class TextIOWrapperTest:
                             self.assertEqual(got_line, exp_line)
                         self.assertEqual(len(got_lines), len(exp_lines))
 
+    def test_crlf_newline_split_by_small_buffer(self):
+        # A line longer than the buffer, with newline="\r\n" and a "\r"
+        # right before it: the "\r\n" ending it must still be found.
+        data = "\U0001f600\u0436\r\U0001f600a\xe9\U0001f600\xe9\r\r\na"
+        for bufsize in (8, 16, 64):
+            with self.subTest(bufsize=bufsize):
+                b = self.BufferedReader(self.BytesIO(data.encode()), bufsize)
+                t = self.TextIOWrapper(b, encoding="utf-8", newline="\r\n")
+                self.assertEqual(t.readline(12), data[:11])
+                self.assertEqual(t.read(), "a")
+
+    def test_read_translates_after_partial_read(self):
+        # A read() after one that stopped before a "\r\n" translates it.
+        for data, first in (("abc\r\nd", 1), ("xyz\u0436\xe9\r\na", 3)):
+            with self.subTest(data=data):
+                b = self.BufferedReader(self.BytesIO(data.encode()), 1000)
+                t = self.TextIOWrapper(b, encoding="utf-8")
+                self.assertEqual(t.read(first), data[:first])
+                self.assertEqual(t.read(5), data[first:].replace("\r\n", "\n"))
+
     def test_newlines_input(self):
         testdata = b"AAA\nBB\x00B\nCCC\rDDD\rEEE\r\nFFF\r\nGGG"
         normalized = testdata.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
