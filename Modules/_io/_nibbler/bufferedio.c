@@ -124,8 +124,11 @@ typedef struct {
        every write takes the lock and looks at the context. */
     int ngather;
 
-    /* The buffered data and the lock.  Its capacity is the buffer size (0:
-       unbuffered, see above; also read without the lock, by __sizeof__()).
+    /* The buffered data and the lock.  Its capacity is the block size,
+       which reads fill and small writes are copied into, and its threshold
+       the number of pending bytes past which writes are written out; both
+       are the buffer size (0: unbuffered, see above; the capacity is also
+       read without the lock, by __sizeof__()).
        Whether the object is closed is up to raw: close() keeps it, so that
        name, mode and raw still work. */
     nibbler nib;
@@ -639,6 +642,7 @@ buffered_add_write(buffered *self, PyObject *obj, const char *data,
                    Py_ssize_t len)
 {
     assert(nibbler_reading(&self->nib) == NULL);
+    assert(nibbler_nbytes(&self->nib) + len <= self->nib.threshold);
     return nibbler_append(&self->nib, obj, data, len, self->raw_vectored);
 }
 
@@ -1460,7 +1464,7 @@ gather_commit(gather *g, int flush)
     }
     while (r == 0) {
         Py_ssize_t pending = nibbler_nbytes(&self->nib);
-        if (pending == 0 || (!flush && pending <= self->nib.capacity)) {
+        if (pending == 0 || (!flush && pending <= self->nib.threshold)) {
             break;
         }
         if (nibbler_io_busy(&self->nib)) {
@@ -2678,6 +2682,7 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
     nibbler_free(&self->nib);
     FT_ATOMIC_STORE_SSIZE_RELAXED(self->nib.capacity,
                                   err == 0 ? buffer_size : 0);
+    self->nib.threshold = err == 0 ? buffer_size : 0;
     if (err == 0) {
         self->raw_fileio = (uint8_t)raw_fileio;
         /* Use _writev() only where it can't bypass an overridden write():
@@ -2761,7 +2766,7 @@ buffered_write_failed(buffered *self, Py_buffer *buffer, Py_ssize_t done)
         return -1;
     }
     PyObject *exc = PyErr_GetRaisedException();
-    Py_ssize_t room = Py_MAX(0, self->nib.capacity
+    Py_ssize_t room = Py_MAX(0, self->nib.threshold
                                 - nibbler_nbytes(&self->nib));
     Py_ssize_t keep = Py_MIN(buffer->len - done, room);
     if (buffered_add_write(self, buffer->obj, (const char *)buffer->buf + done,
@@ -2797,8 +2802,8 @@ buffered_write_locked(buffered *self, Py_buffer *buffer, Py_ssize_t *done)
     Py_ssize_t len = buffer->len;
     /* The loop below makes progress; unbuffered, it stops once everything
        is written. */
-    assert(self->nib.capacity >= 0);
-    if (self->nib.capacity == 0 && self->raw_fileio && len > *done
+    assert(self->nib.threshold >= 0);
+    if (self->nib.threshold == 0 && self->raw_fileio && len > *done
         && !buffered_writing(self))
     {
         /* Unbuffered: one raw write, without queueing.  Writes made
@@ -2817,8 +2822,8 @@ buffered_write_locked(buffered *self, Py_buffer *buffer, Py_ssize_t *done)
             return 0;
         }
     }
-    while (len - *done >= self->nib.capacity
-           || nibbler_nbytes(&self->nib) + (len - *done) > self->nib.capacity)
+    while (len - *done >= self->nib.threshold
+           || nibbler_nbytes(&self->nib) + (len - *done) > self->nib.threshold)
     {
         if (nibbler_io_busy(&self->nib)) {
             if (nibbler_io_is_mine(&self->nib)) {
@@ -2833,7 +2838,7 @@ buffered_write_locked(buffered *self, Py_buffer *buffer, Py_ssize_t *done)
            the lock: other threads can queue writes meanwhile. */
         int status;
         Py_ssize_t rest = len - *done;
-        Py_ssize_t direct = (self->raw_vectored || rest >= self->nib.capacity
+        Py_ssize_t direct = (self->raw_vectored || rest >= self->nib.threshold
                              ? rest : 0);
         *done += buffered_write_out(self, nibbler_nbytes(&self->nib),
                                     data + *done, direct, &status, 1);
@@ -2841,7 +2846,7 @@ buffered_write_locked(buffered *self, Py_buffer *buffer, Py_ssize_t *done)
             return buffered_write_failed(self, buffer, *done);
         }
         if (status == WRITE_BLOCKED) {
-            Py_ssize_t room = Py_MAX(0, self->nib.capacity
+            Py_ssize_t room = Py_MAX(0, self->nib.threshold
                                         - nibbler_nbytes(&self->nib));
             if (len - *done > room) {
                 /* Keep as much of the rest as fits, and report the rest. */

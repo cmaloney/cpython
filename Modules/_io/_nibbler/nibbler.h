@@ -85,8 +85,12 @@ typedef struct {
     uint64_t io;
     Py_ssize_t inflight;
 
-    /* Also read without the lock (FT_ATOMIC relaxed). */
+    /* The block size, which reads fill and small appends are copied into.
+       Also read without the lock (FT_ATOMIC relaxed). */
     Py_ssize_t capacity;
+    /* Pending writes past this many bytes are written out by the owner:
+       appends without the lock stay within it.  Set by the owner. */
+    Py_ssize_t threshold;
     morsel_list list;
     /* NULL until needed.  Also read without the lock (FT_ATOMIC relaxed),
        so stored atomically. */
@@ -227,7 +231,7 @@ morsels_consume(morsel_list *list, Py_ssize_t n)
  * sees plain morsels.  Releasing the lock opens the end again: reading, at
  * the front morsel (or `limit` when all was read); writing, after them if
  * they still end in its block, with `limit` keeping everything appended
- * within the capacity.  An end that is replaced or dropped stays held, so
+ * within the block and the threshold.  An end that is replaced or dropped stays held, so
  * lock-free users that loaded it fail; it is freed, with its reference to
  * the block, once none can still be using it: delayed with QSBR on
  * free-threaded builds.
@@ -328,7 +332,7 @@ nibbler_open(nibbler *n)
         p = last->ptr + last->len - base;
         FT_ATOMIC_STORE_SSIZE_RELAXED(e->done, p);
         FT_ATOMIC_STORE_SSIZE_RELAXED(
-            e->limit, p + Py_MIN(n->capacity - n->list.nbytes,
+            e->limit, p + Py_MIN(n->threshold - n->list.nbytes,
                                  PyBytes_GET_SIZE(e->block) - p));
     }
     FT_ATOMIC_STORE_SSIZE_RELEASE(e->pos, p);
@@ -928,13 +932,13 @@ nibbler_fresh_block(nibbler *n)
     return n->block;
 }
 
-/* Append data[0:len], owned by obj (or NULL), which must fit in capacity:
+/* Append data[0:len], owned by obj (or NULL), at most a block (capacity):
    by reference when by_ref allows it, else copied into the block. */
 static int
 nibbler_append(nibbler *n, PyObject *obj, const char *data, Py_ssize_t len,
                int by_ref)
 {
-    assert(n->list.nbytes + len <= n->capacity);
+    assert(len <= n->capacity);
     if (len == 0) {
         return 0;
     }
