@@ -463,6 +463,21 @@ class TextIOWrapperTest:
                 self.assertEqual(t.read(first), data[:first])
                 self.assertEqual(t.read(5), data[first:].replace("\r\n", "\n"))
 
+    def test_read_translates_after_readline(self):
+        # Reads of n characters after a readline() translate every "\r"
+        # and "\r\n", wherever they cut the text, and note all three.
+        data = "aa\r" + "\u0436\xe9b\r\r\r\nb\r\na\r\n\u0436b\n" * 3
+        expected = data.replace("\r\n", "\n").replace("\r", "\n")
+        for size in range(1, 12):
+            with self.subTest(size=size):
+                b = self.BufferedReader(self.BytesIO(data.encode()), 64)
+                t = self.TextIOWrapper(b, encoding="utf-8")
+                got = [t.readline()]
+                while s := t.read(size):
+                    got.append(s)
+                self.assertEqual("".join(got), expected)
+                self.assertEqual(t.newlines, ("\r", "\n", "\r\n"))
+
     def test_newlines_input(self):
         testdata = b"AAA\nBB\x00B\nCCC\rDDD\rEEE\r\nFFF\r\nGGG"
         normalized = testdata.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
