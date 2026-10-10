@@ -1911,6 +1911,17 @@ class NibblerBufferedRWPairTest(NibblerMixin, CBufferedRWPairTest):
 class NibblerBufferedRandomTest(NibblerMixin, CBufferedRandomTest):
     tp = _nibbler.BufferedRandom
 
+    def test_seek_target_uses_object(self):
+        # The target is converted before the lock is taken: its
+        # __index__() can use the object, as with _io.
+        bufio = self.tp(self.BytesIO(b'0123456789'))
+        bufio.read(5)
+        class Target:
+            def __index__(self):
+                return bufio.tell() - 2
+        self.assertEqual(bufio.seek(Target()), 3)
+        self.assertEqual(bufio.read(2), b'34')
+
 
 # Simple test to ensure that optimizations in the IO library deliver the
 # expected results.  For best testing, run this under a debug-build Python too

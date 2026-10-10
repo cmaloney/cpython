@@ -25,6 +25,7 @@ import textwrap
 import threading
 import time
 import unittest
+import warnings
 
 from test import support
 from test.support import import_helper, os_helper, threading_helper
@@ -2116,10 +2117,16 @@ class ReentrantCallTest:
                     pass
                 return 0
 
-        with self.assertRaises(BlockingIOError):
-            f.seek(Target())
+        # The target is converted before seek() takes the lock, so the
+        # close() in it runs: writing out would block, and the rest of the
+        # buffer is discarded (with a warning).
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with self.assertRaises(BlockingIOError):
+                f.seek(Target())
+        self.assertTrue(f.closed)
         f.close()
-        self.assertEqual(raw.out, b"ABCD")
+        self.assertEqual(raw.out, b"ABC")
 
 
 class CReentrantCallTest(ReentrantCallTest, CTestCase):

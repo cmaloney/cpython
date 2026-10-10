@@ -2862,18 +2862,35 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
                      "whence value %d unsupported", whence);
         return NULL;
     }
+    /* Before taking the lock, as these can run Python code (which may use
+       this object). */
+    PyObject *raw = buffered_get_raw(self);
+    if (raw == NULL) {
+        return NULL;
+    }
+    /* Checked again with the lock. */
+    int closed = buffered_ref_closed(raw);
+    if (closed != 0) {
+        if (closed > 0) {
+            PyErr_SetString(PyExc_ValueError, "seek of closed file");
+        }
+        Py_DECREF(raw);
+        return NULL;
+    }
+    _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
+    PyObject *seekable = _PyIOBase_check_seekable(state, raw, Py_True);
+    Py_DECREF(raw);
+    if (seekable == NULL) {
+        return NULL;
+    }
+    Py_off_t target = PyNumber_AsOff_t(targetobj, PyExc_ValueError);
+    if (target == -1 && PyErr_Occurred()) {
+        return NULL;
+    }
     if (buffered_enter(self, "seek of closed file", KEEP_DIRECTION) < 0) {
         return NULL;
     }
     PyObject *res = NULL;
-    _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
-    Py_off_t target;
-    if (_PyIOBase_check_seekable(state, self->raw, Py_True) == NULL
-        || ((target = PyNumber_AsOff_t(targetobj, PyExc_ValueError)) == -1
-            && PyErr_Occurred()))
-    {
-        goto end;
-    }
     if (nibbler_reading(&self->nib) != NULL && self->stash == NULL
         && (whence == SEEK_SET || whence == SEEK_CUR))
     {
