@@ -33,24 +33,12 @@
 
 #include "pycore_lock.h"                // PyMutex_LockFast()
 #include "pycore_object.h"              // _PyObject_XDecRefDelayed()
-#include "pycore_pyatomic_ft_wrappers.h" // FT_ATOMIC_LOAD_PTR_ACQUIRE()
+#include "pycore_pyatomic_ft_wrappers.h" // FT_ATOMIC_COMPARE_EXCHANGE_SSIZE()
 #include "pycore_pymem.h"               // _PyMem_FreeDelayed()
 #include "pycore_pylifecycle.h"         // _Py_IsInterpreterFinalizing()
 #include "pycore_pystate.h"             // _PyThreadState_GET()
 #include "pycore_qsbr.h"                // _Py_qsbr_advance()
 #include "pycore_tstate.h"              // _PyThreadStateImpl
-
-/* Compare-and-swap in the style of pycore_pyatomic_ft_wrappers.h (which
-   has none): atomic on free-threaded builds, a plain compare and store
-   with the GIL. */
-#ifdef Py_GIL_DISABLED
-#  define FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(value, expected, desired) \
-    _Py_atomic_compare_exchange_ssize(&value, expected, desired)
-#else
-#  define FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(value, expected, desired) \
-    ((value) == *(expected) ? ((value) = (desired), 1)               \
-                            : (*(expected) = (value), 0))
-#endif
 
 /* Exact bytes appended at least this large can be kept by reference
    instead of being copied (the owner may ask for a larger minimum, see
