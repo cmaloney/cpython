@@ -504,6 +504,18 @@ class BufferedReaderTest(CommonBufferedTests):
         self.assertEqual(bufio.readline(5), b"")
 
     def test_readline_would_block_long_partial_line(self):
+        if self.is_nibbler:
+            # A partial line is kept while shorter than the buffer size;
+            # from there it is returned as it is.
+            rawio = self.MockRawIO((b"x" * 15, None, b"y\n"))
+            bufio = self.tp(rawio, 16)
+            self.assertIsNone(bufio.readline())
+            self.assertEqual(bufio.readline(), b"x" * 15 + b"y\n")
+            rawio = self.MockRawIO((b"x" * 40, None, b"y\n"))
+            bufio = self.tp(rawio, 16)
+            self.assertEqual(bufio.readline(), b"x" * 40)
+            self.assertEqual(bufio.readline(), b"y\n")
+            return
         # A partial line longer than the buffer is kept too, up to 64 times
         # the buffer size; past that it is returned as it is.
         if not self.is_stock_C:

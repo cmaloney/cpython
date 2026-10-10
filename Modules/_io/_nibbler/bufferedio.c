@@ -1257,11 +1257,6 @@ buffered_read_into(buffered *self, char *dst, Py_ssize_t len, int read1,
     return written;
 }
 
-/* Without a size, a partial line that would block is kept for the next
-   readline() (which then returns None) until it is this many times the
-   buffer size: then it is returned as it is. */
-#define READLINE_KEEP_BLOCKS 64
-
 /* buffered_read_bytes() over a raw stream other than FileIO: its readinto()
    gets views of the result, which they keep alive. */
 Py_NO_INLINE static PyObject *
@@ -1505,13 +1500,16 @@ buffered_readline(buffered *self, Py_ssize_t limit)
         }
         Py_ssize_t r = buffered_fill(self, 0);
         if (r == -1 || r == WOULD_BLOCK) {
+            /* The partial line stays for the next call (gh-51571), which
+               looks for the end of the line after what was looked at.
+               Would block: return None, unless (without a size) it is the
+               buffer size long (the bound of every implementation): then
+               it is returned as it is.  (The block grows for a longer line, see
+               buffered_fill(), so that a readline() that blocks returns
+               it whole.) */
             if (r == -1 || unread == 0 || limit >= 0
-                || unread < READLINE_KEEP_BLOCKS * n->capacity)
+                || unread < n->capacity)
             {
-                /* The partial line stays for the next call (gh-51571),
-                   which looks for the end of the line after what was
-                   looked at.  Would block: return None, unless it is too
-                   long to keep. */
                 nibbler_set_noline(n, scanned);
                 if (r == -1) {
                     return NULL;

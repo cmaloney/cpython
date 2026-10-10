@@ -600,7 +600,8 @@ class SlowDeviceTest:
 
         def read_line(size):
             line = b"x" * (size - 1) + b"\n"
-            f = self.BufferedReader(Trickle(line), 1 << 16)
+            # A buffer the size of the line: the partial line is kept.
+            f = self.BufferedReader(Trickle(line), size)
             start = time.perf_counter()
             while (got := f.readline()) is None:
                 pass
