@@ -1055,6 +1055,12 @@ _io_FileIO_write_impl(fileio *self, PyTypeObject *cls, Py_buffer *b)
     return PyLong_FromSsize_t(n);
 }
 
+int
+_PyFileIO_appending(PyObject *op)
+{
+    return PyFileIO_CAST(op)->appending;
+}
+
 /* XXX Windows support below is likely incomplete */
 
 /* Cribbed from posix_lseek() */

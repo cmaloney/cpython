@@ -234,6 +234,10 @@ typedef struct {
        class) *and* the raw stream is a vanilla FileIO object. */
     int fast_closed_checks;
 
+    /* The raw stream is a FileIO opened in append mode: it writes at the
+       end of the file, whatever the position. */
+    char raw_appending;
+
     /* Absolute position inside the raw stream (-1 if unknown). */
     Py_off_t abs_pos;
 
@@ -1404,6 +1408,19 @@ _io__Buffered_tell_impl(buffered *self)
        both. */
     if (!ENTER_BUFFERED(self))
         return NULL;
+    if (self->raw_appending && VALID_WRITE_BUFFER(self)
+        && self->write_pos < self->write_end)
+    {
+        /* gh-80592: pending writes go to the end of the file, wherever
+           the position is: write them out, then the raw position is the
+           logical one. */
+        PyObject *r = _bufferedwriter_flush_unlocked(self);
+        if (r == NULL) {
+            LEAVE_BUFFERED(self)
+            return NULL;
+        }
+        Py_DECREF(r);
+    }
     pos = _buffered_raw_tell(self);
     if (pos == -1) {
         LEAVE_BUFFERED(self)
@@ -2037,6 +2054,8 @@ _io_BufferedWriter___init___impl(buffered *self, PyObject *raw,
         Py_IS_TYPE(self, state->PyBufferedWriter_Type) &&
         Py_IS_TYPE(raw, state->PyFileIO_Type)
     );
+    self->raw_appending = (PyObject_TypeCheck(raw, state->PyFileIO_Type)
+                           && _PyFileIO_appending(raw));
 
     self->ok = 1;
     return 0;
@@ -2175,6 +2194,17 @@ _io_BufferedWriter_write_impl(buffered *self, Py_buffer *buffer)
     if (r > 0) {
         PyErr_SetString(PyExc_ValueError, "write to closed file");
         goto error;
+    }
+
+    if (self->raw_appending && VALID_READ_BUFFER(self)) {
+        /* gh-64281: the data goes to the end of the file, not over the
+           read buffer at the position: drop the read buffer, so that
+           reads see the file. */
+        res = buffered_flush_and_rewind_unlocked(self);
+        if (res == NULL) {
+            goto error;
+        }
+        Py_CLEAR(res);
     }
 
     /* Fast path: the data to write can be fully buffered. */
@@ -2641,6 +2671,8 @@ _io_BufferedRandom___init___impl(buffered *self, PyObject *raw,
 
     self->fast_closed_checks = (Py_IS_TYPE(self, state->PyBufferedRandom_Type) &&
                                 Py_IS_TYPE(raw, state->PyFileIO_Type));
+    self->raw_appending = (PyObject_TypeCheck(raw, state->PyFileIO_Type)
+                           && _PyFileIO_appending(raw));
 
     self->ok = 1;
     return 0;

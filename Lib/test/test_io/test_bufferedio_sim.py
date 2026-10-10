@@ -12,6 +12,61 @@ from test.support import os_helper, threading_helper
 from .utils import CTestCase, PyTestCase
 
 
+# --- Positioning within the buffer ---------------------------------------------
+
+class PositionTest:
+    """seek() within buffered data, and what it costs in raw calls."""
+
+    def test_append_mode_write_after_read(self):
+        # gh-64281: a raw stream in append mode writes at the end of the
+        # file whatever the position, so data read before a write must
+        # still read back as it is in the file.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with self.open(os_helper.TESTFN, "wb") as f:
+            f.write(b"testest")
+        with self.open(os_helper.TESTFN, "a+b") as f:
+            f.write(b"A")
+            f.seek(0)
+            self.assertEqual(f.read(), b"testestA")
+            f.seek(0)
+            self.assertEqual(f.read(1), b"t")
+            f.write(b"B")
+            f.seek(0)
+            self.assertEqual(f.read(), b"testestAB")
+        with self.open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(), b"testestAB")
+
+    def test_append_mode_tell_after_write(self):
+        # gh-80592: a write to a raw file in append mode goes to the end of
+        # the file, so tell() is the end of the file after it.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        for mode in ("ab", "a+b"):
+            with self.subTest(mode=mode):
+                with self.open(os_helper.TESTFN, "wb") as f:
+                    f.write(b"abc")
+                with self.open(os_helper.TESTFN, mode) as f:
+                    self.assertEqual(f.tell(), 3)
+                    f.write(b"def")
+                    self.assertEqual(f.tell(), 6)
+                    self.assertEqual(f.seek(0), 0)
+                    self.assertEqual(f.tell(), 0)
+                    f.write(b"ghi")
+                    self.assertEqual(f.tell(), 9)
+                    f.write(b"jkl")
+                    self.assertEqual(f.tell(), 12)
+                    self.assertEqual(f.seek(0, 1), 12)
+                with self.open(os_helper.TESTFN, "rb") as f:
+                    self.assertEqual(f.read(), b"abcdefghijkl")
+
+
+class CPositionTest(PositionTest, CTestCase):
+    pass
+
+
+class PyPositionTest(PositionTest, PyTestCase):
+    pass
+
+
 # --- Concurrency ---------------------------------------------------------------
 
 @threading_helper.requires_working_threading()
