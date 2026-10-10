@@ -78,11 +78,12 @@ typedef struct nibbler {
     nibbler_mutex io;
     Py_ssize_t inflight;
 
-    /* The block size, which reads fill and small appends are copied into,
-       and the most bytes of pending appends: past it the caller writes
-       them out, and appends without the lock stay within it.  Also read
-       without the lock (FT_ATOMIC relaxed). */
+    /* The block size, which reads fill and small appends are copied into.
+       Also read without the lock (FT_ATOMIC relaxed). */
     Py_ssize_t capacity;
+    /* Pending writes past this many bytes are written out by the caller:
+       appends without the lock stay within it.  Set by the caller. */
+    Py_ssize_t threshold;
     morsel_list list;
     /* NULL until needed.  Also read without the lock (FT_ATOMIC relaxed),
        so stored atomically. */
@@ -250,8 +251,8 @@ morsels_consume(morsel_list *list, Py_ssize_t n)
  * the lock sees plain morsels; reading, the position (~pos) is where the
  * unread bytes start.  Releasing the lock opens the end again: reading, at
  * that position; writing, after the morsels if they still end in its
- * block, with `limit` keeping everything appended within the capacity.
- * An end that is replaced or dropped stays held, so
+ * block, with `limit` keeping everything appended within the block and
+ * the threshold.  An end that is replaced or dropped stays held, so
  * lock-free users that loaded it fail; it is freed, with its reference to
  * the block, once none can still be using it: delayed with QSBR on
  * free-threaded builds (see also nibbler_fresh_block()).
@@ -355,7 +356,7 @@ nibbler_open(nibbler *n)
         p = last->ptr + last->len - PyBytes_AS_STRING(e->block);
         FT_ATOMIC_STORE_SSIZE_RELAXED(e->done, p);
         FT_ATOMIC_STORE_SSIZE_RELAXED(
-            e->limit, p + Py_MIN(n->capacity - n->list.nbytes,
+            e->limit, p + Py_MIN(n->threshold - n->list.nbytes,
                                  PyBytes_GET_SIZE(e->block) - p));
     }
     FT_ATOMIC_STORE_SSIZE_RELEASE(e->pos, p);
@@ -1104,21 +1105,27 @@ nibbler_append_copy(nibbler *n, const char *data, Py_ssize_t len)
     return r;
 }
 
-/* Append data[0:len], inside obj (or NULL), at most a block (capacity):
-   by reference when it is at least ref_min bytes (exact bytes only, and at
-   least NIBBLER_REF_MIN), else copied into the block. */
+/* Append data[0:len], inside obj (or NULL): by reference when it is at
+   least ref_min bytes or larger than a block (exact bytes only, and at
+   least NIBBLER_REF_MIN), else copied into the block, or into a bytes
+   object of its own when larger. */
 static int
 nibbler_append(nibbler *n, PyObject *obj, const char *data, Py_ssize_t len,
                Py_ssize_t ref_min)
 {
-    assert(len <= n->capacity);
     if (len == 0) {
         return 0;
     }
-    if (len >= ref_min && len >= NIBBLER_REF_MIN && obj != NULL
+    /* Data larger than a block (the caller may let pending writes pass the
+       block size) is never copied into one. */
+    int large = len > n->capacity;
+    if ((len >= ref_min || large) && len >= NIBBLER_REF_MIN && obj != NULL
         && PyBytes_CheckExact(obj))
     {
         return morsels_push(&n->list, obj, data, len);
+    }
+    if (large) {
+        return nibbler_append_copy(n, data, len);
     }
 
     /* Copy into the block after the last morsel in it, or into a fresh

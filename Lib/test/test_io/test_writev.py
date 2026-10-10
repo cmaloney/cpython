@@ -220,8 +220,8 @@ class NibblerWritevTest(unittest.TestCase):
     def test_batches_of_iov_max(self):
         # Many pieces are written in batches, each one _writev() call.
         raw = Recorder()
+        f = _nibbler.BufferedWriter(raw, None)
         parts = [bytes([i % 256]) * 2048 for i in range(3000)]
-        f = _nibbler.BufferedWriter(raw, 2048 * len(parts) + 1)
         for p in parts:
             f.write(p)
         self.assertEqual(raw.writevs, [])
