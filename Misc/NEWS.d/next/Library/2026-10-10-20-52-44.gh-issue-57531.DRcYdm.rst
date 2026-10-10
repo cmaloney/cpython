@@ -1,0 +1,7 @@
+On a non-blocking stream, :meth:`!read` with a size, :meth:`!readline` and
+iteration of the :class:`!TextIOWrapper` of :mod:`!_pyio` now raise
+:exc:`BlockingIOError` when no character is available, instead of returning
+``""``, which means end of file. :meth:`!readline` keeps a partial line for
+the next call when the stream would block (or a read raises, such as a
+socket timeout) before the end of the line, and :meth:`!tell` keeps working
+after such calls and after :meth:`!flush` during iteration.

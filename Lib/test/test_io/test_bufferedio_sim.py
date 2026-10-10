@@ -121,6 +121,19 @@ class SlowDeviceTest:
         self.assertEqual(f.read(10), "€b")
         self.assertEqual(f.read(10), "")
 
+    def test_text_readline_error_keeps_partial_line(self):
+        if self.is_C:
+            self.skipTest(C_TEXT_GAP)
+        # gh-51571: a raw read that raises (such as a socket timeout) in the
+        # middle of a line loses nothing: the next readline() returns the
+        # whole line.
+        data = "ab\xe9cd\nef".encode()
+        raw = self.scripted_reader(data, [4, TimeoutError("timed out")])
+        f = self.TextIOWrapper(self.BufferedReader(raw, 16), encoding="utf-8")
+        self.assertRaises(TimeoutError, f.readline)
+        self.assertEqual(f.readline(), "ab\xe9cd\n")
+        self.assertEqual(f.readline(), "ef")
+
     # Writing
 
     def test_write_error_keeps_rest_that_fits(self):
