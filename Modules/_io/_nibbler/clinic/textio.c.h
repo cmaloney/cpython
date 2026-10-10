@@ -33,9 +33,7 @@ _io_TextIOWrapper_write(PyObject *self, PyObject *arg)
         goto exit;
     }
     text = arg;
-    Py_BEGIN_CRITICAL_SECTION(self);
     return_value = _io_TextIOWrapper_write_impl((textio *)self, text);
-    Py_END_CRITICAL_SECTION();
 
 exit:
     return return_value;
@@ -68,9 +66,7 @@ _io_TextIOWrapper_read(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
         goto exit;
     }
 skip_optional:
-    Py_BEGIN_CRITICAL_SECTION(self);
     return_value = _io_TextIOWrapper_read_impl((textio *)self, n);
-    Py_END_CRITICAL_SECTION();
 
 exit:
     return return_value;
@@ -112,9 +108,7 @@ _io_TextIOWrapper_readline(PyObject *self, PyObject *const *args, Py_ssize_t nar
         size = ival;
     }
 skip_optional:
-    Py_BEGIN_CRITICAL_SECTION(self);
     return_value = _io_TextIOWrapper_readline_impl((textio *)self, size);
-    Py_END_CRITICAL_SECTION();
 
 exit:
     return return_value;
@@ -138,13 +132,7 @@ _io_TextIOWrapper_tell_impl(textio *self);
 static PyObject *
 _io_TextIOWrapper_tell(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
-    PyObject *return_value = NULL;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    return_value = _io_TextIOWrapper_tell_impl((textio *)self);
-    Py_END_CRITICAL_SECTION();
-
-    return return_value;
+    return _io_TextIOWrapper_tell_impl((textio *)self);
 }
 
 PyDoc_STRVAR(_io_TextIOWrapper_seek__doc__,
@@ -250,13 +238,7 @@ _io_TextIOWrapper_flush_impl(textio *self);
 static PyObject *
 _io_TextIOWrapper_flush(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
-    PyObject *return_value = NULL;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    return_value = _io_TextIOWrapper_flush_impl((textio *)self);
-    Py_END_CRITICAL_SECTION();
-
-    return return_value;
+    return _io_TextIOWrapper_flush_impl((textio *)self);
 }
 
 PyDoc_STRVAR(_io_TextIOWrapper_close__doc__,
@@ -319,13 +301,7 @@ _io_TextIOWrapper_fileno_impl(textio *self);
 static PyObject *
 _io_TextIOWrapper_fileno(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
-    PyObject *return_value = NULL;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    return_value = _io_TextIOWrapper_fileno_impl((textio *)self);
-    Py_END_CRITICAL_SECTION();
-
-    return return_value;
+    return _io_TextIOWrapper_fileno_impl((textio *)self);
 }
 
 PyDoc_STRVAR(_io_TextIOWrapper_seekable__doc__,
@@ -342,13 +318,7 @@ _io_TextIOWrapper_seekable_impl(textio *self);
 static PyObject *
 _io_TextIOWrapper_seekable(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
-    PyObject *return_value = NULL;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    return_value = _io_TextIOWrapper_seekable_impl((textio *)self);
-    Py_END_CRITICAL_SECTION();
-
-    return return_value;
+    return _io_TextIOWrapper_seekable_impl((textio *)self);
 }
 
 PyDoc_STRVAR(_io_TextIOWrapper_readable__doc__,
@@ -365,13 +335,7 @@ _io_TextIOWrapper_readable_impl(textio *self);
 static PyObject *
 _io_TextIOWrapper_readable(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
-    PyObject *return_value = NULL;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    return_value = _io_TextIOWrapper_readable_impl((textio *)self);
-    Py_END_CRITICAL_SECTION();
-
-    return return_value;
+    return _io_TextIOWrapper_readable_impl((textio *)self);
 }
 
 PyDoc_STRVAR(_io_TextIOWrapper_writable__doc__,
@@ -388,13 +352,7 @@ _io_TextIOWrapper_writable_impl(textio *self);
 static PyObject *
 _io_TextIOWrapper_writable(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
-    PyObject *return_value = NULL;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    return_value = _io_TextIOWrapper_writable_impl((textio *)self);
-    Py_END_CRITICAL_SECTION();
-
-    return return_value;
+    return _io_TextIOWrapper_writable_impl((textio *)self);
 }
 
 PyDoc_STRVAR(_io_TextIOWrapper_isatty__doc__,
@@ -411,13 +369,7 @@ _io_TextIOWrapper_isatty_impl(textio *self);
 static PyObject *
 _io_TextIOWrapper_isatty(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
-    PyObject *return_value = NULL;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    return_value = _io_TextIOWrapper_isatty_impl((textio *)self);
-    Py_END_CRITICAL_SECTION();
-
-    return return_value;
+    return _io_TextIOWrapper_isatty_impl((textio *)self);
 }
 
 static PyObject *
@@ -426,13 +378,7 @@ _io_TextIOWrapper_name_get_impl(textio *self);
 static PyObject *
 _io_TextIOWrapper_name_get(PyObject *self, void *Py_UNUSED(context))
 {
-    PyObject *return_value = NULL;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    return_value = _io_TextIOWrapper_name_get_impl((textio *)self);
-    Py_END_CRITICAL_SECTION();
-
-    return return_value;
+    return _io_TextIOWrapper_name_get_impl((textio *)self);
 }
 
 static PyObject *
@@ -441,13 +387,7 @@ _io_TextIOWrapper_closed_get_impl(textio *self);
 static PyObject *
 _io_TextIOWrapper_closed_get(PyObject *self, void *Py_UNUSED(context))
 {
-    PyObject *return_value = NULL;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    return_value = _io_TextIOWrapper_closed_get_impl((textio *)self);
-    Py_END_CRITICAL_SECTION();
-
-    return return_value;
+    return _io_TextIOWrapper_closed_get_impl((textio *)self);
 }
 
 static PyObject *
@@ -456,13 +396,7 @@ _io_TextIOWrapper_newlines_get_impl(textio *self);
 static PyObject *
 _io_TextIOWrapper_newlines_get(PyObject *self, void *Py_UNUSED(context))
 {
-    PyObject *return_value = NULL;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    return_value = _io_TextIOWrapper_newlines_get_impl((textio *)self);
-    Py_END_CRITICAL_SECTION();
-
-    return return_value;
+    return _io_TextIOWrapper_newlines_get_impl((textio *)self);
 }
 
 static PyObject *
@@ -471,13 +405,7 @@ _io_TextIOWrapper_errors_get_impl(textio *self);
 static PyObject *
 _io_TextIOWrapper_errors_get(PyObject *self, void *Py_UNUSED(context))
 {
-    PyObject *return_value = NULL;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    return_value = _io_TextIOWrapper_errors_get_impl((textio *)self);
-    Py_END_CRITICAL_SECTION();
-
-    return return_value;
+    return _io_TextIOWrapper_errors_get_impl((textio *)self);
 }
 
 static Py_ssize_t
@@ -489,9 +417,7 @@ _io_TextIOWrapper__CHUNK_SIZE_get(PyObject *self, void *Py_UNUSED(context))
     PyObject *return_value = NULL;
     Py_ssize_t _return_value;
 
-    Py_BEGIN_CRITICAL_SECTION(self);
     _return_value = _io_TextIOWrapper__CHUNK_SIZE_get_impl((textio *)self);
-    Py_END_CRITICAL_SECTION();
     if ((_return_value == -1) && PyErr_Occurred()) {
         goto exit;
     }
@@ -542,13 +468,7 @@ _io_TextIOWrapper_buffer_get_impl(textio *self);
 static PyObject *
 _io_TextIOWrapper_buffer_get(PyObject *self, void *Py_UNUSED(context))
 {
-    PyObject *return_value = NULL;
-
-    Py_BEGIN_CRITICAL_SECTION(self);
-    return_value = _io_TextIOWrapper_buffer_get_impl((textio *)self);
-    Py_END_CRITICAL_SECTION();
-
-    return return_value;
+    return _io_TextIOWrapper_buffer_get_impl((textio *)self);
 }
 
 PyDoc_STRVAR(_io_TextIOWrapper___init____doc__,
@@ -816,4 +736,4 @@ exit:
 
 #define _IO_TEXTIOWRAPPER_BUFFER_GETSETDEF {"buffer", (getter)_io_TextIOWrapper_buffer_get, (setter)NULL, NULL},
 
-/*[clinic end generated code: output=1998f811edf847f5 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=2c97e792cd5e1180 input=a9049054013a1b77]*/

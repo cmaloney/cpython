@@ -135,6 +135,8 @@ extern char *_PyIONibbler_reserve(PyObject *buffered, Py_ssize_t len,
 extern void _PyIONibbler_commit(void *end, Py_ssize_t len);
 /* Is the raw stream closed?  1, 0, or -1 with an exception set. */
 extern int _PyIONibbler_closed(PyObject *buffered);
+/* The size of the buffer's blocks. */
+extern Py_ssize_t _PyIONibbler_capacity(PyObject *buffered);
 
 /* Shortcut to the core of the IncrementalNewlineDecoder.decode method */
 extern PyObject *_PyIncrementalNewlineDecoder_decode(

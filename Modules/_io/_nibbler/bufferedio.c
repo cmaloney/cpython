@@ -3497,6 +3497,12 @@ _PyIONibbler_commit(void *end, Py_ssize_t len)
     FT_ATOMIC_ADD_SSIZE(((nibbler_end *)end)->done, len);
 }
 
+Py_ssize_t
+_PyIONibbler_capacity(PyObject *op)
+{
+    return FT_ATOMIC_LOAD_SSIZE_RELAXED(buffered_cast(op)->nib.capacity);
+}
+
 int
 _PyIONibbler_closed(PyObject *op)
 {

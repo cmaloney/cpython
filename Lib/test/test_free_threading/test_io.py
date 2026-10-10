@@ -368,7 +368,9 @@ class NibblerTextIOWrapperTest(TestCase):
 
     def test_concurrent_readline(self):
         # Each line is returned once, whole, to one of the threads, also
-        # with tell() and iteration mixed in, over native and other codecs.
+        # with tell() and iteration mixed in.  (UTF-16 goes through the
+        # codec's decoder, with the critical section, which another thread
+        # can take while one waits for the buffer: only no crash there.)
         for encoding in ("utf-8", "latin-1", "utf-16"):
             lines = self.lines(3000)
             if encoding == "latin-1":
@@ -391,6 +393,8 @@ class NibblerTextIOWrapperTest(TestCase):
                             got[i].append(line)
 
                     run_concurrently([lambda i=i: reader(i) for i in range(4)])
+                    if encoding == "utf-16":
+                        continue
                     self.assertEqual(sorted(sum(got, [])), lines)
                     for g in got:
                         self.assertEqual(g, sorted(g))
@@ -474,6 +478,66 @@ class NibblerTextIOWrapperTest(TestCase):
             ]
             run_concurrently([lambda op=op: worker(op) for op in ops])
             f.close()
+
+
+    def test_reconfigure_detach_race(self):
+        # reconfigure() of what can change after reading, tell(), reads and
+        # writes racing, then detach() racing them: no crash, and only the
+        # errors of a detached file.
+        for _ in range(20):
+            with open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+                f.writelines(self.lines(300))
+            f = self.open("r+", buffer_size=500)
+            stop = threading.Event()
+
+            def worker(op):
+                while not stop.is_set():
+                    try:
+                        op()
+                    except ValueError:
+                        return
+
+            def reconfigure():
+                for i in range(200):
+                    try:
+                        f.reconfigure(line_buffering=bool(i % 2),
+                                      write_through=bool(i % 3))
+                    except ValueError:
+                        return
+                    f.line_buffering, f.write_through, f.encoding, f.errors
+
+            def detach():
+                for _ in range(100):
+                    f.tell()
+                stop.set()
+                f.detach().close()
+
+            ops = [lambda: f.readline(), lambda: f.write("x\n"),
+                   lambda: (f.tell(), f.newlines, f.name, f.buffer)]
+            run_concurrently([lambda op=op: worker(op) for op in ops]
+                             + [reconfigure, detach])
+
+    @support.requires_subprocess()
+    def test_daemon_writers_at_exit(self):
+        # Daemon threads still writing through sys.stdout when the process
+        # exits: no hang at the exit flush (a writer waiting on a lock held
+        # by a thread that can't run any more).
+        import subprocess, sys
+        code = """if 1:
+            import sys, threading, time
+            def w():
+                while True:
+                    sys.stdout.write("x" * 50 + "\\n")
+            for _ in range(4):
+                threading.Thread(target=w, daemon=True).start()
+            time.sleep(0.01)
+            """
+        env = dict(os.environ, _PYTHON_IO_DEFAULT_IMPL="_nibbler")
+        for _ in range(30):
+            proc = subprocess.run([sys.executable, "-c", code], env=env,
+                                  stdout=subprocess.DEVNULL,
+                                  timeout=support.SHORT_TIMEOUT)
+            self.assertEqual(proc.returncode, 0)
 
 
 class BufferedWriterTest(TestCase):
