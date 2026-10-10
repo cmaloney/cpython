@@ -1,0 +1,7 @@
+Fix data races and a possible heap corruption in :class:`io.FileIO` on the
+:term:`free threaded <free threading>` build when :meth:`~io.FileIO.close`
+runs concurrently with other methods, or with another
+:meth:`~io.FileIO.close`, or when the file is re-initialized with
+:meth:`!__init__`. Only one :meth:`!close` call now closes the file
+descriptor, and the result of the :func:`os.fstat` call made when the file
+was opened is kept until the object is deallocated.
