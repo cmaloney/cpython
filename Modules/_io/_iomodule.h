@@ -117,9 +117,6 @@ extern int _PyIONibbler_view(PyObject *buffered, _PyIO_Morsel *m);
    unread bytes. */
 extern int _PyIONibbler_consume(PyObject *buffered, _PyIO_Morsel *m,
                                 Py_ssize_t n);
-/* A copy of the n bytes read last (before the unread ones), or NULL
-   without an exception when they are no longer buffered. */
-extern PyObject *_PyIONibbler_lookback(PyObject *buffered, Py_ssize_t n);
 /* Like write(obj), for data[0:len] owned by obj.  buffered may be a
    borrowed reference.  closed_checked: the caller just found its
    raw FileIO open (so it need not be checked again). */

@@ -606,6 +606,87 @@ class TextIOWrapperTest:
                 with self.open(os_helper.TESTFN, "rb") as g:
                     self.assertEqual(g.read(), b"line 00000\n")
 
+    def test_write_after_read(self):
+        # gh-82891: where TextIOWrapper takes from its buffer only the bytes
+        # of the text it returns, the buffer's position is the text
+        # position, so a write (or truncate()) after a read acts there, as
+        # after seek(tell()).  (Elsewhere a write after a read goes where the
+        # buffer read up to.)
+        if not self.text_reads_in_place:
+            self.skipTest("text reads ahead of its position")
+        big = "".join(f"line {i:05}\n" for i in range(3000))
+        def check(enc, newline, text, read, written, after, rest):
+            with self.subTest(encoding=enc, newline=newline, text=text[:12]):
+                with self.open(os_helper.TESTFN, "w", encoding=enc,
+                               newline="") as f:
+                    f.write(text)
+                with self.open(os_helper.TESTFN, "r+", encoding=enc,
+                               newline=newline) as f:
+                    read(f)
+                    pos = f.tell()
+                    self.assertEqual(f.buffer.tell(), pos)
+                    f.write("XY")
+                    self.assertEqual(f.tell(), pos + len("XY".encode(enc)))
+                    self.assertEqual(f.read(len(rest)), rest)
+                with self.open(os_helper.TESTFN, "r", encoding=enc,
+                               newline="") as f:
+                    self.assertEqual(f.read(), after)
+        for enc in ("utf-8", "latin-1", "ascii"):
+            # A file larger than the chunks text was decoded in.
+            check(enc, None, big, lambda f: f.readline(),
+                  "line 00000\n", "line 00000\nXYne 00001\n" + big[22:],
+                  "ne 00001\n")
+            check(enc, None, big, lambda f: next(f),
+                  "line 00000\n", "line 00000\nXYne 00001\n" + big[22:],
+                  "ne 00001\n")
+            check(enc, None, big, lambda f: f.read(15),
+                  "", big[:15] + "XY" + big[17:], big[17:30])
+        # Characters of several bytes.
+        check("utf-8", None, "\xe9\u20ac\U0001f600abc\n", lambda f: f.read(3),
+              "", "\xe9\u20ac\U0001f600XYc\n", "c\n")
+        check("latin-1", None, "\xe9\xe8abc\n", lambda f: f.read(2),
+              "", "\xe9\xe8XYc\n", "c\n")
+        # Translated, "\r\n" is one character; not translated, the write
+        # can go between "\r" and "\n".
+        check("utf-8", None, "ab\r\ncd\r\nef", lambda f: f.read(3),
+              "", "ab\r\nXY\r\nef", "\nef")
+        check("utf-8", "", "ab\r\ncd\r\nef", lambda f: f.read(3),
+              "", "ab\rXYd\r\nef", "d\r\nef")
+        check("utf-8", None, "ab\rcd", lambda f: f.readline(),
+              "", "ab\rXY", "")
+        # truncate() after a read cuts there.
+        with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.write(big)
+        with self.open(os_helper.TESTFN, "r+", encoding="utf-8") as f:
+            self.assertEqual(f.read(15), big[:15])
+            self.assertEqual(f.truncate(), 15)
+            self.assertEqual(f.read(), "")
+        with self.open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(), big[:15].encode())
+
+    def test_read_invalid_with_error_handler(self):
+        # Reads of a file give what reads of the same bytes in a BytesIO
+        # give, also where error handlers drop or replace invalid bytes
+        # (_io._nibbler counts characters in the bytes it reads from).
+        data = b"ab\xffcd\n\xc3(\x80x\r\n\xe2\x82\n" * 20
+        with self.open(os_helper.TESTFN, "wb") as f:
+            f.write(data)
+        ops = [("readline", 1), ("readline", 5), ("read", 3), ("readline", -1),
+               ("read", 7), ("readline", 2), ("read", 1)] * 10
+        for errors in ("replace", "ignore", "surrogateescape",
+                       "backslashreplace"):
+            for newline in (None, "", "\r\n"):
+                with self.subTest(errors=errors, newline=newline):
+                    expected = self.TextIOWrapper(
+                        self.BytesIO(data), encoding="utf-8", errors=errors,
+                        newline=newline)
+                    with self.open(os_helper.TESTFN, encoding="utf-8",
+                                   errors=errors, newline=newline) as f:
+                        for name, n in ops:
+                            self.assertEqual(getattr(f, name)(n),
+                                             getattr(expected, name)(n))
+                        self.assertEqual(f.read(), expected.read())
+
     def test_truncate_below_position(self):
         # As for binary files, the position is not changed: reads return
         # nothing, and a write lands at the position, after a gap of zero

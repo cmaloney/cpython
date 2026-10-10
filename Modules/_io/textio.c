@@ -677,6 +677,14 @@ _io_IncrementalNewlineDecoder_newlines_get_impl(nldecoder_object *self)
 
 typedef PyObject *(*encodefunc_t)(PyObject *, PyObject *);
 
+/* Native reading: from `from`, the bytes before `to` have none of what is
+   looked for (not ASCII, or "\r"), and to is one, if stop. */
+typedef struct {
+    const char *from;
+    const char *to;
+    char stop;
+} native_hint;
+
 struct textio
 {
     PyObject_HEAD
@@ -708,13 +716,20 @@ struct textio
     /* With nibbler, write() of ASCII text may append it as it is, without
        any other work: see textiowrapper_set_fastwrite(). */
     char fastwrite;
-    /* The codec is UTF-8: with nibbler, chunks are decoded straight from
-       the buffer's read-ahead, taking only the bytes of whole characters,
-       so the codec's own decoder (wrapped or not by an
-       IncrementalNewlineDecoder) is bypassed.  It must then hold no bytes,
-       which is checked again once other paths fed it (dec_fed). */
-    char decode_utf8;
-    char dec_fed;
+    /* With nibbler and a codec native_decode() knows (codec), reads
+       decode straight from the buffer's read-ahead, bypassing the codec's
+       decoder, and take only the bytes of what they return (see "Native
+       reading"): NATIVE_ON, or NATIVE_PAUSED while the decoder or
+       decoded_chars hold something from the generic path.  NATIVE_NO
+       otherwise. */
+    char native;
+    char codec;
+    /* Native reading: the buffer's unread bytes when last seen (a
+       reference to their block, released when not reading natively), and
+       what is known of the bytes of that block (see native_clean()). */
+    _PyIO_Morsel view;
+    native_hint ascii;
+    native_hint cr;
     /* The encoder (not encodefunc) encoded text since it was created, so
        close() and detach() give it final=True (gh-79792). */
     char enc_fed;
@@ -744,13 +759,6 @@ struct textio
      * snapshot point.  We use this to reconstruct decoder states in tell().
      */
     PyObject *snapshot;
-    /* With nibbler, the snapshot is kept without objects, which makes it
-       cheap enough to keep while iterating (gh-81217): when snap_len is not
-       -1, snapshot is NULL and the snapshot is (snap_flags, the snap_len
-       bytes just before the buffer's position), looked back at by tell().
-       The functions below keep the two forms apart. */
-    int snap_flags;
-    Py_ssize_t snap_len;
     /* How many bytes of the snapshot's input the decoder held before the
        last chunk was read (the rest is the chunk). */
     Py_ssize_t snap_held;
@@ -775,27 +783,18 @@ struct textio
     _PyIO_State *state;
 };
 
-static inline int
-textiowrapper_has_snapshot(textio *self)
-{
-    return self->snapshot != NULL || self->snap_len >= 0;
-}
-
-static inline void
-textiowrapper_clear_snapshot(textio *self)
-{
-    Py_CLEAR(self->snapshot);
-    self->snap_len = -1;
-}
-
-static inline void
-textiowrapper_set_snapshot(textio *self, PyObject *snapshot)
-{
-    Py_XSETREF(self->snapshot, snapshot);
-    self->snap_len = -1;
-}
+enum { NATIVE_NO = 0, NATIVE_ON, NATIVE_PAUSED };
+enum { CODEC_UTF8 = 1, CODEC_LATIN1, CODEC_ASCII };
 
 #define textio_CAST(op) ((textio *)(op))
+
+/* Release the view of the buffer (and what is known of its bytes). */
+static inline void
+native_drop_view(textio *self)
+{
+    Py_CLEAR(self->view.obj);
+    self->ascii.to = self->cr.to = NULL;
+}
 
 /* Helpers to safely operate on self->buffer.
 
@@ -1008,7 +1007,8 @@ textiowrapper_write_utf8(textio *self, PyObject *text)
 
 /* Once the settings changed: may write() append ASCII text to a nibbler
    buffer as it is?  Not when the text must be encoded, translated or
-   flushed, or a decoder must be reset (the file is also read). */
+   flushed, or reads left something to drop (the file is also read and not
+   NATIVE_ON). */
 static void
 textiowrapper_set_fastwrite(textio *self)
 {
@@ -1016,7 +1016,8 @@ textiowrapper_set_fastwrite(textio *self)
                        && is_asciicompat_encoding(self->encodefunc)
                        && !(self->writetranslate && self->writenl != NULL)
                        && !self->line_buffering && !self->write_through
-                       && self->decoder == NULL);
+                       && (self->decoder == NULL
+                           || self->native == NATIVE_ON));
 }
 
 /* Map normalized encoding names onto the specialized encoding funcs */
@@ -1109,8 +1110,8 @@ _textiowrapper_set_decoder(textio *self, PyObject *codec_info,
         return 0;
 
     Py_CLEAR(self->decoder);
-    self->decode_utf8 = 0;
-    self->dec_fed = 0;
+    self->native = NATIVE_NO;
+    native_drop_view(self);
     self->decoder = _PyCodecInfo_GetIncrementalDecoder(codec_info, errors);
     if (self->decoder == NULL)
         return -1;
@@ -1119,9 +1120,18 @@ _textiowrapper_set_decoder(textio *self, PyObject *codec_info,
     if (PyObject_GetOptionalAttr(codec_info, &_Py_ID(name), &res) < 0) {
         return -1;
     }
-    self->decode_utf8 = (res != NULL && PyUnicode_Check(res)
-                         && _PyUnicode_EqualToASCIIString(res, "utf-8"));
+    self->codec = 0;
+    if (res != NULL && PyUnicode_Check(res)) {
+        self->codec =
+            _PyUnicode_EqualToASCIIString(res, "utf-8") ? CODEC_UTF8
+            : _PyUnicode_EqualToASCIIString(res, "iso8859-1") ? CODEC_LATIN1
+            : _PyUnicode_EqualToASCIIString(res, "ascii") ? CODEC_ASCII
+            : 0;
+    }
     Py_XDECREF(res);
+    if (self->nibbler && self->codec) {
+        self->native = NATIVE_ON;
+    }
 
     if (self->readuniversal) {
         _PyIO_State *state = self->state;
@@ -1363,8 +1373,9 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
     Py_CLEAR(self->readnl);
     Py_CLEAR(self->decoded_chars);
     Py_CLEAR(self->pending_bytes);
-    textiowrapper_clear_snapshot(self);
+    Py_CLEAR(self->snapshot);
     Py_CLEAR(self->line_snap);
+    native_drop_view(self);
     Py_CLEAR(self->errors);
     Py_CLEAR(self->raw);
     self->regular = 0;
@@ -1373,6 +1384,7 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
     self->encodefunc = NULL;
     self->b2cratio = 0.0;
     self->nibbler = 0;
+    self->native = NATIVE_NO;
     self->fastwrite = 0;
 
     if (encoding == NULL && _PyRuntime.preconfig.utf8_mode) {
@@ -1677,8 +1689,9 @@ textiowrapper_clear(PyObject *op)
     Py_CLEAR(self->readnl);
     Py_CLEAR(self->decoded_chars);
     Py_CLEAR(self->pending_bytes);
-    textiowrapper_clear_snapshot(self);
+    Py_CLEAR(self->snapshot);
     Py_CLEAR(self->line_snap);
+    native_drop_view(self);
     Py_CLEAR(self->errors);
     Py_CLEAR(self->raw);
 
@@ -1716,6 +1729,7 @@ textiowrapper_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->pending_bytes);
     Py_VISIT(self->snapshot);
     Py_VISIT(self->line_snap);
+    Py_VISIT(self->view.obj);
     Py_VISIT(self->errors);
     Py_VISIT(self->raw);
 
@@ -1837,6 +1851,7 @@ _io_TextIOWrapper_detach_impl(textio *self)
         return NULL;
     }
     Py_CLEAR(self->buffer);
+    native_drop_view(self);
     self->detached = 1;
     return buffer;
 }
@@ -1915,6 +1930,78 @@ _textiowrapper_writeflush(textio *self)
     if (ret == NULL)
         return -1;
     Py_DECREF(ret);
+    return 0;
+}
+
+/* Native reading (NATIVE_ON) stops while the generic path leaves decoded
+   chars or bytes in the decoder: a seek() with chars to skip, or a read
+   native reading can't do (a character longer than the buffer, a line
+   that doesn't fit in it, data that decodes in an unexpected way). */
+static inline void
+textiowrapper_native_pause(textio *self)
+{
+    if (self->native) {
+        self->native = NATIVE_PAUSED;
+        self->fastwrite = 0;
+        native_drop_view(self);
+    }
+}
+
+/* The decoder holds nothing and there are no decoded chars: native reading
+   can go on. */
+static void
+textiowrapper_native_restart(textio *self)
+{
+    if (self->native == NATIVE_PAUSED) {
+        self->native = NATIVE_ON;
+        textiowrapper_set_fastwrite(self);
+    }
+}
+
+/* NATIVE_PAUSED: native reading goes on once the decoded chars are used
+   up and the decoder holds nothing (no bytes, no pending "\r").  Returns
+   1 if it does, 0 if not yet, or -1 on error. */
+Py_NO_INLINE static int
+textiowrapper_native_resume(textio *self)
+{
+    PyObject *chars = self->decoded_chars;
+    if (chars != NULL
+        && self->decoded_chars_used < PyUnicode_GET_LENGTH(chars))
+    {
+        return 0;
+    }
+    PyObject *state = PyObject_CallMethodNoArgs(self->decoder,
+                                                &_Py_ID(getstate));
+    if (state == NULL) {
+        return -1;
+    }
+    /* (b"", 0) */
+    int empty = (PyTuple_Check(state) && PyTuple_GET_SIZE(state) == 2
+                 && PyBytes_Check(PyTuple_GET_ITEM(state, 0))
+                 && PyBytes_GET_SIZE(PyTuple_GET_ITEM(state, 0)) == 0
+                 && PyLong_Check(PyTuple_GET_ITEM(state, 1))
+                 && _PyLong_IsZero(
+                        (PyLongObject *)PyTuple_GET_ITEM(state, 1)));
+    Py_DECREF(state);
+    if (!empty) {
+        return 0;
+    }
+    textiowrapper_set_decoded_chars(self, NULL);
+    Py_CLEAR(self->snapshot);
+    textiowrapper_native_restart(self);
+    return 1;
+}
+
+/* Can this call read natively?  1, 0 or -1 (error). */
+static inline int
+textiowrapper_native_ready(textio *self)
+{
+    if (self->native == NATIVE_ON) {
+        return 1;
+    }
+    if (self->native == NATIVE_PAUSED) {
+        return textiowrapper_native_resume(self);
+    }
     return 0;
 }
 
@@ -2151,9 +2238,16 @@ _io_TextIOWrapper_write_impl(textio *self, PyObject *text)
         }
     }
 
-    if (textiowrapper_has_snapshot(self)) {
+    if (self->native == NATIVE_ON) {
+        /* The reads took only what they returned, so this was written at
+           the text position, and there is nothing to drop. */
+        native_drop_view(self);
+        return PyLong_FromSsize_t(textlen);
+    }
+
+    if (self->snapshot != NULL) {
         textiowrapper_set_decoded_chars(self, NULL);
-        textiowrapper_clear_snapshot(self);
+        Py_CLEAR(self->snapshot);
     }
 
     if (self->decoder) {
@@ -2161,6 +2255,11 @@ _io_TextIOWrapper_write_impl(textio *self, PyObject *text)
         if (ret == NULL)
             return NULL;
         Py_DECREF(ret);
+    }
+    if (self->native == NATIVE_PAUSED
+        && textiowrapper_native_resume(self) < 0)
+    {
+        return NULL;
     }
 
     return PyLong_FromSsize_t(textlen);
@@ -2175,7 +2274,8 @@ textiowrapper_set_decoded_chars(textio *self, PyObject *chars)
     self->decoded_chars_used = 0;
 }
 
-static PyObject *
+/* Inlined: read() calls it for every read(n) in the generic path. */
+static Py_ALWAYS_INLINE PyObject *
 textiowrapper_get_decoded_chars(textio *self, Py_ssize_t n)
 {
     PyObject *chars;
@@ -2207,162 +2307,661 @@ textiowrapper_get_decoded_chars(textio *self, Py_ssize_t n)
     return chars;
 }
 
-/* With decode_utf8: chars, decoded from bytes without the codec's decoder
-   (a reference stolen), with its newlines translated the way the decoder
-   would. */
-static PyObject *
-textiowrapper_utf8_newlines(textio *self, PyObject *chars, int final)
-{
-    if (chars != NULL
-        && Py_IS_TYPE(self->decoder, self->state->PyIncrementalNewlineDecoder_Type))
-    {
-        return nldecoder_translate(nldecoder_object_CAST(self->decoder),
-                                   chars, final);
-    }
-    return chars;
-}
-
-/* May decode_utf8 bypass the decoder: does it hold no bytes?  Returns 1,
-   0, or -1 on error. */
-static int
-textiowrapper_utf8_ready(textio *self)
-{
-    if (!self->dec_fed) {
-        return 1;
-    }
-    PyObject *state = PyObject_CallMethodNoArgs(self->decoder,
-                                                &_Py_ID(getstate));
-    if (state == NULL) {
-        return -1;
-    }
-    int empty = (PyTuple_Check(state) && PyTuple_GET_SIZE(state) == 2
-                 && PyBytes_Check(PyTuple_GET_ITEM(state, 0))
-                 && PyBytes_GET_SIZE(PyTuple_GET_ITEM(state, 0)) == 0);
-    Py_DECREF(state);
-    if (empty) {
-        self->dec_fed = 0;
-    }
-    return empty;
-}
-
 /* textiowrapper_read_chunk() result: the buffer would block before any
    character was decoded (0 is EOF). */
 #define TEXTIO_BLOCKED 2
 
-/* textiowrapper_read_chunk() with nibbler and decode_utf8: decode straight
-   from the buffer's read-ahead, taking only the bytes of whole characters
-   (a partial one stays in the buffer, which keeps it in front of the next
-   fill).  Returns like textiowrapper_read_chunk(), or _PyIO_NIBBLER_NO. */
-static int
-textiowrapper_read_chunk_nibbler(textio *self, Py_ssize_t size_hint)
-{
-    int r = textiowrapper_utf8_ready(self);
-    if (r <= 0) {
-        return r < 0 ? -1 : _PyIO_NIBBLER_NO;
-    }
-    const char *errors = PyUnicode_AsUTF8(self->errors);
-    if (errors == NULL) {
-        return -1;
-    }
-    /* The decoder state at the snapshot point: no bytes, and the pending
-       \r of the newline decoder (the UTF-8 decoder has no flags). */
-    int dec_flags = 0;
-    if (Py_IS_TYPE(self->decoder, self->state->PyIncrementalNewlineDecoder_Type)) {
-        dec_flags = nldecoder_object_CAST(self->decoder)->pendingcr;
-    }
-    if (size_hint > 0) {
-        size_hint = (Py_ssize_t)(Py_MAX(self->b2cratio, 1.0) * size_hint);
-    }
-    Py_ssize_t size = Py_MAX(self->chunk_size, size_hint);
+/* Without a limit, a partial line that would block is kept for the next
+   readline() (which raises BlockingIOError) until it is this many times
+   the chunk size: then it is returned as it is. */
+#define READLINE_KEEP_MAX 64
 
-    PyObject *buffer = buffer_access_safe(self);
-    if (buffer == NULL) {
-        return -1;
+/*
+ * Native reading
+ *
+ * With an exact _io._nibbler buffer and a codec native_decode() knows,
+ * text is decoded straight from the buffer's read-ahead, and a call takes
+ * only the bytes of the characters it returns (_PyIONibbler_consume()).
+ * So the buffer's position is the text position: tell() is the buffer's,
+ * and write() and truncate() after a read act there (gh-82891).  What a
+ * call doesn't return stays in the buffer: a partial character, a "\r"
+ * that may begin a "\r\n", a line that hasn't ended.  Nothing decoded is
+ * kept between calls (no decoded chars, snapshot or bytes in the decoder),
+ * only the view of the buffer's unread bytes (view), which is checked each
+ * time.  The codec's decoder is bypassed, and of the newline decoder only
+ * seennl is used.
+ *
+ * The fast paths take a whole line, or n characters, that are there
+ * already and need no newline translation, without the lock.  Otherwise
+ * native_readline() and native_read() peek, reading more as needed.  A
+ * call that can't be done this way returns _PyIO_NIBBLER_NO (or NULL
+ * without an exception) having taken nothing, and the generic path does it
+ * (see textiowrapper_native_pause()).
+ */
+
+/* How far native_clean() scans ahead; also what native_decode() calls
+   short. */
+#define NATIVE_SCAN 8192
+
+/* Decode s[0:len]: *used gets how many bytes made whole characters, unless
+   used is NULL (EOF: all of them must). */
+static PyObject *
+native_decode(textio *self, const char *s, Py_ssize_t len, Py_ssize_t *used)
+{
+    /* Checked by __init__() and reconfigure().  NULL is strict too, which
+       the UTF-8 decoder does faster for short text, but slower for long
+       text (it counts the characters first). */
+    const char *errors = (self->errors == &_Py_ID(strict) && len < NATIVE_SCAN
+                          ? NULL : PyUnicode_AsUTF8(self->errors));
+    if (self->codec == CODEC_UTF8) {
+        return PyUnicode_DecodeUTF8Stateful(s, len, errors, used);
     }
-    PyObject *chars;
-    Py_ssize_t used;
-    Py_ssize_t need = 1;
-    int final, blocked;
-    _PyIO_Morsel m = {NULL, NULL, 0};
-    for (;;) {
-        r = _PyIONibbler_peek(buffer, need, &m);
-        if (r < 0) {
-            Py_XDECREF(m.obj);
-            Py_DECREF(buffer);
-            return r;
-        }
-        /* Fewer than needed: EOF, unless the raw stream would block.  Then
-           a partial character stays in the buffer for the next read. */
-        blocked = r == _PyIO_NIBBLER_BLOCKED;
-        final = m.len < need && !blocked;
-        used = Py_MIN(m.len, Py_MAX(size, need));
-        Py_ssize_t len = used;
-        chars = PyUnicode_DecodeUTF8Stateful(m.ptr, len, errors,
-                                             final ? NULL : &used);
-        if (chars != NULL && used == 0 && len > 0 && !final && !blocked) {
-            /* Only part of a character: get more after it. */
-            need = len + 1;
-            r = 0;
-        }
-        else {
-            r = chars == NULL ? -1 : _PyIONibbler_consume(buffer, &m, used);
-        }
-        if (r == 1) {
+    if (used != NULL) {
+        *used = len;
+    }
+    if (self->codec == CODEC_LATIN1) {
+        return PyUnicode_DecodeLatin1(s, len, errors);
+    }
+    return PyUnicode_DecodeASCII(s, len, errors);
+}
+
+/* How many of the bytes of s[0:len] are ASCII before one is not? */
+static Py_ssize_t
+native_ascii_len(const char *s, Py_ssize_t len)
+{
+    const size_t highs = (size_t)-1 / 0xff * 0x80;
+    const Py_ssize_t size = sizeof(size_t);
+    size_t w[4];
+    Py_ssize_t i = 0;
+    for (; i + 4 * size <= len; i += 4 * size) {
+        memcpy(w, s + i, sizeof(w));
+        if ((w[0] | w[1] | w[2] | w[3]) & highs) {
             break;
         }
-        Py_XDECREF(chars);
-        if (r < 0) {
-            Py_XDECREF(m.obj);
-            Py_DECREF(buffer);
-            return -1;
+    }
+    for (; i + size <= len; i += size) {
+        memcpy(w, s + i, size);
+        if (w[0] & highs) {
+            break;
         }
-        /* Again with more, or another thread took bytes meanwhile. */
     }
-    Py_XDECREF(m.obj);
-    Py_DECREF(buffer);
-    chars = textiowrapper_utf8_newlines(self, chars, final);
-    if (chars == NULL) {
-        return -1;
+    while (i < len && (unsigned char)s[i] < 0x80) {
+        i++;
     }
-    textiowrapper_set_decoded_chars(self, chars);
-    Py_ssize_t nchars = PyUnicode_GET_LENGTH(chars);
-    self->b2cratio = nchars > 0 ? (double)used / nchars : 0.0;
-    /* Kept even while iterating: it costs no more than this. */
-    Py_CLEAR(self->snapshot);
-    self->snap_flags = dec_flags;
-    self->snap_len = used;
-    if (used == 0 && nchars == 0) {
-        return blocked ? TEXTIO_BLOCKED : 0;
+    return i;
+}
+
+/* native_first() of what the hint doesn't know: scan from s (or on from
+   what it knows), NATIVE_SCAN bytes or more, for a byte not ASCII (or a
+   "\r" if cr). */
+Py_NO_INLINE static const char *
+native_scan_hint(textio *self, native_hint *h, int cr, const char *s,
+                 const char *end)
+{
+    const char *from = s;
+    if (h->from <= s && s <= h->to) {
+        from = h->to;
+        s = h->from;
+    }
+    const char *limit = Py_MIN(self->view.ptr + self->view.len,
+                               Py_MAX(end, from + NATIVE_SCAN));
+    const char *stop;
+    if (cr) {
+        stop = memchr(from, '\r', limit - from);
+        stop = stop != NULL ? stop : limit;
+    }
+    else {
+        stop = from + native_ascii_len(from, limit - from);
+    }
+    h->from = s;
+    h->to = stop;
+    h->stop = stop < limit;
+    return Py_MIN(stop, end);
+}
+
+/* The first byte of the view from s to end that is not ASCII (or is a
+   "\r" if cr), or end.  What the scans find is kept in the hint for the
+   next calls, as long as the view keeps its block (which is only read
+   while it does), so the fast paths look at the bytes once, not once per
+   call. */
+static inline const char *
+native_first(textio *self, native_hint *h, int cr, const char *s,
+             const char *end)
+{
+    if (h->from <= s && (end <= h->to || (h->stop && s <= h->to))) {
+        return Py_MIN(end, h->to);
+    }
+    return native_scan_hint(self, h, cr, s, end);
+}
+
+/* The first byte of the view from s to end that is not ASCII, or is a
+   "\r" with universal newlines, or end. */
+static inline const char *
+native_clean(textio *self, const char *s, const char *end)
+{
+    const char *bad = native_first(self, &self->ascii, 0, s, end);
+    if (self->readuniversal) {
+        bad = native_first(self, &self->cr, 1, s, bad);
+    }
+    return bad;
+}
+
+/* The str of s[0:len], ASCII. */
+static inline PyObject *
+native_ascii_str(const char *s, Py_ssize_t len)
+{
+    if (len <= 1) {
+        return _PyUnicode_FromASCII(s, len);
+    }
+    PyObject *res = PyUnicode_New(len, 127);
+    if (res != NULL) {
+        memcpy(PyUnicode_1BYTE_DATA(res), s, len);
+    }
+    return res;
+}
+
+/* native_decode() of s[0:len], which has a byte that is not ASCII:
+   Latin-1 needs no decoding, nor a look for its largest character. */
+static inline PyObject *
+native_nonascii_str(textio *self, const char *s, Py_ssize_t len,
+                    Py_ssize_t *used)
+{
+    if (self->codec != CODEC_LATIN1) {
+        return native_decode(self, s, len, used);
+    }
+    PyObject *res = PyUnicode_New(len, 255);
+    if (res != NULL) {
+        memcpy(PyUnicode_1BYTE_DATA(res), s, len);
+    }
+    return res;
+}
+
+/* Universal newlines: is the byte before m a "\r" (so a "\n" at its start
+   ends a "\r\n")? */
+static inline int
+native_after_cr(const _PyIO_Morsel *m)
+{
+    return m->ptr > PyBytes_AS_STRING(m->obj) && m->ptr[-1] == '\r';
+}
+
+/* Move over up to *n characters of s[0:len]: returns the offset reached,
+   and takes the characters moved over from *n.  (UTF-8: counts the bytes
+   that begin a character, which is right for well-formed data; callers
+   check the decoded length.) */
+static Py_ssize_t
+native_skip_chars(textio *self, const char *s, Py_ssize_t len, Py_ssize_t *n)
+{
+    if (self->codec != CODEC_UTF8) {
+        Py_ssize_t k = Py_MIN(*n, len);
+        *n -= k;
+        return k;
+    }
+    Py_ssize_t i = 0, left = *n;
+#if defined(__GNUC__) || defined(__clang__)
+    const size_t highs = (size_t)-1 / 0xff * 0x80;
+    for (; i + (Py_ssize_t)sizeof(size_t) <= len; i += sizeof(size_t)) {
+        size_t w;
+        memcpy(&w, s + i, sizeof(w));
+        /* Continuation bytes are 0b10xxxxxx. */
+        Py_ssize_t starts = sizeof(size_t)
+                            - __builtin_popcountll(w & ~(w << 1) & highs);
+        if (starts > left) {
+            break;
+        }
+        left -= starts;
+    }
+#endif
+    for (; i < len; i++) {
+        if (((unsigned char)s[i] & 0xc0) != 0x80 && left-- == 0) {
+            left = 0;
+            break;
+        }
+    }
+    *n = left;
+    return i;
+}
+
+/* The view of what is unread, for the fast paths: 1, or 0 if it is
+   empty or needs the lock. */
+static inline int
+native_fast_view(textio *self, PyObject *buffer)
+{
+    PyObject *block = self->view.obj;
+    if (!_PyIONibbler_view(buffer, &self->view)) {
+        return 0;
+    }
+    if (self->view.obj != block) {
+        /* What was known is of the old block. */
+        self->ascii.to = self->cr.to = NULL;
     }
     return 1;
 }
 
-/* With a snapshot from textiowrapper_read_chunk_nibbler() (snap_len),
-   make it a tuple: look back at its next input in the buffer. */
-static int
-textiowrapper_snapshot_input(textio *self)
+/* The fast path of readline() (no limit) for a line that ends with "\n"
+   in the buffer already, and has no "\r" for universal newlines: the line,
+   or NULL, with an exception set or not (then native_readline()). */
+static inline PyObject *
+native_readline_fast(textio *self, PyObject *buffer)
 {
-    Py_ssize_t n = self->snap_len;
+    _PyIO_Morsel *m = &self->view;
+    if (!native_fast_view(self, buffer)) {
+        return NULL;
+    }
+    const char *s = m->ptr;
+    const char *lf = memchr(s, '\n', m->len);
+    if (lf == NULL) {
+        return NULL;
+    }
+    Py_ssize_t len = lf - s + 1;
+    const char *bad = native_clean(self, s, lf);
+    PyObject *line;
+    if (bad == lf) {
+        line = native_ascii_str(s, len);
+    }
+    else if (self->readuniversal
+             && native_first(self, &self->cr, 1, bad, lf) != lf)
+    {
+        return NULL;
+    }
+    else {
+        /* Not ASCII, but whole characters: the line ends with "\n". */
+        line = native_nonascii_str(self, s, len, NULL);
+    }
+    /* Not translated, it may be the "\n" of a "\r\n" noted before. */
+    int seen = (!self->readuniversal ? 0
+                : len == 1 && !self->readtranslate && native_after_cr(m) ? 0
+                : SEEN_LF);
+    if (line != NULL && _PyIONibbler_consume(buffer, m, len) != 1) {
+        Py_CLEAR(line);
+    }
+    if (line != NULL && seen) {
+        nldecoder_object_CAST(self->decoder)->seennl |= seen;
+    }
+    return line;
+}
+
+/* The fast path of read(n): up to n characters there in the buffer
+   already, with no "\r" for universal newlines, and ASCII but for
+   Latin-1.  Returns them, or NULL, with an exception set or not (then
+   native_read()). */
+static inline PyObject *
+native_read_fast(textio *self, PyObject *buffer, Py_ssize_t n)
+{
+    _PyIO_Morsel *m = &self->view;
+    if (!native_fast_view(self, buffer)) {
+        return NULL;
+    }
+    const char *s = m->ptr;
+    Py_ssize_t len = Py_MIN(n, m->len);
+    const char *bad = native_clean(self, s, s + len);
+    PyObject *res;
+    if (bad == s + len) {
+        res = native_ascii_str(s, len);
+    }
+    else {
+        /* Not ASCII from bad on (or a "\r"): n characters may take more
+           bytes. */
+        Py_ssize_t left = n - (bad - s);
+        len = (bad - s) + native_skip_chars(self, bad, m->len - (bad - s),
+                                            &left);
+        if (self->readuniversal
+            && native_first(self, &self->cr, 1, bad, s + len) != s + len)
+        {
+            return NULL;
+        }
+        /* Whole characters but at the end of what is there. */
+        Py_ssize_t used = len;
+        res = native_nonascii_str(self, s, len, len < m->len ? NULL : &used);
+        if (res != NULL && (used == 0 || PyUnicode_GET_LENGTH(res) > n)) {
+            /* Only part of a character, or an error handler made more
+               characters than counted. */
+            Py_DECREF(res);
+            return NULL;
+        }
+        len = used;
+    }
+    if (res != NULL && _PyIONibbler_consume(buffer, m, len) != 1) {
+        Py_CLEAR(res);
+    }
+    if (res != NULL && self->readuniversal
+        && !(nldecoder_object_CAST(self->decoder)->seennl & SEEN_LF))
+    {
+        /* Not translated, a "\n" first may end a "\r\n" noted before. */
+        Py_ssize_t skip = (!self->readtranslate && *s == '\n'
+                           && s > PyBytes_AS_STRING(m->obj) && s[-1] == '\r');
+        if (memchr(s + skip, '\n', len - skip) != NULL) {
+            nldecoder_object_CAST(self->decoder)->seennl |= SEEN_LF;
+        }
+    }
+    return res;
+}
+
+/* The length of the first line in s[0:len] with its newline, or -1 if no
+   line ends there yet: a "\r" at the end may begin a "\r\n", unless eof.
+   There is no newline before *start (else -1 sets where to go on from).
+   *nl gets the newline's length, and with universal newlines *seen its
+   SEEN_* kind. */
+static Py_ssize_t
+native_find_line_end(textio *self, const char *s, Py_ssize_t len,
+                     Py_ssize_t *start, int eof, Py_ssize_t *nl, int *seen)
+{
+    const char *p = s + *start, *end = s + len;
+    if (self->readuniversal) {
+        const char *lf = memchr(p, '\n', end - p);
+        const char *q = memchr(p, '\r', (lf != NULL ? lf : end) - p);
+        if (q == NULL) {
+            q = lf;
+        }
+        if (q == NULL || (q + 1 == end && *q == '\r' && !eof)) {
+            *start = q == NULL ? len : q - s;
+            return -1;
+        }
+        *nl = 1 + (*q == '\r' && q + 1 < end && q[1] == '\n');
+        *seen = *q == '\n' ? SEEN_LF : *nl == 2 ? SEEN_CRLF : SEEN_CR;
+        return q - s + *nl;
+    }
+    /* "\n", "\r" or "\r\n" (see validate_newline()). */
+    const char *readnl = (const char *)PyUnicode_1BYTE_DATA(self->readnl);
+    Py_ssize_t n = PyUnicode_GET_LENGTH(self->readnl);
+    for (;;) {
+        const char *q = memchr(p, readnl[0], end - p);
+        if (q == NULL || q + n > end) {
+            *start = q == NULL ? len : q - s;
+            return -1;
+        }
+        if (n == 1 || q[1] == readnl[1]) {
+            *nl = n;
+            return q - s + n;
+        }
+        p = q + 1;
+    }
+}
+
+/* readline(limit) natively: the line, NULL with an exception set, or NULL
+   without one when the generic path must read it. */
+static PyObject *
+native_readline(textio *self, Py_ssize_t limit)
+{
+    PyObject *buffer = buffer_access_safe(self);
+    if (buffer == NULL) {
+        return NULL;
+    }
+    _PyIO_Morsel *m = &self->view;
+    PyObject *line = NULL;
+    Py_ssize_t need = 1, start = 0;
+    /* Peeking may move the view to another block. */
+    self->ascii.to = self->cr.to = NULL;
+    for (;;) {
+        int r = _PyIONibbler_peek(buffer, need, m);
+        if (r < 0) {
+            break;
+        }
+        int blocked = r == _PyIO_NIBBLER_BLOCKED;
+        int eof = !blocked && m->len < need;
+        const char *s = m->ptr;
+        Py_ssize_t nl = 0;
+        int seen = 0, as_is = 0, cut = 0;
+        Py_ssize_t end = native_find_line_end(self, s, m->len, &start, eof,
+                                              &nl, &seen);
+        /* Without a newline: what can't be part of one ("\r" at the end
+           may begin a "\r\n"). */
+        Py_ssize_t avail = m->len - (end < 0 && self->readuniversal
+                                     && m->len > 0 && s[m->len - 1] == '\r');
+        if (limit >= 0) {
+            Py_ssize_t text = (end < 0 ? avail
+                               : end - (self->readtranslate ? nl : 0));
+            Py_ssize_t left = limit;
+            Py_ssize_t o = native_skip_chars(self, s, text, &left);
+            if (left == 0) {
+                /* The limit is reached: the line ends at o. */
+                cut = 1;
+                if (o != end) {
+                    nl = seen = 0;
+                    if (o > 0 && s[o - 1] == '\r' && self->readuniversal) {
+                        /* The "\r" of a "\r\n" (o < end: o is not last). */
+                        seen = s[o] == '\n' ? SEEN_CRLF : SEEN_CR;
+                    }
+                }
+                end = o;
+            }
+        }
+        if (end < 0) {
+            if (!eof && !blocked) {
+                /* Read more after what is there (that fits in the buffer,
+                   else _PyIO_NIBBLER_NO). */
+                need = m->len + 1;
+                continue;
+            }
+            /* Keep a partial line for the next call (gh-57531) until it
+               is too long to keep: then it is a line, as at EOF. */
+            end = avail;
+            as_is = 1;
+            if (blocked
+                && (m->len == 0 || limit >= 0
+                    || m->len < READLINE_KEEP_MAX * self->chunk_size))
+            {
+                _PyIO_set_read_blocking_error();
+                break;
+            }
+        }
+        if (!self->readtranslate && seen == SEEN_LF && end == 1
+            && native_after_cr(m))
+        {
+            seen = 0;
+        }
+        /* Translated, a "\r" or "\r\n" newline becomes the "\r", made a
+           "\n" below. */
+        int crnl = self->readtranslate && nl > 0 && s[end - nl] == '\r';
+        Py_ssize_t len = crnl ? end - nl + 1 : end;
+        /* Only bytes at the end of what is there can be part of a
+           character: before others, they are invalid. */
+        Py_ssize_t used = len;
+        line = native_decode(self, s, len,
+                             eof || end < m->len ? NULL : &used);
+        if (line != NULL && crnl) {
+            Py_ssize_t n = PyUnicode_GET_LENGTH(line);
+            if (n == 1) {
+                Py_SETREF(line, PyUnicode_FromOrdinal('\n'));
+            }
+            else if (PyUnicode_WriteChar(line, n - 1, '\n') < 0) {
+                Py_CLEAR(line);
+            }
+        }
+        if (line != NULL && used < len) {
+            Py_CLEAR(line);
+            if (as_is) {
+                /* But for a partial character. */
+                end = len = used;
+                line = native_decode(self, s, len, &used);
+            }
+            else if (blocked) {
+                /* The limit was counted with a partial character. */
+                _PyIO_set_read_blocking_error();
+                break;
+            }
+            else {
+                need = m->len + 1;
+                continue;
+            }
+        }
+        if (line != NULL && limit >= 0
+            && (cut ? PyUnicode_GET_LENGTH(line) != limit
+                : PyUnicode_GET_LENGTH(line) > limit))
+        {
+            /* Not decoded as counted (invalid data and an error handler
+               that drops or adds characters). */
+            Py_CLEAR(line);
+            break;
+        }
+        r = line == NULL ? -1 : _PyIONibbler_consume(buffer, m, end);
+        if (r == 1) {
+            if (seen) {
+                nldecoder_object_CAST(self->decoder)->seennl |= seen;
+            }
+            break;
+        }
+        Py_CLEAR(line);
+        if (r < 0) {
+            break;
+        }
+        /* Another thread took bytes meanwhile: again. */
+        need = 1;
+        start = 0;
+    }
+    Py_DECREF(buffer);
+    return line;
+}
+
+/* Universal newlines without translation: note the newlines in m[0:len].
+   A "\r" there is followed by its next byte in m, but at EOF; a "\n" at
+   its start may end a "\r\n" noted before. */
+static void
+native_seennl(textio *self, const _PyIO_Morsel *m, Py_ssize_t len)
+{
+    nldecoder_object *dec = nldecoder_object_CAST(self->decoder);
+    int seen = dec->seennl;
+    const char *s = m->ptr;
+    for (Py_ssize_t i = 0; i < len && seen != SEEN_ALL; i++) {
+        if (s[i] == '\n') {
+            if (i > 0 || !native_after_cr(m)) {
+                seen |= SEEN_LF;
+            }
+        }
+        else if (s[i] == '\r') {
+            if (i + 1 < m->len && s[i + 1] == '\n') {
+                seen |= SEEN_CRLF;
+                i++;
+            }
+            else {
+                seen |= SEEN_CR;
+            }
+        }
+    }
+    dec->seennl = seen;
+}
+
+/* Universal newlines: translate the newlines in chars (a reference
+   stolen) and note which were seen, as the newline decoder does at EOF
+   (native reading never ends with a "\r" that may begin a "\r\n"). */
+static PyObject *
+native_newlines(textio *self, PyObject *chars)
+{
+    if (chars != NULL && self->readuniversal) {
+        return nldecoder_translate(nldecoder_object_CAST(self->decoder),
+                                   chars, 1);
+    }
+    return chars;
+}
+
+/* read(n) natively: where to end near end (with m's bytes, at EOF or
+   not): not between a "\r" and what follows it (translated, "\r\n" is one
+   character), or -1 if what follows isn't there yet. */
+static inline Py_ssize_t
+native_read_end(textio *self, const _PyIO_Morsel *m, Py_ssize_t end, int eof)
+{
+    if (!self->readuniversal || end == 0 || m->ptr[end - 1] != '\r') {
+        return end;
+    }
+    if (end < m->len) {
+        return end + (self->readtranslate && m->ptr[end] == '\n');
+    }
+    return eof ? end : -1;
+}
+
+/* native_decode() of m[0:end] (all of it if final), with its newlines
+   noted and translated (universal newlines). */
+static PyObject *
+native_read_str(textio *self, const _PyIO_Morsel *m, Py_ssize_t end,
+                int final, Py_ssize_t *used)
+{
+    *used = end;
+    /* Only bytes at the end of what is there can be part of a character:
+       before others, they are invalid. */
+    PyObject *res = native_decode(self, m->ptr, end,
+                                  final || end < m->len ? NULL : used);
+    if (res == NULL || !self->readuniversal) {
+        return res;
+    }
+    if (!self->readtranslate) {
+        native_seennl(self, m, *used);
+        return res;
+    }
+    if (memchr(m->ptr, '\r', *used) != NULL) {
+        return native_newlines(self, res);
+    }
+    nldecoder_object *dec = nldecoder_object_CAST(self->decoder);
+    if (!(dec->seennl & SEEN_LF) && memchr(m->ptr, '\n', *used) != NULL) {
+        dec->seennl |= SEEN_LF;
+    }
+    return res;
+}
+
+/* read(n) natively: up to n characters (fewer when that is what has
+   arrived, or "\r\n"s became "\n") in *chars.  Returns 1, 0 at EOF,
+   TEXTIO_BLOCKED, -1 on error, or _PyIO_NIBBLER_NO (nothing taken) when
+   the generic path must read. */
+static int
+native_read(textio *self, Py_ssize_t n, PyObject **chars)
+{
     PyObject *buffer = buffer_access_safe(self);
     if (buffer == NULL) {
         return -1;
     }
-    PyObject *input = _PyIONibbler_lookback(buffer, n);
-    Py_DECREF(buffer);
-    if (input == NULL) {
-        if (!PyErr_Occurred()) {
-            /* The buffer was read or moved by other means. */
-            PyErr_SetString(PyExc_OSError,
-                            "can't reconstruct logical file position");
+    _PyIO_Morsel *m = &self->view;
+    Py_ssize_t need = 1;
+    int r;
+    /* Peeking may move the view to another block. */
+    self->ascii.to = self->cr.to = NULL;
+    for (;;) {
+        r = _PyIONibbler_peek(buffer, need, m);
+        if (r < 0) {
+            break;
         }
-        return -1;
+        int blocked = r == _PyIO_NIBBLER_BLOCKED;
+        int eof = !blocked && m->len < need;
+        Py_ssize_t left = n;
+        Py_ssize_t end = native_read_end(
+            self, m, native_skip_chars(self, m->ptr, m->len, &left), eof);
+        if (end < 0 && !blocked) {
+            need = m->len + 1;
+            continue;
+        }
+        if (end < 0) {
+            end = m->len - 1;
+        }
+        Py_ssize_t used;
+        PyObject *res = native_read_str(self, m, end, eof && end == m->len,
+                                        &used);
+        if (res != NULL && PyUnicode_GET_LENGTH(res) > n) {
+            /* Not decoded as counted (an error handler made more). */
+            Py_DECREF(res);
+            r = _PyIO_NIBBLER_NO;
+            break;
+        }
+        if (res != NULL && used == 0 && PyUnicode_GET_LENGTH(res) == 0) {
+            Py_DECREF(res);
+            if (!eof && !blocked) {
+                /* Only part of a character: read more after it. */
+                need = m->len + 1;
+                continue;
+            }
+            r = eof ? 0 : TEXTIO_BLOCKED;
+            break;
+        }
+        r = res == NULL ? -1 : _PyIONibbler_consume(buffer, m, used);
+        if (r == 1) {
+            *chars = res;
+            break;
+        }
+        Py_XDECREF(res);
+        if (r < 0) {
+            break;
+        }
+        /* Another thread took bytes meanwhile: again. */
+        need = 1;
     }
-    PyObject *snapshot = Py_BuildValue("iN", self->snap_flags, input);
-    if (snapshot == NULL) {
-        return -1;
-    }
-    textiowrapper_set_snapshot(self, snapshot);
-    return 0;
+    Py_DECREF(buffer);
+    return r;
 }
 
 /* Read and decode the next chunk of data from the BufferedReader.
@@ -2389,13 +2988,7 @@ textiowrapper_read_chunk(textio *self, Py_ssize_t size_hint)
         return -1;
     }
 
-    if (self->nibbler && self->decode_utf8) {
-        int r = textiowrapper_read_chunk_nibbler(self, size_hint);
-        if (r != _PyIO_NIBBLER_NO) {
-            return r;
-        }
-    }
-    self->dec_fed = 1;
+    textiowrapper_native_pause(self);
 
     if (self->telling) {
         /* To prepare for tell(), we need to snapshot a point in the file
@@ -2498,7 +3091,7 @@ textiowrapper_read_chunk(textio *self, Py_ssize_t size_hint)
             dec_flags = NULL;
             goto fail;
         }
-        textiowrapper_set_snapshot(self, snapshot);
+        Py_XSETREF(self->snapshot, snapshot);
     }
     Py_DECREF(input_chunk);
 
@@ -2512,6 +3105,94 @@ textiowrapper_read_chunk(textio *self, Py_ssize_t size_hint)
     Py_XDECREF(dec_flags);
     Py_XDECREF(input_chunk);
     return -1;
+}
+
+/* read(n) with native reading (NATIVE_ON or NATIVE_PAUSED): out of line,
+   so that the generic path stays as it is.  Each part is read natively
+   when it can be, else as the generic path does. */
+Py_NO_INLINE static PyObject *
+textiowrapper_read_native(textio *self, Py_ssize_t n)
+{
+    PyObject *result = NULL, *chunks = NULL;
+    if (self->pending_bytes != NULL && _textiowrapper_writeflush(self) < 0) {
+        return NULL;
+    }
+    if (self->native == NATIVE_ON && self->buffer != NULL) {
+        result = native_read_fast(self, self->buffer, n);
+        if (result == NULL && PyErr_Occurred()) {
+            return NULL;
+        }
+        if (result != NULL && PyUnicode_GET_LENGTH(result) == n) {
+            return result;
+        }
+    }
+    if (result == NULL) {
+        result = textiowrapper_get_decoded_chars(self, n);
+        if (result == NULL) {
+            return NULL;
+        }
+    }
+    Py_ssize_t remaining = n - PyUnicode_GET_LENGTH(result);
+    while (remaining > 0) {
+        PyObject *got = NULL;
+        int res = textiowrapper_native_ready(self);
+        if (res > 0) {
+            res = native_read(self, remaining, &got);
+        }
+        else if (res == 0) {
+            res = _PyIO_NIBBLER_NO;
+        }
+        if (res == _PyIO_NIBBLER_NO) {
+            res = textiowrapper_read_chunk(self, remaining);
+            if (res == 1) {
+                got = textiowrapper_get_decoded_chars(self, remaining);
+                res = got == NULL ? -1 : 1;
+            }
+        }
+        if (res < 0) {
+            /* NOTE: PyErr_SetFromErrno() calls PyErr_CheckSignals()
+               when EINTR occurs so we needn't do it ourselves. */
+            if (_PyIO_trap_eintr()) {
+                continue;
+            }
+            goto fail;
+        }
+        if (res == TEXTIO_BLOCKED) {
+            if (remaining == n) {
+                /* Nothing to return: "" would mean EOF. */
+                _PyIO_set_read_blocking_error();
+                goto fail;
+            }
+            break;
+        }
+        if (res == 0) {  /* EOF */
+            break;
+        }
+        if (PyUnicode_GET_LENGTH(result) > 0) {
+            if (chunks == NULL) {
+                chunks = PyList_New(0);
+            }
+            if (chunks == NULL || PyList_Append(chunks, result) < 0) {
+                Py_DECREF(got);
+                goto fail;
+            }
+        }
+        Py_SETREF(result, got);
+        remaining -= PyUnicode_GET_LENGTH(result);
+    }
+    if (chunks != NULL) {
+        if (PyList_Append(chunks, result) < 0) {
+            goto fail;
+        }
+        Py_SETREF(result, PyUnicode_Join(&_Py_STR(empty), chunks));
+        Py_DECREF(chunks);
+    }
+    return result;
+
+  fail:
+    Py_XDECREF(result);
+    Py_XDECREF(chunks);
+    return NULL;
 }
 
 /*[clinic input]
@@ -2534,6 +3215,9 @@ _io_TextIOWrapper_read_impl(textio *self, Py_ssize_t n)
         return _unsupported(self->state, "not readable");
     }
 
+    if (n >= 0 && self->native) {
+        return textiowrapper_read_native(self, n);
+    }
     if (_textiowrapper_writeflush(self) < 0)
         return NULL;
 
@@ -2551,21 +3235,18 @@ _io_TextIOWrapper_read_impl(textio *self, Py_ssize_t n)
         }
 
         _PyIO_State *state = self->state;
-        int direct = 0;
-        if (self->nibbler && self->decode_utf8 && PyBytes_Check(bytes)) {
-            direct = textiowrapper_utf8_ready(self);
-            if (direct < 0) {
+        int native = 0;
+        if (self->native && PyBytes_Check(bytes)) {
+            native = textiowrapper_native_ready(self);
+            if (native < 0) {
                 Py_DECREF(bytes);
                 goto fail;
             }
         }
-        if (direct) {
-            /* Without the codec's decoder, as in _read_chunk. */
-            const char *errors = PyUnicode_AsUTF8(self->errors);
-            decoded = errors == NULL ? NULL : textiowrapper_utf8_newlines(
-                self, PyUnicode_DecodeUTF8Stateful(
-                    PyBytes_AS_STRING(bytes), PyBytes_GET_SIZE(bytes),
-                    errors, NULL), 1);
+        if (native) {
+            decoded = native_newlines(self, native_decode(
+                self, PyBytes_AS_STRING(bytes), PyBytes_GET_SIZE(bytes),
+                NULL));
         }
         else if (Py_IS_TYPE(self->decoder, state->PyIncrementalNewlineDecoder_Type))
             decoded = _PyIncrementalNewlineDecoder_decode(self->decoder,
@@ -2588,9 +3269,9 @@ _io_TextIOWrapper_read_impl(textio *self, Py_ssize_t n)
         if (result == NULL)
             goto fail;
 
-        if (textiowrapper_has_snapshot(self)) {
+        if (self->snapshot != NULL) {
             textiowrapper_set_decoded_chars(self, NULL);
-            textiowrapper_clear_snapshot(self);
+            Py_CLEAR(self->snapshot);
         }
         return result;
     }
@@ -2763,10 +3444,6 @@ _PyIO_find_line_ending(
     }
 }
 
-/* Without a limit, a partial line that would block is kept for the next
-   readline() (which raises BlockingIOError) until it is this many times
-   the chunk size: then it is returned as it is. */
-#define READLINE_KEEP_MAX 64
 
 /* While readline() reads a line spanning chunks, the tell() snapshot of
    where the line started: if the stream would block before the line ends,
@@ -2778,39 +3455,6 @@ _PyIO_find_line_ending(
    stays small for lines within a chunk. */
 enum { LS_DEC, LS_START, LS_FLAGS, LS_INPUT };
 
-/* The current snapshot's input (a new reference), and its flags (a new
-   reference) in *flags. */
-static PyObject *
-textiowrapper_snapshot_parts(textio *self, PyObject **flags)
-{
-    PyObject *input;
-    if (self->snap_len >= 0) {
-        PyObject *buffer = buffer_access_safe(self);
-        if (buffer == NULL) {
-            return NULL;
-        }
-        input = _PyIONibbler_lookback(buffer, self->snap_len);
-        Py_DECREF(buffer);
-        if (input == NULL) {
-            if (!PyErr_Occurred()) {
-                PyErr_SetString(PyExc_OSError,
-                                "can't reconstruct logical file position");
-            }
-            return NULL;
-        }
-        *flags = PyLong_FromLong(self->snap_flags);
-        if (*flags == NULL) {
-            Py_DECREF(input);
-            return NULL;
-        }
-        return input;
-    }
-    /* (dec_flags, next_input), see textiowrapper_read_chunk(). */
-    assert(PyTuple_Check(self->snapshot));
-    *flags = Py_NewRef(PyTuple_GET_ITEM(self->snapshot, 0));
-    return Py_NewRef(PyTuple_GET_ITEM(self->snapshot, 1));
-}
-
 /* Before reading the next chunk with nothing of the line put aside yet:
    make line_snap the snapshot of the line from start in decoded_chars, or
    NULL if not telling. */
@@ -2818,8 +3462,8 @@ Py_NO_INLINE static int
 line_snapshot_reset(textio *self, Py_ssize_t start)
 {
     PyObject *ls = NULL;
-    if (self->telling && textiowrapper_has_snapshot(self)) {
-        PyObject *flags, *input, *pos;
+    if (self->telling && self->snapshot != NULL) {
+        PyObject *pos;
         ls = PyList_New(4);
         if (ls == NULL) {
             return -1;
@@ -2830,12 +3474,12 @@ line_snapshot_reset(textio *self, Py_ssize_t start)
             return -1;
         }
         PyList_SET_ITEM(ls, LS_START, pos);
-        if ((input = textiowrapper_snapshot_parts(self, &flags)) == NULL) {
-            Py_DECREF(ls);
-            return -1;
-        }
-        PyList_SET_ITEM(ls, LS_FLAGS, flags);
-        PyList_SET_ITEM(ls, LS_INPUT, input);
+        /* (dec_flags, next_input), see textiowrapper_read_chunk(). */
+        assert(PyTuple_Check(self->snapshot));
+        PyList_SET_ITEM(ls, LS_FLAGS,
+                        Py_NewRef(PyTuple_GET_ITEM(self->snapshot, 0)));
+        PyList_SET_ITEM(ls, LS_INPUT,
+                        Py_NewRef(PyTuple_GET_ITEM(self->snapshot, 1)));
     }
     Py_XSETREF(self->line_snap, ls);
     return 0;
@@ -2845,19 +3489,12 @@ line_snapshot_reset(textio *self, Py_ssize_t start)
 Py_NO_INLINE static int
 line_snapshot_extend(textio *self, PyObject *ls)
 {
-    PyObject *flags;
-    PyObject *input = textiowrapper_snapshot_parts(self, &flags);
-    if (input == NULL) {
-        return -1;
-    }
-    Py_DECREF(flags);
-    /* With nibbler, the decoder held nothing. */
-    Py_ssize_t held = self->snap_len >= 0 ? 0 : self->snap_held;
-    PyObject *chunk = input;
+    PyObject *input = PyTuple_GET_ITEM(self->snapshot, 1);
+    Py_ssize_t held = self->snap_held;
+    PyObject *chunk = Py_NewRef(input);
     if (held > 0) {
-        chunk = PyBytes_FromStringAndSize(PyBytes_AS_STRING(input) + held,
-                                          PyBytes_GET_SIZE(input) - held);
-        Py_DECREF(input);
+        Py_SETREF(chunk, PyBytes_FromStringAndSize(
+            PyBytes_AS_STRING(input) + held, PyBytes_GET_SIZE(input) - held));
         if (chunk == NULL) {
             return -1;
         }
@@ -2919,7 +3556,7 @@ textiowrapper_keep_line(textio *self, PyObject *ls, PyObject *chunks,
         if (snapshot == NULL) {
             goto error;
         }
-        textiowrapper_set_snapshot(self, snapshot);
+        Py_XSETREF(self->snapshot, snapshot);
         Py_CLEAR(self->line_snap);
         Py_ssize_t nchars = PyUnicode_GET_LENGTH(line);
         textiowrapper_set_decoded_chars(self, line);
@@ -2929,7 +3566,7 @@ textiowrapper_keep_line(textio *self, PyObject *ls, PyObject *chunks,
     else {
         /* No snapshot of the line's start: tell() can't work until the
            next seek(). */
-        textiowrapper_clear_snapshot(self);
+        Py_CLEAR(self->snapshot);
         textiowrapper_set_decoded_chars(self, line);
         self->telling = 0;
     }
@@ -3040,7 +3677,7 @@ _textiowrapper_readline(textio *self, Py_ssize_t limit)
                pending \r, which tell() must count as unread. */
             textiowrapper_set_decoded_chars(self, NULL);
             if (res != TEXTIO_BLOCKED) {
-                textiowrapper_clear_snapshot(self);
+                Py_CLEAR(self->snapshot);
             }
             start = endpos = offset_to_buffer = 0;
             break;
@@ -3169,6 +3806,38 @@ _textiowrapper_readline(textio *self, Py_ssize_t limit)
     return NULL;
 }
 
+/* _textiowrapper_readline() with native reading (NATIVE_ON or
+   NATIVE_PAUSED): out of line, so that the generic path stays as it is. */
+Py_NO_INLINE static PyObject *
+textiowrapper_readline_native(textio *self, Py_ssize_t limit)
+{
+    CHECK_CLOSED(self);
+    if (self->pending_bytes != NULL && _textiowrapper_writeflush(self) < 0) {
+        return NULL;
+    }
+    PyObject *line;
+    if (self->native == NATIVE_ON && limit < 0 && self->buffer != NULL
+        && (self->readuniversal || self->writenl == NULL))
+    {
+        /* Universal newlines, or "\n". */
+        line = native_readline_fast(self, self->buffer);
+        if (line != NULL || PyErr_Occurred()) {
+            return line;
+        }
+    }
+    int r = textiowrapper_native_ready(self);
+    if (r < 0) {
+        return NULL;
+    }
+    if (r) {
+        line = native_readline(self, limit);
+        if (line != NULL || PyErr_Occurred()) {
+            return line;
+        }
+    }
+    return _textiowrapper_readline(self, limit);
+}
+
 /*[clinic input]
 @critical_section
 _io.TextIOWrapper.readline
@@ -3181,6 +3850,9 @@ _io_TextIOWrapper_readline_impl(textio *self, Py_ssize_t size)
 /*[clinic end generated code: output=344afa98804e8b25 input=b65bab871dc3ddba]*/
 {
     CHECK_ATTACHED(self);
+    if (self->native) {
+        return textiowrapper_readline_native(self, size);
+    }
     return _textiowrapper_readline(self, size);
 }
 
@@ -3363,6 +4035,7 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
     CHECK_CLOSED(self);
 
     Py_INCREF(cookieObj);
+    native_drop_view(self);
 
     if (!self->seekable) {
         _unsupported(self->state, "underlying stream is not seekable");
@@ -3408,13 +4081,14 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
         }
 
         textiowrapper_set_decoded_chars(self, NULL);
-        textiowrapper_clear_snapshot(self);
+        Py_CLEAR(self->snapshot);
         if (self->decoder) {
             res = PyObject_CallMethodNoArgs(self->decoder, &_Py_ID(reset));
             if (res == NULL)
                 goto fail;
             Py_DECREF(res);
         }
+        textiowrapper_native_restart(self);
 
         PyObject *buf = buffer_access_safe(self);
         if (buf == NULL) {
@@ -3485,7 +4159,7 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
     Py_DECREF(res);
 
     textiowrapper_set_decoded_chars(self, NULL);
-    textiowrapper_clear_snapshot(self);
+    Py_CLEAR(self->snapshot);
 
     /* Restore the decoder to its state from the safe start point. */
     if (self->decoder) {
@@ -3523,9 +4197,9 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
         if (snapshot == NULL) {
             goto fail;
         }
-        textiowrapper_set_snapshot(self, snapshot);
+        Py_XSETREF(self->snapshot, snapshot);
 
-        self->dec_fed = 1;
+        textiowrapper_native_pause(self);
         decoded = PyObject_CallMethodObjArgs(self->decoder, &_Py_ID(decode),
             input_chunk, cookie.need_eof ? Py_True : Py_False, NULL);
 
@@ -3550,11 +4224,18 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
         }
         self->decoded_chars_used = cookie.chars_to_skip;
     }
+    else if (self->native && cookie.dec_flags == 0) {
+        /* The decoder holds nothing: read natively from here. */
+        textiowrapper_native_restart(self);
+    }
     else {
         snapshot = Py_BuildValue("iy", cookie.dec_flags, "");
         if (snapshot == NULL)
             goto fail;
-        textiowrapper_set_snapshot(self, snapshot);
+        Py_XSETREF(self->snapshot, snapshot);
+        /* With native reading, the flags are a pending "\r": the generic
+           path has it. */
+        textiowrapper_native_pause(self);
     }
 
     /* Finally, reset the encoder (merely useful for proper BOM handling) */
@@ -3607,10 +4288,6 @@ _io_TextIOWrapper_tell_impl(textio *self)
         goto fail;
     }
 
-    /* Before flush(), which can drop the buffer's read-ahead. */
-    if (self->snap_len >= 0 && textiowrapper_snapshot_input(self) < 0) {
-        goto fail;
-    }
     if (_textiowrapper_writeflush(self) < 0)
         return NULL;
     if (_PyFile_Flush((PyObject *)self) < 0) {
@@ -3828,15 +4505,17 @@ _io_TextIOWrapper_truncate_impl(textio *self, PyObject *pos)
 /*[clinic end generated code: output=90ec2afb9bb7745f input=8bddb320834c93ee]*/
 {
     CHECK_ATTACHED(self)
+    native_drop_view(self);
 
-    /* After a read, the buffer is past the text position (by the decoded
-       chunk, or more), so truncate() without a size would cut there, and
+    /* After a read (but a native one), the buffer is past the text
+       position (by the decoded chunk, or more), so truncate() without a
+       size would cut there, and
        the next read would return text cut away (gh-70346).  seek(tell())
        first, so that the buffer is where the next write would go.  Both
        flush first, and tell() raises like it does on its own while
        iterating has disabled it. */
     if (self->seekable
-        && (self->decoded_chars != NULL || textiowrapper_has_snapshot(self)))
+        && (self->decoded_chars != NULL || self->snapshot != NULL))
     {
         PyObject *cookie = _io_TextIOWrapper_tell_impl(self);
         if (cookie == NULL) {
@@ -4004,15 +4683,6 @@ _io_TextIOWrapper_flush_impl(textio *self)
            iterating. */
         textiowrapper_resume_telling(self);
     }
-    /* The buffer's flush() can drop its read-ahead, which a snapshot kept
-       without objects looks back at: make it a tuple first.  If that can't
-       be done, tell() will raise as it would have anyway. */
-    if (self->snap_len >= 0 && textiowrapper_snapshot_input(self) < 0) {
-        if (!PyErr_ExceptionMatches(PyExc_OSError)) {
-            return NULL;
-        }
-        PyErr_Clear();
-    }
     if (_textiowrapper_writeflush(self) < 0)
         return NULL;
     return buffer_callmethod_noargs(self, &_Py_ID(flush));
@@ -4093,6 +4763,7 @@ _io_TextIOWrapper_close_impl(textio *self)
                 PyErr_Clear();
             }
         }
+        native_drop_view(self);
         if (textiowrapper_finish_encoder(self) < 0) {
             exc = PyErr_GetRaisedException();
         }
@@ -4142,7 +4813,7 @@ textiowrapper_resume_telling(textio *self)
         PyObject *snapshot = PyTuple_Pack(2, dec_flags, dec_buffer);
         if (snapshot != NULL) {
             textiowrapper_set_decoded_chars(self, NULL);
-            textiowrapper_set_snapshot(self, snapshot);
+            Py_XSETREF(self->snapshot, snapshot);
             self->telling = 1;
         }
     }
@@ -4160,15 +4831,16 @@ textiowrapper_iternext_lock_held(PyObject *op)
 
     CHECK_ATTACHED(self);
 
-    /* Building snapshots for tell() costs too much while iterating, except
-       with nibbler (gh-81217). */
-    int stop_telling = !(self->nibbler && self->decode_utf8);
+    /* Building snapshots for tell() costs too much while iterating, but
+       native reading needs none (gh-81217). */
+    int stop_telling = self->native == NATIVE_NO;
     if (stop_telling) {
         self->telling = 0;
     }
     if (Py_IS_TYPE(self, self->state->PyTextIOWrapper_Type)) {
         /* Skip method call overhead for speed */
-        line = _textiowrapper_readline(self, -1);
+        line = (self->native ? textiowrapper_readline_native(self, -1)
+                : _textiowrapper_readline(self, -1));
     }
     else {
         line = PyObject_CallMethodNoArgs(op, &_Py_ID(readline));
@@ -4195,7 +4867,7 @@ textiowrapper_iternext_lock_held(PyObject *op)
     if (PyUnicode_GET_LENGTH(line) == 0) {
         /* Reached EOF or would have blocked */
         Py_DECREF(line);
-        textiowrapper_clear_snapshot(self);
+        Py_CLEAR(self->snapshot);
         self->telling = self->seekable;
         return NULL;
     }

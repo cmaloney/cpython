@@ -346,6 +346,10 @@ class CTestCase(unittest.TestCase):
     # decode from the buffer's read-ahead, instead of keeping bytes of its
     # own (pending_bytes) and reading chunks with read1()?
     text_uses_buffer_directly = is_nibbler
+    # Does TextIOWrapper take from the buffer only the bytes of the text it
+    # returns (UTF-8, Latin-1 and ASCII), so that the buffer's position is
+    # the text position and a write after a read goes there?  (gh-82891)
+    text_reads_in_place = is_nibbler
 
     MockRawIO = CMockRawIO
     MisbehavedRawIO = CMisbehavedRawIO
@@ -383,6 +387,7 @@ class PyTestCase(unittest.TestCase):
     tells_while_iterating = False
     keeps_long_partial_lines = True
     text_uses_buffer_directly = False
+    text_reads_in_place = False
 
     MockRawIO = PyMockRawIO
     MisbehavedRawIO = PyMisbehavedRawIO

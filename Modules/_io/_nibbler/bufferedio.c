@@ -2469,11 +2469,12 @@ _io_BufferedWriter_write_impl(buffered *self, PyObject *obj)
  *
  * Over an exact buffered object of ours, TextIOWrapper (textio.c) uses the
  * morsels directly (see _iomodule.h): it decodes straight from the
- * read-ahead and takes only the bytes that made whole characters, so a
- * partial character stays here (the next fill keeps it in front); tell()
- * looks back at the bytes it decoded last instead of keeping a copy; and
- * encoded text is appended as write() does.  An instance dict could
- * override the methods, so objects with one are used through them.
+ * read-ahead and takes only the bytes of the characters it returns, so
+ * what it doesn't return (a partial character, a line that hasn't ended)
+ * stays here, the next fill keeping it in front, and the position is the
+ * text position; and encoded text is appended as write() does.  An
+ * instance dict could override the methods, so objects with one are used
+ * through them.
  */
 
 /* peek with the lock: out of line, so that the lock-free path stays
@@ -2597,29 +2598,6 @@ _PyIONibbler_consume(PyObject *op, _PyIO_Morsel *m, Py_ssize_t n)
     }
     /* The end is held, or gone: check the front morsel with the lock. */
     return buffered_text_consume_locked(self, m, n);
-}
-
-PyObject *
-_PyIONibbler_lookback(PyObject *op, Py_ssize_t n)
-{
-    buffered *self = buffered_cast(op);
-    if (n == 0) {
-        return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
-    }
-    if (buffered_lock(self) < 0) {
-        return NULL;
-    }
-    /* Read bytes stay in the reading end's block, before the unread ones
-       (as for seek()). */
-    PyObject *res = NULL;
-    nibbler_end *e = nibbler_reading(&self->nib);
-    Py_ssize_t pos = e == NULL ? -1 : e->limit - nibbler_unread(&self->nib);
-    if (pos >= n) {
-        res = PyBytes_FromStringAndSize(PyBytes_AS_STRING(e->block) + pos - n,
-                                        n);
-    }
-    buffered_unlock(self);
-    return res;
 }
 
 /* _PyIONibbler_write() past its first case, out of line. */
