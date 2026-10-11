@@ -84,10 +84,6 @@ typedef struct {
 /* Newlines seen, for the newlines attribute. */
 enum { SEEN_CR = 1, SEEN_LF = 2, SEEN_CRLF = 4 };
 
-/* A partial line that would block is kept for the next readline() until
-   it is this many times _CHUNK_SIZE characters (or can't fit in the
-   buffer): then it is returned as it is. */
-#define READLINE_KEEP_MAX 64
 
 /* The characters decoded at the position: chars[ci:].  With a native
    codec, while the buffer's unread bytes are those named by key at offset
@@ -2442,12 +2438,13 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
         if (k == 0 && avail > 0 && line
             && (st.status == _PyIO_NIBBLER_FULL
                 || (st.status == _PyIO_NIBBLER_BLOCKED
-                    && (taken || avail >= READLINE_KEEP_MAX
-                                          * FT_ATOMIC_LOAD_SSIZE_RELAXED(
-                                              self->chunk_size)))))
+                    && (taken || avail > FT_ATOMIC_LOAD_SSIZE_RELAXED(
+                                             self->chunk_size)))))
         {
-            /* The buffer can't hold more of the line, or it is too long to
-               keep for the next call: take it so far, but a last "\r"
+            /* The buffer can't hold more of the line, or it would block
+               and is longer than _CHUNK_SIZE (the text layer's buffer
+               size, as _io's and _pyio's keep), too long to keep for the
+               next call: take it so far, but a last "\r"
                (that may begin a "\r\n", universal or the newline: the
                buffer holds 8 bytes or more, so that there are others). */
             k = avail - ((cf->readuniversal
