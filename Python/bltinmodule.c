@@ -2335,8 +2335,8 @@ builtin_print_impl(PyObject *module, PyObject * const *objects,
         return NULL;
     }
 
-    /* Write everything with one write() call, so that it reaches the file
-       in one piece. */
+    /* Write everything with one write() call: a file whose write() is
+       atomic, such as io.TextIOWrapper, then gets it in one piece. */
     PyUnicodeWriter *writer = PyUnicodeWriter_Create(0);
     if (writer == NULL) {
         Py_DECREF(file);
