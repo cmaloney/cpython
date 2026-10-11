@@ -1930,12 +1930,13 @@ static int
 gather_commit(gather *g)
 {
     buffered *self = g->stream;
-    int flush = g->flush;
     if (nibbler_mutex_lock(&self->nib.lock, (PyObject *)self, 0) < 0) {
         /* A reentrant call: the record stays active. */
         return -1;
     }
     nibbler_hold(&self->nib);
+    /* (close() may have done the flush meanwhile.) */
+    int flush = g->flush;
     Py_ssize_t dropped;
     if (gather_end(self, g, &dropped) != GATHER_MOVED) {
         buffered_unlock(self);
@@ -2060,33 +2061,33 @@ gather_exit(PyObject *op, PyObject *const *Py_UNUSED(args),
 /* A record dropped while in the stream's list (its block never ended, or
    ending it failed): move its data, as dealloc of the stream writes its
    own, with a ResourceWarning if its block never ended; or drop it with
-   one. */
+   one.  Takes the lock: other threads use the records in the list. */
 static void
 gather_finish(gather *g)
 {
     buffered *self = g->stream;
-    int active = g->state == GATHER_ACTIVE;
-    Py_ssize_t dropped = 0;
     PyObject *exc = PyErr_GetRaisedException();
-    if (nibbler_mutex_is_mine(&self->nib.lock, _PyThreadState_GET())) {
-        /* Dropped by code running with the lock held (by this thread,
-           further up its stack): the stream may be in the middle of
-           something, so the data is dropped. */
-        dropped = g->list.nbytes;
-        morsels_clear(&g->list);
-        g->state = GATHER_DONE;
-        gather_unlink(self, g);
-    }
-    else {
+    /* Dropped by code running with the lock held (by this thread, further
+       up its stack): the stream may be in the middle of something, so
+       the data is dropped. */
+    int mine = nibbler_mutex_is_mine(&self->nib.lock, _PyThreadState_GET());
+    if (!mine) {
         (void)nibbler_mutex_lock(&self->nib.lock, (PyObject *)self, 0);
         nibbler_hold(&self->nib);
-        if (gather_end(self, g, &dropped) == GATHER_KEPT) {
+    }
+    int active = 0;
+    Py_ssize_t dropped = 0;
+    if (g->pprev != NULL) {
+        active = g->state == GATHER_ACTIVE;
+        if (mine || gather_end(self, g, &dropped) == GATHER_KEPT) {
             dropped = g->list.nbytes;
             morsels_clear(&g->list);
             g->state = GATHER_DONE;
             gather_unlink(self, g);
         }
         PyErr_Clear();
+    }
+    if (!mine) {
         buffered_unlock(self);
     }
     Py_CLEAR(g->block);
@@ -2122,7 +2123,8 @@ static int
 gather_clear(PyObject *op)
 {
     gather *g = (gather *)op;
-    if (g->stream != NULL && g->pprev != NULL) {
+    /* ctx is set when the record joins the stream's list. */
+    if (g->stream != NULL && g->ctx != NULL) {
         gather_finish(g);
     }
     Py_CLEAR(g->stream);
