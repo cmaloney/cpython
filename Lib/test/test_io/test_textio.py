@@ -1293,10 +1293,10 @@ class TextIOWrapperTest:
                             t.seek(pos)
                         self.assertEqual(line + t.read(), expected)
 
-    def test_readline_decode_error_keeps_partial_line(self):
-        # A decode error while reading the rest of a line keeps the part
-        # read before it, but tell() can't work until the next seek():
-        # the buffer is past the bytes that failed.
+    def test_readline_decode_error_drops_partial_line(self):
+        # A decode error while reading the rest of a line loses the part
+        # read before it, with the chunk that failed: keeping it would
+        # join it to the next line, which never existed.
         if self.is_nibbler:
             self.skipTest("the nibbler TextIOWrapper reports a decode error "
                           "per byte and keeps reading: 'ab', the error, "
@@ -1304,8 +1304,7 @@ class TextIOWrapperTest:
         raw = self.MockRawIO((b"ab", b"\xff\n", b"cd\n"))
         t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
         self.assertRaises(UnicodeDecodeError, t.readline)
-        self.assertRaises(OSError, t.tell)
-        self.assertEqual(t.readline(), "abcd\n")
+        self.assertEqual(t.readline(), "cd\n")
 
     def test_tell_after_next_would_block(self):
         # A BlockingIOError from next() doesn't leave tell() disabled as

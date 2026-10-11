@@ -426,6 +426,12 @@ class SlowDeviceTest:
         self.assertRaises(TimeoutError, f.readline)
         self.assertEqual(f.readline(), "ab\xe9cd\n")
         self.assertEqual(f.readline(), "ef")
+        # The same after a KeyboardInterrupt.
+        raw = self.scripted_reader(data, [4, KeyboardInterrupt()])
+        f = self.TextIOWrapper(self.BufferedReader(raw, 16), encoding="utf-8")
+        self.assertRaises(KeyboardInterrupt, f.readline)
+        self.assertEqual(f.readline(), "ab\xe9cd\n")
+        self.assertEqual(f.readline(), "ef")
 
     def test_read_all_error_keeps_data(self):
         # read() of a raw stream with only RawIOBase.readall() keeps what
