@@ -2106,6 +2106,11 @@ _bufferedwriter_raw_write(buffered *self, char *start, Py_ssize_t len)
                      "(should have been between 0 and %zd)", n, len);
         return -1;
     }
+    if (n == 0 && len > 0) {
+        /* Retrying could loop forever (gh-158414). */
+        PyErr_SetString(PyExc_OSError, "raw write() made no progress");
+        return -1;
+    }
     if (n > 0 && self->abs_pos != -1) {
         if (self->raw_appending) {
             /* The data went to the end of the file, not to abs_pos: let
