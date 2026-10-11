@@ -1,4 +1,5 @@
 import array
+import errno
 import pickle
 import random
 import sys
@@ -1009,6 +1010,78 @@ class BufferedWriterTest(CommonBufferedTests):
     def test_max_buffer_size_removal(self):
         with self.assertRaises(TypeError):
             self.tp(self.MockRawIO(), 8, 12)
+
+    def scripted_raw(self, plan):
+        # A raw stream whose write() follows plan, one step per call: an int
+        # n writes at most n bytes and an exception is raised.  Once plan is
+        # used up, writes are whole.
+        class ScriptedRawIO(self.MockRawIO):
+            def write(self, b):
+                step = plan.pop(0) if plan else None
+                if isinstance(step, BaseException):
+                    raise step
+                with memoryview(b) as view:
+                    n = len(view) if step is None else min(step, len(view))
+                    self._write_stack.append(bytes(view[:n]))
+                return n
+        return ScriptedRawIO()
+
+    def test_write_error_keeps_rest_that_fits(self):
+        # An error (other than BlockingIOError) after part of write()'s
+        # data was written keeps the rest pending when it fits in the
+        # buffer: write() raises, and flush() writes the rest.
+        data = bytes(range(100))
+        raw = self.scripted_raw([36, OSError(errno.EIO, "EIO")])
+        bufio = self.tp(raw, 64)
+        with self.assertRaises(OSError) as cm:
+            bufio.write(data)
+        self.assertNotIsInstance(cm.exception, BlockingIOError)
+        self.assertEqual(cm.exception.errno, errno.EIO)
+        self.assertEqual(cm.exception.characters_written, 100)
+        self.assertEqual(b"".join(raw._write_stack), data[:36])
+        bufio.flush()
+        self.assertEqual(b"".join(raw._write_stack), data)
+
+    def test_write_error_keeps_what_fits(self):
+        # When the rest doesn't fit, as much of it as fits is kept, and
+        # characters_written says how much of the data was accepted
+        # (written or kept): the caller writes the rest again.
+        data = bytes(range(200))
+        raw = self.scripted_raw([30, TimeoutError("timed out")])
+        bufio = self.tp(raw, 64)
+        with self.assertRaises(TimeoutError) as cm:
+            bufio.write(data)
+        n = cm.exception.characters_written
+        self.assertEqual(n, 30 + 64)
+        bufio.write(data[n:])
+        bufio.flush()
+        self.assertEqual(b"".join(raw._write_stack), data)
+
+    def test_write_error_before_data_takes_none(self):
+        # An error while writing the data pending before write()'s data
+        # takes none of it: write() raises without characters_written,
+        # and only the earlier data stays pending.
+        raw = self.scripted_raw([2, OSError(errno.EIO, "EIO")])
+        bufio = self.tp(raw, 64)
+        bufio.write(b"abc")
+        with self.assertRaises(OSError) as cm:
+            bufio.write(b"x" * 100)
+        self.assertEqual(cm.exception.errno, errno.EIO)
+        self.assertNotHasAttr(cm.exception, "characters_written")
+        bufio.flush()
+        self.assertEqual(b"".join(raw._write_stack), b"abc")
+
+    def test_write_interrupted_keeps_rest(self):
+        # The same for an exception that isn't an OSError (such as one a
+        # signal handler raises), which has no characters_written.
+        data = bytes(range(100))
+        raw = self.scripted_raw([36, KeyboardInterrupt()])
+        bufio = self.tp(raw, 64)
+        with self.assertRaises(KeyboardInterrupt) as cm:
+            bufio.write(data)
+        self.assertNotHasAttr(cm.exception, "characters_written")
+        bufio.flush()
+        self.assertEqual(b"".join(raw._write_stack), data)
 
     def test_raw_write_no_progress(self):
         # gh-158414: retrying a raw write() that returns 0 could loop
