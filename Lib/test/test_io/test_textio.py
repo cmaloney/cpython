@@ -661,7 +661,9 @@ class TextIOWrapperTest:
                 with self.open(os_helper.TESTFN, "r+", encoding=enc,
                                newline=newline) as f:
                     read(f)
-                    pos = f.tell()
+                    # The buffer's position (with decoder flags past it:
+                    # a "\r\n" seen, between "\r" and "\n").
+                    pos = f.tell() & ((1 << 64) - 1)
                     self.assertEqual(f.buffer.tell(), pos)
                     f.write("XY")
                     self.assertEqual(f.tell(), pos + len("XY".encode(enc)))
@@ -2365,6 +2367,36 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                 t.seek(0)
                 with self.assertRaises(UnicodeDecodeError):
                     list(t)
+
+    def test_newlines_across_tell_seek(self):
+        # readline(3) stops between "\r" and "\n": the "\n" that follows
+        # still ends that "\r\n", also after seek(tell()).
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(b"ab\r\ncd\r\n")
+        for chunk in (8192, 1):
+            with self.subTest(chunk=chunk):
+                t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                                      encoding="utf-8", newline="")
+                t._CHUNK_SIZE = chunk
+                self.assertEqual(t.readline(3), "ab\r")
+                t.seek(t.tell())
+                self.assertEqual(t.readline(), "\n")
+                self.assertEqual(t.readline(), "cd\r\n")
+                self.assertEqual(t.newlines, "\r\n")
+
+    def test_seek_invalid_cookie_native_codec(self):
+        # gh-91112: a cookie tell() can't have returned with a native codec
+        # (decoder flags but the "\r\n" one, characters to skip) is an
+        # error, not another position.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(b"abc\n")
+        t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                              encoding="utf-8")
+        for cookie in (2 << 64, 1 << 128):
+            with self.subTest(cookie=cookie):
+                self.assertRaises(OSError, t.seek, cookie)
 
     def test_reconfigure_encoding_finishes_encoder(self):
         # The old encoder is given the end of its text (gh-79792): the

@@ -1481,13 +1481,15 @@ native_more(textio *self, store *st)
         if (chars == NULL) {
             return -1;
         }
+        /* Decoded again from the same position: the same "\r\n" seen. */
+        int skip_lf = covered > 0 && st->c->ci == 0 && st->c->skip_lf;
         Py_XSETREF(st->c->chars, chars);
         st->c->ci = 0;
         st->c->cr_at = -1;
         st->c->key = st->key;
         st->c->koff = st->m.ptr - PyBytes_AS_STRING(st->m.obj);
         st->c->kbytes = used;
-        st->c->skip_lf = 0;
+        st->c->skip_lf = skip_lf;
         st->c->nl = 0;
         st->c->renew = 1;
         st->c->wide = 0;
@@ -3001,6 +3003,17 @@ cookie_parse(cookie_type *c, PyObject *cookie)
 
 static PyObject *text_tell(textio *self, tconf *cf);
 
+/* Does a "\n" at the position end a "\r\n" whose "\r" was returned? */
+static int
+text_skip_lf(textio *self)
+{
+    tcache copy;
+    tcache *c = cache_get(self, &copy);
+    int r = c->chars != NULL && c->skip_lf;
+    cache_release(c);
+    return r;
+}
+
 /*[clinic input]
 _io.TextIOWrapper.tell
 
@@ -3051,12 +3064,22 @@ text_tell(textio *self, tconf *cf)
         return textio_unsupported(self, "underlying stream is not seekable");
     }
     PyObject *buffer = cf->buffer;
-    if (cf->lockfree) {
-        return PyObject_CallMethodNoArgs(buffer, &_Py_ID(tell));
+    if (cf->codec != CODEC_DECODER || cf->decoder == NULL) {
+        /* The buffer's position, with a native codec and a "\r" just
+           returned that a "\n" there ends, flags 1 (see tcache). */
+        PyObject *pos = (cf->lockfree
+                         ? PyObject_CallMethodNoArgs(buffer, &_Py_ID(tell))
+                         : store_tell(self, buffer));
+        if (pos != NULL && cf->readable && text_skip_lf(self)) {
+            Py_off_t p = PyLong_AsOff_t(pos);
+            Py_SETREF(pos, p == -1 && PyErr_Occurred() ? NULL
+                           : cookie_build(p, (dflags_t){1, 0}, 0));
+        }
+        return pos;
     }
     PyObject *pos = store_tell(self, buffer);
-    if (pos == NULL || cf->decoder == NULL) {
-        return pos;
+    if (pos == NULL) {
+        return NULL;
     }
     Py_off_t p = PyLong_AsOff_t(pos);
     if (p == -1 && PyErr_Occurred()) {
@@ -3150,6 +3173,23 @@ text_skip(textio *self, tconf *cf, Py_ssize_t n)
     cache_release(st.c);
     store_release(&st);
     return n > 0 ? -1 : 0;
+}
+
+/* After seek() to a cookie of tell()'s with flags 1 and a native codec:
+   the "\n" at the position ends a "\r\n" (see text_skip_lf()). */
+static int
+text_seek_skip_lf(textio *self, tconf *cf)
+{
+    store st = {.cf = cf, .buffer = cf->buffer};
+    st.c = cache_get(self, STORE_COPY(&st));
+    Py_ssize_t avail = text_more(self, &st, 0);
+    if (avail > 0) {
+        st.c->skip_lf = 1;
+        cache_put(self, st.c);
+    }
+    cache_release(st.c);
+    store_release(&st);
+    return avail < 0 ? -1 : 0;
 }
 
 /*[clinic input]
@@ -3249,7 +3289,10 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
        another position. */
     if (c.start_pos < 0 || c.chars_to_skip < 0 || c.bytes_to_feed < 0
         || (!cf->readable && (c.dec_flags || c.bytes_to_feed
-                                || c.chars_to_skip || c.need_eof)))
+                                || c.chars_to_skip || c.need_eof))
+        || (cf->codec != CODEC_DECODER
+            && ((uint32_t)c.dec_flags > 1 || c.chars_to_skip
+                || c.bytes_to_feed || c.need_eof)))
     {
         PyErr_SetString(PyExc_OSError, "can't restore logical file position");
         goto done;
@@ -3271,6 +3314,11 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
         goto done;
     }
     if (c.chars_to_skip > 0 && text_skip(self, cf, c.chars_to_skip) < 0) {
+        goto done;
+    }
+    if (cf->codec != CODEC_DECODER && c.dec_flags == 1
+        && text_seek_skip_lf(self, cf) < 0)
+    {
         goto done;
     }
     res = Py_NewRef(cookieObj);
