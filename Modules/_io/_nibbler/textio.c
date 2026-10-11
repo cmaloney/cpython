@@ -154,7 +154,7 @@ struct tspan {
    call takes a reference to them once (textio_conf()), so that everything
    it reads of them agrees, and lives while it runs. */
 typedef struct {
-    Py_ssize_t refs;            /* the object's, and calls' */
+    Py_ssize_t refs;            /* the object's, and calls'; first */
     PyObject *buffer;           /* NULL once detached */
     PyObject *encoding;
     PyObject *errors;
@@ -270,8 +270,10 @@ conf_copy(const tconf *cf)
 {
     tconf *n = conf_new();
     if (n != NULL) {
-        *n = *cf;
-        n->refs = 1;
+        /* All but refs, which other threads change meanwhile. */
+        memcpy((char *)n + offsetof(tconf, buffer),
+               (const char *)cf + offsetof(tconf, buffer),
+               sizeof(tconf) - offsetof(tconf, buffer));
         Py_XINCREF(n->buffer);
         Py_XINCREF(n->encoding);
         Py_XINCREF(n->errors);
