@@ -2958,6 +2958,11 @@ cookie_build(Py_off_t pos, dflags_t flags, Py_ssize_t skip)
                         "the decoder's state doesn't fit a tell() cookie");
         return NULL;
     }
+    if (skip > INT32_MAX) {
+        PyErr_SetString(PyExc_OverflowError,
+                        "too many characters to skip for a tell() cookie");
+        return NULL;
+    }
     unsigned char b[COOKIE_BUF_LEN] = {0};
     uint64_t f[3] = {(uint64_t)pos, flags.fresh ? 0 : flags.v, 0};
     for (int i = 0; i < 8; i++) {
@@ -3421,7 +3426,7 @@ _io_TextIOWrapper_close_impl(textio *self)
     if (r != 0 || conf_peek(self) != cf) {
         /* Closed, or detached or set up again meanwhile. */
         conf_put(cf);
-        return r < 0 ? NULL : Py_None;
+        return r < 0 ? NULL : Py_NewRef(Py_None);
     }
     PyObject *buffer = cf->buffer;
     if (self->finalizing) {
@@ -3742,7 +3747,8 @@ validate_newline(const char *newline)
     if (newline && newline[0] != '\0'
         && !(newline[0] == '\n' && newline[1] == '\0')
         && !(newline[0] == '\r' && newline[1] == '\0')
-        && !(newline[0] == '\r' && newline[1] == '\n' && newline[2] == '\0')) {
+        && !(newline[0] == '\r' && newline[1] == '\n' && newline[2] == '\0'))
+    {
         PyErr_Format(PyExc_ValueError,
                      "illegal newline value: %s", newline);
         return -1;
