@@ -554,6 +554,89 @@ class TextIOWrapperTest:
                     self.multi_line_test(f, enc)
                 f.close()
 
+    def test_truncate_after_read(self):
+        # gh-70346: truncate() without a size cuts at the text position,
+        # where the next write would go, not where the buffer read up to.
+        text = "line one\nline two\nline three\n"
+        for enc in ("ascii", "latin-1", "utf-8", "utf-16", "utf-7"):
+            with self.subTest(encoding=enc):
+                with self.open(os_helper.TESTFN, "w", encoding=enc) as f:
+                    f.write(text)
+                with self.open(os_helper.TESTFN, "r+", encoding=enc) as f:
+                    self.assertEqual(f.readline(), "line one\n")
+                    pos = f.tell()
+                    f.truncate()
+                    self.assertEqual(f.tell(), pos)
+                    self.assertEqual(f.read(), "")
+                    f.write("X")
+                with self.open(os_helper.TESTFN, "r", encoding=enc) as f:
+                    self.assertEqual(f.read(), "line one\nX")
+        # An explicit size is a byte count; the text after the position up
+        # to it is still read.
+        with self.open(os_helper.TESTFN, "w", encoding="ascii") as f:
+            f.write(text)
+        with self.open(os_helper.TESTFN, "r+", encoding="ascii") as f:
+            self.assertEqual(f.read(3), "lin")
+            self.assertEqual(f.truncate(12), 12)
+            self.assertEqual(f.tell(), 3)
+            self.assertEqual(f.read(), "e one\nlin")
+        # A file larger than a decoded chunk.
+        big = "".join(f"line {i:05}\n" for i in range(3000))
+        with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.write(big)
+        with self.open(os_helper.TESTFN, "r+", encoding="utf-8") as f:
+            self.assertEqual(f.readline(), "line 00000\n")
+            f.truncate()
+        with self.open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(), b"line 00000\n")
+        # While iterating, next() disables tell(): truncate() raises like
+        # it, instead of cutting at the wrong place.
+        with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.write(big)
+        with self.open(os_helper.TESTFN, "r+", encoding="utf-8") as f:
+            self.assertEqual(next(f), "line 00000\n")
+            self.assertRaises(OSError, f.tell)
+            self.assertRaises(OSError, f.truncate)
+
+    def test_truncate_below_position(self):
+        # As for binary files, the position is not changed: reads return
+        # nothing, and a write lands at the position, after a gap of zero
+        # bytes.
+        text = "0123456789\nabcdefghij\n"
+        for enc in ("utf-8", "utf-16-le", "utf-16"):
+            for prep in ("read", "readline", "write", "seek", "readall"):
+                with self.subTest(encoding=enc, prep=prep):
+                    with self.open(os_helper.TESTFN, "w", encoding=enc) as f:
+                        f.write(text)
+                    with self.open(os_helper.TESTFN, "rb") as f:
+                        data = f.read()
+                    with self.open(os_helper.TESTFN, "r+", encoding=enc) as f:
+                        if prep == "read":
+                            f.read(8)
+                        elif prep == "readline":
+                            f.readline()
+                            f.read(1)
+                        elif prep == "write":
+                            f.read(0)
+                            f.write("x" * 4)
+                        elif prep == "seek":
+                            f.read(8)
+                            f.seek(f.tell())
+                        else:
+                            f.read()
+                        pos = f.tell()
+                        self.assertEqual(f.truncate(3), 3)
+                        self.assertEqual(f.tell(), pos)
+                        self.assertEqual(f.read(), "")
+                        self.assertEqual(f.write("Z"), 1)
+                    with self.open(os_helper.TESTFN, "rb") as f:
+                        got = f.read()
+                    zlen = 1 if enc == "utf-8" else 2
+                    self.assertEqual(len(got), pos + zlen)
+                    self.assertEqual(got[3:pos], b"\0" * (pos - 3))
+                    if prep != "write":
+                        self.assertEqual(got[:3], data[:3])
+
     def multi_line_test(self, f, enc):
         f.seek(0)
         f.truncate()

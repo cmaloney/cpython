@@ -2656,9 +2656,15 @@ class TextIOWrapper(TextIOBase):
             decoder.setstate(saved_state)
 
     def truncate(self, pos=None):
-        self.flush()
-        if pos is None:
-            pos = self.tell()
+        # After a read, the buffer is past the text position: seek(tell())
+        # first, so that the buffer is where the next write would go
+        # (gh-70346).  Both flush.  pos is a byte count, not a tell()
+        # cookie.
+        if self._seekable and (self._decoded_chars or
+                               self._snapshot is not None):
+            self.seek(self.tell())
+        else:
+            self.flush()
         return self.buffer.truncate(pos)
 
     def detach(self):
