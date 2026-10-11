@@ -65,3 +65,5 @@ Modules
 ---
 
 - [asyncio](asyncio.md)
+
+- [The _io._nibbler buffered classes](io_nibbler.md)
