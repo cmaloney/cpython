@@ -1657,12 +1657,16 @@ static int _textiowrapper_writeflush(textio *self);
    what it still held, for close() and detach().  Only after it encoded
    text since it was created or reset: the built-in fast encoders
    (encodefunc) hold nothing, and a fresh or reset encoder may begin with
-   a BOM. */
+   a BOM.  The text already encoded goes to the buffer first, so that it
+   is not lost if the final encode raises. */
 static int
 textiowrapper_finish_encoder(textio *self)
 {
     if (self->encoder == NULL || !self->enc_fed) {
         return 0;
+    }
+    if (_textiowrapper_writeflush(self) < 0) {
+        return -1;
     }
     self->enc_fed = 0;
     PyObject *b = PyObject_CallMethodObjArgs(
@@ -1677,11 +1681,8 @@ textiowrapper_finish_encoder(textio *self)
         Py_DECREF(b);
         return -1;
     }
-    PyObject *res = NULL;
-    if (PyBytes_GET_SIZE(b) == 0) {
-        res = Py_None;
-    }
-    else if (_textiowrapper_writeflush(self) == 0) {
+    PyObject *res = Py_None;
+    if (PyBytes_GET_SIZE(b) > 0) {
         res = buffer_callmethod_onearg(self, &_Py_ID(write), b);
         Py_XDECREF(res);
     }

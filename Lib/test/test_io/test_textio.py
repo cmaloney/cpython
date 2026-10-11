@@ -2063,6 +2063,23 @@ class TextIOWrapperTest:
         self.assertIs(t.detach(), b)
         self.assertEqual(b.getvalue(), b"www.somesite.com")
 
+    def test_close_final_encode_error_keeps_written_text(self):
+        # Text written before close() reaches the buffer even when the
+        # encoder's final step raises: idna holds the last label until
+        # final=True and then finds it too long.
+        class Recorder(self.BytesIO):
+            def close(self):
+                self.final = self.getvalue()
+                super().close()
+        b = Recorder()
+        t = self.TextIOWrapper(b, encoding="idna")
+        t.write("abc.")
+        t.write("x" * 70)
+        with self.assertRaises(UnicodeError):
+            t.close()
+        self.assertTrue(b.closed)
+        self.assertEqual(b.final, b"abc.")
+
     def test_close_without_writes_writes_no_bom(self):
         # close() gives final=True only to an encoder that encoded text
         # since it was made or reset (by seek()): a reset encoder with a
