@@ -506,9 +506,6 @@ class BufferedReaderTest(CommonBufferedTests):
     def test_readline_would_block_long_partial_line(self):
         # A partial line is kept up to the buffer size; a longer one is
         # returned as it is, with or without a size.
-        if self.is_nibbler:
-            self.skipTest("_io._nibbler keeps up to 64 times the buffer "
-                          "size")
         for size in -1, 100:
             with self.subTest(size=size):
                 rawio = self.MockRawIO((b"x" * 16, None, b"y\n"))
@@ -1846,9 +1843,98 @@ class PyBufferedRandomTest(BufferedRandomTest, PyTestCase):
 class NibblerBufferedReaderTest(NibblerMixin, CBufferedReaderTest):
     tp = _nibbler.BufferedReader
 
+    def test_keeps_read_on_error_marker(self):
+        # The reading classes say that they keep data read before a raw
+        # read raised (socket.makefile() looks at it).
+        for cls in (_nibbler.BufferedReader, _nibbler.BufferedRandom,
+                    _nibbler.BufferedRWPair):
+            self.assertIs(cls._keeps_read_on_error, True)
+        self.assertNotHasAttr(_nibbler.BufferedWriter, '_keeps_read_on_error')
+
+    def test_readinto_python_buffer(self):
+        # readinto() into a class with __buffer__ (PEP 688), also when the
+        # read goes straight to a raw stream other than FileIO.
+        class Buf:
+            def __init__(self, size):
+                self.ba = bytearray(size)
+            def __buffer__(self, flags):
+                return memoryview(self.ba)
+            def __release_buffer__(self, view):
+                view.release()
+        for size in (8, 64):
+            with self.subTest(size=size):
+                rawio = self.MockRawIO([b'x' * 100])
+                bufio = self.tp(rawio, 16)
+                buf = Buf(size)
+                self.assertEqual(bufio.readinto(buf), size)
+                self.assertEqual(buf.ba, b'x' * size)
+                self.assertEqual(bufio.read(), b'x' * (100 - size))
+
 
 class NibblerBufferedWriterTest(NibblerMixin, CBufferedWriterTest):
     tp = _nibbler.BufferedWriter
+
+    def test_stdout_in_cycle_at_exit(self):
+        # The final garbage collection may clear the module before a
+        # buffered object in a cycle with it; dealloc still uses the
+        # module's state.
+        import os, subprocess
+        env = dict(os.environ, _PYTHON_IO_DEFAULT_IMPL='_nibbler')
+        proc = subprocess.run(
+            [sys.executable, '-c',
+             'import sys; sys.stdout.cycle = sys.stdout; print("x")'],
+            env=env, capture_output=True, timeout=support.SHORT_TIMEOUT)
+        self.assertEqual((proc.returncode, proc.stdout), (0, b'x\n'))
+
+    def test_failed_reinit_writes_pending_data(self):
+        # __init__() with a raw stream it can't use writes what is pending
+        # to the old one first, then raises.
+        old = self.MockRawIO()
+        bufio = self.tp(old, 16)
+        bufio.write(b'abc')
+        new = self.MockRawIO()
+        new.writable = lambda: False
+        self.assertRaises(self.UnsupportedOperation, bufio.__init__, new)
+        self.assertEqual(old._write_stack, [b'abc'])
+        self.assertRaises(ValueError, bufio.write, b'x')
+
+    def test_raw_keeps_view_of_written_data(self):
+        # A raw stream keeping a view made from the one it is given keeps
+        # the data of the write() valid, through the caller's object.
+        kept = []
+        class Raw(self.MockRawIO):
+            def write(self, b):
+                kept.append(b[1:])
+                return len(b)
+        for size in (16, 0):
+            kept.clear()
+            data = bytearray(b'A' * 100000)
+            bufio = self.tp(Raw(), size)
+            bufio.write(data)
+            self.assertEqual(len(kept), 1)
+            view = kept[0]
+            self.assertIs(view.obj, data)
+            # The bytearray can't be resized while the view is kept.
+            with self.assertRaises(BufferError):
+                del data[:]
+            self.assertEqual(view.tobytes(), b'A' * 99999)
+            kept.clear()
+            view.release()
+            del data[:]
+
+    def test_raw_keeps_view_of_written_text(self):
+        kept = []
+        class Raw(self.MockRawIO):
+            def write(self, b):
+                kept.append(b[1:])
+                return len(b)
+        text = self.TextIOWrapper(self.tp(Raw(), 16), encoding='ascii')
+        n = 100000
+        text.write('A' * n)
+        text.flush()
+        del text
+        junk = [bytes(100000) for _ in range(5)]
+        self.assertEqual(b''.join(kept), b'A' * 99999)
 
 
 class NibblerBufferedRWPairTest(NibblerMixin, CBufferedRWPairTest):
@@ -1857,6 +1943,17 @@ class NibblerBufferedRWPairTest(NibblerMixin, CBufferedRWPairTest):
 
 class NibblerBufferedRandomTest(NibblerMixin, CBufferedRandomTest):
     tp = _nibbler.BufferedRandom
+
+    def test_seek_target_uses_object(self):
+        # The target is converted before the lock is taken: its
+        # __index__() can use the object, as with _io.
+        bufio = self.tp(self.BytesIO(b'0123456789'))
+        bufio.read(5)
+        class Target:
+            def __index__(self):
+                return bufio.tell() - 2
+        self.assertEqual(bufio.seek(Target()), 3)
+        self.assertEqual(bufio.read(2), b'34')
 
 
 # Simple test to ensure that optimizations in the IO library deliver the

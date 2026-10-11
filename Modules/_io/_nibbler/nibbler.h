@@ -77,6 +77,10 @@ typedef struct nibbler {
        the front given to a raw call. */
     nibbler_mutex io;
     Py_ssize_t inflight;
+    /* Set, with the I/O role, when it was taken over (see "Locking") but
+       the lock could not be had to drop the bytes in flight: the next
+       holder of both drops them. */
+    uint8_t drop_inflight;
 
     /* The block size, which reads fill and small appends are copied into.
        Also read without the lock (FT_ATOMIC relaxed). */
@@ -98,6 +102,9 @@ typedef struct nibbler {
 #endif
     /* NULL for none.  Also read without the lock, see "The open end". */
     struct nibbler_end *end;
+    /* Set by the caller: keep the reading end held when the lock is
+       released, so that reads go through the lock. */
+    uint8_t hold_reading;
     /* How many ends were made (see nibbler_end.id). */
     uint64_t ends;
     /* The nibbler_set it is in (NULL for none); in it, the next one and
@@ -360,11 +367,12 @@ nibbler_open(nibbler *n)
     if (!e->writing) {
         /* At the unread bytes. */
         p = ~FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
-        if (e->done > p) {
+        if (e->done > p || n->hold_reading) {
             /* A readline() found no end of line in the unread bytes (see
                nibbler_noline()): stay held, so that reads without the lock
                fail (lines would be looked for in those bytes again), and
-               go through the lock until they are taken. */
+               go through the lock until they are taken.  Also while the
+               caller wants that. */
             return;
         }
     }
@@ -640,6 +648,7 @@ nibbler_drop_inflight(nibbler *n)
 {
     (void)morsels_consume(&n->list, n->inflight);
     n->inflight = 0;
+    n->drop_inflight = 0;
 }
 
 /* Take the I/O role, then the lock; a signal handler raising interrupts
@@ -652,10 +661,15 @@ nibbler_lock_io(nibbler *n, PyObject *obj)
         return -1;
     }
     if (nibbler_lock(n, obj) < 0) {
+        /* Only a reentrant call fails while finalizing: this thread holds
+           the lock further up its stack, in the middle of something. */
+        if (taken_over) {
+            n->drop_inflight = 1;
+        }
         nibbler_mutex_unlock(&n->io);
         return -1;
     }
-    if (taken_over) {
+    if (taken_over || n->drop_inflight) {
         nibbler_drop_inflight(n);
     }
     return 0;
@@ -713,6 +727,9 @@ nibbler_take_io(nibbler *n, PyObject *obj)
 {
     PyThreadState *tstate = _PyThreadState_GET();
     if (nibbler_mutex_trylock(&n->io, tstate)) {
+        if (n->drop_inflight) {
+            nibbler_drop_inflight(n);
+        }
         return NIBBLER_IO_TAKEN;
     }
     return nibbler_take_io_wait(n, obj, tstate);
@@ -1233,15 +1250,27 @@ nibbler_mutex_after_fork(nibbler_mutex *m, PyThreadState *tstate)
 
 /* In the child of a fork, where only this thread is left: release the
    mutexes that other threads held, dropping what a gone holder of the I/O
-   role was writing out (see "Locking"). */
+   role was writing out (see "Locking").
+
+   Dropping morsels needs the end held: a gone thread writing out without
+   the lock left it open, and a lock-free append in the child would
+   otherwise go after morsels that are gone.  Unless this thread holds the
+   lock (then the end is held already), the lock is taken here, in effect:
+   hold the end, drop, and open it again as releasing the lock does. */
 static void
 nibbler_set_after_fork(nibbler_set *s)
 {
     PyThreadState *tstate = _PyThreadState_GET();
     for (nibbler *n = s->first; n != NULL; n = n->next) {
-        (void)nibbler_mutex_after_fork(&n->lock, tstate);
+        int locked = !nibbler_mutex_after_fork(&n->lock, tstate);
+        if (!locked) {
+            nibbler_hold(n);
+        }
         if (nibbler_mutex_after_fork(&n->io, tstate)) {
             nibbler_drop_inflight(n);
+        }
+        if (!locked) {
+            nibbler_open(n);
         }
     }
 }

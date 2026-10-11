@@ -25,6 +25,7 @@ import textwrap
 import threading
 import time
 import unittest
+import warnings
 
 from test import support
 from test.support import import_helper, os_helper, threading_helper
@@ -494,6 +495,80 @@ class SlowDeviceTest:
                     self.assertEqual(got + f.read(), data[5:], start)
                 self.assertGreater(failures, 0)
 
+    def test_write_memory_error_after_partial_write(self):
+        # write() wrote part of its data, then the raw stream would block
+        # and keeping the rest fails for lack of memory: the MemoryError
+        # says how much was written.
+        if not self.is_nibbler:
+            self.skipTest("no characters_written")
+        _testcapi = import_helper.import_module('_testcapi')
+
+        class Raw(self.RawIOBase):
+            calls = 0
+            def writable(self):
+                return True
+            def write(self, b):
+                self.calls += 1
+                if self.calls == 1:
+                    return 60
+                _testcapi.set_nomemory(0, 1)
+                return None
+
+        f = self.BufferedWriter(Raw(), 16)
+        try:
+            f.write(bytearray(100))
+        except MemoryError as exc:
+            _testcapi.remove_mem_hooks()
+            self.assertEqual(exc.characters_written, 60)
+        except BlockingIOError as exc:
+            # Keeping the rest didn't need memory after all.
+            _testcapi.remove_mem_hooks()
+            self.assertEqual(exc.characters_written, 76)
+        finally:
+            _testcapi.remove_mem_hooks()
+
+    def test_fill_memory_error_keeps_raw_error(self):
+        # A raw read raising, then keeping the partial line failing for
+        # lack of memory: the raw error is the MemoryError's context.
+        if not self.is_nibbler:
+            self.skipTest("no partial line is kept")
+        _testcapi = import_helper.import_module('_testcapi')
+
+        class Raw(self.RawIOBase):
+            def __init__(self, start):
+                self.calls = 0
+                self.start = start
+            def readable(self):
+                return True
+            def readinto(self, b):
+                self.calls += 1
+                if self.calls == 1:
+                    b[:12] = b'x' * 12
+                    return 12
+                exc = OSError("raw failed")
+                # The start-th allocation fails: for some start, one
+                # made to keep the partial line.
+                _testcapi.set_nomemory(self.start, self.start + 1)
+                raise exc
+
+        # Only an allocation of the raise itself may lose the raw error:
+        # every later MemoryError has it as context.
+        lost = []
+        for start in range(100):
+            f = self.BufferedReader(Raw(start), 16)
+            self.assertEqual(f.read(10), b'x' * 10)
+            try:
+                f.readline()
+            except MemoryError as exc:
+                _testcapi.remove_mem_hooks()
+                if not isinstance(exc.__context__, OSError):
+                    lost.append(start)
+            except OSError:
+                pass
+            finally:
+                _testcapi.remove_mem_hooks()
+        self.assertLessEqual(len(lost), 1, lost)
+
     def test_readline_long_line_trickling_in_is_linear(self):
         # A line that arrives a little at a time, the raw stream blocking in
         # between, is kept by readline() (which returns None) until it is
@@ -521,7 +596,8 @@ class SlowDeviceTest:
 
         def read_line(size):
             line = b"x" * (size - 1) + b"\n"
-            f = self.BufferedReader(Trickle(line), 1 << 16)
+            # A buffer the size of the line: the partial line is kept.
+            f = self.BufferedReader(Trickle(line), size)
             start = time.perf_counter()
             while (got := f.readline()) is None:
                 pass
@@ -2125,10 +2201,16 @@ class ReentrantCallTest:
                     pass
                 return 0
 
-        with self.assertRaises(BlockingIOError):
-            f.seek(Target())
+        # The target is converted before seek() takes the lock, so the
+        # close() in it runs: writing out would block, and the rest of the
+        # buffer is discarded (with a warning).
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with self.assertRaises(BlockingIOError):
+                f.seek(Target())
+        self.assertTrue(f.closed)
         f.close()
-        self.assertEqual(raw.out, b"ABCD")
+        self.assertEqual(raw.out, b"ABC")
 
 
 class CReentrantCallTest(ReentrantCallTest, CTestCase):
@@ -2322,6 +2404,54 @@ class LockReleaseTest:
                 self.assertGreater(n, last.get(t, -1))
                 last[t] = n
 
+    @threading_helper.requires_working_threading()
+    def test_shutdown_takeover_in_reentrant_call(self):
+        # While finalizing, a call made with the lock held (from raw.closed
+        # here) takes the I/O role over from a daemon thread blocked writing
+        # out, but can't have the lock, and raises.  The bytes in flight
+        # given to the gone thread are dropped by the next holder of both.
+        code = """
+            import sys
+            from threading import Thread
+
+            GATED = {'write'}
+
+            class Raw(GatedRaw):
+                calls = 0
+
+                @property
+                def closed(self, sys=sys):
+                    if sys.is_finalizing() and not self.calls:
+                        self.calls += 1
+                        try:
+                            f.tell()
+                        except RuntimeError:
+                            os.write(1, b'reentrant ')
+                    return False
+
+            f = BufferedRandom(Raw(), 16)
+
+            class Out:
+                def write(self, s):
+                    return len(s)
+
+                def flush(self, f=f, sys=sys):
+                    if sys.is_finalizing():
+                        f.write(b'late')
+                        f.tell()
+                        f.flush()
+
+            sys.stdout = Out()
+
+            def holder():
+                f.write(b'D' * 10)
+                f.flush()
+
+            Thread(target=holder, daemon=True).start()
+            entered.wait()
+            """
+        self.assertEqual(self.run_child(code), (0, b"reentrant late", ""))
+
     def check_fork(self, gated, holder_op):
         code = f"""
             import warnings
@@ -2358,6 +2488,83 @@ class LockReleaseTest:
         # The gone thread holds the I/O role, in a raw write() made without
         # the lock.
         self.check_fork('write', "f.write(b'.'); f.flush()")
+
+    @threading_helper.requires_working_threading()
+    @support.requires_fork()
+    def test_fork_with_earlier_after_fork_hook(self):
+        # The locks are released before any Python after-fork hook runs,
+        # also one registered before the first buffered object was made.
+        code = """
+            import signal, warnings
+            from threading import Thread
+            warnings.simplefilter('ignore', DeprecationWarning)
+
+            GATED = {'readinto'}
+
+            def child_hook():
+                signal.alarm(10)    # in case it hangs
+                os.write(1, b'tell %d ' % f.tell())
+
+            os.register_at_fork(after_in_child=child_hook)
+            f = BufferedRandom(GatedRaw())
+            Thread(target=f.read, args=(1,), daemon=True).start()
+            entered.wait()
+            pid = os.fork()
+            if pid == 0:
+                os._exit(0)
+            status = os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])
+            os.write(1, b'exit %d' % status)
+            """
+        self.assertEqual(self.run_child(code), (0, b"tell 0 exit 0", ""))
+
+    @threading_helper.requires_working_threading()
+    @support.requires_fork()
+    def test_fork_while_other_thread_writes_out_to_fileio(self):
+        # The gone thread writes out to a FileIO without the lock, which
+        # leaves the writing end open: the child drops the bytes in flight
+        # with the end held, so that its lock-free writes and its next
+        # holds of the lock see consistent morsels.
+        code = """
+            import threading, time, warnings
+            from _io._nibbler import BufferedWriter
+            warnings.simplefilter('ignore', DeprecationWarning)
+
+            r, w = os.pipe()
+            f = BufferedWriter(io.FileIO(w, 'w', closefd=False), 8192)
+            f.write(b'a' * 100)     # opens the writing end
+            f.write(b'b' * 100)     # lock-free
+            os.set_blocking(w, False)
+            try:
+                while True:
+                    os.write(w, b'z' * 4096)
+            except BlockingIOError:
+                pass
+            os.set_blocking(w, True)
+            # Past the buffer size: writes out, and blocks on the full pipe.
+            threading.Thread(target=f.write, args=(b'x' * 10000,),
+                             daemon=True).start()
+            time.sleep(0.2)
+            pid = os.fork()
+            if pid == 0:
+                f.write(b'y' * 10)  # lock-free
+                os.set_blocking(r, False)
+                try:
+                    while os.read(r, 65536):
+                        pass
+                except BlockingIOError:
+                    pass
+                f.flush()
+                os._exit(0)
+            status = os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])
+            os.write(1, b'exit %d' % status)
+            os.set_blocking(r, False)
+            try:
+                while os.read(r, 65536):
+                    pass
+            except BlockingIOError:
+                pass
+            """
+        self.assertEqual(self.run_child(code), (0, b"exit 0", ""))
 
     @threading_helper.requires_working_threading()
     @support.requires_fork()

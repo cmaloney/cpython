@@ -703,7 +703,7 @@ class NibblerReinitTest(TestCase):
         t = io.TextIOWrapper(f, encoding="utf-8", write_through=True)
 
         def gather():
-            with f.gather():
+            with f._gather():
                 f.write(b"g" * 600)
 
         users = [lambda: f.write(b"x" * 10),
@@ -799,3 +799,31 @@ class SetOpenImplTest(TestCase):
                 _io._set_unbuffered_impl("_nibbler" if i % 2 else "_io")
 
         run_concurrently([opener] * 3 + [switcher])
+
+    def test_set_impl_returns_previous(self):
+        # Each call returns the name it replaced: of all the names set and
+        # the first one, those replaced and the last one are the same.
+        import _io
+        from collections import Counter
+        for func in _io._set_open_impl, _io._set_unbuffered_impl:
+            with self.subTest(func=func.__name__):
+                first = func("_io")
+                self.addCleanup(func, first)
+                names = Counter()
+                returned = Counter()
+                lock = threading.Lock()
+
+                def switcher(i):
+                    mine, got = Counter(), Counter()
+                    for k in range(500):
+                        name = "_nibbler" if (i + k) % 2 else "_io"
+                        mine[name] += 1
+                        got[func(name)] += 1
+                    with lock:
+                        names.update(mine)
+                        returned.update(got)
+
+                run_concurrently([lambda i=i: switcher(i) for i in range(4)])
+                last = func("_io")
+                self.assertEqual(returned + Counter([last]),
+                                 names + Counter(["_io"]))

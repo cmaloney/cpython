@@ -375,16 +375,16 @@ class UnlimitedTest(unittest.TestCase):
             self.assertEqual(t.buffer.tell(), 4)
         self.assertEqual(self.read(), b'abc\n')
 
-    # gather() inside an unlimited buffer.
+    # _gather() inside an unlimited buffer.
 
     def test_gather(self):
         with self.writer() as f:
             f.write(b'a')
-            with f.gather(limit=10):
+            with f._gather(limit=10):
                 f.write(b'b' * 100)
                 f.write(b'c' * MiB)
             self.assertEqual(self.size(), 0)
-            with f.gather():
+            with f._gather():
                 f.write(b'd')
                 f.flush()
                 self.assertEqual(self.size(), 0)
@@ -484,6 +484,19 @@ class OpenUnlimitedTest(unittest.TestCase):
                     open(self.path, mode, buffering=None)
                 # Raised before opening: not truncated.
                 self.assertEqual(self.read(), b'old')
+
+    def test_switched_while_opening(self):
+        # The class checked before the file is opened is the one used, also
+        # when _io._set_open_impl() replaces it meanwhile (here from the
+        # opener, called in between).
+        self.nibbler()
+        def opener(path, flags):
+            _io._set_open_impl('_io')
+            return os.open(path, flags)
+        with open(self.path, 'wb', buffering=None, opener=opener) as f:
+            self.assertIs(type(f), _nibbler.BufferedWriter)
+            f.write(b'new')
+        self.assertEqual(self.read(), b'new')
 
     def test_binary(self):
         self.nibbler()

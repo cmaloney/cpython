@@ -814,6 +814,9 @@ PyOS_AfterFork_Child(void)
         goto fatal_error;
     }
 
+    // Before any Python hook, which may use the buffered objects.
+    _PyIO_AfterForkChild();
+
     run_at_forkers(tstate->interp->after_forkers_child, 0);
     return;
 
