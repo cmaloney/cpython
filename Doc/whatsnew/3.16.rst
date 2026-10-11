@@ -1088,9 +1088,13 @@ that may require changes to your code.
     and :class:`io.BufferedRWPair`) return ``None`` instead of ``b""`` or
     ``0`` when the raw stream would block.  ``b""`` now always means end of
     file.
+  * Binary :meth:`~io.IOBase.readline` returns ``None`` when the end of the
+    line hasn't arrived yet, instead of returning the partial line, which is
+    kept for the next call.  Iteration raises :exc:`BlockingIOError` instead
+    of stopping, and :meth:`~io.IOBase.readlines` may return ``None``.
 
-  Code that polls a non-blocking stream should treat ``None`` as "try again
-  later".
+  Code that polls a non-blocking stream should treat ``None`` and
+  :exc:`BlockingIOError` as "try again later".
   (Contributed by Cody Maloney in :gh:`57531`.)
 
 * In :mod:`tkinter`, the *name* parameter of the

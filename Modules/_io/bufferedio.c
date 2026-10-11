@@ -903,6 +903,18 @@ _buffered_init(buffered *self)
     return 0;
 }
 
+void
+_PyIO_set_read_blocking_error(void)
+{
+    PyObject *err = PyObject_CallFunction(
+        PyExc_BlockingIOError, "is", EAGAIN,
+        "read could not complete without blocking");
+    if (err != NULL) {
+        PyErr_SetObject(PyExc_BlockingIOError, err);
+        Py_DECREF(err);
+    }
+}
+
 /* Return 1 if an OSError with errno == EINTR is set (and then
    clears the error indicator), 0 otherwise.
    Should only be called when PyErr_Occurred() is true.
@@ -1337,6 +1349,20 @@ _buffered_readline(buffered *self, Py_ssize_t limit)
         if (n == -1) {
             goto error;
         }
+        if (n == -2 && PyBytesWriter_GetSize(writer) <= self->buffer_size) {
+            /* Would block before the end of the line: keep what there is
+               of it in the buffer, which is empty, for the next call, and
+               return None.  The buffer size bounds what is kept, with or
+               without a size: a longer partial line is returned. */
+            Py_ssize_t size = PyBytesWriter_GetSize(writer);
+            memcpy(self->buffer, PyBytesWriter_GetData(writer), size);
+            self->pos = 0;
+            self->read_end = size;
+            self->raw_pos = size;
+            PyBytesWriter_Discard(writer);
+            LEAVE_BUFFERED(self)
+            Py_RETURN_NONE;
+        }
         if (n <= 0) {
             break;
         }
@@ -1605,7 +1631,7 @@ buffered_iternext(PyObject *op)
     else {
         line = PyObject_CallMethodNoArgs((PyObject *)self,
                                              &_Py_ID(readline));
-        if (line && !PyBytes_Check(line)) {
+        if (line && line != Py_None && !PyBytes_Check(line)) {
             PyErr_Format(PyExc_OSError,
                          "readline() should have returned a bytes object, "
                          "not '%.200s'", Py_TYPE(line)->tp_name);
@@ -1616,6 +1642,12 @@ buffered_iternext(PyObject *op)
 
     if (line == NULL)
         return NULL;
+    if (line == Py_None) {
+        /* Would block: StopIteration would end the loop for good. */
+        Py_DECREF(line);
+        _PyIO_set_read_blocking_error();
+        return NULL;
+    }
 
     if (PyBytes_GET_SIZE(line) == 0) {
         /* Reached EOF or would have blocked */
@@ -2524,6 +2556,20 @@ _io_BufferedRWPair_peek_impl(rwpair *self, PyObject *size)
 }
 
 /*[clinic input]
+_io.BufferedRWPair.readline
+    size: object(c_default="NULL") = -1
+    /
+[clinic start generated code]*/
+
+static PyObject *
+_io_BufferedRWPair_readline_impl(rwpair *self, PyObject *size)
+/*[clinic end generated code: output=ee5bb2364231e6e1 input=d29b33e6efa2f69e]*/
+{
+    /* The reader's, which can keep a partial line for the next call. */
+    return _forward_call(self->reader, &_Py_ID(readline), size);
+}
+
+/*[clinic input]
 _io.BufferedRWPair.read1
     size: object(c_default="NULL") = -1
     /
@@ -2879,6 +2925,7 @@ static PyMethodDef bufferedrwpair_methods[] = {
     _IO_BUFFEREDRWPAIR_READ_METHODDEF
     _IO_BUFFEREDRWPAIR_PEEK_METHODDEF
     _IO_BUFFEREDRWPAIR_READ1_METHODDEF
+    _IO_BUFFEREDRWPAIR_READLINE_METHODDEF
     _IO_BUFFEREDRWPAIR_READINTO_METHODDEF
     _IO_BUFFEREDRWPAIR_READINTO1_METHODDEF
 
