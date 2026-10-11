@@ -331,6 +331,11 @@ I/O base classes
    stream is a binary stream (yielding bytes), or a text stream (yielding
    character strings).  See :meth:`~IOBase.readline` below.
 
+   .. versionchanged:: next
+      On a non-blocking stream, iteration raises :exc:`BlockingIOError`
+      instead of stopping when the next line hasn't arrived yet (see
+      :ref:`io-non-blocking`).
+
    :class:`IOBase` is also a context manager and therefore supports the
    :keyword:`with` statement.  In this example, *file* is closed after the
    :keyword:`!with` statement's suite is finished---even if an exception occurs::
@@ -393,9 +398,11 @@ I/O base classes
       For non-blocking streams, see :ref:`io-non-blocking`.
 
       .. versionchanged:: next
-         On a non-blocking stream, buffered and text streams keep a partial
-         line for the next call; binary streams return ``None`` and text
-         streams raise :exc:`BlockingIOError` instead of returning it.
+         On a non-blocking stream, buffered binary streams return ``None``,
+         and text streams raise :exc:`BlockingIOError`, instead of returning
+         a partial line; they keep it for the next call.  Text streams also
+         keep it when reading the rest of the line raises :exc:`OSError` or
+         :exc:`KeyboardInterrupt`.
 
    .. method:: readlines(hint=-1, /)
 
@@ -408,6 +415,12 @@ I/O base classes
 
       Note that it's already possible to iterate on file objects using ``for
       line in file: ...`` without calling :meth:`!file.readlines`.
+
+      .. versionchanged:: next
+         On a non-blocking stream, the complete lines that have arrived are
+         returned and a partial last line is kept for the next call; with no
+         complete line, buffered binary streams return ``None`` and text
+         streams raise :exc:`BlockingIOError`.
 
    .. method:: seek(offset, whence=os.SEEK_SET, /)
 
@@ -949,6 +962,15 @@ Text I/O
       Read and return at most *size* characters from the stream as a single
       :class:`str`.  If *size* is negative or ``None``, reads until EOF.
 
+      For non-blocking streams, see :ref:`io-non-blocking`.
+
+      .. versionchanged:: next
+         On a non-blocking stream, :class:`TextIOWrapper` raises
+         :exc:`BlockingIOError` instead of returning ``""`` when no
+         character is available, and keeps the first bytes of a character
+         that has only partly arrived for the next read, also without a
+         *size* (which raised :exc:`UnicodeDecodeError`).
+
    .. method:: readline(size=-1, /)
 
       Read until newline or EOF and return a single :class:`str`.  If the stream is
@@ -1266,15 +1288,18 @@ Reading:
   :meth:`~TextIOBase.readline` and iteration also raise
   :exc:`BlockingIOError` if the end of the line (or *size* characters) has
   not arrived yet, and keep what has arrived of the line for the next call.
-  A partial line longer than 8192 characters (the size in which text is
-  read) is not kept but returned as it is.  :meth:`~IOBase.readlines`
+  A partial line longer than the size in which the stream reads (its chunk
+  size, 8192 by default) is not kept but returned as it is.  :meth:`~IOBase.readlines`
   returns the complete lines that have arrived, keeping a partial last line
   for the next call, and raises :exc:`BlockingIOError` if there are none.
   The bytes of a character that has only partly arrived are kept for the
-  next read.
+  next read, with or without a size.
 
-The same holds when a read raises another error, such as a socket timeout:
-a buffered or text stream that keeps a partial line keeps it then too.
+A text stream also keeps a partial line when reading the rest of it raises
+:exc:`OSError` (such as a socket timeout) or :exc:`KeyboardInterrupt`; other
+errors, such as a decode error, lose it.  Binary :meth:`~IOBase.readline`
+does not keep a partial line when the raw read raises: what it read of the
+line is lost.
 
 Writing:
 
@@ -1311,11 +1336,13 @@ taken and should be written again.  When the error has no such attribute
 because none of the data was written, none of it was taken.
 
 .. versionchanged:: next
-   Buffered :meth:`~BufferedIOBase.read1`, :meth:`~BufferedIOBase.readinto1`
-   and :meth:`~BufferedReader.peek` return ``None`` when the raw stream would
-   block, :meth:`~IOBase.readline` keeps a partial line, iteration raises
-   :exc:`BlockingIOError`, text :meth:`~TextIOBase.read` with a size raises
-   :exc:`BlockingIOError` instead of returning ``""``, and
+   Buffered :meth:`~BufferedIOBase.read1` and :meth:`~BufferedReader.peek`
+   return ``None`` when the raw stream would block (as
+   :meth:`~BufferedIOBase.readinto1` already did), :meth:`~IOBase.readline`
+   keeps a partial line, iteration raises :exc:`BlockingIOError`, text
+   :meth:`~TextIOBase.read` with a size raises :exc:`BlockingIOError` instead
+   of returning ``""``, text :meth:`~TextIOBase.read` without a size keeps a
+   partial character instead of raising :exc:`UnicodeDecodeError`, and
    :meth:`~IOBase.close` discards what it can't write, with a
    :exc:`ResourceWarning`.
 

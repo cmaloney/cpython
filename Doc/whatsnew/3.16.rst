@@ -467,19 +467,19 @@ io
 * Add :meth:`io.BytesIO.peek` method to read without advancing position.
   (Contributed by Marcel Martin in :gh:`90533`.)
 
-* Non-blocking streams report "no data yet" consistently, and no longer
-  lose data that has already arrived: buffered
-  :meth:`~io.BufferedIOBase.read1`, :meth:`~io.BufferedIOBase.readinto1`
-  and :meth:`~io.BufferedReader.peek` return ``None`` when the raw stream
-  would block, :meth:`~io.IOBase.readline` keeps a partial line for the next
-  call, and text reads raise :exc:`BlockingIOError` instead of returning
-  ``""``.  See :ref:`io-non-blocking`.
+* Non-blocking streams report "no data yet" consistently, and keep a
+  partial line that has already arrived: buffered
+  :meth:`~io.BufferedIOBase.read1` and :meth:`~io.BufferedReader.peek`
+  return ``None`` when the raw stream would block,
+  :meth:`~io.IOBase.readline` keeps a partial line for the next call, and
+  text reads raise :exc:`BlockingIOError` instead of returning ``""``.  See
+  :ref:`io-non-blocking`.
   (Contributed by Cody Maloney in :gh:`57531`.)
 
 * When the flush done by :meth:`~io.IOBase.close` of a buffered or text
-  stream fails, the stream is closed anyway and the data still buffered is
-  discarded with a :exc:`ResourceWarning`, instead of being written again by
-  a later :meth:`!close`.
+  stream fails, a :exc:`ResourceWarning` says how much buffered data was
+  discarded, and :meth:`!close` of a text stream no longer tries to write
+  the data a second time through its buffer's :meth:`!close`.
   (Contributed by Cody Maloney in :gh:`83973`.)
 
 
@@ -1098,11 +1098,11 @@ that may require changes to your code.
 
 * On non-blocking streams (see :ref:`io-non-blocking`):
 
-  * :meth:`io.BufferedReader.read1`, :meth:`!readinto1` and
-    :meth:`~io.BufferedReader.peek` (and those of :class:`io.BufferedRandom`
-    and :class:`io.BufferedRWPair`) return ``None`` instead of ``b""`` or
-    ``0`` when the raw stream would block.  ``b""`` now always means end of
-    file.
+  * :meth:`io.BufferedReader.read1` and :meth:`~io.BufferedReader.peek`
+    (and those of :class:`io.BufferedRandom` and :class:`io.BufferedRWPair`)
+    return ``None`` instead of ``b""`` when the raw stream would block, as
+    :meth:`!readinto1` already did (only :mod:`!_pyio` returned ``0``).
+    ``b""`` now always means end of file.
   * Binary :meth:`~io.IOBase.readline` returns ``None``, and text
     :meth:`~io.TextIOBase.readline` raises :exc:`BlockingIOError`, when the
     end of the line hasn't arrived yet, instead of returning the partial
@@ -1119,9 +1119,10 @@ that may require changes to your code.
 
 * :meth:`~io.IOBase.close` of a buffered or text stream whose flush fails
   closes the stream and discards the data still buffered, with a
-  :exc:`ResourceWarning`.  A later :meth:`!close` no longer tries to write
-  it.  Call :meth:`~io.IOBase.flush` until it succeeds before closing to
-  avoid losing data.
+  :exc:`ResourceWarning` that says how much.  :meth:`!close` of a text
+  stream no longer flushes twice (the second time through its buffer's
+  :meth:`!close`).  Call :meth:`~io.IOBase.flush` until it succeeds before
+  closing to avoid losing data.
   (Contributed by Cody Maloney in :gh:`83973`.)
 
 * :func:`print` now calls the *file*'s :meth:`!write` method once per call,
