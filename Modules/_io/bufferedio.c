@@ -2451,21 +2451,17 @@ write_failed:
     if (written > 0) {
         PyObject *exc = PyErr_GetRaisedException();
         Py_ssize_t keep = Py_MIN(remaining, self->buffer_size);
-        if (self->readable)
+        if (self->readable) {
             _bufferedreader_reset_buf(self);
+        }
         memcpy(self->buffer, (char *) buffer->buf + written, keep);
         self->write_pos = 0;
         self->write_end = keep;
         ADJUST_POSITION(self, keep);
         self->raw_pos = 0;
         if (PyErr_GivenExceptionMatches(exc, PyExc_OSError)) {
-            PyObject *n = PyLong_FromSsize_t(written + keep);
-            if (n == NULL
-                || PyObject_SetAttrString(exc, "characters_written", n) < 0)
-            {
-                PyErr_Clear();
-            }
-            Py_XDECREF(n);
+            /* What setting characters_written does; this can't fail. */
+            ((PyOSErrorObject *)exc)->written = written + keep;
         }
         PyErr_SetRaisedException(exc);
     }
