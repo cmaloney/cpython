@@ -1,0 +1,5 @@
+Fix data races in :class:`io.FileIO` on the :term:`free threaded <free
+threading>` build when :meth:`~io.FileIO.close` runs concurrently with other
+methods: they read the file descriptor once, atomically, and use that value.
+Only one of concurrent :meth:`!close` calls now closes the file descriptor;
+the others no longer close it again.
