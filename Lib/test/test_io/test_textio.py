@@ -1066,6 +1066,38 @@ class TextIOWrapperTest:
                             t.seek(pos)
                         self.assertEqual(line + t.read(), expected)
 
+    def test_readline_decode_error_keeps_partial_line(self):
+        # A decode error while reading the rest of a line keeps the part
+        # read before it, but tell() can't work until the next seek():
+        # the buffer is past the bytes that failed.
+        raw = self.MockRawIO((b"ab", b"\xff\n", b"cd\n"))
+        t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
+        self.assertRaises(UnicodeDecodeError, t.readline)
+        self.assertRaises(OSError, t.tell)
+        self.assertEqual(t.readline(), "abcd\n")
+
+    def test_text_readline_error_keeps_partial_line(self):
+        # gh-51571: a raw read that raises (such as a socket timeout) in the
+        # middle of a line loses nothing: the next readline() returns the
+        # whole line.
+        class Raw(self.RawIOBase):
+            def __init__(self, chunks):
+                self.chunks = list(chunks)
+            def readable(self):
+                return True
+            def readinto(self, b):
+                chunk = self.chunks.pop(0) if self.chunks else b""
+                if isinstance(chunk, BaseException):
+                    raise chunk
+                b[:len(chunk)] = chunk
+                return len(chunk)
+        data = "ab\xe9cd\nef".encode()
+        raw = Raw([data[:4], TimeoutError("timed out"), data[4:]])
+        t = self.TextIOWrapper(self.BufferedReader(raw, 16), encoding="utf-8")
+        self.assertRaises(TimeoutError, t.readline)
+        self.assertEqual(t.readline(), "ab\xe9cd\n")
+        self.assertEqual(t.readline(), "ef")
+
     def test_tell_after_next_would_block(self):
         # A BlockingIOError from next() doesn't leave tell() disabled as
         # during iteration: it reports the position after the last line,

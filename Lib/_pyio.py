@@ -2936,7 +2936,20 @@ class TextIOWrapper(TextIOBase):
                                      self._decoded_chars_used - len(line),
                                      dec_flags, [next_input])
             while True:
-                more = self._read_chunk()
+                try:
+                    more = self._read_chunk()
+                except BaseException as exc:
+                    # Keep the partial line for the next call, as the
+                    # buffer keeps what it read (such as before a socket
+                    # timeout, gh-51571).  With the snapshot of its start
+                    # only after an OSError, raised before the buffer gave
+                    # out the chunk: after another error (from the
+                    # decoder, say) the chunk was consumed, so tell() can't
+                    # work until the next seek().
+                    if line:
+                        self._keep_line(line, line_snapshot
+                                        if isinstance(exc, OSError) else None)
+                    raise
                 if line_snapshot is not None:
                     next_input = self._snapshot[1]
                     line_snapshot[3].append(next_input[self._snapshot_held:])

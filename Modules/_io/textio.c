@@ -2475,7 +2475,7 @@ line_snapshot_extend(textio *self, PyObject *ls)
     return r;
 }
 
-/* readline() would block after the partial line: keep it
+/* readline() would block (or raised) after the partial line: keep it
    (chunks, then remaining, either may be NULL) as the decoded chars for
    the next call, with the position at its start (from the line snapshot
    ls, or NULL: then tell() can't work until the next seek()). */
@@ -2576,6 +2576,27 @@ textiowrapper_readline_blocked(textio *self, PyObject *chunks,
     return -1;
 }
 
+/* Reading the next chunk of a line raised: keep the partial line for the
+   next call, as the buffer keeps what it read (such as before a socket
+   timeout, gh-51571).  With the snapshot of its start only after an
+   OSError, raised before the buffer gave out the chunk: after another
+   error (from the decoder, say) the chunk was consumed, so tell() can't
+   work until the next seek().  Keeps the raised exception. */
+Py_NO_INLINE static void
+textiowrapper_readline_error(textio *self, PyObject *chunks,
+                             PyObject *remaining)
+{
+    PyObject *exc = PyErr_GetRaisedException();
+    PyObject *ls = PyErr_GivenExceptionMatches(exc, PyExc_OSError)
+                   ? self->line_snap : NULL;
+    if (textiowrapper_keep_line(self, ls, chunks, remaining) < 0) {
+        _PyErr_ChainExceptions1(exc);
+    }
+    else {
+        PyErr_SetRaisedException(exc);
+    }
+}
+
 static PyObject *
 _textiowrapper_readline(textio *self, Py_ssize_t limit)
 {
@@ -2606,6 +2627,9 @@ _textiowrapper_readline(textio *self, Py_ssize_t limit)
                    when EINTR occurs so we needn't do it ourselves. */
                 if (_PyIO_trap_eintr()) {
                     continue;
+                }
+                if (remaining != NULL || chunks != NULL) {
+                    textiowrapper_readline_error(self, chunks, remaining);
                 }
                 goto error;
             }
