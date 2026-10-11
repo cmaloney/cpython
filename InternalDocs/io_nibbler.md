@@ -33,7 +33,8 @@ Reading order
 3. Fork and finalization: "Locking" in `nibbler.h`,
    `nibbler_set_after_fork()`, `_PyIO_AfterForkChild()`.
 4. `__init__()` (`buffered_init()`), `close()`, `detach()`, dealloc.
-5. The `_iomodule.c` glue: `open()` (`buffering=None`), the
+5. "Gathering" (`_gather()`).
+6. The `_iomodule.c` glue: `open()` (`buffering=None`), the
    `_set_*_impl()` functions and `iomodule_exec()`.
 
 
@@ -58,8 +59,9 @@ Data structures
   no thread can use it (QSBR on free-threaded builds).
 - **buffered**: the object: `raw`, the nibbler, the **stash** (data a raw
   read returned that couldn't go into the read-ahead without a large
-  allocation, read before the raw stream), and flags fixed by
-  `__init__()` (`raw_fileio`, `raw_vectored`, `raw_appending`, `ref_min`).
+  allocation, read before the raw stream), flags fixed by `__init__()`
+  (`raw_fileio`, `raw_vectored`, `raw_appending`, `ref_min`), and the list
+  of `_gather()` records.
 
 
 Invariants
@@ -80,6 +82,8 @@ Invariants
   made without the lock) belong to the I/O-role holder until the raw call
   returns: other threads only append meanwhile.
 - `raw` changes only with the lock held (or with no other users).
+- While a stream has `_gather()` records, it has no writing end and its
+  reading end stays held (`hold_reading`).
 
 
 Locks and roles per operation
@@ -102,6 +106,8 @@ thread holding the lock never waits for the role).
 | `seek()`, `tell()`, `truncate()`, `_discard_writes()` | yes | yes | raw calls with both held |
 | `close()`, `detach()`, `__init__()` | yes | yes | flush with both held |
 | `fileno()`, `isatty()`, `seekable()`, `readable()`, `writable()`, `name`, `mode`, `closed`, `raw` | – | – | a reference to raw, taken without the lock |
+| `_gather()` enter / write in a block | – | yes | |
+| `_gather()` exit | only to write out | yes (not interruptible) | |
 
 Waits release the GIL (or detach) and a signal handler that raises
 interrupts them, except the relock after a raw call, whose result must be
@@ -125,6 +131,7 @@ Fields used with the lock need nothing more.  Those used without it:
 - `buffered.raw`: `_Py_XGetRef()` / atomic exchange (`buffered_ref_raw()`,
   `buffered_swap_raw()`).
 - `buffered.raw_fileio`, `buffered.dict`: relaxed.
+- `buffered.ngather`: stored relaxed with the lock; read with it.
 - mutex holders: relaxed (a thread only compares with its own id).
 - Blocks and ends that threads without the lock may still read are freed
   or reused only after a QSBR goal (`block_goal`, `spare`,
@@ -221,6 +228,15 @@ size None (writers only) buffers writes without limit: the threshold is
 write out.  `open(buffering=None)` gives that, and is only accepted when
 `open()` uses the nibbler classes (it raises before opening the file
 otherwise).
+
+
+`_gather()`
+-----------
+
+Private and experimental.  See "Gathering" in `bufferedio.c`: a block's
+writes from the context that entered it are kept in a record and added in
+one piece at its end (or at `limit`, or before an operation of that
+context needs the position, or by `close()`/`detach()`/`__init__()`).
 
 
 Differences from `_io`

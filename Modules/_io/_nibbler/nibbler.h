@@ -102,6 +102,9 @@ typedef struct nibbler {
 #endif
     /* NULL for none.  Also read without the lock, see "The open end". */
     struct nibbler_end *end;
+    /* Set by the caller: keep the reading end held when the lock is
+       released, so that reads go through the lock. */
+    uint8_t hold_reading;
     /* How many ends were made (see nibbler_end.id). */
     uint64_t ends;
     /* The nibbler_set it is in (NULL for none); in it, the next one and
@@ -189,6 +192,28 @@ morsels_push(morsel_list *list, PyObject *obj, const char *ptr,
         list->items[list->count++] = (morsel){Py_NewRef(obj), ptr, len};
     }
     list->nbytes += len;
+    return 0;
+}
+
+/* Move all of src's morsels, with their references, to the end of dst,
+   leaving src empty. */
+static int
+morsels_splice(morsel_list *dst, morsel_list *src)
+{
+    if (dst->count + src->count > dst->capacity
+        && morsels_grow(dst, dst->count + src->count) < 0)
+    {
+        return -1;
+    }
+    if (src->count > 0) {
+        memcpy(dst->items + dst->count, src->items,
+               (size_t)src->count * sizeof(morsel));
+    }
+    dst->count += src->count;
+    dst->nbytes += src->nbytes;
+    src->count = 0;
+    src->nbytes = 0;
+    morsels_compact(src);
     return 0;
 }
 
@@ -342,11 +367,12 @@ nibbler_open(nibbler *n)
     if (!e->writing) {
         /* At the unread bytes. */
         p = ~FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
-        if (e->done > p) {
+        if (e->done > p || n->hold_reading) {
             /* A readline() found no end of line in the unread bytes (see
                nibbler_noline()): stay held, so that reads without the lock
                fail (lines would be looked for in those bytes again), and
-               go through the lock until they are taken. */
+               go through the lock until they are taken.  Also while the
+               caller wants that. */
             return;
         }
     }
