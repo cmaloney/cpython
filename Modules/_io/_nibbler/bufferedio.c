@@ -4240,6 +4240,20 @@ _io_BufferedRWPair_flush_impl(rwpair *self)
 }
 
 /*[clinic input]
+_io.BufferedRWPair._discard_writes
+
+Drop the writer's pending writes; return how many bytes they were.
+[clinic start generated code]*/
+
+static PyObject *
+_io_BufferedRWPair__discard_writes_impl(rwpair *self)
+/*[clinic end generated code: output=aa59aa3f077b7fff input=ced7594605661a68]*/
+{
+    /* For TextIOWrapper.close() over the pair, as over a BufferedWriter. */
+    return rwpair_forward_call(self->writer, &_Py_ID(_discard_writes), NULL);
+}
+
+/*[clinic input]
 _io.BufferedRWPair.readable
 [clinic start generated code]*/
 
@@ -4451,6 +4465,7 @@ static PyMethodDef bufferedrwpair_methods[] = {
 
     _IO_BUFFEREDRWPAIR_WRITE_METHODDEF
     _IO_BUFFEREDRWPAIR_FLUSH_METHODDEF
+    _IO_BUFFEREDRWPAIR__DISCARD_WRITES_METHODDEF
 
     _IO_BUFFEREDRWPAIR_READABLE_METHODDEF
     _IO_BUFFEREDRWPAIR_WRITABLE_METHODDEF

@@ -1335,6 +1335,10 @@ class BufferedReader(_BufferedIOMixin):
             self._reset_read_buf()
             return pos
 
+    def _discard_writes(self):
+        # Nothing to drop (see BufferedWriter._discard_writes()).
+        return 0
+
 class BufferedWriter(_BufferedIOMixin):
 
     """A buffer for a writeable sequential RawIO object.
@@ -1551,6 +1555,10 @@ class BufferedRWPair(BufferedIOBase):
 
     def flush(self):
         return self.writer.flush()
+
+    def _discard_writes(self):
+        # For TextIOWrapper.close() over the pair, as over a BufferedWriter.
+        return self.writer._discard_writes()
 
     def close(self):
         try:

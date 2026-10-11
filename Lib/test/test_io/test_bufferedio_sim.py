@@ -1175,6 +1175,25 @@ class SlowDeviceTest:
         self.assertEqual(raw.calls, 1)
         self.assertEqual(raw.received, b"")
 
+    def test_text_close_flush_error_no_retry_rwpair(self):
+        # The same over a BufferedRWPair, as socket.makefile("rw") makes
+        # in text mode: the pair discards its writer's pending data.
+        raw = self.scripted_writer([OSError(errno.EPIPE, "EPIPE")])
+        pair = self.BufferedRWPair(self.scripted_reader(b""), raw, 64)
+        f = self.TextIOWrapper(pair, encoding="ascii")
+        f.write("abc")
+        with self.assertWarnsRegex(ResourceWarning,
+                                   "discarded 3 buffered bytes"):
+            with self.assertRaises(BrokenPipeError):
+                f.close()
+        self.assertTrue(f.closed)
+        self.assertEqual(raw.calls, 1)
+        self.assertEqual(raw.received, b"")
+        # A reader has nothing to discard.
+        r = self.BufferedReader(self.scripted_reader(b"ab"))
+        self.assertEqual(r._discard_writes(), 0)
+        self.assertEqual(r.read(), b"ab")
+
     # Real file descriptors
 
     @threading_helper.requires_working_threading()

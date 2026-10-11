@@ -1184,6 +1184,24 @@ _io_BufferedRWPair_flush(PyObject *self, PyObject *Py_UNUSED(ignored))
     return _io_BufferedRWPair_flush_impl((rwpair *)self);
 }
 
+PyDoc_STRVAR(_io_BufferedRWPair__discard_writes__doc__,
+"_discard_writes($self, /)\n"
+"--\n"
+"\n"
+"Drop the writer\'s pending writes; return how many bytes they were.");
+
+#define _IO_BUFFEREDRWPAIR__DISCARD_WRITES_METHODDEF    \
+    {"_discard_writes", (PyCFunction)_io_BufferedRWPair__discard_writes, METH_NOARGS, _io_BufferedRWPair__discard_writes__doc__},
+
+static PyObject *
+_io_BufferedRWPair__discard_writes_impl(rwpair *self);
+
+static PyObject *
+_io_BufferedRWPair__discard_writes(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    return _io_BufferedRWPair__discard_writes_impl((rwpair *)self);
+}
+
 PyDoc_STRVAR(_io_BufferedRWPair_readable__doc__,
 "readable($self, /)\n"
 "--\n"
@@ -1268,4 +1286,4 @@ _io_BufferedRWPair_closed_get(PyObject *self, void *Py_UNUSED(context))
 
 #define _IO_BUFFEREDRWPAIR_CLOSED_GETSETDEF {"closed", (getter)_io_BufferedRWPair_closed_get, (setter)NULL, NULL},
 
-/*[clinic end generated code: output=d9af9183ed01144f input=a9049054013a1b77]*/
+/*[clinic end generated code: output=ab93f1078da6d745 input=a9049054013a1b77]*/
