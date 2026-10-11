@@ -403,8 +403,9 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
             encoding = "utf-8";
         }
 #endif
-        /* Single-letter modes use a cached string. */
-        PyObject *rawmodeobj = rawmode[1] == '\0'
+        /* Single-letter modes use a cached string.  (A mode with none of
+           "xrwa" leaves rawmode empty: rawmode[1] is then unset.) */
+        PyObject *rawmodeobj = rawmode[0] != '\0' && rawmode[1] == '\0'
                                ? _Py_LATIN1_CHR((unsigned char)rawmode[0])
                                : PyUnicode_FromString(rawmode);
         if (rawmodeobj == NULL) {

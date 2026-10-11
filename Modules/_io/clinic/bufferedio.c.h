@@ -299,7 +299,13 @@ _io__Buffered__discard_writes_impl(buffered *self);
 static PyObject *
 _io__Buffered__discard_writes(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
-    return _io__Buffered__discard_writes_impl((buffered *)self);
+    PyObject *return_value = NULL;
+
+    Py_BEGIN_CRITICAL_SECTION(self);
+    return_value = _io__Buffered__discard_writes_impl((buffered *)self);
+    Py_END_CRITICAL_SECTION();
+
+    return return_value;
 }
 
 PyDoc_STRVAR(_io__Buffered_simple_flush__doc__,
@@ -1493,4 +1499,4 @@ exit:
 
 #define _IO_BUFFEREDRWPAIR_CLOSED_GETSETDEF {"closed", (getter)_io_BufferedRWPair_closed_get, (setter)NULL, NULL},
 
-/*[clinic end generated code: output=89ac5249deb93b4d input=a9049054013a1b77]*/
+/*[clinic end generated code: output=8783f51ec3e9adbe input=a9049054013a1b77]*/

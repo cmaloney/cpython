@@ -403,8 +403,6 @@ class SlowDeviceTest:
         self.assertEqual(out, data)
 
     def test_text_read_would_block_keeps_partial_char(self):
-        if self.is_stock_C:
-            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # A raw stream that would block in the middle of a multibyte
         # character: its first bytes stay buffered for the next read,
         # instead of being decoded as if at EOF.
@@ -417,8 +415,6 @@ class SlowDeviceTest:
         self.assertEqual(f.read(10), "")
 
     def test_text_readline_error_keeps_partial_line(self):
-        if self.is_stock_C:
-            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # gh-51571: a raw read that raises (such as a socket timeout) in the
         # middle of a line loses nothing: the next readline() returns the
         # whole line.
@@ -886,6 +882,20 @@ class SlowDeviceTest:
         f.flush()
         self.assertEqual(bytes(raw.received), data)
 
+    def test_write_error_before_data_takes_none(self):
+        # An error while writing the data pending before write()'s data
+        # takes none of it: write() raises without characters_written,
+        # and only the earlier data stays pending.
+        raw = self.scripted_writer([2, OSError(errno.EIO, "EIO")])
+        f = self.BufferedWriter(raw, 64)
+        f.write(b"abc")
+        with self.assertRaises(OSError) as cm:
+            f.write(b"x" * 100)
+        self.assertEqual(cm.exception.errno, errno.EIO)
+        self.assertNotHasAttr(cm.exception, "characters_written")
+        f.flush()
+        self.assertEqual(bytes(raw.received), b"abc")
+
     def test_write_interrupted_keeps_rest(self):
         # The same for an exception that isn't an OSError (such as one a
         # signal handler raises), which has no characters_written.
@@ -921,7 +931,7 @@ class SlowDeviceTest:
                 raw = self.scripted_writer([step])
                 f = self.BufferedWriter(raw, 64)
                 f.write(b"x" * 10)
-                with self.assertWarnsRegex(RuntimeWarning,
+                with self.assertWarnsRegex(ResourceWarning,
                                            "discarded 10 buffered bytes"):
                     with self.assertRaises(exc):
                         f.close()
@@ -935,14 +945,12 @@ class SlowDeviceTest:
                 self.assertEqual(raw.received, b"")
 
     def test_text_close_flush_error_no_retry(self):
-        if self.is_stock_C:
-            self.skipTest("_io.TextIOWrapper is as upstream has it")
         # TextIOWrapper.close() doesn't write the data again through the
         # close() of its buffer either.
         raw = self.scripted_writer([OSError(errno.EPIPE, "EPIPE")])
         f = self.TextIOWrapper(self.BufferedWriter(raw, 64), encoding="ascii")
         f.write("abc")
-        with self.assertWarnsRegex(RuntimeWarning,
+        with self.assertWarnsRegex(ResourceWarning,
                                    "discarded 3 buffered bytes"):
             with self.assertRaises(BrokenPipeError):
                 f.close()
@@ -1190,12 +1198,7 @@ class CSlowDeviceTest(SlowDeviceTest, CTestCase):
 
 
 class PySlowDeviceTest(SlowDeviceTest, PyTestCase):
-    # _pyio BufferedReader._readinto() sizes the copy from its buffer with
-    # len(buf) instead of len(buf) - written, so a readinto() that needs
-    # more than one refill raises ValueError (memoryview assignment).
-    @unittest.expectedFailure
-    def test_trickle_readinto_is_exact(self):
-        super().test_trickle_readinto_is_exact()
+    pass
 
 
 class NibblerSlowDeviceTest(NibblerMixin, SlowDeviceTest, CTestCase):
@@ -1527,6 +1530,26 @@ class PositionTest:
                 with self.open(os_helper.TESTFN, "rb") as f:
                     self.assertEqual(f.read(), b"abcdefghijkl")
 
+    def test_append_mode_seek_in_buffer_after_write(self):
+        # A write to a raw file in append mode lands at the end of the
+        # file, not at the position the buffered object last knew: seek()
+        # within the read buffer afterwards must not count from there.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with self.open(os_helper.TESTFN, "wb") as f:
+            f.write(b"0123456789")
+        with self.BufferedRandom(self.FileIO(os_helper.TESTFN, "a+"),
+                                 8) as f:
+            f.seek(0)
+            f.write(b"X" * 20)
+            with self.open(os_helper.TESTFN, "ab") as g:
+                g.write(b"abcdef")
+            self.assertEqual(f.read(1), b"a")
+            self.assertEqual(f.seek(1, 1), 32)
+            self.assertEqual(f.read(1), b"c")
+            self.assertEqual(f.seek(-3, 1), 30)
+            self.assertEqual(f.read(2), b"ab")
+            self.assertEqual(f.tell(), 32)
+
 
     @property
     def detached_errors(self):
@@ -1689,21 +1712,7 @@ class CRandomOpsTest(RandomOpsTest, CTestCase):
 
 
 class PyRandomOpsTest(RandomOpsTest, PyTestCase):
-    # Known _pyio bugs these sequences hit (C gets them right):
-    # * readline(size) can return more than size bytes: IOBase.readline's
-    #   nreadahead() clamps each step to size, not to what is still needed
-    #   (BufferedRandom(raw, 16): readline(100); readline(10) -> 15 bytes).
-    # * truncate() keeps read-ahead data, so reads return bytes past the
-    #   new end (BufferedRandom(raw, 512): readinto(100); truncate(100);
-    #   read1(64) -> data instead of b"").
-    # * The _readinto() ValueError described on PySlowDeviceTest.
-    @unittest.expectedFailure
-    def test_file(self):
-        super().test_file()
-
-    @unittest.expectedFailure
-    def test_short_transfer_device(self):
-        super().test_short_transfer_device()
+    pass
 
 
 class NibblerRandomOpsTest(NibblerMixin, RandomOpsTest, CTestCase):

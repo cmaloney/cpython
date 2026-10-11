@@ -1208,8 +1208,9 @@ class BufferedReader(_BufferedIOMixin):
 
     def _readline_would_block(self, res, size):
         # Keep the partial line for the next call, which can then find its
-        # end, unless it is too long to keep.
-        if size < 0 and len(res) >= _READLINE_KEEP_MAX * self.buffer_size:
+        # end, unless it is longer than the buffer size: then it is
+        # returned as it is.
+        if len(res) > self.buffer_size:
             return res.take_bytes()
         if res:
             with self._read_lock:
@@ -1282,7 +1283,8 @@ class BufferedReader(_BufferedIOMixin):
             while written < len(buf):
 
                 # First try to read from internal buffer
-                avail = min(len(self._read_buf) - self._read_pos, len(buf))
+                avail = min(len(self._read_buf) - self._read_pos,
+                            len(buf) - written)
                 if avail:
                     buf[written:written+avail] = \
                         self._read_buf[self._read_pos:self._read_pos+avail]
@@ -1393,6 +1395,11 @@ class BufferedWriter(_BufferedIOMixin):
                         del self._write_buf[keep:]
                         if isinstance(e, OSError):
                             e.characters_written = written - unwritten + keep
+                    else:
+                        # The error came before any of b was written: take
+                        # none of it, as C does (a caller retrying would
+                        # write it twice).
+                        del self._write_buf[unwritten - written:]
                     raise
             return written
 
@@ -1651,13 +1658,7 @@ def _warn_discarded(n, would_block):
     import warnings
     warnings.warn(f"close() discarded {n} buffered bytes: writing them "
                   f"{'would block' if would_block else 'failed'}",
-                  RuntimeWarning, stacklevel=3)
-
-
-# Without a size, a partial line that would block is kept for the next
-# readline() (which then returns None) until it is this many times the
-# buffer size: then it is returned as it is.
-_READLINE_KEEP_MAX = 64
+                  ResourceWarning, stacklevel=3)
 
 
 def _new_buffersize(bytes_read):
@@ -2287,6 +2288,9 @@ class TextIOWrapper(TextIOBase):
         self._decoded_chars = ''  # buffer for text returned from decoder
         self._decoded_chars_used = 0  # offset into _decoded_chars for read()
         self._snapshot = None  # info for reconstructing decoder state
+        # How many bytes of the snapshot's input the decoder held before
+        # the last chunk was read (the rest is the chunk).
+        self._snapshot_held = 0
         self._seekable = self._telling = self.buffer.seekable()
         self._has_read1 = hasattr(self.buffer, 'read1')
         self._configure(encoding, errors, newline,
@@ -2303,6 +2307,9 @@ class TextIOWrapper(TextIOBase):
         self._encoding = encoding
         self._errors = errors
         self._encoder = None
+        # The encoder encoded text since it was made or reset, so close()
+        # and detach() give it final=True.
+        self._encoder_fed = False
         self._decoder = None
         self._b2cratio = 0.0
 
@@ -2468,8 +2475,10 @@ class TextIOWrapper(TextIOBase):
 
     def _finish_encoder(self):
         # gh-79792: give the encoder the end of the text, and write what
-        # it still held.
-        if self._encoder is not None:
+        # it still held.  Only after it encoded text: a fresh or reset
+        # encoder holds nothing, but may still begin with a BOM.
+        if self._encoder is not None and self._encoder_fed:
+            self._encoder_fed = False
             b = self._encoder.encode("", final=True)
             if b:
                 self.buffer.write(b)
@@ -2508,6 +2517,7 @@ class TextIOWrapper(TextIOBase):
                 encoder.setstate(0)
             self._encoding_start_of_stream = False
         b = encoder.encode(s)
+        self._encoder_fed = True
         self.buffer.write(b)
         if self._line_buffering and (haslf or "\r" in s):
             self.flush()
@@ -2766,6 +2776,7 @@ class TextIOWrapper(TextIOBase):
                 else:
                     encoder.reset()
                 self._encoding_start_of_stream = position == 0
+                self._encoder_fed = False
 
         if self.closed:
             raise ValueError("tell on closed file")
@@ -2801,10 +2812,12 @@ class TextIOWrapper(TextIOBase):
             self._unpack_cookie(cookie)
         # gh-91112: out of range bits of a cookie that tell() can't have
         # returned (a position too large, or decoder state for a stream
-        # that doesn't read) must not be silently dropped or reused.
-        if (cookie >> 257 or (not self.readable() and
-                             (dec_flags or bytes_to_feed or chars_to_skip
-                              or need_eof))):
+        # that doesn't read) must not be silently dropped or reused.  As
+        # in C, the position is a signed 64-bit offset.
+        if (cookie >> 257 or start_pos >> 63 or
+                (not self.readable() and
+                 (dec_flags or bytes_to_feed or chars_to_skip
+                  or need_eof))):
             raise OSError("can't restore logical file position")
 
         # Seek back to the safe start point.
@@ -2986,12 +2999,17 @@ class TextIOWrapper(TextIOBase):
             while True:
                 try:
                     more = self._read_chunk()
-                except BaseException:
+                except BaseException as exc:
                     # Keep the partial line for the next call, as the
                     # buffer keeps what it read (such as before a socket
-                    # timeout, gh-51571).
+                    # timeout, gh-51571).  With the snapshot of its start
+                    # only after an OSError, raised before the buffer gave
+                    # out the chunk: after another error (from the
+                    # decoder, say) the chunk was consumed, so tell() can't
+                    # work until the next seek().
                     if line:
-                        self._keep_line(line, line_snapshot)
+                        self._keep_line(line, line_snapshot
+                                        if isinstance(exc, OSError) else None)
                     raise
                 if line_snapshot is not None:
                     next_input = self._snapshot[1]
@@ -3000,12 +3018,11 @@ class TextIOWrapper(TextIOBase):
                     break
             if self._decoded_chars:
                 line += self._get_decoded_chars()
-            elif more is None and (
-                    size >= 0 or
-                    len(line) < _READLINE_KEEP_MAX * self._CHUNK_SIZE):
+            elif more is None and len(line) <= self._CHUNK_SIZE:
                 # Would block before the end of the line: keep what there
                 # is of it for the next call, and raise, since "" would
-                # mean EOF.
+                # mean EOF.  (A line longer than the chunk size, the text
+                # layer's buffer size, is returned as it is.)
                 if line:
                     self._keep_line(line, line_snapshot)
                 raise BlockingIOError(

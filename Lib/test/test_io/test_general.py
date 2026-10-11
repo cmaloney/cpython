@@ -322,8 +322,6 @@ class IOTest:
     def test_readline_size_across_peeks(self):
         # readline(size) returns at most size bytes when the line spans
         # several peek() results.
-        if self.is_C:
-            self.skipTest("_io's IOBase.readline(size) overshoots size too")
         class R(self.IOBase):
             def __init__(self, data):
                 self.data = data
@@ -360,6 +358,36 @@ class IOTest:
             def readline(self):
                 return None
         self.assertRaises(BlockingIOError, next, R())
+
+    def test_readline_peek_would_block(self):
+        # IOBase.readline() over peek() and read(): None from either
+        # before anything arrived is None, after part of a line the part
+        # (which IOBase has nowhere to keep).
+        class R(self.IOBase):
+            def __init__(self, script):
+                self.script = script
+
+            def readable(self):
+                return True
+
+            def peek(self, size=0):
+                return self.script[0]
+
+            def read(self, size=-1):
+                data = self.script.pop(0)
+                if data is None:
+                    return None
+                b, rest = data[:size], data[size:]
+                if rest:
+                    self.script.insert(0, rest)
+                return b
+
+        f = R([None, b"ab", None, b"c\n"])
+        self.assertIsNone(f.readline())
+        f.script.pop(0)
+        self.assertEqual(f.readline(), b"ab")
+        f.script.pop(0)
+        self.assertEqual(f.readline(), b"c\n")
 
     def test_readlines_would_block(self):
         # readlines() built on iteration: when readline() would block, the
@@ -708,6 +736,14 @@ class IOTest:
             return fd
         with self.open("non-existent", "r", encoding="utf-8", opener=opener) as f:
             self.assertEqual(f.read(), "egg\n")
+
+    def test_open_without_read_write_mode(self):
+        # A mode with none of "xrwa" is an error, whatever else it has.
+        for mode in "b", "t", "", "+", "b+":
+            with self.subTest(mode=mode):
+                with self.assertRaisesRegex(ValueError,
+                                            "(?i)exactly one of"):
+                    self.open(os_helper.TESTFN, mode)
 
     def test_bad_opener_negative_1(self):
         # Issue #27066.

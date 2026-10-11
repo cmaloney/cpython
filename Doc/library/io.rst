@@ -351,6 +351,10 @@ I/O base classes
 
       For non-blocking streams, see :ref:`io-non-blocking`.
 
+      .. versionchanged:: next
+         If the flush fails, buffered and text streams are closed anyway and
+         the data still buffered is discarded, with a :exc:`ResourceWarning`.
+
    .. attribute:: closed
 
       ``True`` if the stream is closed.
@@ -385,6 +389,13 @@ I/O base classes
       The line terminator is always ``b'\n'`` for binary files; for text files,
       the *newline* argument to :func:`open` can be used to select the line
       terminator(s) recognized.
+
+      For non-blocking streams, see :ref:`io-non-blocking`.
+
+      .. versionchanged:: next
+         On a non-blocking stream, buffered and text streams keep a partial
+         line for the next call; binary streams return ``None`` and text
+         streams raise :exc:`BlockingIOError` instead of returning it.
 
    .. method:: readlines(hint=-1, /)
 
@@ -592,6 +603,10 @@ I/O base classes
 
       For non-blocking raw streams, see :ref:`io-non-blocking`.
 
+      .. versionchanged:: next
+         :class:`BufferedReader` and :class:`BufferedRandom` return ``None``
+         instead of ``b""`` when the raw stream would block.
+
    .. method:: readinto(b, /)
 
       Read bytes into a pre-allocated, writable
@@ -676,6 +691,12 @@ Raw file I/O
       return values checked explicitly in a retry loop to implement "write all"
       and "read at least" behavior. High-level I/O objects :ref:`binary-io` and
       :ref:`text-io` implement retry behavior.
+
+   .. note::
+      :meth:`~RawIOBase.readall`, and :meth:`~RawIOBase.read` with no size,
+      discard the bytes they already read when a later system call fails
+      (:gh:`81877`).  So does the :meth:`!read` with no size of a buffered
+      stream over a :class:`FileIO`.
 
    .. versionchanged:: 3.3
       The *opener* parameter was added.
@@ -790,6 +811,10 @@ than raw I/O does.
       Return bytes from the stream without advancing the position. The number of
       bytes returned may be less or more than requested.  For non-blocking raw
       streams, see :ref:`io-non-blocking`.
+
+      .. versionchanged:: next
+         Return ``None`` instead of ``b""`` when the raw stream would block
+         and no bytes are buffered.
 
    .. method:: read(size=-1, /)
 
@@ -930,6 +955,8 @@ Text I/O
       already at EOF, an empty string is returned.
 
       If *size* is specified, at most *size* characters will be read.
+
+      For non-blocking streams, see :ref:`io-non-blocking`.
 
    .. method:: seek(offset, whence=SEEK_SET, /)
 
@@ -1226,24 +1253,28 @@ Reading:
   the data available, which may be less than requested, or ``None`` if there
   is none.  :meth:`~IOBase.readline` returns ``None`` if the end of the line
   (or *size* bytes) has not arrived yet, and keeps what has arrived of the
-  line for the next call.  A partial line that grows too long to keep (64
-  times the buffer size, or the buffer size in some implementations) is
-  returned as it is.  Iteration raises :exc:`BlockingIOError` instead of
-  stopping.  :meth:`~IOBase.readlines` returns the complete lines that have
-  arrived (keeping a partial last line for the next call, as
-  :meth:`~IOBase.readline` does), or ``None`` if there are none.
+  line for the next call, which then finds its end.  A partial line longer
+  than the buffer size is not kept but returned as it is.  Iteration raises
+  :exc:`BlockingIOError` instead of stopping.  :meth:`~IOBase.readlines`
+  returns the complete lines that have arrived (keeping a partial last line
+  for the next call, as :meth:`~IOBase.readline` does), or ``None`` if there
+  are none.
 * Text streams (:class:`TextIOWrapper`): :meth:`~TextIOBase.read`,
   :meth:`~TextIOBase.readline` and iteration raise :exc:`BlockingIOError`
   if no character is available.  Otherwise :meth:`~TextIOBase.read` with a
   size returns the characters available, which may be fewer than requested.
   :meth:`~TextIOBase.readline` and iteration also raise
   :exc:`BlockingIOError` if the end of the line (or *size* characters) has
-  not arrived yet, and keep what has arrived of the line for the next call,
-  unless it has grown too long to keep (64 times the chunk size): then it is
-  returned as it is.  :meth:`~IOBase.readlines` returns the complete lines
-  that have arrived, keeping a partial last line for the next call, and
-  raises :exc:`BlockingIOError` if there are none.  The bytes of a character
-  that has only partly arrived are kept for the next read.
+  not arrived yet, and keep what has arrived of the line for the next call.
+  A partial line longer than 8192 characters (the size in which text is
+  read) is not kept but returned as it is.  :meth:`~IOBase.readlines`
+  returns the complete lines that have arrived, keeping a partial last line
+  for the next call, and raises :exc:`BlockingIOError` if there are none.
+  The bytes of a character that has only partly arrived are kept for the
+  next read.
+
+The same holds when a read raises another error, such as a socket timeout:
+a buffered or text stream that keeps a partial line keeps it then too.
 
 Writing:
 
@@ -1264,7 +1295,7 @@ Closing: if the flush done by :meth:`~IOBase.close` of a buffered or text
 stream fails, because it would block or for any other reason (an error, or
 an exception such as :exc:`KeyboardInterrupt` raised while it waits), the
 stream is closed anyway, raw stream included, and the data still buffered
-is discarded.  A :exc:`RuntimeWarning` says how many bytes were lost, and
+is discarded.  A :exc:`ResourceWarning` says how many bytes were lost, and
 :meth:`!close` raises the exception.  Nothing tries to write the data again,
 neither a later :meth:`!close` nor the finalizer.  To avoid losing data,
 call :meth:`~IOBase.flush` until it succeeds before closing.
@@ -1273,14 +1304,20 @@ Errors other than "would block" (such as a timeout or :data:`errno.EIO`)
 are raised.  When the :meth:`~BufferedIOBase.write` of a buffered stream
 raises one after part of the data was written, as much of the rest as fits
 in the buffer stays buffered, for :meth:`~BufferedWriter.flush` to write.
-If the error is an :exc:`OSError`, its :attr:`~BlockingIOError.characters_written`
-attribute is then set to the number of bytes taken from the data (written or
-buffered): the rest was not taken and should be written again.  When the
-error has no such attribute because none of the data was written, none of it
-was taken.  Note that :meth:`FileIO.readall` and :meth:`FileIO.read` with no
-size (and so the :meth:`!read` with no size of a buffered stream over a
-:class:`FileIO`) may discard the bytes they already read when a later system
-call fails.
+If the error is an :exc:`OSError`, its
+:attr:`~BlockingIOError.characters_written` attribute is then set to the
+number of bytes taken from the data (written or buffered): the rest was not
+taken and should be written again.  When the error has no such attribute
+because none of the data was written, none of it was taken.
+
+.. versionchanged:: next
+   Buffered :meth:`~BufferedIOBase.read1`, :meth:`~BufferedIOBase.readinto1`
+   and :meth:`~BufferedReader.peek` return ``None`` when the raw stream would
+   block, :meth:`~IOBase.readline` keeps a partial line, iteration raises
+   :exc:`BlockingIOError`, text :meth:`~TextIOBase.read` with a size raises
+   :exc:`BlockingIOError` instead of returning ``""``, and
+   :meth:`~IOBase.close` discards what it can't write, with a
+   :exc:`ResourceWarning`.
 
 Performance
 -----------

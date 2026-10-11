@@ -9,7 +9,8 @@ import unittest
 import _pyio as pyio
 from _io import _nibbler
 
-from test.support import threading_helper
+from test.support import os_helper, threading_helper
+from test.support.script_helper import assert_python_ok
 
 
 class DefaultWritevTest:
@@ -98,6 +99,27 @@ class PyDefaultWritevTest(DefaultWritevTest, unittest.TestCase):
     RawIOBase = pyio.RawIOBase
 
 
+class FileIOWritevTest(unittest.TestCase):
+
+    def setUp(self):
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+
+    def test_writev(self):
+        with io.FileIO(os_helper.TESTFN, "w") as f:
+            self.assertEqual(f._writev([b"ab", bytearray(b"cd"),
+                                        memoryview(b"ef")]), 6)
+            # Nothing to write.
+            self.assertEqual(f._writev([]), 0)
+        with open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(), b"abcdef")
+
+    def test_closed(self):
+        f = io.FileIO(os_helper.TESTFN, "w")
+        f.close()
+        self.assertRaises(ValueError, f._writev, [])
+        self.assertRaises(ValueError, f._writev, [b"x"])
+
+
 @unittest.skipUnless(hasattr(socket, "socketpair"), "needs socketpair()")
 class SocketIOWritevTest(unittest.TestCase):
 
@@ -134,6 +156,14 @@ class SocketIOWritevTest(unittest.TestCase):
         except BlockingIOError:
             pass
         self.assertEqual(bytes(received), b"".join(parts)[:sent])
+
+    def test_iov_max_not_asked_at_import(self):
+        # "import socket" doesn't call sysconf(); the first _writev() does.
+        assert_python_ok("-c", "import socket; "
+                         "assert socket._IOV_MAX is None, socket._IOV_MAX")
+        f = socket.SocketIO(self.a, "w")
+        self.assertEqual(f._writev([b"x"]), 1)
+        self.assertGreater(socket._IOV_MAX, 0)
 
     def test_closed(self):
         f = socket.SocketIO(self.a, "w")

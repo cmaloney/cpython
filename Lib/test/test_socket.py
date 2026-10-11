@@ -5727,17 +5727,11 @@ class FileObjectClassTestCase(SocketConnectedTest):
 
     def _keeps_data_on_timeout(self):
         # Does the buffered reader keep what it read before a timeout for
-        # the next read?  (gh-51571)  Also called from the client thread.
+        # the next read?  (gh-51571)  In text mode, TextIOWrapper keeps the
+        # part of a line it had decoded too.  As in makefile(), which then
+        # lets reading go on.  Also called from the client thread.
         return (self.bufsize != 0
                 and getattr(io.BufferedReader, "_is_nibbler", False))
-
-    def _keeps_text_on_timeout(self):
-        # Does the file object keep what it read before a timeout in the
-        # middle of a line or of the rest?  In text mode, TextIOWrapper must
-        # keep it too.
-        return (self._keeps_data_on_timeout()
-                and ('b' in self.read_mode
-                     or getattr(io.TextIOWrapper, "_is_nibbler", False)))
 
     def testReadAfterTimeout(self):
         # Issue #7322: A file object must disallow further reads
@@ -5764,7 +5758,7 @@ class FileObjectClassTestCase(SocketConnectedTest):
     def testReadlineAfterTimeout(self):
         # gh-51571: a timeout in the middle of a line loses nothing, and
         # reading goes on once the rest arrives.
-        if not self._keeps_text_on_timeout():
+        if not self._keeps_data_on_timeout():
             self.skipTest("data read before a timeout is lost")
         self.cli_conn.settimeout(0.5)
         self.assertRaises(TimeoutError, self.read_file.readline)
@@ -5773,7 +5767,7 @@ class FileObjectClassTestCase(SocketConnectedTest):
         self.assertEqual(self.read_file.readline(), self.read_msg)
 
     def _testReadlineAfterTimeout(self):
-        if not self._keeps_text_on_timeout():
+        if not self._keeps_data_on_timeout():
             return
         self.write_file.write(self.write_msg[0:3])
         self.write_file.flush()
@@ -5784,7 +5778,7 @@ class FileObjectClassTestCase(SocketConnectedTest):
 
     def testReadAllAfterTimeout(self):
         # gh-51571: the same for read() to the end.
-        if not self._keeps_text_on_timeout():
+        if not self._keeps_data_on_timeout():
             self.skipTest("data read before a timeout is lost")
         self.cli_conn.settimeout(0.5)
         self.assertRaises(TimeoutError, self.read_file.read)
@@ -5793,7 +5787,7 @@ class FileObjectClassTestCase(SocketConnectedTest):
         self.assertEqual(self.read_file.read(), self.read_msg)
 
     def _testReadAllAfterTimeout(self):
-        if not self._keeps_text_on_timeout():
+        if not self._keeps_data_on_timeout():
             return
         self.write_file.write(self.write_msg[0:3])
         self.write_file.flush()

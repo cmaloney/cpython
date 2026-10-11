@@ -522,6 +522,7 @@ _io__Buffered__dealloc_warn_impl(buffered *self, PyObject *source)
 }
 
 /*[clinic input]
+@critical_section
 _io._Buffered._discard_writes
 
 Drop the pending writes; return how many bytes they were.
@@ -532,7 +533,7 @@ close() of its buffer doesn't try to write them again.
 
 static PyObject *
 _io__Buffered__discard_writes_impl(buffered *self)
-/*[clinic end generated code: output=4a612257ab62b745 input=8c98a37d7a14ddfa]*/
+/*[clinic end generated code: output=4a612257ab62b745 input=95d405f3fdb05c2e]*/
 {
     CHECK_INITIALIZED(self)
     if (!ENTER_BUFFERED(self)) {
@@ -993,7 +994,7 @@ void
 _PyIO_warn_discarded(Py_ssize_t n, int would_block)
 {
     PyObject *exc = PyErr_GetRaisedException();
-    if (PyErr_WarnFormat(PyExc_RuntimeWarning, 1,
+    if (PyErr_WarnFormat(PyExc_ResourceWarning, 1,
                          "close() discarded %zd buffered bytes: writing them "
                          "%s", n, would_block ? "would block" : "failed") < 0)
     {
@@ -1409,7 +1410,8 @@ _buffered_readline(buffered *self, Py_ssize_t limit)
         if (n == -2 && PyBytesWriter_GetSize(writer) <= self->buffer_size) {
             /* Would block before the end of the line: keep what there is
                of it in the buffer, which is empty, for the next call, and
-               return None.  (A longer partial line is returned.) */
+               return None.  The buffer size bounds what is kept, with or
+               without a size: a longer partial line is returned. */
             Py_ssize_t size = PyBytesWriter_GetSize(writer);
             memcpy(self->buffer, PyBytesWriter_GetData(writer), size);
             self->pos = 0;
@@ -2201,8 +2203,16 @@ _bufferedwriter_raw_write(buffered *self, char *start, Py_ssize_t len)
         PyErr_SetString(PyExc_OSError, "raw write() made no progress");
         return -1;
     }
-    if (n > 0 && self->abs_pos != -1)
-        self->abs_pos += n;
+    if (n > 0 && self->abs_pos != -1) {
+        if (self->raw_appending) {
+            /* The data went to the end of the file, not to abs_pos: let
+               RAW_TELL() ask the raw stream. */
+            self->abs_pos = -1;
+        }
+        else {
+            self->abs_pos += n;
+        }
+    }
     return n;
 }
 
