@@ -3451,6 +3451,8 @@ _io_BufferedWriter_write_impl(buffered *self, PyObject *obj)
  * so objects with one are used through them (_PyIO_NIBBLER_NO).
  */
 
+#define TEXT_CLOSED "I/O operation on closed file."
+
 /* peek with the lock: out of line, so that the lock-free path stays
    small. */
 Py_NO_INLINE static int
@@ -3465,19 +3467,21 @@ buffered_text_peek_locked(buffered *self, Py_ssize_t need, morsel *m,
         buffered_leave(self);
         return _PyIO_NIBBLER_NO;
     }
-    /* Not even what is read ahead after close() (unlike reads). */
-    int r = buffered_check_closed(self, "I/O operation on closed file.");
-    if (r < 0) {
-        buffered_leave(self);
-        return -1;
-    }
-    if (need > self->nib.capacity) {
-        /* The unread bytes and more can't fit in a block. */
-        r = _PyIO_NIBBLER_FULL;
-    }
-    else if (nibbler_unread(&self->nib) < need) {
-        Py_ssize_t n = buffered_fill(self, 0);
-        r = n == -1 ? -1 : n == WOULD_BLOCK ? _PyIO_NIBBLER_BLOCKED : 0;
+    /* What was read ahead is there after the raw stream alone was closed
+       (as with reads, and without the lock); more is not. */
+    int r = 0;
+    if (nibbler_unread(&self->nib) < need) {
+        if (buffered_check_closed(self, TEXT_CLOSED) < 0) {
+            r = -1;
+        }
+        else if (need > self->nib.capacity) {
+            /* The unread bytes and more can't fit in a block. */
+            r = _PyIO_NIBBLER_FULL;
+        }
+        else {
+            Py_ssize_t n = buffered_fill(self, 0);
+            r = n == -1 ? -1 : n == WOULD_BLOCK ? _PyIO_NIBBLER_BLOCKED : 0;
+        }
     }
     Py_ssize_t unread = nibbler_unread(&self->nib);
     if (r >= 0 && unread > 0) {
@@ -3530,9 +3534,10 @@ buffered_text_advance_locked(buffered *self, uint64_t key, Py_ssize_t off,
         r = _PyIO_NIBBLER_NO;
     }
     else if (r == 0) {
-        r = buffered_check_closed(self, "I/O operation on closed file.");
+        /* Bytes peeked are there after the raw stream alone was closed
+           (see buffered_text_peek_locked()). */
         nibbler_end *e = nibbler_reading(&self->nib);
-        if (r == 0 && e != NULL && e->id == key
+        if (e != NULL && e->id == key
             && nibbler_reading_pos(e) == off
             && nibbler_unread(&self->nib) >= n)
         {
@@ -3570,8 +3575,6 @@ _PyIONibbler_advance(PyObject *op, uint64_t key, Py_ssize_t off,
     /* The end is held, or gone, or the raw stream must be asked. */
     return buffered_text_advance_locked(self, key, off, n);
 }
-
-#define TEXT_CLOSED "I/O operation on closed file."
 
 int
 _PyIONibbler_write(PyObject *op, PyObject *obj, const char *data,

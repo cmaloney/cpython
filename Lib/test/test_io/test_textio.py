@@ -2366,6 +2366,24 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                 with self.assertRaises(UnicodeDecodeError):
                     list(t)
 
+    def test_read_ahead_after_raw_close(self):
+        # After the raw stream alone is closed, what the buffer read ahead
+        # can still be read as text, as bytes: also once a binary read
+        # that needed the raw stream raised.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(b"abcdefghij" * 10)
+        raw = self.FileIO(os_helper.TESTFN, "r")
+        b = self.BufferedReader(raw, 64)
+        t = self.TextIOWrapper(b, encoding="utf-8")
+        self.addCleanup(t.close)
+        self.assertEqual(t.read(2), "ab")
+        raw.close()
+        self.assertEqual(t.read(2), "cd")
+        self.assertRaises(ValueError, b.readline)
+        self.assertEqual(t.read(2), "ef")
+        self.assertEqual(b.read(2), b"gh")
+
     def test_decoder_flags_past_32_bits(self):
         # iso2022_kr's decoder state goes past 32 bits: reads work, and
         # only tell(), whose cookie can't hold it, raises.
