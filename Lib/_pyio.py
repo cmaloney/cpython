@@ -1300,7 +1300,7 @@ class BufferedReader(_BufferedIOMixin):
                     n = self.raw.readinto(buf[written:])
                     if not n:
                         if n is None and not written:
-                            return None # would block
+                            return None  # would block
                         break # eof
                     written += n
 
@@ -1310,7 +1310,7 @@ class BufferedReader(_BufferedIOMixin):
                     peeked = self._peek_unlocked(1)
                     if not peeked:
                         if peeked is None and not written:
-                            return None # would block
+                            return None  # would block
                         break # eof
 
                 # In readinto1 mode, return as soon as we have some data
