@@ -185,6 +185,7 @@ def _repo_files(pattern):
                             recursive=True))
 
 
+@support.requires_resource('cpu')
 class ReadAllDocsTest:
     """Every Doc/*.rst and Lib/*.py file reads back byte-for-byte.
 
@@ -823,8 +824,7 @@ class SlowDeviceTest:
         with self.assertRaisesRegex(ValueError, msg):
             f.write(b"c")
         # The failed write left nothing queued.
-        if hasattr(f, "_discard_writes"):
-            self.assertEqual(f._discard_writes(), 2)
+        self.assertEqual(f._discard_writes(), 2)
 
     def test_write_after_other_raw_closed(self):
         # Raw streams other than FileIO say whether they are closed when
@@ -2379,6 +2379,10 @@ class ReentrantCallTest:
         self.assertEqual(raw.out, b"ABC")
 
 
+# No PyReentrantCallTest: _pyio's buffered classes don't guard against
+# reentrant calls, so a detach() from a raw method leaves the running method
+# to fail with AttributeError on the missing raw stream (not a RuntimeError
+# or ValueError, as these tests expect).
 class CReentrantCallTest(ReentrantCallTest, CTestCase):
     pass
 
