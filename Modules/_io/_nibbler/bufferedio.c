@@ -3448,7 +3448,11 @@ _io_BufferedWriter_write_impl(buffered *self, PyObject *obj)
  * _iomodule.h) instead of its methods: it decodes from the unread bytes
  * and takes only those of the text it returns, and appends what it
  * encodes as write() does.  An instance dict could override the methods,
- * so objects with one are used through them (_PyIO_NIBBLER_NO).
+ * so objects with one are used through them (_PyIO_NIBBLER_NO): peek and
+ * advance look for it again once they have the lock, so that no bytes are
+ * taken here once the text layer may have read ahead through read1().
+ * After the raw stream alone was closed, what was read ahead is served
+ * (locked or not), as read() does; more raises ValueError.
  */
 
 #define TEXT_CLOSED "I/O operation on closed file."

@@ -13,7 +13,8 @@
 
     Over an exact _io._nibbler BufferedReader, BufferedWriter or
     BufferedRandom, the bytes are used in place through the functions in
-    _iomodule.h ("the store").  Over any other buffer (or a raw stream),
+    _iomodule.h ("the store").  Over any other buffer (or a raw stream, or
+    once the buffer has an instance dict, which may override its methods),
     the store is a bytes object of read-ahead kept here (rbuf), filled with
     read1() (or read()), and written text goes to write() at once.
 
@@ -35,8 +36,15 @@
       there, and how many characters to skip; write() and truncate() first
       find the byte position of the text position by decoding again.
 
+    Invalid bytes (errors="strict") end a read before them, as the end of
+    the stream would; the next read takes them and raises, once.
+
     Universal newlines are handled on the decoded characters, by
     text_take(), which also notes the kinds of newline seen.
+
+    What calls run by is one immutable object, tconf; see "Locking" for
+    which calls run without the critical section.  InternalDocs/io_nibbler.md
+    ("Text layer") has an overview.
 */
 
 #include "Python.h"
