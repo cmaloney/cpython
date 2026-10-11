@@ -1,5 +1,6 @@
 import array
 import codecs
+import errno
 import locale
 import os
 import pickle
@@ -1877,6 +1878,27 @@ class TextIOWrapperTest:
         self.assertEqual(b.getvalue(), b"www.somesite.")
         self.assertIs(t.detach(), b)
         self.assertEqual(b.getvalue(), b"www.somesite.com")
+
+    def test_text_close_flush_error_no_retry(self):
+        # gh-83973, gh-55589: when close()'s flush fails, TextIOWrapper
+        # doesn't write the data again through the close() of its buffer:
+        # the data is discarded with a ResourceWarning.
+        class Raw(self.RawIOBase):
+            calls = 0
+            def writable(self):
+                return True
+            def write(self, b):
+                self.calls += 1
+                raise BrokenPipeError(errno.EPIPE, "EPIPE")
+        raw = Raw()
+        t = self.TextIOWrapper(self.BufferedWriter(raw, 64), encoding="ascii")
+        t.write("abc")
+        with self.assertWarnsRegex(ResourceWarning,
+                                   "discarded 3 buffered bytes"):
+            with self.assertRaises(BrokenPipeError):
+                t.close()
+        self.assertTrue(t.closed)
+        self.assertEqual(raw.calls, 1)
 
     def test_close_without_writes_writes_no_bom(self):
         # close() gives final=True only to an encoder that encoded text
