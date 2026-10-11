@@ -60,8 +60,16 @@ Data structures
 - **buffered**: the object: `raw`, the nibbler, the **stash** (data a raw
   read returned that couldn't go into the read-ahead without a large
   allocation, read before the raw stream), flags fixed by `__init__()`
-  (`raw_fileio`, `raw_vectored`, `raw_appending`, `ref_min`), and the list
-  of `_gather()` records.
+  (`raw_fileio`, `raw_vectored`, `raw_appending`, `raw_regular`,
+  `ref_min`), and the list of `_gather()` records.
+- **raw position** (`nibbler.raw_pos`, negative when unknown): kept only when
+  `raw_regular` (an exact FileIO of a regular file, not in append mode),
+  so that `tell()` and `seek()` inside the read-ahead make no `lseek`, like
+  `_io`'s `abs_pos`.  Raw `seek()`/`tell()` set it, raw reads and
+  write-outs advance it, `readall()`, `truncate()`, `nibbler_free()`, a
+  takeover of the I/O role and a fork make it unknown.  `tell()` with
+  nothing buffered still asks the raw stream.  Pipes and character devices
+  are left out because their position doesn't follow reads (GH-95782).
 
 
 Invariants
@@ -82,6 +90,9 @@ Invariants
   made without the lock) belong to the I/O-role holder until the raw call
   returns: other threads only append meanwhile.
 - `raw` changes only with the lock held (or with no other users).
+- A known `raw_pos` is the raw stream's position, assuming nothing else
+  moves it while data is buffered (as `_io` does).  It is used and changed
+  only with the I/O role and the lock.
 - While a stream has `_gather()` records, it has no writing end and its
   reading end stays held (`hold_reading`).
 

@@ -150,6 +150,16 @@ typedef struct {
        rather than copied into a block (see buffered_init()). */
     Py_ssize_t ref_min;
     uint8_t raw_appending;
+    /* Fixed by __init__(): raw is an exact FileIO of a regular file, not in
+       append mode, whose position the nibbler keeps (nib.raw_pos), so that
+       tell() and seek() inside the read-ahead make no raw call.  Raw seek()
+       and tell() set it, raw reads and writes advance it, and readall()
+       and truncate() make it unknown; like _io's abs_pos, it assumes that
+       nothing else moves the raw stream while data is buffered.  Not for a
+       character device or a pipe, whose position does not follow what was
+       read (GH-95782), nor in append mode, where writes go to the end; nor
+       for other raw streams, whose methods could do anything. */
+    uint8_t raw_regular;
     /* The records of _gather() blocks (see "Gathering"), in the order
        they were entered, and how many (also read without the lock, so
        stored atomically).  While there are some, there is no writing end
@@ -488,6 +498,23 @@ buffered_relock_after_raw(buffered *self, int unlocked)
     }
 }
 
+/* A raw read or write moved the raw position by n >= 0 bytes: advance it
+   (an unknown one stays unknown, see raw_regular). */
+static inline void
+buffered_raw_moved(buffered *self, Py_ssize_t n)
+{
+    self->nib.raw_pos += n;
+}
+
+/* Keep pos, the raw position from raw.seek() or raw.tell() (-1 on error),
+   if raw_regular. */
+static inline void
+buffered_raw_set(buffered *self, Py_off_t pos)
+{
+    self->nib.raw_pos = (self->raw_regular && pos >= 0
+                         ? pos : NIBBLER_POS_UNKNOWN);
+}
+
 /* Convert the result of a raw readinto(), write() or _writev() of up to len
    bytes: the count, WOULD_BLOCK for None, or -1 on error. */
 static Py_ssize_t
@@ -631,8 +658,13 @@ buffered_raw_read(buffered *self, char *dst, Py_ssize_t len, PyObject *memobj,
         return buffered_take_stash(self, dst, len);
     }
     if (self->raw_fileio) {
-        return _PyFileIO_readinto(self->raw, dst, len);
+        Py_ssize_t n = _PyFileIO_readinto(self->raw, dst, len);
+        if (n > 0) {
+            buffered_raw_moved(self, n);
+        }
+        return n;
     }
+    /* (Other raw streams have no known position to advance.) */
     assert(memobj != NULL);
     PyObject *view = buffered_memory_view(dst, len, PyBUF_WRITE, memobj);
     if (view == NULL) {
@@ -785,11 +817,22 @@ buffered_raw_offset(PyObject *res)
     return n;
 }
 
+/* The raw position, from raw.tell(); kept if raw_regular. */
 static Py_off_t
 buffered_raw_tell(buffered *self)
 {
-    return buffered_raw_offset(
+    Py_off_t pos = buffered_raw_offset(
         PyObject_CallMethodNoArgs(self->raw, &_Py_ID(tell)));
+    buffered_raw_set(self, pos);
+    return pos;
+}
+
+/* The raw position: the one kept, else raw.tell(). */
+static inline Py_off_t
+buffered_raw_pos(buffered *self)
+{
+    Py_off_t pos = self->nib.raw_pos;
+    return pos >= 0 ? pos : buffered_raw_tell(self);
 }
 
 static Py_off_t
@@ -808,7 +851,9 @@ buffered_raw_seek(buffered *self, Py_off_t target, int whence)
                                                posobj, whenceobj, NULL);
     Py_DECREF(posobj);
     Py_DECREF(whenceobj);
-    return buffered_raw_offset(res);
+    Py_off_t pos = buffered_raw_offset(res);
+    buffered_raw_set(self, pos);
+    return pos;
 }
 
 /* The logical position: the raw one adjusted for what is buffered, and
@@ -816,7 +861,11 @@ buffered_raw_seek(buffered *self, Py_off_t target, int whence)
 static PyObject *
 buffered_position(buffered *self, Py_ssize_t gathered)
 {
-    Py_off_t pos = buffered_raw_tell(self);
+    /* With nothing buffered, ask the raw stream, as _io does: code sharing
+       the file descriptor may have moved it. */
+    Py_off_t pos = (nibbler_nbytes(&self->nib) == 0
+                    && nibbler_unread(&self->nib) == 0 && self->stash == NULL
+                    ? buffered_raw_tell(self) : buffered_raw_pos(self));
     if (pos == -1) {
         return NULL;
     }
@@ -904,6 +953,8 @@ buffered_write_spans(buffered *self, _PyIO_Span *spans, PyObject **objs,
         /* Keeping errno and the exception. */
         buffered_relock_after_raw(self, unlocked);
     }
+    /* With the lock again: only the holder of the I/O role uses it. */
+    buffered_raw_moved(self, done);
     *written = done;
     return st;
 }
@@ -1400,6 +1451,8 @@ buffered_read_chunks(buffered *self, PyObject *size)
 static PyObject *
 buffered_raw_read_all(buffered *self)
 {
+    /* Even reading to EOF may stop anywhere (on an error). */
+    self->nib.raw_pos = NIBBLER_POS_UNKNOWN;
     if (self->raw_fileio) {
         return _PyFileIO_readall(self->raw);
     }
@@ -2989,7 +3042,7 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
     {
         /* Move within the last fill if the target is in it: its bytes end
            at the raw position. */
-        Py_off_t raw_pos = buffered_raw_tell(self);
+        Py_off_t raw_pos = buffered_raw_pos(self);
         if (raw_pos == -1) {
             goto end;
         }
@@ -3044,6 +3097,7 @@ _io__Buffered_truncate_impl(buffered *self, PyTypeObject *cls, PyObject *pos)
     }
     else if (buffered_sync(self, 0) == 0) {
         res = PyObject_CallMethodOneArg(self->raw, &_Py_ID(truncate), pos);
+        self->nib.raw_pos = NIBBLER_POS_UNKNOWN;
     }
     buffered_leave(self);
     return res;
@@ -3229,6 +3283,9 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
             && PyObject_TypeCheck(raw, state->PyFileIO_Type)
             && _PyFileIO_appending(raw));
     }
+    /* (nibbler_free() made the raw position unknown.) */
+    self->raw_regular = (err == 0 && raw_fileio && !self->raw_appending
+                         && _PyFileIO_regular(raw));
     PyObject *old = buffered_swap_raw(self, err == 0 ? Py_NewRef(raw) : NULL);
     buffered_leave(self);
     /* Releasing the old raw stream can run arbitrary code. */

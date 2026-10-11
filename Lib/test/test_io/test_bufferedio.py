@@ -1,5 +1,6 @@
 import array
 import errno
+import os
 import pickle
 import random
 import sys
@@ -1982,6 +1983,241 @@ class BufferedRandomTest(BufferedReaderTest, BufferedWriterTest):
             self.assertEqual(f.read(2), b"ab")
             self.assertEqual(f.tell(), 32)
 
+    def make_seek_file(self, size=300000):
+        data = bytes((i * 7 + i // 251) % 256 for i in range(size))
+        data = data.replace(b'\x0a', b'.')
+        data = bytearray(data)
+        for i in range(0, size, 97):
+            data[i] = 0x0a
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with self.open(os_helper.TESTFN, "wb") as f:
+            f.write(data)
+        return data
+
+    def check_seek_pattern(self, name, op, bufsize, n=300):
+        # Run op(f, model, i) n times on a BufferedRandom over a FileIO,
+        # model being what the file should hold, checking every read and
+        # tell() against it, then the file itself.
+        model = self.make_seek_file()
+        with self.subTest(pattern=name, bufsize=bufsize):
+            raw = self.FileIO(os_helper.TESTFN, "r+")
+            with self.tp(raw, bufsize) as f:
+                pos = 0
+                for i in range(n):
+                    pos = op(f, model, i, pos)
+                    self.assertEqual(f.tell(), pos, (name, i))
+                self.assertEqual(f.seek(0, io.SEEK_END), len(model))
+                self.assertEqual(f.tell(), len(model))
+            with self.open(os_helper.TESTFN, "rb") as f:
+                self.assertEqual(f.read(), model)
+
+    def test_seek_patterns(self):
+        # Seeking inside and outside the read-ahead, tell(), and read,
+        # modify, write in place keep the position right.
+        def read(f, model, pos, k):
+            self.assertEqual(f.read(k), model[pos:pos + k])
+            return min(pos + k, len(model))
+        def write(f, model, pos, b):
+            f.write(b)
+            model[pos:pos + len(b)] = b
+            return pos + len(b)
+        def seek_within(f, model, i, pos):
+            return read(f, model, f.seek((i * 37) % 4000), 16)
+        def seek_back(f, model, i, pos):
+            pos = read(f, model, pos, 64)
+            return f.seek(-16, 1)
+        def tell_seek(f, model, i, pos):
+            p = f.tell()
+            read(f, model, p, 32)
+            self.assertEqual(f.seek(p), p)
+            return read(f, model, p, 48)
+        def tell_line(f, model, i, pos):
+            self.assertEqual(f.tell(), pos)
+            line = f.readline()
+            end = model.find(b'\n', pos)
+            end = len(model) if end < 0 else end + 1
+            self.assertEqual(line, model[pos:end])
+            return end
+        def peek_seek(f, model, i, pos):
+            pos = read(f, model, pos, 30)
+            return read(f, model, f.seek(-30, 1), 46)
+        def rmw_seq(f, model, i, pos):
+            r = f.read(64)
+            self.assertEqual(r, model[pos:pos + 64])
+            self.assertEqual(f.seek(-64, 1), pos)
+            return write(f, model, pos, r[::-1])
+        def rmw_rand(f, model, i, pos):
+            off = ((i * 7919) % 1024) * 64
+            self.assertEqual(f.seek(off), off)
+            r = f.read(64)
+            self.assertEqual(r, model[off:off + 64])
+            self.assertEqual(f.seek(off), off)
+            return write(f, model, off, r[::-1])
+        def hdr_patch(f, model, i, pos):
+            if i == 0:
+                f.seek(len(model))
+                pos = len(model)
+            pos = write(f, model, pos, b'd' * 512)
+            self.assertEqual(f.tell(), pos)
+            self.assertEqual(f.seek(4), 4)
+            write(f, model, 4, pos.to_bytes(4, 'little'))
+            return f.seek(pos)
+        def rand_read(f, model, i, pos):
+            off = ((i * 7919) % 4096) * 64
+            self.assertEqual(f.seek(off), off)
+            return read(f, model, off, 64)
+        def seq_after_seek(f, model, i, pos):
+            pos = f.seek(((i * 3) % 4) * 65536 + i)
+            for j in range(16):
+                pos = read(f, model, pos, 4096)
+            return pos
+        def seek_cur_far(f, model, i, pos):
+            pos = read(f, model, pos, 10)
+            step = 5000 if pos + 5000 < len(model) else -pos
+            return read(f, model, f.seek(step, 1), 10)
+        patterns = [seek_within, seek_back, tell_seek, tell_line, peek_seek,
+                    rmw_seq, rmw_rand, hdr_patch, rand_read, seq_after_seek,
+                    seek_cur_far]
+        for bufsize in (16, 1000, 8192, 131072):
+            for op in patterns:
+                self.check_seek_pattern(op.__name__, op, bufsize)
+
+    def test_text_tell_seek_back(self):
+        # TextIOWrapper's cookies, from the buffered position.
+        model = self.make_seek_file(20000)
+        with self.open(os_helper.TESTFN, "w", encoding="latin-1") as f:
+            f.write(model.decode('latin-1'))
+        lines = bytes(model).split(b'\n')
+        for bufsize in (16, 1000, 8192):
+            raw = self.FileIO(os_helper.TESTFN, "r+")
+            with self.TextIOWrapper(self.tp(raw, bufsize),
+                                    encoding="latin-1", newline='\n') as t:
+                for line in lines[:100]:
+                    line = (line + b'\n').decode('latin-1')
+                    c = t.tell()
+                    self.assertEqual(t.readline(), line)
+                    self.assertEqual(t.seek(c), c)
+                    self.assertEqual(t.readline(), line)
+
+    def test_append_mode_position(self):
+        # In append mode writes go to the end, wherever the position was.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with self.open(os_helper.TESTFN, "wb") as f:
+            f.write(b'0123456789' * 10)
+        for bufsize in (16, 1000):
+            raw = self.FileIO(os_helper.TESTFN, "a+")
+            with self.tp(raw, bufsize) as f:
+                size = f.seek(0, io.SEEK_END)
+                self.assertEqual(f.tell(), size)
+                f.write(b'x' * 10)
+                self.assertEqual(f.tell(), size + 10)
+                self.assertEqual(f.seek(3), 3)
+                self.assertEqual(f.read(5), b'34567')
+                f.write(b'y' * 3)
+                self.assertEqual(f.tell(), size + 13)
+                self.assertEqual(f.seek(-13, io.SEEK_END), size)
+                self.assertEqual(f.read(), b'x' * 10 + b'yyy')
+                self.assertEqual(f.tell(), size + 13)
+
+    def test_truncate_position(self):
+        model = self.make_seek_file(5000)
+        for bufsize in (16, 1000, 8192):
+            with self.open(os_helper.TESTFN, "wb") as f:
+                f.write(model)
+            raw = self.FileIO(os_helper.TESTFN, "r+")
+            with self.tp(raw, bufsize) as f:
+                self.assertEqual(f.read(100), model[:100])
+                self.assertEqual(f.truncate(50), 50)
+                self.assertEqual(f.tell(), 100)
+                self.assertEqual(f.read(10), b'')
+                f.write(b'z')
+                self.assertEqual(f.tell(), 101)
+                self.assertEqual(f.seek(40), 40)
+                self.assertEqual(f.read(10), model[40:50])
+                self.assertEqual(f.tell(), 50)
+                self.assertEqual(f.truncate(), 50)
+                self.assertEqual(f.tell(), 50)
+                f.write(b'w')
+                self.assertEqual(f.seek(0, io.SEEK_END), 51)
+                self.assertEqual(f.seek(45), 45)
+                self.assertEqual(f.read(), model[45:50] + b'w')
+            with self.open(os_helper.TESTFN, "rb") as f:
+                self.assertEqual(f.read(), model[:50] + b'w')
+
+    def test_tell_after_external_move(self):
+        # With nothing buffered, tell() asks the raw stream: code sharing
+        # the file descriptor may have moved it.
+        model = self.make_seek_file(5000)
+        raw = self.FileIO(os_helper.TESTFN, "r+")
+        with self.tp(raw, 16) as f:
+            self.assertEqual(f.tell(), 0)
+            os.lseek(raw.fileno(), 100, os.SEEK_SET)
+            self.assertEqual(f.tell(), 100)
+            self.assertEqual(f.read(4), model[100:104])
+            self.assertEqual(f.read(12), model[104:116])
+            self.assertEqual(f.tell(), 116)
+            os.lseek(raw.fileno(), 500, os.SEEK_SET)
+            self.assertEqual(f.tell(), 500)
+            self.assertEqual(f.read(4), model[500:504])
+            self.assertEqual(f.tell(), 504)
+            self.assertEqual(f.seek(-2, 1), 502)
+            self.assertEqual(f.read(2), model[502:504])
+            f.write(b'abc')
+            f.flush()
+            self.assertEqual(f.tell(), 507)
+            os.lseek(raw.fileno(), 1000, os.SEEK_SET)
+            self.assertEqual(f.tell(), 1000)
+            f.write(b'def')
+            self.assertEqual(f.tell(), 1003)
+            self.assertEqual(f.seek(998), 998)
+            self.assertEqual(f.read(7),
+                             model[998:1000] + b'def' + model[1003:1005])
+
+    def test_reinit_position(self):
+        # A new raw stream comes with a new position.
+        model = self.make_seek_file(5000)
+        f = self.tp(self.FileIO(os_helper.TESTFN, "r+"), 1000)
+        self.assertEqual(f.read(10), model[:10])
+        self.assertEqual(f.tell(), 10)
+        self.assertEqual(f.seek(3000), 3000)
+        self.assertEqual(f.read(10), model[3000:3010])
+        self.assertEqual(f.tell(), 3010)
+        f.raw.close()
+        raw = self.FileIO(os_helper.TESTFN, "r+")
+        raw.seek(7)
+        f.__init__(raw, 1000)
+        self.assertEqual(f.read(10), model[7:17])
+        self.assertEqual(f.tell(), 17)
+        self.assertEqual(f.seek(9), 9)
+        self.assertEqual(f.read(2), model[9:11])
+        raw = f.detach()
+        pos = raw.tell()
+        f = self.tp(raw, 1000)
+        self.assertEqual(f.read(3), model[pos:pos + 3])
+        self.assertEqual(f.tell(), pos + 3)
+        f.close()
+
+    def test_pipe_and_char_device_position(self):
+        # The position of a pipe or a character device doesn't follow what
+        # was read: reads still work, and tell() asks the raw stream.
+        r, w = os.pipe()
+        os.write(w, b'0123456789' * 10)
+        os.close(w)
+        with self.BufferedReader(self.FileIO(r, "r"), 16) as f:
+            self.assertEqual(f.read(5), b'01234')
+            self.assertRaises(OSError, f.tell)
+            self.assertRaises(OSError, f.seek, 0)
+            self.assertEqual(f.read(10), b'5678901234')
+            self.assertEqual(len(f.read()), 85)
+        if os.path.exists('/dev/zero'):
+            with self.BufferedReader(self.FileIO('/dev/zero', "r"), 16) as f:
+                self.assertEqual(f.read(5), bytes(5))
+                f.tell()
+                self.assertEqual(f.read(100), bytes(100))
+                self.assertEqual(f.seek(0), 0)
+                self.assertEqual(f.read(20), bytes(20))
+                self.assertGreaterEqual(f.tell(), 0)
+
     # You can't construct a BufferedRandom over a non-seekable stream.
     test_unseekable = None
 
@@ -2114,6 +2350,76 @@ class NibblerBufferedRandomTest(NibblerMixin, CBufferedRandomTest):
                 return bufio.tell() - 2
         self.assertEqual(bufio.seek(Target()), 3)
         self.assertEqual(bufio.read(2), b'34')
+
+    def test_seek_and_tell_keep_raw_position(self):
+        # Over an exact FileIO of a regular file, the raw position is kept:
+        # tell() and seek() inside the read-ahead, and tell() with pending
+        # writes, make no raw call.  A probe: they don't see the file
+        # descriptor moved behind their back (which is meaningless while
+        # data is buffered, as with _io), and don't move it.
+        model = self.make_seek_file(50000)
+        raw = self.FileIO(os_helper.TESTFN, "r+")
+        fd = raw.fileno()
+        with self.tp(raw, 1000) as f:
+            self.assertEqual(f.read(10), model[:10])
+            self.assertEqual(f.tell(), 10)
+            os.lseek(fd, 20000, os.SEEK_SET)
+            for i in range(20):
+                p = (i * 37) % 990
+                self.assertEqual(f.seek(p), p)
+                self.assertEqual(f.tell(), p)
+                self.assertEqual(f.seek(5, 1), p + 5)
+                self.assertEqual(f.read(5), model[p + 5:p + 10])
+                self.assertEqual(f.tell(), p + 10)
+            self.assertEqual(os.lseek(fd, 0, os.SEEK_CUR), 20000)
+            os.lseek(fd, 1000, os.SEEK_SET)
+            # A seek out of the read-ahead sets it, reads advance it (also
+            # direct ones).
+            self.assertEqual(f.seek(3000), 3000)
+            self.assertEqual(f.read(500), model[3000:3500])
+            self.assertEqual(f.read(800), model[3500:4300])
+            self.assertEqual(os.lseek(fd, 0, os.SEEK_CUR), 5000)
+            self.assertEqual(f.read(700), model[4300:5000])
+            self.assertEqual(f.read(2000), model[5000:7000])
+            self.assertEqual(f.read(10), model[7000:7010])
+            self.assertEqual(os.lseek(fd, 0, os.SEEK_CUR), 8000)
+            os.lseek(fd, 30000, os.SEEK_SET)
+            self.assertEqual(f.tell(), 7010)
+            self.assertEqual(f.seek(7005), 7005)
+            self.assertEqual(f.read(10), model[7005:7015])
+            os.lseek(fd, 8000, os.SEEK_SET)
+            # Pending writes.
+            f.write(b'abc')
+            os.lseek(fd, 30000, os.SEEK_SET)
+            self.assertEqual(f.tell(), 7018)
+            os.lseek(fd, 7015, os.SEEK_SET)
+            f.flush()
+            self.assertEqual(os.lseek(fd, 0, os.SEEK_CUR), 7018)
+            f.write(b'def')
+            os.lseek(fd, 30000, os.SEEK_SET)
+            self.assertEqual(f.tell(), 7021)
+
+    @support.requires_fork()
+    def test_raw_position_after_fork(self):
+        # The child of a fork shares the file position with the parent:
+        # what the parent kept is not trusted there.
+        model = self.make_seek_file(50000)
+        raw = self.FileIO(os_helper.TESTFN, "r+")
+        fd = raw.fileno()
+        with self.tp(raw, 1000) as f:
+            self.assertEqual(f.read(10), model[:10])
+            self.assertEqual(f.tell(), 10)
+            pid = os.fork()
+            if pid == 0:
+                code = 1
+                try:
+                    os.lseek(fd, 20000, os.SEEK_SET)
+                    # 990 bytes are unread.
+                    if f.tell() == 19010:
+                        code = 0
+                finally:
+                    os._exit(code)
+            support.wait_process(pid, exitcode=0)
 
 
 # Simple test to ensure that optimizations in the IO library deliver the
