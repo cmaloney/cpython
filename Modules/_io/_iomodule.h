@@ -135,6 +135,14 @@ extern int _PyIONibbler_peek(PyObject *buffered, Py_ssize_t need,
    or _PyIO_NIBBLER_NO. */
 extern int _PyIONibbler_advance(PyObject *buffered, uint64_t key,
                                 Py_ssize_t off, Py_ssize_t n);
+/* Like _PyIONibbler_advance(), copying the bytes taken to copy. */
+extern int _PyIONibbler_take(PyObject *buffered, uint64_t key, Py_ssize_t off,
+                             Py_ssize_t n, char *copy);
+/* Put data[0:len] back in front of the unread bytes, as read-ahead (a text
+   read that failed after taking them).  Returns 1, 0 if not (there are
+   pending writes, or the object is detached), -1 or _PyIO_NIBBLER_NO. */
+extern int _PyIONibbler_unread(PyObject *buffered, const char *data,
+                               Py_ssize_t len);
 /* Like write(obj), for data[0:len] owned by obj, but ValueError("I/O
    operation on closed file.") if closed.  buffered may be a borrowed
    reference. */

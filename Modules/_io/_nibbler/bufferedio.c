@@ -3613,7 +3613,9 @@ _io_BufferedWriter_write_impl(buffered *self, PyObject *obj)
  * advance look for it again once they have the lock, so that no bytes are
  * taken here once the text layer may have read ahead through read1().
  * After the raw stream alone was closed, what was read ahead is served
- * (locked or not), as read() does; more raises ValueError.
+ * (locked or not), as read() does; more raises ValueError.  A text read
+ * that fails after taking bytes puts them back (_PyIONibbler_unread()), as
+ * buffered_push_back() does for a binary read.
  */
 
 #define TEXT_CLOSED "I/O operation on closed file."
@@ -3704,7 +3706,7 @@ _PyIONibbler_peek(PyObject *op, Py_ssize_t need, _PyIO_Morsel *m,
    small. */
 Py_NO_INLINE static int
 buffered_text_advance_locked(buffered *self, uint64_t key, Py_ssize_t off,
-                             Py_ssize_t n)
+                             Py_ssize_t n, char *copy)
 {
     /* The caller's reference may be borrowed, and other threads run while
        this waits for the lock. */
@@ -3723,6 +3725,9 @@ buffered_text_advance_locked(buffered *self, uint64_t key, Py_ssize_t off,
             && nibbler_reading_pos(e) == off
             && nibbler_unread(&self->nib) >= n)
         {
+            if (copy != NULL) {
+                memcpy(copy, nibbler_unread_ptr(&self->nib), n);
+            }
             nibbler_skip(&self->nib, n);
             r = 1;
         }
@@ -3732,9 +3737,9 @@ buffered_text_advance_locked(buffered *self, uint64_t key, Py_ssize_t off,
     return r;
 }
 
-int
-_PyIONibbler_advance(PyObject *op, uint64_t key, Py_ssize_t off,
-                     Py_ssize_t n)
+static inline int
+buffered_text_advance(PyObject *op, uint64_t key, Py_ssize_t off,
+                      Py_ssize_t n, char *copy)
 {
     buffered *self = buffered_cast(op);
     /* Once it has a dict, its methods may be in use: then the bytes at its
@@ -3748,6 +3753,11 @@ _PyIONibbler_advance(PyObject *op, uint64_t key, Py_ssize_t off,
     if (e != NULL && e->id == key && n <= nibbler_end_limit(e) - off) {
         Py_ssize_t c = off;
         if (FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(e->pos, &c, off + n)) {
+            if (copy != NULL) {
+                /* Not written over before this thread waits (see
+                   nibbler_fresh_block()). */
+                memcpy(copy, PyBytes_AS_STRING(e->block) + off, n);
+            }
             return 1;
         }
         if (c >= 0) {
@@ -3755,7 +3765,61 @@ _PyIONibbler_advance(PyObject *op, uint64_t key, Py_ssize_t off,
         }
     }
     /* The end is held, or gone, or the raw stream must be asked. */
-    return buffered_text_advance_locked(self, key, off, n);
+    return buffered_text_advance_locked(self, key, off, n, copy);
+}
+
+int
+_PyIONibbler_advance(PyObject *op, uint64_t key, Py_ssize_t off,
+                     Py_ssize_t n)
+{
+    return buffered_text_advance(op, key, off, n, NULL);
+}
+
+int
+_PyIONibbler_take(PyObject *op, uint64_t key, Py_ssize_t off, Py_ssize_t n,
+                  char *copy)
+{
+    return buffered_text_advance(op, key, off, n, copy);
+}
+
+int
+_PyIONibbler_unread(PyObject *op, const char *data, Py_ssize_t len)
+{
+    buffered *self = buffered_cast(op);
+    if (buffered_dict(self) != NULL) {
+        return _PyIO_NIBBLER_NO;
+    }
+    /* The I/O role too, so that no fill is under way. */
+    if (nibbler_lock_io(&self->nib, op) < 0) {
+        return -1;
+    }
+    int r = 0;
+    if (buffered_dict(self) != NULL) {
+        r = _PyIO_NIBBLER_NO;
+    }
+    else if (buffered_raw_usable(self->raw) && !buffered_writing(self)
+             && self->ngather == 0)
+    {
+        /* In front of the unread bytes (from a fresh block, as
+           buffered_push_back() does).  Pending writes would be past
+           them: then they are not kept. */
+        Py_ssize_t unread = nibbler_unread(&self->nib);
+        PyObject *block = PyBytes_FromStringAndSize(NULL, len + unread);
+        if (block == NULL) {
+            r = -1;
+        }
+        else {
+            memcpy(PyBytes_AS_STRING(block), data, len);
+            if (unread > 0) {
+                memcpy(PyBytes_AS_STRING(block) + len,
+                       nibbler_unread_ptr(&self->nib), unread);
+            }
+            r = nibbler_publish(&self->nib, block, len + unread) < 0 ? -1 : 1;
+            Py_DECREF(block);
+        }
+    }
+    buffered_leave(self);
+    return r;
 }
 
 int

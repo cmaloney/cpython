@@ -231,7 +231,9 @@ in place through the byte API ("Bytes for TextIOWrapper" in
   that it returns `_PyIO_NIBBLER_FULL` and the line is taken in parts.
 - `_PyIONibbler_advance()` takes bytes only if they are still at the
   position (key and offset): that is how a call finds that another thread
-  read first.
+  read first.  `_PyIONibbler_take()` also copies them out.
+- `_PyIONibbler_unread()` puts bytes back in front of the unread ones, as
+  read-ahead (see "Failed reads" below).
 - `_PyIONibbler_write()`, and `_PyIONibbler_reserve()` plus
   `_PyIONibbler_commit()` for UTF-8 written straight into the buffer.
 
@@ -259,7 +261,42 @@ only `tell()`, whose cookie holds 32 bits, raises `OverflowError`).
 
 Invalid bytes with `strict` end the read before them (as at the end of the
 stream); the next read takes them and raises, once, with either kind of
-codec.
+codec.  This holds for `read()` with no size as well: it decodes what the
+buffer's `read()` returned at once, and when that fails, gives the bytes
+back and reads them in parts.
+
+### Failed reads
+
+A read takes the bytes of its text piece by piece (each span decoded, each
+peek), and may fail after it took some: the raw stream raises (or is
+closed, or raises `BlockingIOError` rather than returning `None`), or
+`KeyboardInterrupt` comes while it waits.  Then, as the buffer does with
+bytes (gh-51571), what the call took is given back and the exception is
+raised; the next read returns it.  With a native codec the call copies the
+bytes it takes (`_PyIONibbler_take()`, into its stack while small) and puts
+them back with `_PyIONibbler_unread()` (or in front of `rbuf`); with the
+decoder the characters are still in the cache, whose position goes back.
+So the text position, `tell()`, and `skip_lf` are as before the call.
+Nothing is swallowed: a read that would block (the buffer returns `None`)
+still returns what it has, as documented, but an exception always
+propagates.
+
+Not taking the bytes until the call succeeds was the alternative.  It
+fails on two counts: a read may want more than the buffer can hold at once
+(past `_PyIO_NIBBLER_FULL`), and once the buffer gathers unread bytes into
+another block (a new key), a call can't tell whether the bytes it saw are
+still the next ones or another thread took them.  Copying costs a
+`memcpy()` of what multi-step reads return; the single-step reads
+(`text_quick()`, the bulk of the text rows of the scoreboard) copy
+nothing.
+
+With free threading other threads may read between a call's pieces; the
+bytes given back then go in front of what is unread now (read after text
+that followed them, never lost or read twice).  The decoder's characters go
+back only if no other call read from the cache meanwhile; the bytes, only
+while the buffer has no pending writes.  A call without the critical
+section whose buffer got an instance dict hands the bytes to
+`text_read_more()`, which puts them in `rbuf`.
 
 ### Locking
 
@@ -287,6 +324,7 @@ reference, so lockfree settings are swapped out with a stop-the-world pass
 - A partial line that would block is kept until it is longer than
   `_CHUNK_SIZE`, as `_io` and `_pyio` keep.
 - Decode errors are raised once per run of invalid bytes, which are
-  skipped; the text before them is returned first.
+  skipped; the text before them is returned first (by `read()` too).
+- A read that raises keeps the text it took for the next read.
 - `reconfigure(encoding=...)`, `close()` and `detach()` give the old
   encoder `final=True` (gh-79792).

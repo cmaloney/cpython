@@ -37,7 +37,9 @@
       find the byte position of the text position by decoding again.
 
     Invalid bytes (errors="strict") end a read before them, as the end of
-    the stream would; the next read takes them and raises, once.
+    the stream would; the next read takes them and raises, once.  A read
+    that raises after taking some text gives it back for the next read
+    (see "Keeping what a read took").
 
     Universal newlines are handled on the decoded characters, by
     text_take(), which also notes the kinds of newline seen.
@@ -508,7 +510,23 @@ typedef struct {
     char lockfree;      /* without the critical section */
     char retry;         /* error: do it with the critical section */
     char stop;          /* invalid bytes follow the characters */
+    char again;         /* read everything in parts (see text_read_all()) */
     Py_ssize_t held;    /* bytes of m the decoder held (it forgot them) */
+    /* What a read took so far, to give back if it fails (see "Keeping
+       what a read took"): with keep, it notes it; taken: there is some;
+       kskip: skip_lf where it started.  With a native codec, copies of the
+       bytes, kbuf[0:klen] (kcap bytes of room); with the decoder, the
+       characters chars[kci:kend] of the cache while its chars are kchars
+       (NULL: they aren't any more). */
+    char keep;
+    char taken;
+    uint8_t kskip;
+    char *kbuf;
+    Py_ssize_t klen;
+    Py_ssize_t kcap;
+    PyObject *kchars;
+    Py_ssize_t kci;
+    Py_ssize_t kend;
     /* The cache as this call knows it: a copy (copy), with free threading
        (see "Locking"); with the GIL, the cache itself. */
     tcache *c;
@@ -516,6 +534,9 @@ typedef struct {
     tcache copy;
 #endif
 } store;
+
+/* How many bytes of what a read took it copies to its own stack. */
+#define KEEP_STACK 256
 
 /* rbuf's key: not one the buffer gives. */
 #define STORE_KEY(gen) ((gen) | ((uint64_t)1 << 63))
@@ -916,7 +937,7 @@ store_peek_methods(textio *self, store *st, Py_ssize_t need)
 }
 
 static inline int store_advance(textio *self, store *st, uint64_t key,
-                                Py_ssize_t off, Py_ssize_t n);
+                                Py_ssize_t off, Py_ssize_t n, char *copy);
 
 /* Take the first n bytes of st->m: 1, 0 if another thread took them, or
    -1. */
@@ -927,18 +948,18 @@ store_take(textio *self, store *st, Py_ssize_t n)
         return 1;
     }
     return store_advance(self, st, st->key,
-                         st->m.ptr - PyBytes_AS_STRING(st->m.obj), n);
+                         st->m.ptr - PyBytes_AS_STRING(st->m.obj), n, NULL);
 }
 
-/* Take n bytes from where key and off name: 1, 0 if the unread bytes
-   don't start there any more, or -1. */
+/* Take n bytes from where key and off name (copying them to copy unless
+   NULL): 1, 0 if the unread bytes don't start there any more, or -1. */
 static inline int
 store_advance(textio *self, store *st, uint64_t key, Py_ssize_t off,
-              Py_ssize_t n)
+              Py_ssize_t n, char *copy)
 {
     int r = 1;
     if (st->lockfree || self->nib) {
-        r = _PyIONibbler_advance(st->buffer, key, off, n);
+        r = _PyIONibbler_take(st->buffer, key, off, n, copy);
         if (r == _PyIO_NIBBLER_NO) {
             /* A dict on the buffer: through its methods, with the critical
                section (see text_read()). */
@@ -953,6 +974,9 @@ store_advance(textio *self, store *st, uint64_t key, Py_ssize_t off,
              && self->rpos == off
              && n <= PyBytes_GET_SIZE(self->rbuf) - off)
     {
+        if (copy != NULL) {
+            memcpy(copy, PyBytes_AS_STRING(self->rbuf) + off, n);
+        }
         self->rpos += n;
     }
     else {
@@ -1475,6 +1499,13 @@ native_more(textio *self, store *st)
                 chars = native_decode(st->cf, st->m.ptr, start, 0, &used);
                 st->stop = 1;
             }
+            else if (st->taken) {
+                /* After text this call took: it ends there, and the next
+                   read raises. */
+                PyErr_Clear();
+                st->stop = 1;
+                return 0;
+            }
             else {
                 PyObject *exc = PyErr_GetRaisedException();
                 if (store_take(self, st, Py_MIN(end, st->m.len)) < 0) {
@@ -1575,6 +1606,12 @@ decoder_more(textio *self, store *st)
                                    &flags);
             st->stop = 1;
         }
+        else if (st->taken) {
+            /* As native_more(). */
+            PyErr_Clear();
+            st->stop = 1;
+            return decoder_setstate(decoder, self->flags);
+        }
         else {
             PyObject *exc = PyErr_GetRaisedException();
             int r = store_take(self, st, Py_MIN(Py_MAX(end, 1), st->m.len));
@@ -1603,8 +1640,15 @@ decoder_more(textio *self, store *st)
        buffer). */
     cache_release(st->c);
     st->c = cache_get(self, STORE_COPY(st));
+    if (st->kchars != NULL
+        && (st->c->chars != st->kchars || st->c->ci != st->kend))
+    {
+        /* Another call read meanwhile (see text_give_back()). */
+        Py_CLEAR(st->kchars);
+    }
     if (st->c->chars == NULL || self->dspan == NULL
-        || st->c->ci == PyUnicode_GET_LENGTH(st->c->chars))
+        || (st->c->ci == PyUnicode_GET_LENGTH(st->c->chars)
+            && st->kchars == NULL))
     {
         Py_XSETREF(st->c->chars, chars);
         Py_XSETREF(self->dspan, bytes);
@@ -1621,6 +1665,10 @@ decoder_more(textio *self, store *st)
             cache_clear(st->c);
             textio_drop_chars(self);
             return -1;
+        }
+        if (st->kchars != NULL) {
+            /* The characters the call took are still there. */
+            Py_SETREF(st->kchars, Py_NewRef(st->c->chars));
         }
     }
     self->flags = flags;
@@ -1672,6 +1720,35 @@ text_more(textio *self, store *st, Py_ssize_t have)
     }
 }
 
+/* Room for n more bytes in st->kbuf. */
+static int
+keep_room(store *st, Py_ssize_t n)
+{
+    if (n > PY_SSIZE_T_MAX / 2 - st->klen) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    Py_ssize_t cap = Py_MAX(st->klen + n, 2 * st->kcap);
+    char *p = st->kbuf;
+    if (st->kcap <= KEEP_STACK) {
+        /* From the caller's room (see text_read_impl()). */
+        p = PyMem_Malloc(cap);
+        if (p != NULL && st->klen > 0) {
+            memcpy(p, st->kbuf, st->klen);
+        }
+    }
+    else {
+        p = PyMem_Realloc(p, cap);
+    }
+    if (p == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    st->kbuf = p;
+    st->kcap = cap;
+    return 0;
+}
+
 /* Take k characters from chars[ci:], at the store's position: their bytes
    with a native codec.  Returns 1, 0 if another thread took bytes
    meanwhile (then nothing was taken), or -1. */
@@ -1690,7 +1767,14 @@ text_commit(textio *self, store *st, Py_ssize_t k)
         PyObject *chars = st->c->chars;
         Py_ssize_t koff = st->c->koff;
 #endif
-        int r = store_advance(self, st, st->c->key, st->c->koff, b);
+        char *copy = NULL;
+        if (st->keep) {
+            if (b > st->kcap - st->klen && keep_room(st, b) < 0) {
+                return -1;
+            }
+            copy = st->kbuf + st->klen;
+        }
+        int r = store_advance(self, st, st->c->key, st->c->koff, b, copy);
         if (r == 0) {
             /* Another thread took bytes: look at them afresh (not
                trusting the cache, which it may not have updated). */
@@ -1704,6 +1788,10 @@ text_commit(textio *self, store *st, Py_ssize_t k)
         if (r <= 0) {
             return r;
         }
+        if (st->keep) {
+            st->klen += b;
+            st->taken = 1;
+        }
 #ifndef Py_GIL_DISABLED
         if (st->c->chars != chars || st->c->koff != koff) {
             /* Now out of date (see text_read_impl()). */
@@ -1713,12 +1801,178 @@ text_commit(textio *self, store *st, Py_ssize_t k)
         st->c->koff += b;
         st->c->kbytes -= b;
     }
+    else if (st->keep) {
+        /* The characters stay in the cache: note where. */
+        if (!st->taken) {
+            st->taken = 1;
+            st->kci = ci;
+            st->kchars = Py_NewRef(st->c->chars);
+        }
+        else if (st->kchars != NULL
+                 && (st->c->chars != st->kchars || ci != st->kend))
+        {
+            /* Another call read meanwhile (see text_give_back()). */
+            Py_CLEAR(st->kchars);
+        }
+        st->kend = ci + k;
+    }
     st->c->ci = ci + k;
     cache_put(self, st->c);
     FT_ATOMIC_STORE_UINT8_RELAXED(self->decoded, 1);
     /* With room again, the buffer may take more. */
     st->status = 0;
     return 1;
+}
+
+/*
+ * Keeping what a read took
+ *
+ * A read takes the bytes of its text from the store piece by piece (as
+ * text_commit() does), but may fail before it is done: the buffer's raw
+ * stream raises, is closed, or would block when asked for more (an
+ * exception, as opposed to a read returning None), or KeyboardInterrupt
+ * comes.  Then, as the buffer does with bytes (gh-51571), what it took
+ * is given back, so that the next read returns it, and the exception is
+ * raised: with a native codec the bytes go back in front of the store's
+ * unread bytes (the buffer's read-ahead, _PyIONibbler_unread(), or rbuf);
+ * with the decoder, whose characters stay in the cache, the cache's
+ * position goes back.  Either way the text position is where it was
+ * before the call, so tell() and write() are right, and skip_lf is as it
+ * was.  Not taking the bytes until the end instead would not do: a read
+ * may need more than the buffer holds, and the buffer can't tell whether
+ * the bytes at a position seen before are still unread once it gathered
+ * them into another block.
+ *
+ * Invalid bytes after text the call took end it as the end of the stream
+ * would (see native_more()); the next read raises.  read() of everything
+ * (text_read_all()) gives the bytes back and reads them in parts.
+ *
+ * With free threading, other threads may read between the pieces: the
+ * bytes then go back in front of what is unread now, and are read after
+ * text that followed them, but neither lost nor read twice.  The
+ * decoder's characters go back only if no other call read from the cache
+ * meanwhile (or moved the position: seek(), write()); bytes go back only
+ * while the buffer has no pending writes.  Without the critical section,
+ * bytes that the buffer won't take back (it got an instance dict) are
+ * handed to text_read_more(), which puts them in rbuf.
+ */
+
+/* Put data[0:len] back in front of the store's unread bytes.  Returns 1,
+   0 if they can't be (see above), _PyIO_NIBBLER_NO without the critical
+   section, or -1. */
+static int
+store_unread(textio *self, store *st, const char *data, Py_ssize_t len)
+{
+    if (st->lockfree || self->nib) {
+        int r = _PyIONibbler_unread(st->buffer, data, len);
+        if (r != _PyIO_NIBBLER_NO || st->lockfree) {
+            return r;
+        }
+        if (store_use_methods(self, st, 1) < 0) {
+            return -1;
+        }
+    }
+    Py_ssize_t unread = RBUF_UNREAD(self);
+    PyObject *rbuf = PyBytes_FromStringAndSize(NULL, len + unread);
+    if (rbuf == NULL) {
+        return -1;
+    }
+    memcpy(PyBytes_AS_STRING(rbuf), data, len);
+    if (unread > 0) {
+        memcpy(PyBytes_AS_STRING(rbuf) + len,
+               PyBytes_AS_STRING(self->rbuf) + self->rpos, unread);
+    }
+    Py_XSETREF(self->rbuf, rbuf);
+    self->rpos = 0;
+    self->rgen++;
+    return 1;
+}
+
+/* Bytes given back to the store: the "\n" there ends a "\r\n" seen before
+   (as text_seek_skip_lf() does).  Without the critical section if
+   lockfree. */
+static int
+text_unread_skip_lf(textio *self, tconf *cf, int lockfree)
+{
+    store st = {.cf = cf, .buffer = cf->buffer, .lockfree = lockfree};
+    st.c = cache_get(self, STORE_COPY(&st));
+    Py_ssize_t avail = text_more(self, &st, 0);
+    if (avail > 0) {
+        st.c->skip_lf = 1;
+        cache_put(self, st.c);
+    }
+    cache_release(st.c);
+    store_release(&st);
+    return avail < 0 ? -1 : 0;
+}
+
+/* Bytes a read without the critical section couldn't give back. */
+typedef struct {
+    PyObject *bytes;
+    uint8_t skip_lf;
+} tkept;
+
+enum { GIVEN = 1, HANDED = 2 };
+
+/* The read of st failed (with an exception, unless retrying): give back
+   what it took (see above).  Returns GIVEN, HANDED (to *out, without the
+   critical section), or 0 if it is lost (the exception raised, if
+   any, is kept, maybe as the context of another one). */
+static int
+text_give_back(textio *self, store *st, tkept *out)
+{
+    if (!st->taken) {
+        return GIVEN;
+    }
+    PyObject *exc = PyErr_GetRaisedException();
+    int r = 0;
+    if (st->cf->codec == CODEC_DECODER) {
+        /* The cache's position back, if it is where the call left it. */
+        cache_release(st->c);
+        st->c = cache_get(self, STORE_COPY(st));
+        if (st->kchars != NULL && st->c->chars == st->kchars
+            && st->c->ci == st->kend)
+        {
+            st->c->ci = st->kci;
+            st->c->skip_lf = st->kskip;
+            st->c->cr_at = -1;
+            cache_put(self, st->c);
+            r = GIVEN;
+        }
+    }
+    else {
+        r = store_unread(self, st, st->kbuf, st->klen);
+        if (r == _PyIO_NIBBLER_NO) {
+            assert(st->lockfree && out != NULL);
+            out->bytes = PyBytes_FromStringAndSize(st->kbuf, st->klen);
+            out->skip_lf = st->kskip;
+            r = out->bytes != NULL ? HANDED : -1;
+        }
+        else if (r > 0 && st->kskip
+                 && text_unread_skip_lf(self, st->cf, st->lockfree) < 0)
+        {
+            /* The bytes are back; only the newlines noted may differ. */
+            PyErr_Clear();
+        }
+    }
+    if (r < 0) {
+        if (exc != NULL) {
+            _PyErr_ChainExceptions1(exc);
+            exc = NULL;
+        }
+        else {
+            /* Retrying: nothing to raise but this. */
+            return -1;
+        }
+        r = 0;
+    }
+    st->taken = 0;
+    st->klen = 0;
+    Py_CLEAR(st->kchars);
+    if (exc != NULL) {
+        PyErr_SetRaisedException(exc);
+    }
+    return r;
 }
 
 /*
@@ -2311,10 +2565,14 @@ done:
 /* read() of everything, with a native codec: the buffer's read() (which
    needn't gather what it reads in a block, as peeking would), decoded at
    once.  The characters decoded but not taken yet came from bytes still
-   in the buffer, so the cache is dropped. */
+   in the buffer, so the cache is dropped.  If decoding fails, the bytes
+   are the call's to give back (see "Keeping what a read took"); invalid
+   bytes are then read in parts instead (st->again), so that the text
+   before them is returned first. */
 static PyObject *
-text_read_all(textio *self, tconf *cf)
+text_read_all(textio *self, store *st)
 {
+    tconf *cf = st->cf;
     PyObject *b = PyObject_CallMethodNoArgs(cf->buffer, &_Py_ID(read));
     if (b == NULL) {
         return NULL;
@@ -2337,18 +2595,27 @@ text_read_all(textio *self, tconf *cf)
     cache_clear(c);
     cache_put(self, c);
     cache_release(c);
-    Py_ssize_t used;
-    t.chars = native_decode(cf, PyBytes_AS_STRING(b), PyBytes_GET_SIZE(b),
-                            1, &used);
-    Py_DECREF(b);
+    Py_ssize_t used, len = PyBytes_GET_SIZE(b);
+    t.chars = native_decode(cf, PyBytes_AS_STRING(b), len, 1, &used);
     if (t.chars == NULL) {
+        if (len > st->kcap && keep_room(st, len) < 0) {
+            Py_DECREF(b);
+            return NULL;
+        }
+        memcpy(st->kbuf, PyBytes_AS_STRING(b), len);
+        Py_DECREF(b);
+        st->klen = len;
+        st->taken = len > 0;
+        st->kskip = t.skip_lf;
+        st->again = PyErr_ExceptionMatches(PyExc_UnicodeDecodeError);
         return NULL;
     }
-    store st = {.cf = cf, .buffer = cf->buffer, .c = &t};
+    Py_DECREF(b);
+    store tst = {.cf = cf, .buffer = cf->buffer, .c = &t};
     Py_ssize_t avail = PyUnicode_GET_LENGTH(t.chars), scanned = 0, k = 0;
     int found;
     PyObject *text = (avail == 0 ? NULL
-                      : text_take(self, &st, avail, -1, 0, 1, &scanned, &k,
+                      : text_take(self, &tst, avail, -1, 0, 1, &scanned, &k,
                                   &found));
     Py_DECREF(t.chars);
     if (text == NULL && !PyErr_Occurred()) {
@@ -2358,10 +2625,11 @@ text_read_all(textio *self, tconf *cf)
 }
 
 /* read(n) (n < 0: all), or with line, readline(n); with lockfree, without
-   the critical section (*retry: do it with it after all). */
+   the critical section (*retry: do it with it after all; *out: bytes taken
+   to give back with it, see text_give_back()). */
 static PyObject *
 text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
-               int *retry)
+               int *retry, tkept *out)
 {
     tconf *cf = textio_conf(self);
     if (cf == NULL) {
@@ -2391,22 +2659,48 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
             return text;
         }
     }
+    /* The bytes taken are copied here first (see "Keeping what a read
+       took"). */
+    char kstack[KEEP_STACK];
     store st = {.cf = cf, .buffer = cf->buffer, .all = n < 0 && !line,
-                .lockfree = lockfree};
+                .lockfree = lockfree, .keep = 1, .kbuf = kstack,
+                .kcap = KEEP_STACK};
+    /* The text so far: res, then in writer once there are two pieces. */
+    PyObject *res = NULL;
+    _PyUnicodeWriter writer;
+    int pieces = 0;
     if (!cf->readable) {
         conf_put(cf);
         return textio_unsupported(self, "not readable");
     }
     if (st.all && peeks && (lockfree || self->rbuf == NULL)) {
-        PyObject *text = text_read_all(self, cf);
-        conf_put(cf);
-        return text;
+        PyObject *text = text_read_all(self, &st);
+        if (text != NULL || !st.taken) {
+            if (st.kbuf != kstack) {
+                PyMem_Free(st.kbuf);
+            }
+            conf_put(cf);
+            return text;
+        }
+        st.c = cache_get(self, STORE_COPY(&st));
+        if (!st.again) {
+            goto error;
+        }
+        /* Invalid bytes: the text before them first. */
+        st.again = 0;
+        int r = text_give_back(self, &st, out);
+        if (r == 0) {
+            goto error;
+        }
+        PyErr_Clear();
+        if (r == HANDED) {
+            *retry = 1;
+            goto error;
+        }
     }
-    st.c = cache_get(self, STORE_COPY(&st));
-    /* The text so far: res, then in writer once there are two pieces. */
-    PyObject *res = NULL;
-    _PyUnicodeWriter writer;
-    int pieces = 0;
+    else {
+        st.c = cache_get(self, STORE_COPY(&st));
+    }
     /* have: characters at the position looked at without a decision. */
     Py_ssize_t got = 0, have = 0, scanned = 0;
     int taken = 0;
@@ -2433,6 +2727,10 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
         Py_ssize_t k = 0;
         int found = 0;
         PyObject *text = NULL;
+        if (!st.taken) {
+            /* Where the text taken would start. */
+            st.kskip = st.c->skip_lf;
+        }
         if (avail > 0) {
             text = text_take(self, &st, avail, n < 0 ? -1 : n - got, line,
                              st.at_end, &scanned, &k, &found);
@@ -2510,6 +2808,12 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
         }
         have = scanned = 0;
     }
+    /* Done: nothing to give back. */
+    st.klen = 0;
+    Py_CLEAR(st.kchars);
+    if (st.kbuf != kstack) {
+        PyMem_Free(st.kbuf);
+    }
     store_release(&st);
     cache_release(st.c);
     conf_put(cf);
@@ -2517,21 +2821,25 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
             : res ? res : Py_GetConstant(Py_CONSTANT_EMPTY_STR));
 
 error:
-    store_release(&st);
-    cache_release(st.c);
-    conf_put(cf);
     if (st.retry) {
-        /* The rest with the critical section, after the text taken so far
-           (see text_read_more()).  (An error found meanwhile, as of bytes
-           that weren't next any more, will be found again.) */
+        /* All of it with the critical section, the text taken so far
+           given back (see text_read_more()).  (An error found meanwhile,
+           as of bytes that weren't next any more, will be found again.) */
         assert(lockfree);
         PyErr_Clear();
         *retry = 1;
-        if (pieces > 0) {
-            return pieces > 1 ? _PyUnicodeWriter_Finish(&writer) : res;
-        }
-        return NULL;
     }
+    if (st.taken && text_give_back(self, &st, out) < 0) {
+        /* Retrying, but the bytes couldn't be handed over. */
+        *retry = 0;
+    }
+    Py_CLEAR(st.kchars);
+    if (st.kbuf != kstack) {
+        PyMem_Free(st.kbuf);
+    }
+    store_release(&st);
+    cache_release(st.c);
+    conf_put(cf);
     Py_XDECREF(res);
     if (pieces > 1) {
         _PyUnicodeWriter_Dealloc(&writer);
@@ -2539,38 +2847,65 @@ error:
     return NULL;
 }
 
+/* With the critical section: bytes a read without it took and couldn't
+   give back to the buffer (see text_give_back()) go in front of rbuf,
+   from which reads take them first. */
+static int
+text_keep_handed(textio *self, tkept *kept)
+{
+    tconf *cf = textio_conf(self);
+    if (cf == NULL) {
+        return -1;
+    }
+    store st = {.cf = cf, .buffer = cf->buffer};
+    st.c = cache_get(self, STORE_COPY(&st));
+    int r = store_unread(self, &st, PyBytes_AS_STRING(kept->bytes),
+                         PyBytes_GET_SIZE(kept->bytes));
+    cache_release(st.c);
+    if (r > 0 && kept->skip_lf && text_unread_skip_lf(self, cf, 0) < 0) {
+        PyErr_Clear();
+    }
+    conf_put(cf);
+    return r < 0 ? -1 : 0;
+}
+
 /* text_read() past text_quick(). */
 Py_NO_INLINE static PyObject *
 text_read_more(textio *self, Py_ssize_t n, int line, int lockfree)
 {
-    PyObject *res, *head = NULL;
+    PyObject *res;
     if (lockfree) {
         int retry = 0;
-        head = text_read_impl(self, n, line, 1, &retry);
-        if (!retry) {
-            return head;
+        tkept kept = {NULL, 0};
+        res = text_read_impl(self, n, line, 1, &retry, &kept);
+        if (!retry && kept.bytes == NULL) {
+            return res;
         }
-        /* Text taken before it couldn't go on without the critical
-           section: the rest follows it. */
-        if (head != NULL && n >= 0) {
-            n -= PyUnicode_GET_LENGTH(head);
-            if (n == 0) {
-                return head;
+        if (kept.bytes != NULL) {
+            /* Unless retrying, an error is raised after they are kept. */
+            PyObject *exc = PyErr_GetRaisedException();
+            int r;
+            Py_BEGIN_CRITICAL_SECTION(self);
+            r = text_keep_handed(self, &kept);
+            Py_END_CRITICAL_SECTION();
+            Py_DECREF(kept.bytes);
+            if (exc != NULL) {
+                if (r < 0) {
+                    _PyErr_ChainExceptions1(exc);
+                }
+                else {
+                    PyErr_SetRaisedException(exc);
+                }
+                return NULL;
+            }
+            if (r < 0) {
+                return NULL;
             }
         }
     }
     Py_BEGIN_CRITICAL_SECTION(self);
-    res = text_read_impl(self, n, line, 0, NULL);
+    res = text_read_impl(self, n, line, 0, NULL, NULL);
     Py_END_CRITICAL_SECTION();
-    if (head != NULL) {
-        if (res != NULL) {
-            PyUnicode_Append(&head, res);
-            Py_SETREF(res, head);
-        }
-        else {
-            Py_DECREF(head);
-        }
-    }
     return res;
 }
 
