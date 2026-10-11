@@ -1081,6 +1081,18 @@ Porting to Python 3.16
 This section lists previously described changes and other bugfixes
 that may require changes to your code.
 
+* On non-blocking streams:
+
+  * :meth:`io.BufferedReader.read1`, :meth:`!readinto1` and
+    :meth:`~io.BufferedReader.peek` (and those of :class:`io.BufferedRandom`
+    and :class:`io.BufferedRWPair`) return ``None`` instead of ``b""`` or
+    ``0`` when the raw stream would block.  ``b""`` now always means end of
+    file.
+
+  Code that polls a non-blocking stream should treat ``None`` as "try again
+  later".
+  (Contributed by Cody Maloney in :gh:`57531`.)
+
 * In :mod:`tkinter`, the *name* parameter of the
   :meth:`~tkinter.Misc.wait_variable`, :meth:`~tkinter.Misc.setvar` and
   :meth:`~tkinter.Misc.getvar` methods and the *value* parameter of
