@@ -553,9 +553,14 @@ buffered_memory_view(char *mem, Py_ssize_t len, int flags, PyObject *memobj)
         PyObject *view = PyMemoryView_FromMemory(mem, len, flags);
         if (view != NULL) {
             /* Immutable: released with the managed buffer, without
-               bf_releasebuffer. */
-            ((PyMemoryViewObject *)view)->mbuf->master.obj =
-                Py_NewRef(memobj);
+               bf_releasebuffer.  A read-only view shows it as its obj,
+               as one made from it would; a writable one (into a block of
+               ours) doesn't, so that Python code can't keep the block. */
+            PyMemoryViewObject *mv = (PyMemoryViewObject *)view;
+            mv->mbuf->master.obj = Py_NewRef(memobj);
+            if (flags == PyBUF_READ) {
+                mv->view.obj = memobj;
+            }
         }
         return view;
     }
@@ -656,21 +661,10 @@ buffered_raw_read(buffered *self, char *dst, Py_ssize_t len, PyObject *memobj,
    obj may also be the object holding the data of the current write() call
    (see buffered_memory_view()), or NULL for memory only valid during the
    call. */
-static PyObject *
+static inline PyObject *
 buffered_view(const morsel *m)
 {
-    if (m->obj == NULL || !PyBytes_CheckExact(m->obj)) {
-        return buffered_memory_view((char *)m->ptr, m->len, PyBUF_READ,
-                                    m->obj);
-    }
-    PyObject *whole = PyMemoryView_FromObject(m->obj);
-    if (whole == NULL) {
-        return NULL;
-    }
-    Py_ssize_t start = m->ptr - PyBytes_AS_STRING(m->obj);
-    PyObject *view = PySequence_GetSlice(whole, start, start + m->len);
-    Py_DECREF(whole);
-    return view;
+    return buffered_memory_view((char *)m->ptr, m->len, PyBUF_READ, m->obj);
 }
 
 /* A raw write of len > 0 bytes that wrote none: raise, since retrying it
@@ -1639,7 +1633,7 @@ gather_unlink(buffered *self, gather *g)
 
 /* The active record of the current context on self (borrowed), or NULL
    (with the lock held). */
-static gather *
+Py_NO_INLINE static gather *
 gather_find(buffered *self)
 {
     PyObject *ctx = _PyThreadState_GET()->context;
@@ -1709,7 +1703,7 @@ gather_splice_records(buffered *self, int all)
    `limit` bytes, they are moved to the pending writes (only: what can't be
    written out yet stays pending past the threshold, for the next write,
    flush or the end of the block). */
-static int
+Py_NO_INLINE static int
 gather_add(gather *g, PyObject *obj, const char *data, Py_ssize_t len)
 {
     buffered *self = g->stream;
@@ -3315,7 +3309,7 @@ _io_BufferedWriter___init___impl(buffered *self, PyObject *raw,
    accepted (written, or kept pending), as BlockingIOError does, so that
    the caller knows what to write again.  (Others, such as one a signal
    handler raised, are left as they are.)  Keeps the exception. */
-static void
+Py_NO_INLINE static void
 buffered_set_written(Py_ssize_t n)
 {
     PyObject *exc = PyErr_GetRaisedException();
@@ -3339,7 +3333,7 @@ buffered_set_written(Py_ssize_t n)
    to how much of the data was accepted (written or kept), see
    buffered_set_written().  Without that,
    the caller couldn't tell what to write again.  Returns -1. */
-static int
+Py_NO_INLINE static int
 buffered_write_failed(buffered *self, PyObject *obj, const char *data,
                       Py_ssize_t len, Py_ssize_t done)
 {
