@@ -19,6 +19,7 @@ import os
 import random
 import select
 import signal
+import socket
 import subprocess
 import sys
 import textwrap
@@ -832,6 +833,146 @@ class SlowDeviceTest:
             f.flush()
         with self.assertRaises(ValueError):
             f.write(b"c")
+
+    def other_raws(self):
+        # Raw streams other than FileIO, closed by their own close(): the
+        # nibbler asks them whether they are closed only with the lock.
+        # Each comes with a function returning the bytes it received.
+        test = self
+
+        class NoSuperClose(self.MockRawIO):
+            # close() without super().close(): closed says.
+            _closed = False
+
+            @property
+            def closed(self):
+                return self._closed
+
+            def close(self):
+                self._closed = True
+
+        def mock(cls):
+            def make():
+                raw = cls()
+                return raw, lambda: b"".join(raw._write_stack)
+            return make
+
+        def socket_raw():
+            a, b = socket.socketpair()
+            test.addCleanup(a.close)
+            test.addCleanup(b.close)
+            b.setblocking(False)
+
+            def received():
+                try:
+                    return b.recv(1 << 16)
+                except BlockingIOError:
+                    return b""
+            return socket.SocketIO(a, "wb"), received
+
+        return (("RawIOBase subclass", mock(self.MockRawIO)),
+                ("close() without super", mock(NoSuperClose)),
+                ("SocketIO", socket_raw))
+
+    def test_small_writes_after_other_raw_closed(self):
+        # After raw.close() of a raw stream other than FileIO, the nibbler
+        # queues small writes without an error until the block is full
+        # (the room left in it: here 63 one-byte writes), then raises; _io
+        # and _pyio raise at once.  Nothing reaches the raw stream.
+        for kind, make in self.other_raws():
+            with self.subTest(kind):
+                raw, received = make()
+                f = self.BufferedWriter(raw, 64)
+                f.write(b"a")
+                raw.close()
+                queued = 0
+                with self.assertRaises(ValueError):
+                    for _ in range(64):
+                        f.write(b"b")
+                        queued += 1
+                if self.is_nibbler:
+                    self.assertLess(queued, 64)
+                else:
+                    self.assertEqual(queued, 0)
+                # The writing end is dropped: every write takes the lock
+                # and raises now.
+                with self.assertRaises(ValueError):
+                    f.write(b"c")
+                with self.assertRaises(ValueError):
+                    f.flush()
+                self.assertEqual(received(), b"")
+
+    def test_locked_op_after_other_raw_closed(self):
+        # After raw.close() of a raw stream other than FileIO, the next
+        # operation that takes the lock raises, whatever small writes were
+        # queued before it, and none of them reaches the raw stream.
+        ops = (("flush", lambda f: f.flush()),
+               ("large write", lambda f: f.write(b"L" * 512)),
+               ("write that doesn't fit", lambda f: f.write(b"F" * 61)))
+        for kind, make in self.other_raws():
+            for name, op in ops:
+                with self.subTest(kind, op=name):
+                    raw, received = make()
+                    f = self.BufferedWriter(raw, 64)
+                    f.write(b"a")
+                    raw.close()
+                    if self.is_nibbler:
+                        for _ in range(3):
+                            f.write(b"b")
+                    with self.assertRaises(ValueError):
+                        op(f)
+                    with self.assertRaises(ValueError):
+                        f.write(b"c")
+                    self.assertEqual(received(), b"")
+
+    def test_close_after_other_raw_closed(self):
+        # close() of the buffered object after raw.close() finds it closed
+        # and returns: the queued small writes are dropped, never written.
+        # (The nibbler's writing end stays open: small writes after it are
+        # still queued until an operation raises.)
+        for kind, make in self.other_raws():
+            with self.subTest(kind):
+                raw, received = make()
+                f = self.BufferedWriter(raw, 64)
+                f.write(b"a")
+                raw.close()
+                if self.is_nibbler:
+                    for _ in range(3):
+                        f.write(b"b")
+                f.close()
+                self.assertTrue(f.closed)
+                with self.assertRaises(ValueError):
+                    f.flush()
+                with self.assertRaises(ValueError):
+                    f.write(b"c")
+                del f
+                support.gc_collect()
+                self.assertEqual(received(), b"")
+
+    def test_small_writes_after_unrelated_close(self):
+        # Closing another stream doesn't stop or reorder small writes.
+        raw = self.MockRawIO()
+        f = self.BufferedWriter(raw, 64)
+        for i in range(100):
+            f.write(b"%02d" % i)
+            if i % 3 == 0:
+                self.MockRawIO().close()
+        f.flush()
+        self.assertEqual(b"".join(raw._write_stack),
+                         b"".join(b"%02d" % i for i in range(100)))
+
+    def test_raw_closed_attribute_is_honored(self):
+        # Whether a raw stream is closed is what its closed says, also after
+        # IOBase.close() ran.
+        class Raw(self.MockRawIO):
+            closed = False
+        raw = Raw()
+        f = self.BufferedWriter(raw, 16)
+        f.write(b"a")
+        raw.close()
+        f.write(b"b")
+        f.flush()
+        self.assertEqual(b"".join(raw._write_stack), b"ab")
 
     def test_closed_follows_raw(self):
         # close() keeps the raw stream, which says whether it is closed:

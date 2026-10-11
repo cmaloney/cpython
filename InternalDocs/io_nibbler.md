@@ -108,7 +108,7 @@ thread holding the lock never waits for the role).
 
 | Operation | I/O role | lock | Notes |
 |---|---|---|---|
-| small `write()` (exact FileIO, room at the writing end) | – | – | reserve/commit at the end; the FileIO is checked after reserving |
+| small `write()` (under 512 bytes, room at the writing end) | – | – | reserve/commit at the end; an exact FileIO is checked after reserving, other raw streams are not asked (see "Closing the raw stream alone") |
 | text write through `_PyIONibbler_reserve()`/`_commit()` | – | – | same, from `TextIOWrapper` |
 | other `write()` | only to write out | yes | the lock is released around the raw write (`buffered_write_spans()`) |
 | `read(n)`, `read1()`, `readline()`, `peek()` hitting the read-ahead | – | – | claim at the reading end |
@@ -151,6 +151,61 @@ Fields used with the lock need nothing more.  Those used without it:
 Nothing that can wait or detach runs between reserving and committing at
 the writing end, so a holder waiting for appends only waits for threads
 running their copy.
+
+
+Closing the raw stream alone
+----------------------------
+
+After `raw.close()` (rather than the buffered object's `close()`), writes
+must not reach the raw stream.  What small writes see depends on the raw
+stream:
+
+- An exact `FileIO` is checked by every write, also a small one without
+  the lock, by loading its `fd` after reserving: the next write raises.
+- Other raw streams (`SocketIO`, Python `RawIOBase` subclasses,
+  subclasses of `FileIO`) are asked through `closed` only by operations
+  that take the lock.  A small write (under 512 bytes) that fits at the
+  writing end goes without the lock and doesn't ask, so after a direct
+  `raw.close()` small writes are queued without an error until the room
+  left in the current block is used up, or until an operation that takes
+  the lock and checks `closed` runs: `flush()`, a write that doesn't fit,
+  a write of 512 bytes or more, `seek()`, reads.  That operation raises
+  `ValueError` and drops the writing end, so every later write takes the
+  lock and raises too.  With 16-byte writes after one queued write, 511
+  writes are queued at buffer size 8192, 4095 at 65536, and 8191 with
+  buffer size None (whose block is `DEFAULT_BUFFER_SIZE`, 128 KiB).
+- Queued bytes never reach the closed raw stream: every write-out asks
+  `closed` with the lock first.  `close()` of the buffered object then
+  finds the raw stream closed and returns without writing them or
+  warning (as `_io` does with bytes buffered before `raw.close()`); they
+  are dropped with the object.  It doesn't drop the writing end either,
+  so small writes after it are still queued until an operation raises.
+- Text writes through the nibbler `TextIOWrapper` ask the buffered object
+  whether it is closed on each write when the raw stream isn't an exact
+  FileIO, so they raise at once.
+
+Why small writes don't ask: `closed` of a Python raw stream is an
+attribute lookup and a Python call, about 1750 instructions for a
+`RawIOBase` subclass and 1950 for a `SocketIO` (callgrind, -O3 GIL build),
+more than a whole lock-free small write (about 1120).  Making small writes
+notice sooner without asking was tried and rejected for its complexity
+(branch `raw_closed`):
+
+- a global count of closes bumped by `_io._IOBase.close()`, compared by
+  each small write: under 0.6% per small write, but every close anywhere
+  sends the next small write of every such buffered object to the lock,
+  and with threads closing Python raw streams in a loop up to 18% of small
+  writes took the lock and free-threaded writes/s fell by 20-43%
+  (`Tools/nibblerbench/closechurn.py`);
+- a count per raw stream, in a table of watched streams keyed by the
+  stream with a mutex and 64 hashed counters: fixes that (about 25
+  instructions per close), at about 100 more lines in `_iomodule.c`;
+- a C `closed` flag in the `_io._IOBase` struct: covers only raw types with
+  that layout, grows every Python IO object, and must mirror the
+  `__IOBase_closed` attribute.
+
+A raw stream whose `closed` says it is open after its file descriptor was
+closed could write to a reused descriptor, with `_io` as here.
 
 
 Fork and finalization
@@ -213,6 +268,11 @@ Each of these is a bug of `_io`'s classes, which the tests skip for them:
   kept in the read-ahead (up to the buffer size when the raw stream would
   block, then returned as it is).
 - Buffer size 0 and None are only supported here.
+
+And one of the nibbler: after a raw stream other than an exact FileIO is
+closed by itself, small writes are queued without an error until the
+block is full or an operation takes the lock (see "Closing the raw stream
+alone"); `_io` asks `closed` on every write.
 
 When the nibbler classes replace `_io`'s, the C fast paths keyed on
 `_io`'s exact types (stock `TextIOWrapper`'s `read1()` shortcut, pickle's

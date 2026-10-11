@@ -79,13 +79,22 @@ find_nibblermodule_state_by_def(PyTypeObject *type)
  *   role, without holding the lock; meanwhile other threads can only queue
  *   more writes.  Small writes that fit are queued without the lock (see
  *   "The open end" in nibbler.h), so all code holding the lock sees them
- *   queued.  They check that an exact FileIO is open.  Other raw streams
- *   are asked with the lock (asking without it, a Python call, would cost
- *   more than the write), and once one says it is closed the open end is
- *   dropped, so that writes take the lock and raise; closing through the
- *   buffered object drops it too.  So small writes after a raw stream
- *   other than FileIO was closed by itself are queued without an error
- *   until the next write that takes the lock.
+ *   queued.  They check that an exact FileIO is open (one load of its
+ *   fd), so the next write after raw.close() raises.  Other raw streams
+ *   are asked through closed only with the lock: asking is a Python call
+ *   that costs more than a whole lock-free write (about 1750-1950 against
+ *   1120 instructions), and the counts of closes that would let small
+ *   writes notice without asking were rejected as too complex (see
+ *   "Closing the raw stream alone" in InternalDocs/io_nibbler.md).  Once
+ *   one says it is closed, the open end is dropped, so that writes take
+ *   the lock and raise; closing through the buffered object drops it too.
+ *   So after such a raw stream was closed by itself, small writes are
+ *   queued without an error until the room left in the current block is
+ *   used up or an operation that takes the lock runs (flush(), a write
+ *   that doesn't fit, seek(), ...), which raises.  Queued bytes never
+ *   reach the closed raw stream: writing out asks closed first, and
+ *   close() finds it closed and returns, keeping the open end, without
+ *   writing them or warning; they are dropped with the object.
  *
  * - Reading: the reading end holds the bytes the last fill read (see "The
  *   open end" in nibbler.h).  Its position splits them: the bytes before
@@ -3427,8 +3436,9 @@ buffered_write_lockfree(buffered *self, const char *data, Py_ssize_t len,
     /* Until committed, nothing can replace raw.  When an exact FileIO was
        closed by itself, the bytes are given back, unless other threads
        reserved bytes after them meanwhile: then they are queued too, and
-       nothing can write them out any more.  (Other raw streams: see
-       buffered_check_closed().) */
+       nothing can write them out any more.  Other raw streams are not
+       asked here (see "Writing" in the comment before the buffered
+       struct). */
     PyObject *raw = FT_ATOMIC_LOAD_PTR_RELAXED(self->raw);
     if (FT_ATOMIC_LOAD_UINT8_RELAXED(self->raw_fileio)
         && _PyFileIO_closed(raw))
