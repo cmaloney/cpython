@@ -385,6 +385,11 @@ I/O base classes
       the *newline* argument to :func:`open` can be used to select the line
       terminator(s) recognized.
 
+      .. versionchanged:: next
+         On a non-blocking stream, buffered and text streams keep a partial
+         line for the next call; binary streams return ``None`` and text
+         streams raise :exc:`BlockingIOError` instead of returning it.
+
    .. method:: readlines(hint=-1, /)
 
       Read and return a list of lines from the stream.  *hint* can be specified
