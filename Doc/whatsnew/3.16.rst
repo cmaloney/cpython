@@ -467,6 +467,15 @@ io
 * Add :meth:`io.BytesIO.peek` method to read without advancing position.
   (Contributed by Marcel Martin in :gh:`90533`.)
 
+* Non-blocking streams report "no data yet" consistently, and no longer
+  lose data that has already arrived: buffered
+  :meth:`~io.BufferedIOBase.read1`, :meth:`~io.BufferedIOBase.readinto1`
+  and :meth:`~io.BufferedReader.peek` return ``None`` when the raw stream
+  would block, :meth:`~io.IOBase.readline` keeps a partial line for the next
+  call, and text reads raise :exc:`BlockingIOError` instead of returning
+  ``""``.  See :ref:`io-non-blocking`.
+  (Contributed by Cody Maloney in :gh:`57531`.)
+
 * When the flush done by :meth:`~io.IOBase.close` of a buffered or text
   stream fails, the stream is closed anyway and the data still buffered is
   discarded with a :exc:`ResourceWarning`, instead of being written again by
@@ -1087,7 +1096,7 @@ Porting to Python 3.16
 This section lists previously described changes and other bugfixes
 that may require changes to your code.
 
-* On non-blocking streams:
+* On non-blocking streams (see :ref:`io-non-blocking`):
 
   * :meth:`io.BufferedReader.read1`, :meth:`!readinto1` and
     :meth:`~io.BufferedReader.peek` (and those of :class:`io.BufferedRandom`
