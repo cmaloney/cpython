@@ -3005,15 +3005,22 @@ class TextIOWrapper(TextIOBase):
                     # timeout, gh-51571).  With the snapshot of its start
                     # only after an OSError, raised before the buffer gave
                     # out the chunk: after another error (from the
-                    # decoder, say) the chunk was consumed, so tell() can't
-                    # work until the next seek().
+                    # decoder, say) the chunk was consumed, or for a line
+                    # longer than the chunk size, tell() can't work until
+                    # the next seek().
                     if line:
                         self._keep_line(line, line_snapshot
                                         if isinstance(exc, OSError) else None)
                     raise
                 if line_snapshot is not None:
-                    next_input = self._snapshot[1]
-                    line_snapshot[3].append(next_input[self._snapshot_held:])
+                    if len(line) > self._CHUNK_SIZE:
+                        # Too long to keep if it would block: no snapshot
+                        # either, so it costs no copy of the line's bytes.
+                        line_snapshot = None
+                    else:
+                        next_input = self._snapshot[1]
+                        line_snapshot[3].append(
+                            next_input[self._snapshot_held:])
                 if not more or self._decoded_chars:
                     break
             if self._decoded_chars:

@@ -2455,12 +2455,16 @@ line_snapshot_reset(textio *self, Py_ssize_t start)
     return 0;
 }
 
-/* Add the chunk just read to the line snapshot ls. */
+/* Add the chunk just read to the line snapshot ls, after chunked chars of
+   the line were put aside. */
 Py_NO_INLINE static int
-line_snapshot_extend(textio *self, PyObject *ls)
+line_snapshot_extend(textio *self, PyObject *ls, Py_ssize_t chunked)
 {
-    if (self->snapshot == NULL) {
-        /* Not telling any more: no snapshot of the line either. */
+    if (self->snapshot == NULL || chunked > self->chunk_size) {
+        /* Not telling any more, or the line is already too long to keep
+           when the stream would block (see
+           textiowrapper_readline_blocked()): no snapshot of the line
+           either, so that it costs no copy of the line's bytes. */
         Py_CLEAR(self->line_snap);
         return 0;
     }
@@ -2581,8 +2585,9 @@ textiowrapper_readline_blocked(textio *self, PyObject *chunks,
    next call, as the buffer keeps what it read (such as before a socket
    timeout, gh-51571).  With the snapshot of its start only after an
    OSError, raised before the buffer gave out the chunk: after another
-   error (from the decoder, say) the chunk was consumed, so tell() can't
-   work until the next seek().  Keeps the raised exception. */
+   error (from the decoder, say) the chunk was consumed, or for a line
+   longer than the chunk size (no line_snap), tell() can't work until the
+   next seek().  Keeps the raised exception. */
 Py_NO_INLINE static void
 textiowrapper_readline_error(textio *self, PyObject *chunks,
                              PyObject *remaining)
@@ -2638,7 +2643,8 @@ _textiowrapper_readline(textio *self, Py_ssize_t limit)
                (else it may be an older line's). */
             if ((chunks != NULL || remaining != NULL)
                 && self->line_snap != NULL
-                && line_snapshot_extend(self, self->line_snap) < 0)
+                && line_snapshot_extend(self, self->line_snap,
+                                        chunked) < 0)
             {
                 goto error;
             }

@@ -1207,6 +1207,29 @@ class TextIOWrapperTest:
                 self.assertRaises(BlockingIOError, t.readline, size)
                 self.assertEqual(t.readline(size), "x" * 4 + "y\n")
 
+    def test_readline_long_line_memory(self):
+        # The tell() snapshot of where a line spanning chunks started (so
+        # that it can be kept if the stream would block) stops growing
+        # once the line is too long to keep: a long line over a seekable
+        # buffer costs no extra copy of its bytes.
+        if self.is_nibbler:
+            self.skipTest("the nibbler TextIOWrapper reads a long line "
+                          "differently (peak about 4x)")
+        import tracemalloc
+        n = 4 * 1024 * 1024
+        data = b"x" * n + b"\n"
+        t = self.TextIOWrapper(self.BufferedReader(self.BytesIO(data)),
+                               encoding="ascii")
+        tracemalloc.start()
+        try:
+            line = t.readline()
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(len(line), n + 1)
+        # The decoded chunks and the joined line: 2x (3x with the copy).
+        self.assertLess(peak, 2.5 * n)
+
     def test_tell_after_readline_would_block(self):
         # A readline() that would block after a partial line keeps the
         # decoder's held bytes (a partial character) or pending \r in the
