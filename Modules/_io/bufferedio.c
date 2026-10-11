@@ -1704,7 +1704,8 @@ buffered_iternext(PyObject *op)
     if (line == NULL)
         return NULL;
     if (line == Py_None) {
-        /* Would block: StopIteration would end the loop for good. */
+        /* Would block: raise BlockingIOError, since StopIteration would
+           look like EOF. */
         Py_DECREF(line);
         _PyIO_set_read_blocking_error();
         return NULL;

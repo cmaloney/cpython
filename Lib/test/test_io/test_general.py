@@ -352,8 +352,8 @@ class IOTest:
 
     def test_next_readline_would_block(self):
         # readline() returns None when a non-blocking stream would block:
-        # iteration raises BlockingIOError, since StopIteration would end
-        # the loop for good.
+        # iteration raises BlockingIOError, since StopIteration would look
+        # like EOF.
         class R(self.IOBase):
             def readline(self):
                 return None

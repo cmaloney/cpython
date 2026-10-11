@@ -571,7 +571,8 @@ class IOBase(metaclass=abc.ABCMeta):
     def __next__(self):
         line = self.readline()
         if line is None:
-            # Would block: StopIteration would end the loop for good.
+            # Would block: raise BlockingIOError, since StopIteration
+            # would look like EOF.
             raise BlockingIOError(
                 errno.EAGAIN, "read could not complete without blocking")
         if not line:
