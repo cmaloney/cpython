@@ -1441,8 +1441,9 @@ _Unpickler_ReadFromFile(PickleState *state, UnpicklerObject *self, Py_ssize_t n)
             data = _Pickle_FastCall(self->peek, len);
             if (data == NULL) {
                 int unsupported = _Unpickler_PeekUnsupported();
-                if (unsupported <= 0)
+                if (unsupported <= 0) {
                     return -1;
+                }
                 /* peek() is probably not supported by the given file object */
                 PyErr_Clear();
                 Py_CLEAR(self->peek);
