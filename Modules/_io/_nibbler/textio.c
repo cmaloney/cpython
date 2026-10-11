@@ -1050,7 +1050,7 @@ store_write_methods(textio *self, tconf *cf, PyObject *obj, const char *data,
 /* Store data[0:len] (owned by obj).  Without the critical section
    (lockfree), only into the buffer itself: _PyIO_NIBBLER_NO if it has to
    be done with it. */
-static inline int
+static Py_ALWAYS_INLINE int
 store_write(textio *self, tconf *cf, int lockfree, PyObject *obj,
             const char *data, Py_ssize_t len)
 {
@@ -2591,7 +2591,7 @@ text_read(textio *self, Py_ssize_t n, int line)
 /* UTF-8 text not ASCII, of 1 or 2 byte characters but no surrogates, into
    room reserved in the buffer, without a bytes object.  Returns 0, or
    _PyIO_NIBBLER_NO (nothing done). */
-static int
+static Py_ALWAYS_INLINE int
 utf8_write_direct(PyObject *buffer, PyObject *text)
 {
     int kind = PyUnicode_KIND(text);
@@ -2636,10 +2636,12 @@ utf8_write_direct(PyObject *buffer, PyObject *text)
    encoder must be given final=True at the end (gh-79792).  Without the
    critical section (lockfree), _PyIO_NIBBLER_NO if it has to be done with
    it (nothing done). */
-static int
+static int text_write_encoded(textio *self, tconf *cf, int lockfree,
+                              PyObject *text);
+
+static Py_ALWAYS_INLINE int
 text_write(textio *self, tconf *cf, int lockfree, PyObject *text)
 {
-    PyObject *b;
     int enc = cf->enc;
     if (enc != CODEC_DECODER
         && (PyUnicode_IS_ASCII(text)
@@ -2656,6 +2658,15 @@ text_write(textio *self, tconf *cf, int lockfree, PyObject *text)
             return r;
         }
     }
+    return text_write_encoded(self, cf, lockfree, text);
+}
+
+/* text_write() past its fast cases: encoded into a bytes object. */
+Py_NO_INLINE static int
+text_write_encoded(textio *self, tconf *cf, int lockfree, PyObject *text)
+{
+    PyObject *b;
+    int enc = cf->enc;
     const char *errors = (enc == CODEC_DECODER || enc == CODEC_CHARMAP ? NULL
                           : cf->errors_str);
     if (enc == CODEC_UTF8) {
@@ -2772,10 +2783,13 @@ text_sync(textio *self, tconf *cf, int lockfree)
     return !lockfree && self->rbuf ? store_rewind(self, cf) : 0;
 }
 
-/* write(); with lockfree, without the critical section (*retry: do it with
-   it after all, nothing done). */
-static PyObject *
-text_write_call(textio *self, PyObject *text, int lockfree, int *retry)
+/* What text_write_call() returns to have write() done with the critical
+   section after all (nothing was done). */
+#define TEXT_RETRY Py_NotImplemented
+
+/* write(); with lockfree, without the critical section (or TEXT_RETRY). */
+static Py_ALWAYS_INLINE PyObject *
+text_write_call(textio *self, PyObject *text, int lockfree)
 {
     tconf *cf = textio_conf(self);
     if (cf == NULL) {
@@ -2783,8 +2797,7 @@ text_write_call(textio *self, PyObject *text, int lockfree, int *retry)
     }
     if (lockfree && !cf->lockfree) {
         conf_put(cf);
-        *retry = 1;
-        return NULL;
+        return TEXT_RETRY;
     }
     /* Over the buffer as the store, which checks that it is open when the
        bytes are stored, if any (and then there is nothing to sync but the
@@ -2822,14 +2835,23 @@ text_write_call(textio *self, PyObject *text, int lockfree, int *retry)
     if (r == _PyIO_NIBBLER_NO) {
         assert(lockfree);
         conf_put(cf);
-        *retry = 1;
-        return NULL;
+        return TEXT_RETRY;
     }
     if (r == 0 && needflush) {
         r = _PyFile_Flush(cf->buffer);
     }
     conf_put(cf);
     return r < 0 ? NULL : PyLong_FromSsize_t(textlen);
+}
+
+Py_NO_INLINE static PyObject *
+text_write_locked(textio *self, PyObject *text)
+{
+    PyObject *res;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    res = text_write_call(self, text, 0);
+    Py_END_CRITICAL_SECTION();
+    return res;
 }
 
 /*[clinic input]
@@ -2844,17 +2866,12 @@ _io_TextIOWrapper_write_impl(textio *self, PyObject *text)
 {
     tconf *cf = conf_peek(self);
     if (cf != NULL && cf->lockfree) {
-        int retry = 0;
-        PyObject *res = text_write_call(self, text, 1, &retry);
-        if (!retry) {
+        PyObject *res = text_write_call(self, text, 1);
+        if (res != TEXT_RETRY) {
             return res;
         }
     }
-    PyObject *res;
-    Py_BEGIN_CRITICAL_SECTION(self);
-    res = text_write_call(self, text, 0, NULL);
-    Py_END_CRITICAL_SECTION();
-    return res;
+    return text_write_locked(self, text);
 }
 
 /*
