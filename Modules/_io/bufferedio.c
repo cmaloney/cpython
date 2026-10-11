@@ -1329,12 +1329,12 @@ _buffered_readline_buffered(buffered *self, Py_ssize_t limit,
     }
     const char *start = self->buffer + self->pos;
     const char *s = memchr(start, '\n', n);
-    if (s == NULL && n != limit) {
-        *avail = n;
-        return NULL;
-    }
     if (s != NULL) {
         n = s - start + 1;
+    }
+    else if (n != limit) {
+        *avail = n;
+        return NULL;
     }
     PyObject *res = PyBytes_FromStringAndSize(start, n);
     if (res == NULL) {
