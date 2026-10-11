@@ -2589,8 +2589,9 @@ text_read(textio *self, Py_ssize_t n, int line)
  */
 
 /* UTF-8 text not ASCII, of 1 or 2 byte characters but no surrogates, into
-   room reserved in the buffer, without a bytes object.  Returns 0, or
-   _PyIO_NIBBLER_NO (nothing done). */
+   room reserved in the buffer, without a bytes object.  Returns 0, -1
+   (closed: the bytes are stored, as by write()), or _PyIO_NIBBLER_NO
+   (nothing done). */
 static Py_ALWAYS_INLINE int
 utf8_write_direct(PyObject *buffer, PyObject *text)
 {
@@ -2609,7 +2610,8 @@ utf8_write_direct(PyObject *buffer, PyObject *text)
         size += (c >= 0x80) + (c >= 0x800);
     }
     void *end;
-    char *p = _PyIONibbler_reserve(buffer, size, &end);
+    int closed;
+    char *p = _PyIONibbler_reserve(buffer, size, &end, &closed);
     if (p == NULL) {
         return _PyIO_NIBBLER_NO;
     }
@@ -2629,6 +2631,10 @@ utf8_write_direct(PyObject *buffer, PyObject *text)
         }
     }
     _PyIONibbler_commit(end, size);
+    if (closed) {
+        PyErr_SetString(PyExc_ValueError, "I/O operation on closed file.");
+        return -1;
+    }
     return 0;
 }
 

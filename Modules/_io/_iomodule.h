@@ -140,11 +140,13 @@ extern int _PyIONibbler_advance(PyObject *buffered, uint64_t key,
 extern int _PyIONibbler_write(PyObject *buffered, PyObject *obj,
                               const char *data, Py_ssize_t len);
 /* Without the lock, room for len bytes at the end of the buffer, if there
-   is and it is open: where to put them, and *end for
-   _PyIONibbler_commit(end, len), which must follow without running any
-   Python code.  NULL: nothing reserved (_PyIONibbler_write() then). */
+   is: where to put them, and *end for _PyIONibbler_commit(end, len), which
+   must follow without running any Python code.  NULL: nothing reserved
+   (_PyIONibbler_write() then).  *closed: the raw stream was closed, but
+   the room couldn't be given back: commit it, then raise ValueError("I/O
+   operation on closed file."), as write() does. */
 extern char *_PyIONibbler_reserve(PyObject *buffered, Py_ssize_t len,
-                                  void **end);
+                                  void **end, int *closed);
 extern void _PyIONibbler_commit(void *end, Py_ssize_t len);
 /* Is the raw stream closed?  1, 0, or -1 with an exception set. */
 extern int _PyIONibbler_closed(PyObject *buffered);

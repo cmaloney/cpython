@@ -3605,7 +3605,7 @@ _PyIONibbler_write(PyObject *op, PyObject *obj, const char *data,
 }
 
 char *
-_PyIONibbler_reserve(PyObject *op, Py_ssize_t len, void **end)
+_PyIONibbler_reserve(PyObject *op, Py_ssize_t len, void **end, int *closed)
 {
     buffered *self = buffered_cast(op);
     nibbler_end *e;
@@ -3614,15 +3614,18 @@ _PyIONibbler_reserve(PyObject *op, Py_ssize_t len, void **end)
        be looked at once the bytes are reserved: then raw and raw_fileio
        stay.  If it was closed by itself, the bytes are given back, unless
        others were reserved after them: then they are queued, as with
-       write(), and can't be written out any more. */
+       write(), and can't be written out any more (*closed; see
+       buffered_write_lockfree()). */
     if (buffered_dict(self) != NULL || len >= NIBBLER_REF_MIN
         || !FT_ATOMIC_LOAD_UINT8_RELAXED(self->raw_fileio)
         || (e = nibbler_end_get(&self->nib, 1)) == NULL
-        || (r = nibbler_reserve(e, len)) < 0
-        || (FT_ATOMIC_LOAD_UINT8_RELAXED(self->raw_fileio)
-            && _PyFileIO_closed(FT_ATOMIC_LOAD_PTR_RELAXED(self->raw))
-            && nibbler_unreserve(e, r, len)))
+        || (r = nibbler_reserve(e, len)) < 0)
     {
+        return NULL;
+    }
+    *closed = (FT_ATOMIC_LOAD_UINT8_RELAXED(self->raw_fileio)
+               && _PyFileIO_closed(FT_ATOMIC_LOAD_PTR_RELAXED(self->raw)));
+    if (*closed && nibbler_unreserve(e, r, len)) {
         return NULL;
     }
     *end = e;

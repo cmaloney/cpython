@@ -573,6 +573,47 @@ class NibblerTextIOWrapperTest(TestCase):
         self.assertEqual(len(parts), 4 * 20000 + 1)
         self.assertLessEqual(set(parts[1:]), {b"\n", b"\r", b"\r\n"})
 
+    def test_write_after_raw_close(self):
+        # Small non-ASCII writes (into room reserved without the lock) racing
+        # raw.close(): none succeeds once close() has returned, as with the
+        # buffer's own write().
+        late = 0
+        for _ in range(100):
+            raw = io.FileIO(os_helper.TESTFN, "w")
+            f = self.nib.TextIOWrapper(self.nib.BufferedWriter(raw, 1 << 20),
+                                       encoding="utf-8")
+            closed = threading.Event()
+            started = threading.Barrier(7)
+            done = [0] * 6
+            after = [0] * 6
+
+            def writer(k):
+                started.wait()
+                for _ in range(20000):
+                    was_closed = closed.is_set()
+                    try:
+                        f.write("\xe9")
+                    except ValueError:
+                        return
+                    done[k] += 1
+                    after[k] += was_closed
+
+            def closer():
+                started.wait()
+                while sum(done) < 3000:
+                    pass
+                raw.close()
+                closed.set()
+
+            run_concurrently([lambda k=k: writer(k) for k in range(6)]
+                             + [closer])
+            late += sum(after)
+            try:
+                f.close()
+            except ValueError:
+                pass
+        self.assertEqual(late, 0)
+
     def test_reinit_race(self):
         # __init__() called again while other threads read, write and
         # tell(): no crash (the old buffer and codec were freed under
