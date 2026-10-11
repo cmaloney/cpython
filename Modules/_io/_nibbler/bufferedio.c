@@ -1505,14 +1505,12 @@ buffered_readline(buffered *self, Py_ssize_t limit)
         if (r == -1 || r == WOULD_BLOCK) {
             /* The partial line stays for the next call (gh-51571), which
                looks for the end of the line after what was looked at.
-               Would block: return None, unless (without a size) it is the
-               buffer size long (the bound of every implementation): then
-               it is returned as it is.  (The block grows for a longer line, see
-               buffered_fill(), so that a readline() that blocks returns
-               it whole.) */
-            if (r == -1 || unread == 0 || limit >= 0
-                || unread < n->capacity)
-            {
+               Would block: return None, unless, with or without a size, it
+               is longer than the buffer size (the bound of every
+               implementation): then it is returned as it is.  (The block
+               grows for a longer line, see buffered_fill(), so that a
+               readline() that blocks returns it whole.) */
+            if (r == -1 || unread == 0 || unread <= n->capacity) {
                 nibbler_set_noline(n, scanned);
                 if (r == -1) {
                     return NULL;
