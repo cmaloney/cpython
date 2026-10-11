@@ -3453,6 +3453,14 @@ _io_BufferedWriter_write_impl(buffered *self, PyObject *obj)
 
 #define TEXT_CLOSED "I/O operation on closed file."
 
+/* How many unread bytes a peek gathers in one block, growing it (as
+   buffered_fill() does for a long line), before it returns
+   _PyIO_NIBBLER_FULL: so that text takes a line of up to that many bytes
+   at once (and threads reading lines get them whole).  64 blocks, and at
+   least DEFAULT_BUFFER_SIZE. */
+#define TEXT_PEEK_MAX(capacity) \
+    Py_MAX(64 * (capacity), (Py_ssize_t)DEFAULT_BUFFER_SIZE)
+
 /* peek with the lock: out of line, so that the lock-free path stays
    small. */
 Py_NO_INLINE static int
@@ -3470,18 +3478,27 @@ buffered_text_peek_locked(buffered *self, Py_ssize_t need, morsel *m,
     /* What was read ahead is there after the raw stream alone was closed
        (as with reads, and without the lock); more is not. */
     int r = 0;
-    if (nibbler_unread(&self->nib) < need) {
-        if (buffered_check_closed(self, TEXT_CLOSED) < 0) {
-            r = -1;
-        }
-        else if (need > self->nib.capacity) {
-            /* The unread bytes and more can't fit in a block. */
+    if (nibbler_unread(&self->nib) < need
+        && buffered_check_closed(self, TEXT_CLOSED) < 0)
+    {
+        r = -1;
+    }
+    /* Until there are enough: fewer means the end of the stream.  (Other
+       threads may have taken bytes while this one waited for the lock, so
+       one fill may not do.) */
+    while (r == 0 && nibbler_unread(&self->nib) < need) {
+        if (self->nib.capacity == 0
+            || need > TEXT_PEEK_MAX(self->nib.capacity))
+        {
+            /* Unbuffered, or more than a block may grow to. */
             r = _PyIO_NIBBLER_FULL;
+            break;
         }
-        else {
-            Py_ssize_t n = buffered_fill(self, 0);
-            r = n == -1 ? -1 : n == WOULD_BLOCK ? _PyIO_NIBBLER_BLOCKED : 0;
+        Py_ssize_t n = buffered_fill(self, 0);
+        if (n == 0) {
+            break;
         }
+        r = n == -1 ? -1 : n == WOULD_BLOCK ? _PyIO_NIBBLER_BLOCKED : 0;
     }
     Py_ssize_t unread = nibbler_unread(&self->nib);
     if (r >= 0 && unread > 0) {

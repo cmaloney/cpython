@@ -121,7 +121,8 @@ typedef struct {
    after them when fewer are unread) unless the stream ends first (then 0
    with fewer), or
    _PyIO_NIBBLER_BLOCKED when it would block first, or _PyIO_NIBBLER_FULL
-   when `need` is more than the buffer holds.  *key and the offset of
+   when `need` is more than the buffer gathers (64 blocks, at least
+   DEFAULT_BUFFER_SIZE).  *key and the offset of
    m->ptr in m->obj always name the same bytes: a later peek with both the
    same returns them again. */
 #define _PyIO_NIBBLER_BLOCKED 1

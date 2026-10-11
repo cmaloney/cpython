@@ -399,6 +399,29 @@ class NibblerTextIOWrapperTest(TestCase):
                     for g in got:
                         self.assertEqual(g, sorted(g))
 
+    def test_concurrent_readline_long_lines(self):
+        # Lines longer than the buffer's block are still read whole, each by
+        # one thread: the block grows to hold them.
+        lines = ["%06d:%s\n" % (i, "x" * (3000 * (i % 7)))
+                 for i in range(1500)]
+        with open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        for newline in (None, ""):
+            with self.subTest(newline=newline):
+                f = self.nib.TextIOWrapper(
+                    self.nib.BufferedReader(io.FileIO(os_helper.TESTFN, "r"),
+                                            8192),
+                    encoding="utf-8", newline=newline)
+                with f:
+                    got = [[] for _ in range(8)]
+
+                    def reader(k):
+                        got[k].extend(f)
+
+                    run_concurrently([lambda k=k: reader(k)
+                                      for k in range(8)])
+                self.assertEqual(sorted(sum(got, [])), lines)
+
     def test_text_and_binary_reads(self):
         # Text reads and binary reads of its buffer take every byte once.
         # (ASCII: a binary read may stop inside a character.)

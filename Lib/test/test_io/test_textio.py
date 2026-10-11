@@ -2511,6 +2511,28 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
             self.assertEqual(sorted(sum(got, [])), lines)
 
     @threading_helper.requires_working_threading()
+    @support.requires_resource("cpu")
+    def test_threads_readline_long_lines(self):
+        # Lines longer than the buffer's block are read whole, each by one
+        # thread, also where they switch while waiting for the buffer.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        lines = ["%06d:%s\n" % (i, "x" * (3000 * (i % 7)))
+                 for i in range(1500)]
+        with open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                              encoding="utf-8")
+        got = [[] for _ in range(8)]
+
+        def reader(k):
+            got[k].extend(t)
+
+        with threading_helper.start_threads(
+                threading.Thread(target=reader, args=(k,)) for k in range(8)):
+            pass
+        self.assertEqual(sorted(sum(got, [])), lines)
+
+    @threading_helper.requires_working_threading()
     def test_reconfigure_newline_while_threads_write(self):
         # reconfigure(newline=...) keeps the codec: writes racing it never
         # find the stream unwritable.
