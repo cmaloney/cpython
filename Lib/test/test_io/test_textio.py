@@ -660,7 +660,9 @@ class TextIOWrapperTest:
                 with self.open(os_helper.TESTFN, "r+", encoding=enc,
                                newline=newline) as f:
                     read(f)
-                    pos = f.tell()
+                    # The buffer's position (with decoder flags past it:
+                    # a "\r\n" seen, between "\r" and "\n").
+                    pos = f.tell() & ((1 << 64) - 1)
                     self.assertEqual(f.buffer.tell(), pos)
                     f.write("XY")
                     self.assertEqual(f.tell(), pos + len("XY".encode(enc)))
@@ -1183,8 +1185,6 @@ class TextIOWrapperTest:
         # A partial line is kept up to the chunk size (the text layer's
         # buffer size); a longer one is returned as it is, as at EOF, with
         # or without a size.
-        if self.is_nibbler:
-            self.skipTest("_io._nibbler keeps up to 64 times the chunk size")
         for size in -1, 100:
             with self.subTest(size=size):
                 raw = self.MockRawIO((b"x" * 5, None, b"y\n"))
@@ -2376,7 +2376,255 @@ class CTextIOWrapperTest(TextIOWrapperTest, CTestCase):
 
 
 class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
-    pass
+
+    def open_nibbler(self, cls, mode, buffer_size, **kwargs):
+        f = self.TextIOWrapper(cls(self.FileIO(os_helper.TESTFN, mode),
+                                   buffer_size), **kwargs)
+        self.addCleanup(f.close)
+        return f
+
+    def test_buffer_dict_mid_read(self):
+        # An attribute set on the buffer between reads makes the text layer
+        # use its methods from then on, without losing the characters it
+        # had decoded and taken the bytes of.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        data = "0123456789\nABCDEFGHIJKLMNOP\nqrstuvwxyz\n"
+        with open(os_helper.TESTFN, "w", encoding="ascii") as f:
+            f.write(data)
+        for cls in (self.BufferedReader, self.BufferedRandom):
+            for bs, chunk, first in itertools.product(
+                    (16, 8192), (3, 8192), (("readline",), ("read", 4))):
+                with self.subTest(cls=cls, bs=bs, chunk=chunk, first=first):
+                    t = self.open_nibbler(cls, "r+", bs, encoding="utf-8")
+                    t._CHUNK_SIZE = chunk
+                    a = getattr(t, first[0])(*first[1:])
+                    t.buffer.x = 1
+                    self.assertEqual(a + t.read(7) + t.read(), data)
+
+    def test_invalid_bytes_strict(self):
+        # Invalid bytes end the text before them, and the next read raises
+        # (once): they don't look like the end of the stream.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        cases = [
+            ("utf-8", b"one\ntwo\xff\nthree\n",
+             ["one\n", "two", None, "\n", "three\n", ""]),
+            ("utf-8", b"ab\xc3", ["ab", None, ""]),
+            ("ascii", b"x\x80y\n", ["x", None, "y\n", ""]),
+            ("cp1252", b"x\x81y\n", ["x", None, "y\n", ""]),
+        ]
+        for encoding, data, expected in cases:
+            with self.subTest(encoding=encoding, data=data):
+                with open(os_helper.TESTFN, "wb") as f:
+                    f.write(data)
+                t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                                      encoding=encoding)
+                for want in expected:
+                    if want is None:
+                        self.assertRaises(UnicodeDecodeError, t.readline)
+                    else:
+                        self.assertEqual(t.readline(), want)
+                t.seek(0)
+                with self.assertRaises(UnicodeDecodeError):
+                    list(t)
+
+    def test_newlines_across_tell_seek(self):
+        # readline(3) stops between "\r" and "\n": the "\n" that follows
+        # still ends that "\r\n", also after seek(tell()).
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(b"ab\r\ncd\r\n")
+        for chunk in (8192, 1):
+            with self.subTest(chunk=chunk):
+                t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                                      encoding="utf-8", newline="")
+                t._CHUNK_SIZE = chunk
+                self.assertEqual(t.readline(3), "ab\r")
+                t.seek(t.tell())
+                self.assertEqual(t.readline(), "\n")
+                self.assertEqual(t.readline(), "cd\r\n")
+                self.assertEqual(t.newlines, "\r\n")
+
+    def test_seek_invalid_cookie_native_codec(self):
+        # gh-91112: a cookie tell() can't have returned with a native codec
+        # (decoder flags but the "\r\n" one, characters to skip) is an
+        # error, not another position.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(b"abc\n")
+        t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                              encoding="utf-8")
+        for cookie in (2 << 64, 1 << 128):
+            with self.subTest(cookie=cookie):
+                self.assertRaises(OSError, t.seek, cookie)
+
+    def test_reconfigure_encoding_finishes_encoder(self):
+        # The old encoder is given the end of its text (gh-79792): the
+        # ISO-2022-JP text ends back in ASCII before the new encoding's.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        t = self.open_nibbler(self.BufferedWriter, "w", 8192,
+                              encoding="iso2022_jp")
+        t.write("日本")
+        t.reconfigure(encoding="ascii")
+        t.write("x")
+        t.close()
+        with open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(),
+                             "日本".encode("iso2022_jp") + b"x")
+
+    def test_read_ahead_after_raw_close(self):
+        # After the raw stream alone is closed, what the buffer read ahead
+        # can still be read as text, as bytes: also once a binary read
+        # that needed the raw stream raised.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(b"abcdefghij" * 10)
+        raw = self.FileIO(os_helper.TESTFN, "r")
+        b = self.BufferedReader(raw, 64)
+        t = self.TextIOWrapper(b, encoding="utf-8")
+        self.addCleanup(t.close)
+        self.assertEqual(t.read(2), "ab")
+        raw.close()
+        self.assertEqual(t.read(2), "cd")
+        self.assertRaises(ValueError, b.readline)
+        self.assertEqual(t.read(2), "ef")
+        self.assertEqual(b.read(2), b"gh")
+
+    def test_decoder_flags_past_32_bits(self):
+        # iso2022_kr's decoder state goes past 32 bits: reads work, and
+        # only tell(), whose cookie can't hold it, raises.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        text = "abc\n\ud55c\uad6d\ud55c\uad6d\nx\n" * 3
+        with open(os_helper.TESTFN, "w", encoding="iso2022_kr") as f:
+            f.write(text)
+        t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                              encoding="iso2022_kr")
+        t._CHUNK_SIZE = 4
+        lines = text.splitlines(keepends=True)
+        self.assertEqual(t.readline(), lines[0])
+        self.assertEqual(t.readline(), lines[1])
+        self.assertEqual(t.readline(), lines[2])
+        self.assertEqual(t.readline(), lines[3])
+        self.assertEqual(t.read(1), "\ud55c")
+        with self.assertRaises(OverflowError):
+            t.tell()
+        self.assertEqual(t.read(), text[len("".join(lines[:4])) + 1:])
+        # Flags within 32 bits still go through tell() and seek().
+        with open(os_helper.TESTFN, "w", encoding="iso2022_jp") as f:
+            f.write("abc\n日本\nx\n")
+        t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                              encoding="iso2022_jp")
+        self.assertEqual(t.readline(), "abc\n")
+        self.assertEqual(t.read(1), "日")
+        pos = t.tell()
+        self.assertEqual(t.read(), "本\nx\n")
+        t.seek(pos)
+        self.assertEqual(t.read(), "本\nx\n")
+
+    def test_invalid_bytes_codec_decoder(self):
+        # The same through the codec's incremental decoder: the bad bytes
+        # are taken, so that reading goes on past them.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        cases = [
+            ("utf-16-le", b"a\x00\x00\xd8b\x00c\x00\n\x00d\x00",
+             ["a", None, "bc\n", "d", ""]),
+            ("utf-32-le", "a\n".encode("utf-32-le") + b"\x00\x00\x11\x00"
+             + "b\n".encode("utf-32-le"), ["a\n", None, "b\n", ""]),
+        ]
+        for encoding, data, expected in cases:
+            with self.subTest(encoding=encoding):
+                with open(os_helper.TESTFN, "wb") as f:
+                    f.write(data)
+                t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                                      encoding=encoding)
+                for want in expected:
+                    if want is None:
+                        self.assertRaises(UnicodeDecodeError, t.readline)
+                    else:
+                        self.assertEqual(t.readline(), want)
+
+    @threading_helper.requires_working_threading()
+    @support.requires_resource("cpu")
+    def test_buffer_dict_while_threads_read(self):
+        # The same while threads iterate (with the GIL, they switch where
+        # they wait for the buffer): each line is read once, whole.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        lines = ["%06d \xe9€ %s\n" % (i, "x" * (i % 30))
+                 for i in range(5000)]
+        with open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        self.addCleanup(sys.setswitchinterval, sys.getswitchinterval())
+        sys.setswitchinterval(1e-6)
+        for i in range(20):
+            t = self.open_nibbler(self.BufferedReader, "r", 64,
+                                  encoding="utf-8")
+            got = [[] for _ in range(6)]
+
+            def reader(k):
+                got[k].extend(t)
+
+            threads = [threading.Thread(target=reader, args=(k,))
+                       for k in range(6)]
+            with threading_helper.start_threads(threads):
+                time.sleep(0.0002 * i)
+                t.buffer.foo = 1
+            self.assertEqual(sorted(sum(got, [])), lines)
+
+    @threading_helper.requires_working_threading()
+    @support.requires_resource("cpu")
+    def test_threads_readline_long_lines(self):
+        # Lines longer than the buffer's block are read whole, each by one
+        # thread, also where they switch while waiting for the buffer.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        lines = ["%06d:%s\n" % (i, "x" * (3000 * (i % 7)))
+                 for i in range(1500)]
+        with open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                              encoding="utf-8")
+        got = [[] for _ in range(8)]
+
+        def reader(k):
+            got[k].extend(t)
+
+        with threading_helper.start_threads(
+                threading.Thread(target=reader, args=(k,)) for k in range(8)):
+            pass
+        self.assertEqual(sorted(sum(got, [])), lines)
+
+    @threading_helper.requires_working_threading()
+    def test_reconfigure_newline_while_threads_write(self):
+        # reconfigure(newline=...) keeps the codec: writes racing it never
+        # find the stream unwritable.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        self.addCleanup(sys.setswitchinterval, sys.getswitchinterval())
+        sys.setswitchinterval(1e-6)
+        t = self.open_nibbler(self.BufferedWriter, "w", 1 << 16,
+                              encoding="utf-8")
+        stop = threading.Event()
+        errors = []
+
+        def writer():
+            try:
+                for _ in range(20000):
+                    t.write("ab\n")
+            except Exception as e:
+                errors.append(e)
+
+        def reconfigure():
+            i = 0
+            while not stop.is_set():
+                t.reconfigure(newline=("\r\n", "\n", "\r", "")[i % 4])
+                i += 1
+
+        r = threading.Thread(target=reconfigure)
+        with threading_helper.start_threads([r]):
+            try:
+                with threading_helper.start_threads(
+                        threading.Thread(target=writer) for _ in range(4)):
+                    pass
+            finally:
+                stop.set()
+        self.assertEqual(errors, [])
 
 
 class PyTextIOWrapperTest(TextIOWrapperTest, PyTestCase):

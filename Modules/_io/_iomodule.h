@@ -121,7 +121,8 @@ typedef struct {
    after them when fewer are unread) unless the stream ends first (then 0
    with fewer), or
    _PyIO_NIBBLER_BLOCKED when it would block first, or _PyIO_NIBBLER_FULL
-   when `need` is more than the buffer holds.  *key and the offset of
+   when `need` is more than the buffer gathers (64 blocks, at least
+   DEFAULT_BUFFER_SIZE).  *key and the offset of
    m->ptr in m->obj always name the same bytes: a later peek with both the
    same returns them again. */
 #define _PyIO_NIBBLER_BLOCKED 1
@@ -130,8 +131,8 @@ extern int _PyIONibbler_peek(PyObject *buffered, Py_ssize_t need,
                              _PyIO_Morsel *m, uint64_t *key);
 /* Take n bytes from the position named by key and off (see
    _PyIONibbler_peek()).  Returns 1, 0 (nothing taken) if the unread bytes
-   don't start there any more, or -1 (ValueError if the raw stream is
-   closed). */
+   don't start there any more, -1 (ValueError if the raw stream is closed),
+   or _PyIO_NIBBLER_NO. */
 extern int _PyIONibbler_advance(PyObject *buffered, uint64_t key,
                                 Py_ssize_t off, Py_ssize_t n);
 /* Like write(obj), for data[0:len] owned by obj, but ValueError("I/O
@@ -140,11 +141,13 @@ extern int _PyIONibbler_advance(PyObject *buffered, uint64_t key,
 extern int _PyIONibbler_write(PyObject *buffered, PyObject *obj,
                               const char *data, Py_ssize_t len);
 /* Without the lock, room for len bytes at the end of the buffer, if there
-   is and it is open: where to put them, and *end for
-   _PyIONibbler_commit(end, len), which must follow without running any
-   Python code.  NULL: nothing reserved (_PyIONibbler_write() then). */
+   is: where to put them, and *end for _PyIONibbler_commit(end, len), which
+   must follow without running any Python code.  NULL: nothing reserved
+   (_PyIONibbler_write() then).  *closed: the raw stream was closed, but
+   the room couldn't be given back: commit it, then raise ValueError("I/O
+   operation on closed file."), as write() does. */
 extern char *_PyIONibbler_reserve(PyObject *buffered, Py_ssize_t len,
-                                  void **end);
+                                  void **end, int *closed);
 extern void _PyIONibbler_commit(void *end, Py_ssize_t len);
 /* Is the raw stream closed?  1, 0, or -1 with an exception set. */
 extern int _PyIONibbler_closed(PyObject *buffered);

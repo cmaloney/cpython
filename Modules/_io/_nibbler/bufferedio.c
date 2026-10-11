@@ -3611,8 +3611,22 @@ _io_BufferedWriter_write_impl(buffered *self, PyObject *obj)
  * _iomodule.h) instead of its methods: it decodes from the unread bytes
  * and takes only those of the text it returns, and appends what it
  * encodes as write() does.  An instance dict could override the methods,
- * so objects with one are used through them (_PyIO_NIBBLER_NO).
+ * so objects with one are used through them (_PyIO_NIBBLER_NO): peek and
+ * advance look for it again once they have the lock, so that no bytes are
+ * taken here once the text layer may have read ahead through read1().
+ * After the raw stream alone was closed, what was read ahead is served
+ * (locked or not), as read() does; more raises ValueError.
  */
+
+#define TEXT_CLOSED "I/O operation on closed file."
+
+/* How many unread bytes a peek gathers in one block, growing it (as
+   buffered_fill() does for a long line), before it returns
+   _PyIO_NIBBLER_FULL: so that text takes a line of up to that many bytes
+   at once (and threads reading lines get them whole).  64 blocks, and at
+   least DEFAULT_BUFFER_SIZE. */
+#define TEXT_PEEK_MAX(capacity) \
+    Py_MAX(64 * (capacity), (Py_ssize_t)DEFAULT_BUFFER_SIZE)
 
 /* peek with the lock: out of line, so that the lock-free path stays
    small. */
@@ -3623,18 +3637,34 @@ buffered_text_peek_locked(buffered *self, Py_ssize_t need, morsel *m,
     if (buffered_enter(self, NULL, READING) < 0) {
         return -1;
     }
-    /* Not even what is read ahead after close() (unlike reads). */
-    int r = buffered_check_closed(self, "I/O operation on closed file.");
-    if (r < 0) {
+    if (buffered_dict(self) != NULL) {
+        /* Got a dict while this waited (see _PyIONibbler_advance()). */
         buffered_leave(self);
-        return -1;
+        return _PyIO_NIBBLER_NO;
     }
-    if (need > self->nib.capacity) {
-        /* The unread bytes and more can't fit in a block. */
-        r = _PyIO_NIBBLER_FULL;
+    /* What was read ahead is there after the raw stream alone was closed
+       (as with reads, and without the lock); more is not. */
+    int r = 0;
+    if (nibbler_unread(&self->nib) < need
+        && buffered_check_closed(self, TEXT_CLOSED) < 0)
+    {
+        r = -1;
     }
-    else if (nibbler_unread(&self->nib) < need) {
+    /* Until there are enough: fewer means the end of the stream.  (Other
+       threads may have taken bytes while this one waited for the lock, so
+       one fill may not do.) */
+    while (r == 0 && nibbler_unread(&self->nib) < need) {
+        if (self->nib.capacity == 0
+            || need > TEXT_PEEK_MAX(self->nib.capacity))
+        {
+            /* Unbuffered, or more than a block may grow to. */
+            r = _PyIO_NIBBLER_FULL;
+            break;
+        }
         Py_ssize_t n = buffered_fill(self, 0);
+        if (n == 0) {
+            break;
+        }
         r = n == -1 ? -1 : n == WOULD_BLOCK ? _PyIO_NIBBLER_BLOCKED : 0;
     }
     Py_ssize_t unread = nibbler_unread(&self->nib);
@@ -3682,10 +3712,16 @@ buffered_text_advance_locked(buffered *self, uint64_t key, Py_ssize_t off,
        this waits for the lock. */
     Py_INCREF(self);
     int r = buffered_lock(self);
-    if (r == 0) {
-        r = buffered_check_closed(self, "I/O operation on closed file.");
+    if (r == 0 && buffered_dict(self) != NULL) {
+        /* Got a dict while this waited. */
+        buffered_unlock(self);
+        r = _PyIO_NIBBLER_NO;
+    }
+    else if (r == 0) {
+        /* Bytes peeked are there after the raw stream alone was closed
+           (see buffered_text_peek_locked()). */
         nibbler_end *e = nibbler_reading(&self->nib);
-        if (r == 0 && e != NULL && e->id == key
+        if (e != NULL && e->id == key
             && nibbler_reading_pos(e) == off
             && nibbler_unread(&self->nib) >= n)
         {
@@ -3703,6 +3739,11 @@ _PyIONibbler_advance(PyObject *op, uint64_t key, Py_ssize_t off,
                      Py_ssize_t n)
 {
     buffered *self = buffered_cast(op);
+    /* Once it has a dict, its methods may be in use: then the bytes at its
+       position may not be next any more. */
+    if (buffered_dict(self) != NULL) {
+        return _PyIO_NIBBLER_NO;
+    }
     /* Without the lock: move the reading end's position from off, if it
        is still there (see _PyIONibbler_peek()). */
     nibbler_end *e = nibbler_end_get(&self->nib, 0);
@@ -3718,8 +3759,6 @@ _PyIONibbler_advance(PyObject *op, uint64_t key, Py_ssize_t off,
     /* The end is held, or gone, or the raw stream must be asked. */
     return buffered_text_advance_locked(self, key, off, n);
 }
-
-#define TEXT_CLOSED "I/O operation on closed file."
 
 int
 _PyIONibbler_write(PyObject *op, PyObject *obj, const char *data,
@@ -3753,7 +3792,7 @@ _PyIONibbler_write(PyObject *op, PyObject *obj, const char *data,
 }
 
 char *
-_PyIONibbler_reserve(PyObject *op, Py_ssize_t len, void **end)
+_PyIONibbler_reserve(PyObject *op, Py_ssize_t len, void **end, int *closed)
 {
     buffered *self = buffered_cast(op);
     nibbler_end *e;
@@ -3762,15 +3801,18 @@ _PyIONibbler_reserve(PyObject *op, Py_ssize_t len, void **end)
        be looked at once the bytes are reserved: then raw and raw_fileio
        stay.  If it was closed by itself, the bytes are given back, unless
        others were reserved after them: then they are queued, as with
-       write(), and can't be written out any more. */
+       write(), and can't be written out any more (*closed; see
+       buffered_write_lockfree()). */
     if (buffered_dict(self) != NULL || len >= NIBBLER_REF_MIN
         || !FT_ATOMIC_LOAD_UINT8_RELAXED(self->raw_fileio)
         || (e = nibbler_end_get(&self->nib, 1)) == NULL
-        || (r = nibbler_reserve(e, len)) < 0
-        || (FT_ATOMIC_LOAD_UINT8_RELAXED(self->raw_fileio)
-            && _PyFileIO_closed(FT_ATOMIC_LOAD_PTR_RELAXED(self->raw))
-            && nibbler_unreserve(e, r, len)))
+        || (r = nibbler_reserve(e, len)) < 0)
     {
+        return NULL;
+    }
+    *closed = (FT_ATOMIC_LOAD_UINT8_RELAXED(self->raw_fileio)
+               && _PyFileIO_closed(FT_ATOMIC_LOAD_PTR_RELAXED(self->raw)));
+    if (*closed && nibbler_unreserve(e, r, len)) {
         return NULL;
     }
     *end = e;
