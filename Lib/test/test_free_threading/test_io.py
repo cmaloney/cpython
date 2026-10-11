@@ -683,7 +683,7 @@ class NibblerReinitTest(TestCase):
         t = io.TextIOWrapper(f, encoding="utf-8", write_through=True)
 
         def gather():
-            with f.gather():
+            with f._gather():
                 f.write(b"g" * 600)
 
         users = [lambda: f.write(b"x" * 10),

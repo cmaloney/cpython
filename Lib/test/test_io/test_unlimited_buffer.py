@@ -375,16 +375,16 @@ class UnlimitedTest(unittest.TestCase):
             self.assertEqual(t.buffer.tell(), 4)
         self.assertEqual(self.read(), b'abc\n')
 
-    # gather() inside an unlimited buffer.
+    # _gather() inside an unlimited buffer.
 
     def test_gather(self):
         with self.writer() as f:
             f.write(b'a')
-            with f.gather(limit=10):
+            with f._gather(limit=10):
                 f.write(b'b' * 100)
                 f.write(b'c' * MiB)
             self.assertEqual(self.size(), 0)
-            with f.gather():
+            with f._gather():
                 f.write(b'd')
                 f.flush()
                 self.assertEqual(self.size(), 0)
