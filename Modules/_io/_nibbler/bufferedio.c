@@ -18,7 +18,7 @@
 #include "pycore_typeobject.h"          // _PyType_GetDict()
 #include "pycore_weakref.h"             // FT_CLEAR_WEAKREFS()
 
-#include "_iomodule.h"
+#include "../_iomodule.h"
 #include "nibbler.h"
 
 /*[clinic input]

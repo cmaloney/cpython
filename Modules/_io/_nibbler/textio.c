@@ -64,7 +64,7 @@
 #include "pycore_unicodeobject.h"       // _PyUnicode_AsUTF8String()
 #include "pycore_weakref.h"             // FT_CLEAR_WEAKREFS()
 
-#include "_iomodule.h"
+#include "../_iomodule.h"
 
 /*[clinic input]
 module _io
