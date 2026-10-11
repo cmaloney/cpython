@@ -150,6 +150,31 @@ fileio_set_stat(fileio *self, struct _Py_stat_struct *st)
 #endif
 }
 
+/* _Py_fstat_noraise(), saving the error of a failure in *error the way it
+   reports it: GetLastError() on Windows, errno elsewhere.  Called without
+   the GIL. */
+#ifdef MS_WINDOWS
+static int
+fileio_fstat(int fd, struct _Py_stat_struct *st, DWORD *error)
+{
+    int res = _Py_fstat_noraise(fd, st);
+    if (res < 0) {
+        *error = GetLastError();
+    }
+    return res;
+}
+#else
+static int
+fileio_fstat(int fd, struct _Py_stat_struct *st, int *error)
+{
+    int res = _Py_fstat_noraise(fd, st);
+    if (res < 0) {
+        *error = errno;
+    }
+    return res;
+}
+#endif
+
 /* Returns 0 on success, -1 with exception set on failure. */
 static int
 internal_close(fileio *self)
@@ -311,7 +336,12 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
     /* Set once fstat() ran together with open(), saving a second release
        of the GIL. */
     int fstat_done = 0;
-    int fstat_errno = 0;
+    /* The error of a failed fstat(), as _Py_fstat_noraise() reports it. */
+#ifdef MS_WINDOWS
+    DWORD fstat_error = 0;
+#else
+    int fstat_error = 0;
+#endif
     int async_err = 0;
 
 #ifdef Py_DEBUG
@@ -475,8 +505,7 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
                 fd = open(name, flags, 0666);
 #endif
                 if (fd >= 0) {
-                    fstat_result = _Py_fstat_noraise(fd, st);
-                    fstat_errno = errno;
+                    fstat_result = fileio_fstat(fd, st, &fstat_error);
                     fstat_done = 1;
                 }
                 Py_END_ALLOW_THREADS
@@ -530,12 +559,9 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
 #endif
     }
 
-    if (fstat_done) {
-        errno = fstat_errno;
-    }
-    else {
+    if (!fstat_done) {
         Py_BEGIN_ALLOW_THREADS
-        fstat_result = _Py_fstat_noraise(fd, st);
+        fstat_result = fileio_fstat(fd, st, &fstat_error);
         Py_END_ALLOW_THREADS
     }
     if (fstat_result < 0) {
@@ -543,10 +569,11 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
         an anonymous file on a Virtual Box shared folder filesystem would
         raise ENOENT. */
 #ifdef MS_WINDOWS
-        if (GetLastError() == ERROR_INVALID_HANDLE) {
-            PyErr_SetFromWindowsErr(0);
+        if (fstat_error == ERROR_INVALID_HANDLE) {
+            PyErr_SetFromWindowsErr(fstat_error);
 #else
-        if (errno == EBADF) {
+        if (fstat_error == EBADF) {
+            errno = fstat_error;
             PyErr_SetFromErrno(PyExc_OSError);
 #endif
             goto error;
