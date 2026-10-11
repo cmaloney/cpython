@@ -1115,6 +1115,13 @@ that may require changes to your code.
   avoid losing data.
   (Contributed by Cody Maloney in :gh:`83973`.)
 
+* :func:`print` now calls the *file*'s :meth:`!write` method once per call,
+  with the objects, separators and end joined, instead of once for each of
+  them.  A file object that counts or inspects :meth:`!write` calls sees
+  fewer of them, and nothing is written when converting an object to a
+  string raises.
+  (Contributed by Cody Maloney.)
+
 * In :mod:`tkinter`, the *name* parameter of the
   :meth:`~tkinter.Misc.wait_variable`, :meth:`~tkinter.Misc.setvar` and
   :meth:`~tkinter.Misc.getvar` methods and the *value* parameter of
