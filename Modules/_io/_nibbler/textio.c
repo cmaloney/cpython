@@ -3910,15 +3910,16 @@ text_set_codec(tconf *cf, PyObject *buffer, PyObject *codec_info)
 }
 
 /* Can calls by cf run without the critical section (see "Locking")?  Only
-   over a buffer that can hold a few characters more than a "\r", and is
-   the store (nothing in rbuf). */
+   over a buffer that is the store (nothing in rbuf) and, for reads, can
+   hold a few characters more than a "\r" (an unbuffered one can't). */
 static void
 text_set_lockfree(textio *self, tconf *cf)
 {
     cf->lockfree = (textio_exact(self) && cf->nibbler && self->nib_ok
                     && self->nib && self->rbuf == NULL
                     && cf->codec != CODEC_DECODER
-                    && _PyIONibbler_capacity(cf->buffer) >= 8);
+                    && (!cf->readable
+                        || _PyIONibbler_capacity(cf->buffer) >= 8));
 }
 
 /* The encoder writes a BOM only at the start of the stream. */

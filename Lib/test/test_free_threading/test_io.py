@@ -447,10 +447,16 @@ class NibblerTextIOWrapperTest(TestCase):
 
     def test_concurrent_write(self):
         # Each write lands whole, in its thread's order, also with flush()
-        # and tell() racing them.
+        # and tell() racing them; also unbuffered (writes run without the
+        # critical section then too, the stream being write-only).
         nthreads, count = 4, 2000
+        for buffer_size in (700, 0):
+            with self.subTest(buffer_size=buffer_size):
+                self.check_concurrent_write(nthreads, count, buffer_size)
+
+    def check_concurrent_write(self, nthreads, count, buffer_size):
         stop = threading.Event()
-        with self.open("w", buffer_size=700) as f:
+        with self.open("w", buffer_size=buffer_size) as f:
             def writer(t):
                 for i in range(count):
                     f.write("%d:%05d \xe9%s\n" % (t, i, "." * (i % 30)))
