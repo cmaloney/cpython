@@ -1092,6 +1092,32 @@ class TextIOWrapperTest:
 
     @unittest.skipUnless(hasattr(os, "set_blocking"),
                          "requires os.set_blocking()")
+    def test_nonblocking_pipe_readline(self):
+        # Over a real non-blocking pipe, readline() and iteration that
+        # would block raise BlockingIOError and keep the partial line.
+        r, w = os.pipe()
+        try:
+            os.set_blocking(r, False)
+            with self.open(r, "r", encoding="utf-8", closefd=False) as t:
+                self.assertRaises(BlockingIOError, t.readline)
+                os.write(w, b"ab")
+                self.assertRaises(BlockingIOError, t.readline)
+                self.assertRaises(BlockingIOError, next, t)
+                os.write(w, b"c\nd")
+                self.assertEqual(t.readline(), "abc\n")
+                self.assertRaises(BlockingIOError, t.readline)
+                os.write(w, b"e\n")
+                self.assertEqual(next(t), "de\n")
+                os.close(w)
+                w = None
+                self.assertEqual(t.readline(), "")
+        finally:
+            os.close(r)
+            if w is not None:
+                os.close(w)
+
+    @unittest.skipUnless(hasattr(os, "set_blocking"),
+                         "requires os.set_blocking()")
     def test_nonblocking_pipe_partial_char(self):
         # gh-57531: over a real non-blocking pipe, a read that would block
         # in the middle of a multibyte character returns the characters

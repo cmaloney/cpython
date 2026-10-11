@@ -474,6 +474,34 @@ class BufferedReaderTest(CommonBufferedTests):
         self.assertEqual(next(bufio), b"efg")
         self.assertRaises(StopIteration, next, bufio)
 
+    @unittest.skipUnless(hasattr(os, "set_blocking"),
+                         "requires os.set_blocking()")
+    def test_readline_nonblocking_pipe(self):
+        # The same on a real non-blocking pipe.
+        if self.tp is not self.BufferedReader:
+            self.skipTest("a pipe is not seekable")
+        r, w = os.pipe()
+        try:
+            os.set_blocking(r, False)
+            raw = self.FileIO(r, "r", closefd=False)
+            with self.tp(raw) as bufio:
+                self.assertIsNone(bufio.readline())
+                os.write(w, b"ab")
+                self.assertIsNone(bufio.readline())
+                self.assertRaises(BlockingIOError, next, bufio)
+                os.write(w, b"c\nd")
+                self.assertEqual(bufio.readline(), b"abc\n")
+                self.assertIsNone(bufio.readline())
+                os.write(w, b"e\n")
+                self.assertEqual(next(bufio), b"de\n")
+                os.close(w)
+                w = None
+                self.assertEqual(bufio.readline(), b"")
+        finally:
+            os.close(r)
+            if w is not None:
+                os.close(w)
+
     def test_readlines_would_block(self):
         # readlines() that would block returns the complete lines so far
         # and keeps the partial last line for the next call; with none,
