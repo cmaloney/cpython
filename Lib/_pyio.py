@@ -1321,7 +1321,8 @@ class BufferedReader(_BufferedIOMixin):
 
     def tell(self):
         with self._read_lock:
-            pos = _BufferedIOMixin.tell(self) - len(self._read_buf) + self._read_pos
+            pos = (_BufferedIOMixin.tell(self) - len(self._read_buf)
+                   + self._read_pos)
         # GH-95782: Keep return value non-negative
         return max(pos, 0)
 
