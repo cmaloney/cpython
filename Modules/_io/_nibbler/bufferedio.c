@@ -77,13 +77,15 @@ find_nibblermodule_state_by_def(PyTypeObject *type)
  *   reading end.  write() and flush() write them out together (in one call
  *   when the raw stream has a vectored _writev() method) with the I/O
  *   role, without holding the lock; meanwhile other threads can only queue
- *   more writes.  Small
- *   writes that fit are queued without the lock (see "The open end" in
- *   nibbler.h), so all code holding the lock sees them queued.  They
- *   check that an exact FileIO is open; other raw streams are asked with
- *   the lock, and once one says it is closed the open end is dropped, so
- *   that writes take the lock and raise (closing through the buffered
- *   object drops it too).
+ *   more writes.  Small writes that fit are queued without the lock (see
+ *   "The open end" in nibbler.h), so all code holding the lock sees them
+ *   queued.  They check that an exact FileIO is open.  Other raw streams
+ *   are asked with the lock (asking without it, a Python call, would cost
+ *   more than the write), and once one says it is closed the open end is
+ *   dropped, so that writes take the lock and raise; closing through the
+ *   buffered object drops it too.  So small writes after a raw stream
+ *   other than FileIO was closed by itself are queued without an error
+ *   until the next write that takes the lock.
  *
  * - Reading: the reading end holds the bytes the last fill read (see "The
  *   open end" in nibbler.h).  Its position splits them: the bytes before
