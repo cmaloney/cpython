@@ -153,7 +153,8 @@ in `nibbler.h`):
   `nibbler_set`) it resets the mutexes other threads held and, if the I/O
   role was held, drops the bytes in flight (the parent still writes them),
   holding the end meanwhile.  Read-ahead that a gone thread was filling
-  is lost.
+  is lost.  Each tracked object keeps a reference to the module, whose
+  state holds the set, until its dealloc leaves the set.
 - **finalization**: every other thread is detached and hangs as soon as it
   attaches, so the finalizing thread takes over a mutex such a thread
   holds, dropping the bytes in flight.  If it takes the role over but the
