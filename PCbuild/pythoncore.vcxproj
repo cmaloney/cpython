@@ -530,6 +530,10 @@
       <!-- Same basename as ..\Modules\_io\bufferedio.c; keep the objects apart. -->
       <ObjectFileName>$(IntDir)_nibbler_bufferedio.obj</ObjectFileName>
     </ClCompile>
+    <ClCompile Include="..\Modules\_io\_nibbler\textio.c">
+      <!-- Same basename as ..\Modules\_io\textio.c; keep the objects apart. -->
+      <ObjectFileName>$(IntDir)_nibbler_textio.obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Include="..\Modules\_io\iobase.c" />
     <ClCompile Include="..\Modules\_io\textio.c" />
     <ClCompile Include="..\Modules\_io\winconsoleio.c" />

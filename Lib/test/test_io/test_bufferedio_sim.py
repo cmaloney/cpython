@@ -1304,6 +1304,64 @@ class NibblerSlowDeviceTest(NibblerMixin, SlowDeviceTest, CTestCase):
     pass
 
 
+# --- Text over a buffered object ------------------------------------------------
+
+class TextTest:
+    """TextIOWrapper over a buffered object."""
+
+    def setUp(self):
+        super().setUp()
+        if not self.is_nibbler:
+            self.skipTest("text keeps bytes of its own")
+
+    def test_text_and_buffer_writes_keep_order(self):
+        # gh-52203: sys.stdout.write() then sys.stdout.buffer.write() come
+        # out in that order.
+        for enc in ("utf-8", "latin-1"):
+            with self.subTest(encoding=enc):
+                raw = self.BytesIO()
+                t = self.TextIOWrapper(self.BufferedWriter(raw), encoding=enc)
+                t.write("unicode ")
+                t.buffer.write(b"bytes ")
+                t.write("\xe9 ")
+                t.buffer.write(b"more")
+                t.flush()
+                self.assertEqual(raw.getvalue(),
+                                 b"unicode bytes " + "\xe9".encode(enc)
+                                 + b" more")
+
+    def test_text_reads_use_buffer_size(self):
+        # gh-153656: text reads make raw reads of the buffer size, not of
+        # TextIOWrapper's chunk size (8192).
+        Reader = make_scripted_reader(self.RawIOBase)
+        class RecordingReader(Reader):
+            def readinto(self, b):
+                self.sizes.append(len(b))
+                return super().readinto(b)
+        data = b"line\n" * 50_000
+        for encoding in ("utf-8", "latin-1"):
+            with self.subTest(encoding=encoding):
+                raw = RecordingReader(data)
+                raw.sizes = []
+                t = self.TextIOWrapper(self.BufferedReader(raw, 100_000),
+                                       encoding=encoding)
+                for _ in range(1000):
+                    self.assertEqual(t.readline(), "line\n")
+                self.assertEqual(raw.sizes, [100_000])
+
+
+class CTextTest(TextTest, CTestCase):
+    pass
+
+
+class PyTextTest(TextTest, PyTestCase):
+    pass
+
+
+class NibblerTextTest(NibblerMixin, TextTest, CTestCase):
+    pass
+
+
 # --- Positioning within the buffer ---------------------------------------------
 
 class PositionTest:

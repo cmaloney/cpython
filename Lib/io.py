@@ -86,11 +86,12 @@ for klass in (BytesIO, BufferedReader, BufferedWriter, BufferedRandom,
               BufferedRWPair):
     BufferedIOBase.register(klass)
 
-# Register the _io._nibbler clones as BufferedIOBase too.
+# Register the _io._nibbler clones as BufferedIOBase and TextIOBase too.
 from _io import _nibbler as _nibbler
 for klass in (_nibbler.BufferedReader, _nibbler.BufferedWriter,
               _nibbler.BufferedRandom, _nibbler.BufferedRWPair):
     BufferedIOBase.register(klass)
+TextIOBase.register(_nibbler.TextIOWrapper)
 del _nibbler
 
 for klass in (StringIO, TextIOWrapper):
