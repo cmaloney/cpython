@@ -1873,6 +1873,18 @@ class NibblerBufferedReaderTest(NibblerMixin, CBufferedReaderTest):
 class NibblerBufferedWriterTest(NibblerMixin, CBufferedWriterTest):
     tp = _nibbler.BufferedWriter
 
+    def test_stdout_in_cycle_at_exit(self):
+        # The final garbage collection may clear the module before a
+        # buffered object in a cycle with it; dealloc still uses the
+        # module's state.
+        import os, subprocess
+        env = dict(os.environ, _PYTHON_IO_DEFAULT_IMPL='_nibbler')
+        proc = subprocess.run(
+            [sys.executable, '-c',
+             'import sys; sys.stdout.cycle = sys.stdout; print("x")'],
+            env=env, capture_output=True, timeout=support.SHORT_TIMEOUT)
+        self.assertEqual((proc.returncode, proc.stdout), (0, b'x\n'))
+
     def test_failed_reinit_writes_pending_data(self):
         # __init__() with a raw stream it can't use writes what is pending
         # to the old one first, then raises.

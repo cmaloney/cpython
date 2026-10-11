@@ -171,6 +171,10 @@ typedef struct {
 
     PyObject *dict;
     PyObject *weakreflist;
+    /* The module, whose state holds the set of nibblers this one is in
+       (see buffered_track()), kept alive until dealloc removes it: in a
+       garbage cycle, the type may drop its reference first. */
+    PyObject *module;
 } buffered;
 
 static inline buffered *
@@ -2226,9 +2230,12 @@ _PyIO_AfterForkChild(void)
 static void
 buffered_track(buffered *self)
 {
-    nibbler_set_add(
-        &find_nibblermodule_state_by_def(Py_TYPE(self))->nibblers,
-        &self->nib);
+    if (self->module == NULL) {
+        self->module = Py_NewRef(PyType_GetModuleByDef(
+            Py_TYPE(self), &_PyIO_nibbler_Module));
+    }
+    nibbler_set_add(&get_nibblermodule_state(self->module)->nibblers,
+                    &self->nib);
 }
 
 /*
@@ -2262,6 +2269,7 @@ buffered_dealloc(PyObject *op)
     nibbler_set_remove(&self->nib);
     nibbler_free(&self->nib);
     (void)buffered_clear(op);
+    Py_CLEAR(self->module);
     tp->tp_free(self);
     Py_DECREF(tp);
 }
@@ -2291,6 +2299,7 @@ buffered_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(self->raw);
     Py_VISIT(self->stash);
     Py_VISIT(self->dict);
+    Py_VISIT(self->module);
     return 0;
 }
 
