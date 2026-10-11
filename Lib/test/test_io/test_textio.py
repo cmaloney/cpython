@@ -2366,6 +2366,20 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                 with self.assertRaises(UnicodeDecodeError):
                     list(t)
 
+    def test_reconfigure_encoding_finishes_encoder(self):
+        # The old encoder is given the end of its text (gh-79792): the
+        # ISO-2022-JP text ends back in ASCII before the new encoding's.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        t = self.open_nibbler(self.BufferedWriter, "w", 8192,
+                              encoding="iso2022_jp")
+        t.write("日本")
+        t.reconfigure(encoding="ascii")
+        t.write("x")
+        t.close()
+        with open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(),
+                             "日本".encode("iso2022_jp") + b"x")
+
     def test_read_ahead_after_raw_close(self):
         # After the raw stream alone is closed, what the buffer read ahead
         # can still be read as text, as bytes: also once a binary read

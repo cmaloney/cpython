@@ -4146,13 +4146,19 @@ _io_TextIOWrapper_reconfigure_impl(textio *self, PyObject *encoding,
     if ((line_buffering = convert_optional_bool(line_buffering_obj,
                                                 self->line_buffering)) < 0
         || (write_through = convert_optional_bool(write_through_obj,
-                                                  self->write_through)) < 0
-        || _PyFile_Flush((PyObject *)self) < 0)
+                                                  self->write_through)) < 0)
     {
         return NULL;
     }
     tconf *cf = textio_conf(self);
     if (cf == NULL) {
+        return NULL;
+    }
+    /* The old encoder ends its text first (gh-79792). */
+    if ((codec_change && text_finish_encoder(self, cf) < 0)
+        || _PyFile_Flush((PyObject *)self) < 0)
+    {
+        conf_put(cf);
         return NULL;
     }
     /* New settings, published at once (see "Locking"): the codec is kept
