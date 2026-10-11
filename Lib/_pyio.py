@@ -2381,7 +2381,25 @@ class TextIOWrapper(TextIOBase):
 
     def flush(self):
         self.buffer.flush()
-        self._telling = self._seekable
+        if not self._telling and self._seekable:
+            # Not just _telling = _seekable: the snapshot was not kept
+            # while iterating.
+            self._resume_telling()
+
+    def _resume_telling(self):
+        # Let tell() work again after next() disabled it, if the position
+        # is known: when all decoded text was returned, it is the buffer's,
+        # less what the decoder holds.  (Otherwise the snapshot of where
+        # the text left starts was not taken while iterating.)
+        if self._decoded_chars[self._decoded_chars_used:]:
+            return
+        if self._decoder is None:
+            self._telling = True
+            return
+        dec_buffer, dec_flags = self._decoder.getstate()
+        self._set_decoded_chars('')
+        self._snapshot = (dec_flags, dec_buffer)
+        self._telling = True
 
     def close(self):
         if self.buffer is not None and not self.closed:
@@ -2802,7 +2820,14 @@ class TextIOWrapper(TextIOBase):
 
     def __next__(self):
         self._telling = False
-        line = self.readline()
+        try:
+            line = self.readline()
+        except BlockingIOError:
+            # No end of the iteration, but tell() should work again, as at
+            # EOF.
+            if self._seekable:
+                self._resume_telling()
+            raise
         if not line:
             self._snapshot = None
             self._telling = self._seekable
