@@ -1268,8 +1268,9 @@ class TextIOWrapperTest:
         # read before it, but tell() can't work until the next seek():
         # the buffer is past the bytes that failed.
         if self.is_nibbler:
-            self.skipTest("_io._nibbler.TextIOWrapper's readline() returns "
-                          "'' at invalid UTF-8 (reported)")
+            self.skipTest("the nibbler TextIOWrapper reports a decode error "
+                          "per byte and keeps reading: 'ab', the error, "
+                          "then '\\n' and 'cd\\n'; tell() keeps working")
         raw = self.MockRawIO((b"ab", b"\xff\n", b"cd\n"))
         t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
         self.assertRaises(UnicodeDecodeError, t.readline)
