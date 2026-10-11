@@ -1118,6 +1118,72 @@ class TextIOWrapperTest:
 
     @unittest.skipUnless(hasattr(os, "set_blocking"),
                          "requires os.set_blocking()")
+    def test_nonblocking_pipe_read_all_partial_char(self):
+        # read() without a size keeps the first bytes of a character that
+        # has only partly arrived, as read(size) does; at EOF they are an
+        # error.
+        r, w = os.pipe()
+        try:
+            os.set_blocking(r, False)
+            with self.open(r, "r", encoding="utf-8", closefd=False) as t:
+                os.write(w, b"a\xc3")
+                self.assertEqual(t.read(), "a")
+                self.assertRaises(BlockingIOError, t.read)
+                os.write(w, b"\xa9b\xe2\x82")
+                self.assertEqual(t.read(), "\xe9b")
+                os.write(w, b"\xac")
+                self.assertEqual(t.read(), "\u20ac")
+                os.write(w, b"\xc3")
+                os.close(w)
+                w = None
+                self.assertRaises(UnicodeDecodeError, t.read)
+        finally:
+            os.close(r)
+            if w is not None:
+                os.close(w)
+
+    def test_read_all_would_block_partial_char_tell(self):
+        # After read() without a size kept a partial character, tell()
+        # is the position before it.
+        if self.is_nibbler:
+            self.skipTest("the nibbler TextIOWrapper reads on after this "
+                          "mock's two would-blocks")
+        class BlockTwice(self.RawIOBase):
+            # Would block twice at position at: once for the first read of
+            # the buffer, once more for the read after the partial char.
+            def __init__(self, data, at):
+                self.data, self.at, self.pos = data, at, 0
+                self.blocks = 2
+            def readable(self): return True
+            def seekable(self): return True
+            def tell(self): return self.pos
+            def seek(self, pos, whence=0):
+                self.pos = pos
+                return pos
+            def readinto(self, b):
+                if self.pos == self.at:
+                    self.blocks -= 1
+                    if not self.blocks:
+                        self.at = None
+                    return None
+                end = len(self.data) if self.at is None else self.at
+                n = min(len(b), end - self.pos)
+                b[:n] = self.data[self.pos:self.pos + n]
+                self.pos += n
+                return n
+        data = "ab\u20accd".encode()
+        for seek in (False, True):
+            with self.subTest(seek=seek):
+                t = self.TextIOWrapper(self.BufferedReader(BlockTwice(data, 3)),
+                                       encoding="utf-8")
+                self.assertEqual(t.read(), "ab")
+                self.assertEqual(t.tell(), 2)
+                if seek:
+                    t.seek(2)
+                self.assertEqual(t.read(), "\u20accd")
+
+    @unittest.skipUnless(hasattr(os, "set_blocking"),
+                         "requires os.set_blocking()")
     def test_nonblocking_pipe_partial_char(self):
         # gh-57531: over a real non-blocking pipe, a read that would block
         # in the middle of a multibyte character returns the characters

@@ -2182,6 +2182,109 @@ textiowrapper_read_chunk(textio *self, Py_ssize_t size_hint)
     return -1;
 }
 
+static void textiowrapper_resume_telling(textio *self);
+
+static inline PyObject *
+textiowrapper_decode(textio *self, PyObject *bytes, int final)
+{
+    if (Py_IS_TYPE(self->decoder,
+                   self->state->PyIncrementalNewlineDecoder_Type))
+    {
+        return _PyIncrementalNewlineDecoder_decode(self->decoder, bytes,
+                                                   final);
+    }
+    return PyObject_CallMethodObjArgs(self->decoder, &_Py_ID(decode), bytes,
+                                      final ? Py_True : Py_False, NULL);
+}
+
+/* read() without a size: decoding what the buffer returned with
+   final=True raised.  After a UnicodeDecodeError, the buffer may have
+   stopped in the middle of a character because the stream would block,
+   not at EOF: decode without final=True, so that the decoder keeps the
+   character's first bytes for the next read, as read(size) does, and read
+   on.  If the buffer then returns None (would block), set *blocked and
+   return the text decoded so far; at EOF, or for bytes that are invalid
+   anyway, raise the error. */
+Py_NO_INLINE static PyObject *
+textiowrapper_read_all_decode_error(textio *self, PyObject *bytes,
+                                    int *blocked)
+{
+    PyObject *exc = PyErr_GetRaisedException();
+    if (!PyErr_GivenExceptionMatches(exc, PyExc_UnicodeDecodeError)) {
+        PyErr_SetRaisedException(exc);
+        return NULL;
+    }
+    PyObject *parts = PyList_New(0);
+    if (parts == NULL) {
+        Py_DECREF(exc);
+        return NULL;
+    }
+    PyObject *result = NULL;
+    Py_INCREF(bytes);
+    while (1) {
+        PyObject *decoded = textiowrapper_decode(self, bytes, 0);
+        Py_DECREF(bytes);
+        if (decoded == NULL) {
+            if (PyErr_ExceptionMatches(PyExc_UnicodeDecodeError)) {
+                PyErr_Clear();
+                PyErr_SetRaisedException(exc);
+                exc = NULL;
+            }
+            goto done;
+        }
+        if (check_decoded(decoded) < 0) {
+            goto done;
+        }
+        int r = PyList_Append(parts, decoded);
+        Py_DECREF(decoded);
+        if (r < 0) {
+            goto done;
+        }
+        bytes = buffer_callmethod_noargs(self, &_Py_ID(read));
+        if (bytes == NULL) {
+            goto done;
+        }
+        if (bytes == Py_None) {
+            Py_DECREF(bytes);
+            *blocked = 1;
+            break;
+        }
+        Py_ssize_t len = PyObject_Length(bytes);
+        if (len <= 0) {
+            Py_DECREF(bytes);
+            if (len == 0) {
+                /* EOF: the partial character is an error after all. */
+                PyErr_SetRaisedException(exc);
+                exc = NULL;
+            }
+            goto done;
+        }
+        decoded = textiowrapper_decode(self, bytes, 1);
+        if (decoded != NULL) {
+            Py_DECREF(bytes);
+            if (check_decoded(decoded) < 0) {
+                goto done;
+            }
+            r = PyList_Append(parts, decoded);
+            Py_DECREF(decoded);
+            if (r < 0) {
+                goto done;
+            }
+            break;
+        }
+        if (!PyErr_ExceptionMatches(PyExc_UnicodeDecodeError)) {
+            Py_DECREF(bytes);
+            goto done;
+        }
+        Py_SETREF(exc, PyErr_GetRaisedException());
+    }
+    result = PyUnicode_Join(&_Py_STR(empty), parts);
+done:
+    Py_XDECREF(exc);
+    Py_DECREF(parts);
+    return result;
+}
+
 /*[clinic input]
 @critical_section
 _io.TextIOWrapper.read
@@ -2218,13 +2321,12 @@ _io_TextIOWrapper_read_impl(textio *self, Py_ssize_t n)
             return NULL;
         }
 
-        _PyIO_State *state = self->state;
-        if (Py_IS_TYPE(self->decoder, state->PyIncrementalNewlineDecoder_Type))
-            decoded = _PyIncrementalNewlineDecoder_decode(self->decoder,
-                                                          bytes, 1);
-        else
-            decoded = PyObject_CallMethodObjArgs(
-                self->decoder, &_Py_ID(decode), bytes, Py_True, NULL);
+        int blocked = 0;
+        decoded = textiowrapper_decode(self, bytes, 1);
+        if (decoded == NULL) {
+            decoded = textiowrapper_read_all_decode_error(self, bytes,
+                                                          &blocked);
+        }
         Py_DECREF(bytes);
         if (check_decoded(decoded) < 0)
             goto fail;
@@ -2243,6 +2345,16 @@ _io_TextIOWrapper_read_impl(textio *self, Py_ssize_t n)
         if (self->snapshot != NULL) {
             textiowrapper_set_decoded_chars(self, NULL);
             Py_CLEAR(self->snapshot);
+        }
+        if (blocked && self->telling) {
+            /* The position is before the bytes the decoder holds. */
+            textiowrapper_resume_telling(self);
+        }
+        if (blocked && PyUnicode_GET_LENGTH(result) == 0) {
+            /* Nothing to return: "" would mean EOF. */
+            Py_DECREF(result);
+            _PyIO_set_read_blocking_error();
+            return NULL;
         }
         return result;
     }

@@ -2880,11 +2880,39 @@ class TextIOWrapper(TextIOBase):
             if chunk is None:
                 raise BlockingIOError("Read returned None.")
             # Read everything.
-            result = (self._get_decoded_chars() +
-                      decoder.decode(chunk, final=True))
+            result = self._get_decoded_chars()
+            blocked = False
+            while True:
+                try:
+                    result += decoder.decode(chunk, final=True)
+                    break
+                except UnicodeDecodeError as exc:
+                    error = exc
+                # The buffer may have stopped in the middle of a character
+                # because the stream would block, not at EOF: keep the
+                # character's first bytes in the decoder for the next read,
+                # as read(size) does, and read on.  At EOF, or for bytes
+                # that are invalid anyway, the error stands.
+                try:
+                    result += decoder.decode(chunk)
+                except UnicodeDecodeError:
+                    raise error from None
+                chunk = self.buffer.read()
+                if chunk is None:
+                    blocked = True
+                    break
+                if not chunk:
+                    raise error
             if self._snapshot is not None:
                 self._set_decoded_chars('')
                 self._snapshot = None
+            if blocked and self._telling:
+                # The position is before the bytes the decoder holds.
+                self._resume_telling()
+            if blocked and not result:
+                # Nothing to return: "" would mean EOF.
+                raise BlockingIOError(
+                    errno.EAGAIN, "read could not complete without blocking")
             return result
         else:
             # Keep reading chunks until we have size characters to return.
