@@ -1512,6 +1512,57 @@ class TextIOWrapperTest:
                     with self.assertRaises(exc):
                         f.seek(cookie)
 
+    def test_close_and_detach_finish_encoder(self):
+        # gh-79792: the incremental encoder gets final=True, so the idna
+        # codec writes its last label.
+        class Recorder(self.BytesIO):
+            def close(self):
+                self.final = self.getvalue()
+                super().close()
+        b = Recorder()
+        t = self.TextIOWrapper(b, encoding="idna")
+        t.write("www.somesite.com")
+        t.close()
+        self.assertEqual(b.final, b"www.somesite.com")
+        b = self.BytesIO()
+        t = self.TextIOWrapper(b, encoding="idna")
+        t.write("www.somesite.com")
+        t.flush()
+        self.assertEqual(b.getvalue(), b"www.somesite.")
+        self.assertIs(t.detach(), b)
+        self.assertEqual(b.getvalue(), b"www.somesite.com")
+
+    def test_close_without_writes_writes_no_bom(self):
+        # close() gives final=True only to an encoder that encoded text
+        # since it was made or reset (by seek()): a reset encoder with a
+        # BOM would otherwise write one at the position.
+        filename = os_helper.TESTFN
+        for charset in ('utf-8-sig', 'utf-16', 'utf-32'):
+            with self.subTest(charset=charset):
+                data = 'abc'.encode(charset)
+                with self.open(filename, 'wb') as f:
+                    f.write(data)
+                # Reading after seek(0), opened for update or read only.
+                for mode in 'r+', 'r':
+                    with self.open(filename, mode, encoding=charset) as f:
+                        f.seek(0)
+                        self.assertEqual(f.read(), 'abc')
+                    with self.open(filename, 'rb') as f:
+                        self.assertEqual(f.read(), data)
+                # Writing nothing after seek(0).
+                with self.open(filename, 'w+', encoding=charset) as f:
+                    f.seek(0)
+                with self.open(filename, 'rb') as f:
+                    self.assertEqual(f.read(), b'')
+                # Writing, then seek(0) without writing again.
+                with self.open(filename, 'w+', encoding=charset) as f:
+                    f.write('abc')
+                    f.seek(0)
+                    self.assertEqual(f.read(), 'abc')
+                    f.seek(0)
+                with self.open(filename, 'rb') as f:
+                    self.assertEqual(f.read(), data)
+
 
 class MemviewBytesIO(io.BytesIO):
     '''A BytesIO object whose read method returns memoryviews
