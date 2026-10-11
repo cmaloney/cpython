@@ -352,8 +352,8 @@ class socket(_socket.socket):
         else:
             assert writing
             buffer = io.BufferedWriter(raw, buffering)
-        if reading and getattr(buffer, "_is_nibbler", False):
-            # This buffered reader keeps the data it read before a timeout
+        if reading and getattr(type(buffer), "_keeps_read_on_error", False):
+            # This buffered class keeps the data it read before a timeout
             # for the next read, and TextIOWrapper keeps the part of a line
             # it had decoded, so reading may go on (gh-51571).
             raw._timeout_retryable = True

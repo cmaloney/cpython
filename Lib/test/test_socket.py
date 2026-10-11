@@ -1988,6 +1988,53 @@ class GeneralModuleTests(unittest.TestCase):
                             "mode"):
                         sock.makefile(mode, buffering=1).close()
 
+    def test_makefile_timeout_retryable(self):
+        # makefile() lets reading go on after a timeout only when the
+        # buffered class says that it keeps what it read before an error
+        # (gh-51571).
+        class Keeps(io.BufferedReader):
+            _keeps_read_on_error = True
+        class KeepsPair(io.BufferedRWPair):
+            _keeps_read_on_error = True
+        default = getattr(io.BufferedReader, "_keeps_read_on_error", False)
+        cases = [
+            ('rb', 'BufferedReader', io.BufferedReader, default),
+            ('rb', 'BufferedReader', Keeps, True),
+            ('r', 'BufferedReader', Keeps, True),
+            ('rwb', 'BufferedRWPair', KeepsPair, True),
+            ('wb', 'BufferedWriter', io.BufferedWriter, False),
+        ]
+        for mode, name, cls, expected in cases:
+            with self.subTest(mode=mode, cls=cls.__name__):
+                raws = []
+                real_socketio = socket.SocketIO
+                def socketio(*args):
+                    raws.append(real_socketio(*args))
+                    return raws[-1]
+                with (mock.patch.object(io, name, cls),
+                      mock.patch.object(socket, 'SocketIO', socketio),
+                      socket.socket() as sock):
+                    encoding = None if "b" in mode else "utf-8"
+                    with sock.makefile(mode, encoding=encoding):
+                        self.assertIs(raws[0]._timeout_retryable, expected)
+
+        # An instance attribute doesn't count: the class says it.
+        class InstanceOnly(io.BufferedReader):
+            _keeps_read_on_error = False
+            def __init__(self, *args):
+                super().__init__(*args)
+                self._keeps_read_on_error = True
+        raws = []
+        real_socketio = socket.SocketIO
+        def socketio(*args):
+            raws.append(real_socketio(*args))
+            return raws[-1]
+        with (mock.patch.object(io, 'BufferedReader', InstanceOnly),
+              mock.patch.object(socket, 'SocketIO', socketio),
+              socket.socket() as sock):
+            with sock.makefile('rb'):
+                self.assertIs(raws[0]._timeout_retryable, False)
+
     def test_makefile_invalid_mode(self):
         for mode in 'rt', 'x', '+', 'a':
             with self.subTest(mode=mode):
@@ -5731,7 +5778,7 @@ class FileObjectClassTestCase(SocketConnectedTest):
         # part of a line it had decoded too.  As in makefile(), which then
         # lets reading go on.  Also called from the client thread.
         return (self.bufsize != 0
-                and getattr(io.BufferedReader, "_is_nibbler", False))
+                and getattr(io.BufferedReader, "_keeps_read_on_error", False))
 
     def testReadAfterTimeout(self):
         # Issue #7322: A file object must disallow further reads
