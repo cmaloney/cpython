@@ -294,8 +294,12 @@ closed, or raises `BlockingIOError` rather than returning `None`), or
 bytes (gh-51571), what the call took is given back and the exception is
 raised; the next read returns it.  With a native codec the call keeps
 copies of the bytes it takes and puts them back with
-`_PyIONibbler_unread()` (or in front of `rbuf`); with the decoder the
-characters are only consumed on success.
+`_PyIONibbler_unread()` (or in front of `rbuf`).  With the decoder, text
+longer than a chunk is taken in pieces as it is decoded (so the next
+characters replace them, in linear time), joined at the end; a failed read
+gives the pieces back as characters, but not their bytes (`dlost`):
+`tell()` then names where they were decoded from and how many characters
+to skip, and a write or `detach()` reads the bytes again first.
 
 ### Locking
 
