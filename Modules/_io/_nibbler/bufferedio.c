@@ -2104,6 +2104,29 @@ _io__Buffered_tell_impl(buffered *self)
     return res;
 }
 
+/* seek() inside the block, whose bytes end at raw_pos (if known): only
+   move.  Returns the position, or NULL (with no exception) if the target
+   isn't in it. */
+static PyObject *
+buffered_seek_within(buffered *self, Py_off_t target, int whence,
+                     Py_off_t raw_pos)
+{
+    if (!self->reading || self->list.nbytes > 0 || raw_pos < 0
+        || (whence != SEEK_SET && whence != SEEK_CUR))
+    {
+        return NULL;
+    }
+    Py_off_t start = raw_pos - self->end;
+    Py_off_t at = whence == SEEK_SET ? target : start + self->pos + target;
+    if (at < start || at > raw_pos) {
+        return NULL;
+    }
+    self->pos = (Py_ssize_t)(at - start);
+    self->noline = 0;
+    // GH-95782
+    return PyLong_FromOff_t(at < 0 ? 0 : at);
+}
+
 /*[clinic input]
 _io._Buffered.seek
     target as targetobj: object
@@ -2126,49 +2149,51 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
         PyErr_Format(PyExc_ValueError, "whence value %d unsupported", whence);
         return NULL;
     }
-    /* Before taking the lock, as these run Python code that may use this
-       object (the target's __index__() too). */
+    /* Before taking the lock: its __index__() may use this object. */
+    Py_off_t target = PyNumber_AsOff_t(targetobj, PyExc_ValueError);
+    if ((target == -1 && PyErr_Occurred()) || buffered_lock(self) < 0) {
+        return NULL;
+    }
+    /* Inside the block of a regular file, whose raw position is kept: with
+       the lock alone. */
+    PyObject *res = (self->raw_fileio && !_PyFileIO_closed(self->raw)
+                     ? buffered_seek_within(self, target, whence,
+                                            self->raw_pos) : NULL);
+    buffered_unlock(self);
+    if (res != NULL || PyErr_Occurred()) {
+        return res;
+    }
+    /* Python calls, which may use this object: without the lock. */
     PyObject *raw = buffered_get_raw(self);
     if (raw == NULL) {
         return NULL;
     }
-    _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
     int r = buffered_ref_closed(raw);
     if (r > 0) {
         PyErr_SetString(PyExc_ValueError, "seek of closed file");
     }
-    PyObject *seekable = r ? NULL : _PyIOBase_check_seekable(state, raw,
-                                                            Py_True);
+    PyObject *seekable = r ? NULL : PyObject_CallMethodNoArgs(
+        raw, &_Py_ID(seekable));
     Py_DECREF(raw);
-    Py_off_t target = (seekable ? PyNumber_AsOff_t(targetobj, PyExc_ValueError)
-                       : -1);
-    if (seekable == NULL || (target == -1 && PyErr_Occurred())
+    r = seekable ? PyObject_IsTrue(seekable) : -1;
+    Py_XDECREF(seekable);
+    if (r == 0) {
+        buffered_unsupported(self, "File or stream is not seekable.");
+    }
+    if (r <= 0
         || buffered_enter(self, "seek of closed file", KEEP_DIRECTION) < 0)
     {
         return NULL;
     }
-    PyObject *res = NULL;
-    Py_off_t pos;
-    if (self->reading && self->list.nbytes == 0
-        && (whence == SEEK_SET || whence == SEEK_CUR))
+    Py_off_t pos = self->raw_pos;
+    if (self->reading && pos < 0 && (whence == SEEK_SET || whence == SEEK_CUR)
+        && (pos = buffered_raw_tell(self)) == -1)
     {
-        /* Inside the block (whose bytes end at the raw position): only
-           move. */
-        Py_off_t raw_pos = self->raw_pos >= 0 ? self->raw_pos
-                                              : buffered_raw_tell(self);
-        if (raw_pos == -1) {
-            goto end;
-        }
-        Py_off_t start = raw_pos - self->end;
-        Py_off_t at = whence == SEEK_SET ? target : raw_pos - self->end
-                                                    + self->pos + target;
-        if (at >= start && at <= raw_pos) {
-            self->pos = (Py_ssize_t)(at - start);
-            self->noline = 0;
-            // GH-95782
-            res = PyLong_FromOff_t(at < 0 ? 0 : at);
-            goto end;
-        }
+        goto end;
+    }
+    res = buffered_seek_within(self, target, whence, pos);
+    if (res != NULL || PyErr_Occurred()) {
+        goto end;
     }
     if (self->reading) {
         Py_ssize_t unread = self->end - self->pos + self->list.nbytes;
