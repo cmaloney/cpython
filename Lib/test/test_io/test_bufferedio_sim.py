@@ -1185,8 +1185,6 @@ class SlowDeviceTest:
         # The same when the write of what the encoder held to the end
         # (gh-79792) fails: the idna encoder holds the last label, which
         # doesn't fit the buffer, and the write out of the buffer fails.
-        if self.is_nibbler:
-            self.skipTest("not fixed in the nibbler yet")
         raw = self.scripted_writer([OSError(errno.EPIPE, "EPIPE")])
         f = self.TextIOWrapper(self.BufferedWriter(raw, 64), encoding="idna")
         f.write("x" * 60 + ".abcd")

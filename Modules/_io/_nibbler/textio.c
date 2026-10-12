@@ -3104,7 +3104,8 @@ text_write_encoded(textio *self, tconf *cf, int lockfree, PyObject *text)
 }
 
 /* Give the codec's encoder the end of the text, and store what it still
-   held (gh-79792). */
+   held (gh-79792).  Returns 0, or with an exception set -2 if storing it
+   raised, else -1. */
 static int
 text_finish_encoder(textio *self, tconf *cf)
 {
@@ -3126,7 +3127,7 @@ text_finish_encoder(textio *self, tconf *cf)
     int r = store_write(self, cf, 0, b, PyBytes_AS_STRING(b),
                         PyBytes_GET_SIZE(b));
     Py_DECREF(b);
-    return r;
+    return r < 0 ? -2 : 0;
 }
 
 /* The decoder's characters not returned yet came from bytes taken already:
@@ -3832,11 +3833,17 @@ _io_TextIOWrapper_close_impl(textio *self)
         Py_XDECREF(res);
     }
     PyObject *exc = NULL;
-    if (text_finish_encoder(self, cf) < 0) {
-        exc = PyErr_GetRaisedException();
+    r = text_finish_encoder(self, cf);
+    if (r == 0 && _PyFile_Flush((PyObject *)self) < 0) {
+        r = -2;
     }
-    else if (_PyFile_Flush((PyObject *)self) < 0) {
+    if (r == -2) {
+        /* A write failed: close completely, without the buffer's close()
+           writing the data out again. */
         exc = text_discard_writes(buffer, PyErr_GetRaisedException());
+    }
+    else if (r < 0) {
+        exc = PyErr_GetRaisedException();
     }
     text_drop_reads(self);
     res = PyObject_CallMethodNoArgs(buffer, &_Py_ID(close));
