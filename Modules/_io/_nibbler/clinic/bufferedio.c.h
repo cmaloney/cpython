@@ -68,32 +68,6 @@ _io__Buffered__discard_writes(PyObject *self, PyObject *Py_UNUSED(ignored))
     return _io__Buffered__discard_writes_impl((buffered *)self);
 }
 
-PyDoc_STRVAR(_io__Buffered_simple_flush__doc__,
-"flush($self, /)\n"
-"--\n"
-"\n");
-
-#define _IO__BUFFERED_SIMPLE_FLUSH_METHODDEF    \
-    {"flush", (PyCFunction)_io__Buffered_simple_flush, METH_NOARGS, _io__Buffered_simple_flush__doc__},
-
-static PyObject *
-_io__Buffered_simple_flush_impl(buffered *self);
-
-static PyObject *
-_io__Buffered_simple_flush(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    return _io__Buffered_simple_flush_impl((buffered *)self);
-}
-
-static PyObject *
-_io__Buffered_closed_get_impl(buffered *self);
-
-static PyObject *
-_io__Buffered_closed_get(PyObject *self, void *Py_UNUSED(context))
-{
-    return _io__Buffered_closed_get_impl((buffered *)self);
-}
-
 PyDoc_STRVAR(_io__Buffered_close__doc__,
 "close($self, /)\n"
 "--\n"
@@ -126,109 +100,6 @@ static PyObject *
 _io__Buffered_detach(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
     return _io__Buffered_detach_impl((buffered *)self);
-}
-
-PyDoc_STRVAR(_io__Buffered_seekable__doc__,
-"seekable($self, /)\n"
-"--\n"
-"\n");
-
-#define _IO__BUFFERED_SEEKABLE_METHODDEF    \
-    {"seekable", (PyCFunction)_io__Buffered_seekable, METH_NOARGS, _io__Buffered_seekable__doc__},
-
-static PyObject *
-_io__Buffered_seekable_impl(buffered *self);
-
-static PyObject *
-_io__Buffered_seekable(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    return _io__Buffered_seekable_impl((buffered *)self);
-}
-
-PyDoc_STRVAR(_io__Buffered_readable__doc__,
-"readable($self, /)\n"
-"--\n"
-"\n");
-
-#define _IO__BUFFERED_READABLE_METHODDEF    \
-    {"readable", (PyCFunction)_io__Buffered_readable, METH_NOARGS, _io__Buffered_readable__doc__},
-
-static PyObject *
-_io__Buffered_readable_impl(buffered *self);
-
-static PyObject *
-_io__Buffered_readable(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    return _io__Buffered_readable_impl((buffered *)self);
-}
-
-PyDoc_STRVAR(_io__Buffered_writable__doc__,
-"writable($self, /)\n"
-"--\n"
-"\n");
-
-#define _IO__BUFFERED_WRITABLE_METHODDEF    \
-    {"writable", (PyCFunction)_io__Buffered_writable, METH_NOARGS, _io__Buffered_writable__doc__},
-
-static PyObject *
-_io__Buffered_writable_impl(buffered *self);
-
-static PyObject *
-_io__Buffered_writable(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    return _io__Buffered_writable_impl((buffered *)self);
-}
-
-static PyObject *
-_io__Buffered_name_get_impl(buffered *self);
-
-static PyObject *
-_io__Buffered_name_get(PyObject *self, void *Py_UNUSED(context))
-{
-    return _io__Buffered_name_get_impl((buffered *)self);
-}
-
-static PyObject *
-_io__Buffered_mode_get_impl(buffered *self);
-
-static PyObject *
-_io__Buffered_mode_get(PyObject *self, void *Py_UNUSED(context))
-{
-    return _io__Buffered_mode_get_impl((buffered *)self);
-}
-
-PyDoc_STRVAR(_io__Buffered_fileno__doc__,
-"fileno($self, /)\n"
-"--\n"
-"\n");
-
-#define _IO__BUFFERED_FILENO_METHODDEF    \
-    {"fileno", (PyCFunction)_io__Buffered_fileno, METH_NOARGS, _io__Buffered_fileno__doc__},
-
-static PyObject *
-_io__Buffered_fileno_impl(buffered *self);
-
-static PyObject *
-_io__Buffered_fileno(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    return _io__Buffered_fileno_impl((buffered *)self);
-}
-
-PyDoc_STRVAR(_io__Buffered_isatty__doc__,
-"isatty($self, /)\n"
-"--\n"
-"\n");
-
-#define _IO__BUFFERED_ISATTY_METHODDEF    \
-    {"isatty", (PyCFunction)_io__Buffered_isatty, METH_NOARGS, _io__Buffered_isatty__doc__},
-
-static PyObject *
-_io__Buffered_isatty_impl(buffered *self);
-
-static PyObject *
-_io__Buffered_isatty(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    return _io__Buffered_isatty_impl((buffered *)self);
 }
 
 PyDoc_STRVAR(_io__Buffered_flush__doc__,
@@ -714,124 +585,6 @@ exit:
     return return_value;
 }
 
-PyDoc_STRVAR(_io__Buffered__gather__doc__,
-"_gather($self, /, limit=20971520)\n"
-"--\n"
-"\n"
-"Gather the writes of the current context in a with block.\n"
-"\n"
-"Returns a context manager.  Inside its with block, what the current\n"
-"context (thread, or asyncio task) writes is kept apart, also past\n"
-"the buffer size, and added to the buffered data in one piece when\n"
-"the block ends (also when it raises), so that no other output gets\n"
-"in between.  Once the block gathered limit bytes, they are added,\n"
-"and gathering goes on; with limit None, only at the end.  flush()\n"
-"inside the block takes effect at its end.  Reads, seek() and\n"
-"truncate() in the context add what it gathered first; close(),\n"
-"detach() and __init__(), from any context, what every block\n"
-"gathered.  A block on the same stream nested in one gathers into it.\n"
-"\n"
-"Gathering is by context, as with decimal.localcontext(): a block\n"
-"spanning a yield gathers what runs in the context meanwhile.  Data\n"
-"of a block dropped before it ends is added then, or dropped when\n"
-"the stream is closed, with a ResourceWarning.  Experimental.");
-
-#define _IO__BUFFERED__GATHER_METHODDEF    \
-    {"_gather", _PyCFunction_CAST(_io__Buffered__gather), METH_FASTCALL|METH_KEYWORDS, _io__Buffered__gather__doc__},
-
-static PyObject *
-_io__Buffered__gather_impl(buffered *self, PyObject *limit_obj);
-
-static PyObject *
-_io__Buffered__gather(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
-{
-    PyObject *return_value = NULL;
-    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
-
-    #define NUM_KEYWORDS 1
-    static struct {
-        PyGC_Head _this_is_not_used;
-        PyObject_VAR_HEAD
-        Py_hash_t ob_hash;
-        PyObject *ob_item[NUM_KEYWORDS];
-    } _kwtuple = {
-        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
-        .ob_hash = -1,
-        .ob_item = { &_Py_ID(limit), },
-    };
-    #undef NUM_KEYWORDS
-    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
-
-    #else  // !Py_BUILD_CORE
-    #  define KWTUPLE NULL
-    #endif  // !Py_BUILD_CORE
-
-    static const char * const _keywords[] = {"limit", NULL};
-    static _PyArg_Parser _parser = {
-        .keywords = _keywords,
-        .fname = "_gather",
-        .kwtuple = KWTUPLE,
-    };
-    #undef KWTUPLE
-    PyObject *argsbuf[1];
-    Py_ssize_t noptargs = nargs + (kwnames ? PyTuple_GET_SIZE(kwnames) : 0) - 0;
-    PyObject *limit_obj = NULL;
-
-    args = _PyArg_UnpackKeywords(args, nargs, NULL, kwnames, &_parser,
-            /*minpos*/ 0, /*maxpos*/ 1, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
-    if (!args) {
-        goto exit;
-    }
-    if (!noptargs) {
-        goto skip_optional_pos;
-    }
-    limit_obj = args[0];
-skip_optional_pos:
-    return_value = _io__Buffered__gather_impl((buffered *)self, limit_obj);
-
-exit:
-    return return_value;
-}
-
-PyDoc_STRVAR(_io_BufferedWriter_readall__doc__,
-"readall($self, /)\n"
-"--\n"
-"\n"
-"Not supported: a BufferedWriter can\'t read.");
-
-#define _IO_BUFFEREDWRITER_READALL_METHODDEF    \
-    {"readall", (PyCFunction)_io_BufferedWriter_readall, METH_NOARGS, _io_BufferedWriter_readall__doc__},
-
-static PyObject *
-_io_BufferedWriter_readall_impl(buffered *self);
-
-static PyObject *
-_io_BufferedWriter_readall(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    return _io_BufferedWriter_readall_impl((buffered *)self);
-}
-
-PyDoc_STRVAR(_io_BufferedWriter_write__doc__,
-"write($self, buffer, /)\n"
-"--\n"
-"\n");
-
-#define _IO_BUFFEREDWRITER_WRITE_METHODDEF    \
-    {"write", (PyCFunction)_io_BufferedWriter_write, METH_O, _io_BufferedWriter_write__doc__},
-
-static PyObject *
-_io_BufferedWriter_write_impl(buffered *self, PyObject *obj);
-
-static PyObject *
-_io_BufferedWriter_write(PyObject *self, PyObject *obj)
-{
-    PyObject *return_value = NULL;
-
-    return_value = _io_BufferedWriter_write_impl((buffered *)self, obj);
-
-    return return_value;
-}
-
 PyDoc_STRVAR(_io_BufferedRandom___init____doc__,
 "BufferedRandom(raw, buffer_size=DEFAULT_BUFFER_SIZE)\n"
 "--\n"
@@ -904,6 +657,45 @@ exit:
     return return_value;
 }
 
+PyDoc_STRVAR(_io_BufferedWriter_readall__doc__,
+"readall($self, /)\n"
+"--\n"
+"\n"
+"Not supported: a BufferedWriter can\'t read.");
+
+#define _IO_BUFFEREDWRITER_READALL_METHODDEF    \
+    {"readall", (PyCFunction)_io_BufferedWriter_readall, METH_NOARGS, _io_BufferedWriter_readall__doc__},
+
+static PyObject *
+_io_BufferedWriter_readall_impl(buffered *self);
+
+static PyObject *
+_io_BufferedWriter_readall(PyObject *self, PyObject *Py_UNUSED(ignored))
+{
+    return _io_BufferedWriter_readall_impl((buffered *)self);
+}
+
+PyDoc_STRVAR(_io_BufferedWriter_write__doc__,
+"write($self, buffer, /)\n"
+"--\n"
+"\n");
+
+#define _IO_BUFFEREDWRITER_WRITE_METHODDEF    \
+    {"write", (PyCFunction)_io_BufferedWriter_write, METH_O, _io_BufferedWriter_write__doc__},
+
+static PyObject *
+_io_BufferedWriter_write_impl(buffered *self, PyObject *obj);
+
+static PyObject *
+_io_BufferedWriter_write(PyObject *self, PyObject *obj)
+{
+    PyObject *return_value = NULL;
+
+    return_value = _io_BufferedWriter_write_impl((buffered *)self, obj);
+
+    return return_value;
+}
+
 PyDoc_STRVAR(_io_BufferedRWPair___init____doc__,
 "BufferedRWPair(reader, writer, buffer_size=DEFAULT_BUFFER_SIZE, /)\n"
 "--\n"
@@ -962,328 +754,4 @@ skip_optional:
 exit:
     return return_value;
 }
-
-PyDoc_STRVAR(_io_BufferedRWPair_read__doc__,
-"read($self, size=-1, /)\n"
-"--\n"
-"\n");
-
-#define _IO_BUFFEREDRWPAIR_READ_METHODDEF    \
-    {"read", _PyCFunction_CAST(_io_BufferedRWPair_read), METH_FASTCALL, _io_BufferedRWPair_read__doc__},
-
-static PyObject *
-_io_BufferedRWPair_read_impl(rwpair *self, PyObject *size);
-
-static PyObject *
-_io_BufferedRWPair_read(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
-{
-    PyObject *return_value = NULL;
-    PyObject *size = NULL;
-
-    if (!_PyArg_CheckPositional("read", nargs, 0, 1)) {
-        goto exit;
-    }
-    if (nargs < 1) {
-        goto skip_optional;
-    }
-    size = args[0];
-skip_optional:
-    return_value = _io_BufferedRWPair_read_impl((rwpair *)self, size);
-
-exit:
-    return return_value;
-}
-
-PyDoc_STRVAR(_io_BufferedRWPair_readall__doc__,
-"readall($self, /)\n"
-"--\n"
-"\n");
-
-#define _IO_BUFFEREDRWPAIR_READALL_METHODDEF    \
-    {"readall", (PyCFunction)_io_BufferedRWPair_readall, METH_NOARGS, _io_BufferedRWPair_readall__doc__},
-
-static PyObject *
-_io_BufferedRWPair_readall_impl(rwpair *self);
-
-static PyObject *
-_io_BufferedRWPair_readall(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    return _io_BufferedRWPair_readall_impl((rwpair *)self);
-}
-
-PyDoc_STRVAR(_io_BufferedRWPair_peek__doc__,
-"peek($self, size=0, /)\n"
-"--\n"
-"\n");
-
-#define _IO_BUFFEREDRWPAIR_PEEK_METHODDEF    \
-    {"peek", _PyCFunction_CAST(_io_BufferedRWPair_peek), METH_FASTCALL, _io_BufferedRWPair_peek__doc__},
-
-static PyObject *
-_io_BufferedRWPair_peek_impl(rwpair *self, PyObject *size);
-
-static PyObject *
-_io_BufferedRWPair_peek(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
-{
-    PyObject *return_value = NULL;
-    PyObject *size = NULL;
-
-    if (!_PyArg_CheckPositional("peek", nargs, 0, 1)) {
-        goto exit;
-    }
-    if (nargs < 1) {
-        goto skip_optional;
-    }
-    size = args[0];
-skip_optional:
-    return_value = _io_BufferedRWPair_peek_impl((rwpair *)self, size);
-
-exit:
-    return return_value;
-}
-
-PyDoc_STRVAR(_io_BufferedRWPair_readline__doc__,
-"readline($self, size=-1, /)\n"
-"--\n"
-"\n");
-
-#define _IO_BUFFEREDRWPAIR_READLINE_METHODDEF    \
-    {"readline", _PyCFunction_CAST(_io_BufferedRWPair_readline), METH_FASTCALL, _io_BufferedRWPair_readline__doc__},
-
-static PyObject *
-_io_BufferedRWPair_readline_impl(rwpair *self, PyObject *size);
-
-static PyObject *
-_io_BufferedRWPair_readline(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
-{
-    PyObject *return_value = NULL;
-    PyObject *size = NULL;
-
-    if (!_PyArg_CheckPositional("readline", nargs, 0, 1)) {
-        goto exit;
-    }
-    if (nargs < 1) {
-        goto skip_optional;
-    }
-    size = args[0];
-skip_optional:
-    return_value = _io_BufferedRWPair_readline_impl((rwpair *)self, size);
-
-exit:
-    return return_value;
-}
-
-PyDoc_STRVAR(_io_BufferedRWPair_read1__doc__,
-"read1($self, size=-1, /)\n"
-"--\n"
-"\n");
-
-#define _IO_BUFFEREDRWPAIR_READ1_METHODDEF    \
-    {"read1", _PyCFunction_CAST(_io_BufferedRWPair_read1), METH_FASTCALL, _io_BufferedRWPair_read1__doc__},
-
-static PyObject *
-_io_BufferedRWPair_read1_impl(rwpair *self, PyObject *size);
-
-static PyObject *
-_io_BufferedRWPair_read1(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
-{
-    PyObject *return_value = NULL;
-    PyObject *size = NULL;
-
-    if (!_PyArg_CheckPositional("read1", nargs, 0, 1)) {
-        goto exit;
-    }
-    if (nargs < 1) {
-        goto skip_optional;
-    }
-    size = args[0];
-skip_optional:
-    return_value = _io_BufferedRWPair_read1_impl((rwpair *)self, size);
-
-exit:
-    return return_value;
-}
-
-PyDoc_STRVAR(_io_BufferedRWPair_readinto__doc__,
-"readinto($self, buffer, /)\n"
-"--\n"
-"\n");
-
-#define _IO_BUFFEREDRWPAIR_READINTO_METHODDEF    \
-    {"readinto", (PyCFunction)_io_BufferedRWPair_readinto, METH_O, _io_BufferedRWPair_readinto__doc__},
-
-static PyObject *
-_io_BufferedRWPair_readinto_impl(rwpair *self, PyObject *buffer);
-
-static PyObject *
-_io_BufferedRWPair_readinto(PyObject *self, PyObject *buffer)
-{
-    PyObject *return_value = NULL;
-
-    return_value = _io_BufferedRWPair_readinto_impl((rwpair *)self, buffer);
-
-    return return_value;
-}
-
-PyDoc_STRVAR(_io_BufferedRWPair_readinto1__doc__,
-"readinto1($self, buffer, /)\n"
-"--\n"
-"\n");
-
-#define _IO_BUFFEREDRWPAIR_READINTO1_METHODDEF    \
-    {"readinto1", (PyCFunction)_io_BufferedRWPair_readinto1, METH_O, _io_BufferedRWPair_readinto1__doc__},
-
-static PyObject *
-_io_BufferedRWPair_readinto1_impl(rwpair *self, PyObject *buffer);
-
-static PyObject *
-_io_BufferedRWPair_readinto1(PyObject *self, PyObject *buffer)
-{
-    PyObject *return_value = NULL;
-
-    return_value = _io_BufferedRWPair_readinto1_impl((rwpair *)self, buffer);
-
-    return return_value;
-}
-
-PyDoc_STRVAR(_io_BufferedRWPair_write__doc__,
-"write($self, buffer, /)\n"
-"--\n"
-"\n");
-
-#define _IO_BUFFEREDRWPAIR_WRITE_METHODDEF    \
-    {"write", (PyCFunction)_io_BufferedRWPair_write, METH_O, _io_BufferedRWPair_write__doc__},
-
-static PyObject *
-_io_BufferedRWPair_write_impl(rwpair *self, PyObject *buffer);
-
-static PyObject *
-_io_BufferedRWPair_write(PyObject *self, PyObject *buffer)
-{
-    PyObject *return_value = NULL;
-
-    return_value = _io_BufferedRWPair_write_impl((rwpair *)self, buffer);
-
-    return return_value;
-}
-
-PyDoc_STRVAR(_io_BufferedRWPair_flush__doc__,
-"flush($self, /)\n"
-"--\n"
-"\n");
-
-#define _IO_BUFFEREDRWPAIR_FLUSH_METHODDEF    \
-    {"flush", (PyCFunction)_io_BufferedRWPair_flush, METH_NOARGS, _io_BufferedRWPair_flush__doc__},
-
-static PyObject *
-_io_BufferedRWPair_flush_impl(rwpair *self);
-
-static PyObject *
-_io_BufferedRWPair_flush(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    return _io_BufferedRWPair_flush_impl((rwpair *)self);
-}
-
-PyDoc_STRVAR(_io_BufferedRWPair__discard_writes__doc__,
-"_discard_writes($self, /)\n"
-"--\n"
-"\n"
-"Drop the writer\'s pending writes; return how many bytes they were.");
-
-#define _IO_BUFFEREDRWPAIR__DISCARD_WRITES_METHODDEF    \
-    {"_discard_writes", (PyCFunction)_io_BufferedRWPair__discard_writes, METH_NOARGS, _io_BufferedRWPair__discard_writes__doc__},
-
-static PyObject *
-_io_BufferedRWPair__discard_writes_impl(rwpair *self);
-
-static PyObject *
-_io_BufferedRWPair__discard_writes(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    return _io_BufferedRWPair__discard_writes_impl((rwpair *)self);
-}
-
-PyDoc_STRVAR(_io_BufferedRWPair_readable__doc__,
-"readable($self, /)\n"
-"--\n"
-"\n");
-
-#define _IO_BUFFEREDRWPAIR_READABLE_METHODDEF    \
-    {"readable", (PyCFunction)_io_BufferedRWPair_readable, METH_NOARGS, _io_BufferedRWPair_readable__doc__},
-
-static PyObject *
-_io_BufferedRWPair_readable_impl(rwpair *self);
-
-static PyObject *
-_io_BufferedRWPair_readable(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    return _io_BufferedRWPair_readable_impl((rwpair *)self);
-}
-
-PyDoc_STRVAR(_io_BufferedRWPair_writable__doc__,
-"writable($self, /)\n"
-"--\n"
-"\n");
-
-#define _IO_BUFFEREDRWPAIR_WRITABLE_METHODDEF    \
-    {"writable", (PyCFunction)_io_BufferedRWPair_writable, METH_NOARGS, _io_BufferedRWPair_writable__doc__},
-
-static PyObject *
-_io_BufferedRWPair_writable_impl(rwpair *self);
-
-static PyObject *
-_io_BufferedRWPair_writable(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    return _io_BufferedRWPair_writable_impl((rwpair *)self);
-}
-
-PyDoc_STRVAR(_io_BufferedRWPair_close__doc__,
-"close($self, /)\n"
-"--\n"
-"\n");
-
-#define _IO_BUFFEREDRWPAIR_CLOSE_METHODDEF    \
-    {"close", (PyCFunction)_io_BufferedRWPair_close, METH_NOARGS, _io_BufferedRWPair_close__doc__},
-
-static PyObject *
-_io_BufferedRWPair_close_impl(rwpair *self);
-
-static PyObject *
-_io_BufferedRWPair_close(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    return _io_BufferedRWPair_close_impl((rwpair *)self);
-}
-
-PyDoc_STRVAR(_io_BufferedRWPair_isatty__doc__,
-"isatty($self, /)\n"
-"--\n"
-"\n");
-
-#define _IO_BUFFEREDRWPAIR_ISATTY_METHODDEF    \
-    {"isatty", (PyCFunction)_io_BufferedRWPair_isatty, METH_NOARGS, _io_BufferedRWPair_isatty__doc__},
-
-static PyObject *
-_io_BufferedRWPair_isatty_impl(rwpair *self);
-
-static PyObject *
-_io_BufferedRWPair_isatty(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    return _io_BufferedRWPair_isatty_impl((rwpair *)self);
-}
-
-static PyObject *
-_io_BufferedRWPair_closed_get_impl(rwpair *self);
-
-static PyObject *
-_io_BufferedRWPair_closed_get(PyObject *self, void *Py_UNUSED(context))
-{
-    return _io_BufferedRWPair_closed_get_impl((rwpair *)self);
-}
-#define _IO__BUFFERED_CLOSED_GETSETDEF {"closed", (getter)_io__Buffered_closed_get, (setter)NULL, NULL},
-
-#define _IO__BUFFERED_NAME_GETSETDEF {"name", (getter)_io__Buffered_name_get, (setter)NULL, NULL},
-
-#define _IO__BUFFERED_MODE_GETSETDEF {"mode", (getter)_io__Buffered_mode_get, (setter)NULL, NULL},
-
-#define _IO_BUFFEREDRWPAIR_CLOSED_GETSETDEF {"closed", (getter)_io_BufferedRWPair_closed_get, (setter)NULL, NULL},
-
-/*[clinic end generated code: output=ab93f1078da6d745 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=9fd40a0914e41c0e input=a9049054013a1b77]*/

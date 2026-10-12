@@ -375,23 +375,6 @@ class UnlimitedTest(unittest.TestCase):
             self.assertEqual(t.buffer.tell(), 4)
         self.assertEqual(self.read(), b'abc\n')
 
-    # _gather() inside an unlimited buffer.
-
-    def test_gather(self):
-        with self.writer() as f:
-            f.write(b'a')
-            with f._gather(limit=10):
-                f.write(b'b' * 100)
-                f.write(b'c' * MiB)
-            self.assertEqual(self.size(), 0)
-            with f._gather():
-                f.write(b'd')
-                f.flush()
-                self.assertEqual(self.size(), 0)
-            # The flush was deferred to the end of the block.
-            self.assertEqual(self.size(), 2 + 100 + MiB)
-        self.assertEqual(self.read(), b'a' + b'b' * 100 + b'c' * MiB + b'd')
-
     # Threads.
 
     @threading_helper.requires_working_threading()
