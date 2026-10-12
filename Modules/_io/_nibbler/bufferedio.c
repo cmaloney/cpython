@@ -180,13 +180,10 @@ typedef struct {
     nibbler nib;
 
     /* Data the raw stream returned that follows the read-ahead but could
-       not be put in it without a large allocation (see buffered_stash()):
-       a list of bytes objects, the first from offset stash_pos, `stashed`
-       bytes in all; or NULL.  Raw reads take from it first, so it is read
-       like the raw stream's own data.  Set only while reading. */
-    PyObject *stash;
-    Py_ssize_t stash_pos;
-    Py_ssize_t stashed;
+       not be put in it without a large allocation (see buffered_stash()).
+       Raw reads take from it first, so it is read like the raw stream's own
+       data.  Set only while reading. */
+    morsel_list stash;
 
     PyObject *dict;
     PyObject *weakreflist;
@@ -321,56 +318,25 @@ buffered_writing(buffered *self)
 static inline int
 buffered_reading(buffered *self)
 {
-    return nibbler_reading(&self->nib) != NULL || self->stash != NULL;
+    return nibbler_reading(&self->nib) != NULL || self->stash.nbytes > 0;
 }
 
 /* Drop the stashed data.  Returns how many bytes it had. */
 static Py_ssize_t
 buffered_drop_stash(buffered *self)
 {
-    Py_ssize_t n = self->stashed;
-    Py_CLEAR(self->stash);
-    self->stash_pos = 0;
-    self->stashed = 0;
+    Py_ssize_t n = self->stash.nbytes;
+    morsels_clear(&self->stash);
     return n;
 }
 
-/* Keep the bytes objects of chunks (a list, which is stolen), data the
-   raw stream returned, after the stashed data for the next reads.  Returns
-   0, or -1 on error (then they are lost). */
-static int
-buffered_stash_list(buffered *self, PyObject *chunks)
-{
-    Py_ssize_t total = 0;
-    for (Py_ssize_t i = 0; i < PyList_GET_SIZE(chunks); i++) {
-        total += PyBytes_GET_SIZE(PyList_GET_ITEM(chunks, i));
-    }
-    if (self->stash == NULL) {
-        self->stash = chunks;
-    }
-    else {
-        Py_ssize_t end = PyList_GET_SIZE(self->stash);
-        int r = PyList_SetSlice(self->stash, end, end, chunks);
-        Py_DECREF(chunks);
-        if (r < 0) {
-            return -1;
-        }
-    }
-    self->stashed += total;
-    return 0;
-}
-
-/* Keep obj (non-empty bytes), data the raw stream returned, like
-   buffered_stash_list(). */
+/* Keep obj (bytes), data the raw stream returned, after the stashed data
+   for the next reads.  Returns 0, or -1 on error (then it is lost). */
 static int
 buffered_stash(buffered *self, PyObject *obj)
 {
-    PyObject *chunks = PyList_New(1);
-    if (chunks == NULL) {
-        return -1;
-    }
-    PyList_SET_ITEM(chunks, 0, Py_NewRef(obj));
-    return buffered_stash_list(self, chunks);
+    return morsels_push(&self->stash, obj, PyBytes_AS_STRING(obj),
+                        PyBytes_GET_SIZE(obj));
 }
 
 /* Take up to len stashed bytes, copying them to dst.  Returns how many. */
@@ -378,26 +344,13 @@ static Py_ssize_t
 buffered_take_stash(buffered *self, char *dst, Py_ssize_t len)
 {
     Py_ssize_t done = 0;
-    while (done < len && self->stash != NULL) {
-        PyObject *b = PyList_GET_ITEM(self->stash, 0);
-        Py_ssize_t k = Py_MIN(PyBytes_GET_SIZE(b) - self->stash_pos,
-                              len - done);
-        memcpy(dst + done, PyBytes_AS_STRING(b) + self->stash_pos, k);
+    for (Py_ssize_t i = 0; i < self->stash.count && done < len; i++) {
+        morsel *m = &self->stash.items[i];
+        Py_ssize_t k = Py_MIN(m->len, len - done);
+        memcpy(dst + done, m->ptr, k);
         done += k;
-        self->stash_pos += k;
-        self->stashed -= k;
-        if (self->stash_pos == PyBytes_GET_SIZE(b)) {
-            self->stash_pos = 0;
-            if (PyList_GET_SIZE(self->stash) == 1) {
-                Py_CLEAR(self->stash);
-            }
-            else {
-                /* Deleting one item needs no memory. */
-                (void)PyList_SetSlice(self->stash, 0, 1, NULL);
-            }
-        }
     }
-    return done;
+    return morsels_consume(&self->stash, done);
 }
 
 /* Is raw closed (fileio: it is exactly a FileIO)?  Returns 1 if closed, 0
@@ -653,7 +606,7 @@ static Py_ssize_t
 buffered_raw_read(buffered *self, char *dst, Py_ssize_t len, PyObject *memobj,
                   int *shared)
 {
-    if (self->stash != NULL) {
+    if (self->stash.nbytes > 0) {
         /* Data the raw stream returned already. */
         return buffered_take_stash(self, dst, len);
     }
@@ -864,7 +817,8 @@ buffered_position(buffered *self, Py_ssize_t gathered)
     /* With nothing buffered, ask the raw stream, as _io does: code sharing
        the file descriptor may have moved it. */
     Py_off_t pos = (nibbler_nbytes(&self->nib) == 0
-                    && nibbler_unread(&self->nib) == 0 && self->stash == NULL
+                    && nibbler_unread(&self->nib) == 0
+                    && self->stash.nbytes == 0
                     ? buffered_raw_tell(self) : buffered_raw_pos(self));
     if (pos == -1) {
         return NULL;
@@ -872,7 +826,7 @@ buffered_position(buffered *self, Py_ssize_t gathered)
     /* Gathered writes hand back read-ahead first; stashed data (only
        while reading) was read from the raw stream too. */
     pos += (nibbler_nbytes(&self->nib) - nibbler_unread(&self->nib)
-            - self->stashed + gathered);
+            - self->stash.nbytes + gathered);
     // GH-95782
     return PyLong_FromOff_t(pos < 0 ? 0 : pos);
 }
@@ -1432,10 +1386,11 @@ buffered_read_chunks(buffered *self, PyObject *size)
            joining the chunks failed: keep what was read, after the
            read-ahead, for the next read (gh-51571), without copying it. */
         PyObject *exc = PyErr_GetRaisedException();
-        if ((PyList_GET_SIZE(chunks) > 0
-             && buffered_stash_list(self, Py_NewRef(chunks)) < 0)
-            || (last != NULL && buffered_stash(self, last) < 0))
-        {
+        int r = 0;
+        for (Py_ssize_t i = 0; r == 0 && i < PyList_GET_SIZE(chunks); i++) {
+            r = buffered_stash(self, PyList_GET_ITEM(chunks, i));
+        }
+        if (r < 0 || (last != NULL && buffered_stash(self, last) < 0)) {
             _PyErr_ChainExceptions1(exc);
         }
         else {
@@ -1501,7 +1456,7 @@ buffered_read_all(buffered *self)
     }
     Py_ssize_t restlen = rest == Py_None ? 0 : PyBytes_GET_SIZE(rest);
     Py_ssize_t k = nibbler_unread(&self->nib);
-    Py_ssize_t st = self->stashed;
+    Py_ssize_t st = self->stash.nbytes;
     if (k == 0 && st == 0) {
         (void)nibbler_drop_unread(&self->nib);
         return rest;
@@ -1908,7 +1863,7 @@ buffered_enter_append(buffered *self)
         return -1;
     }
     if (self->raw_fileio && nibbler_reading(&self->nib) == NULL
-        && self->stash == NULL && buffered_raw_usable(self->raw)
+        && self->stash.nbytes == 0 && buffered_raw_usable(self->raw)
         && !_PyFileIO_closed(self->raw))
     {
         return 0;
@@ -2323,6 +2278,7 @@ buffered_dealloc(PyObject *op)
     nibbler_set_remove(&self->nib);
     nibbler_free(&self->nib);
     (void)buffered_clear(op);
+    morsels_free(&self->stash);
     Py_CLEAR(self->module);
     tp->tp_free(self);
     Py_DECREF(tp);
@@ -2351,7 +2307,6 @@ buffered_traverse(PyObject *op, visitproc visit, void *arg)
     buffered *self = buffered_cast(op);
     Py_VISIT(Py_TYPE(self));
     Py_VISIT(self->raw);
-    Py_VISIT(self->stash);
     Py_VISIT(self->dict);
     Py_VISIT(self->module);
     return 0;
@@ -3037,7 +2992,7 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
         return NULL;
     }
     PyObject *res = NULL;
-    if (nibbler_reading(&self->nib) != NULL && self->stash == NULL
+    if (nibbler_reading(&self->nib) != NULL && self->stash.nbytes == 0
         && (whence == SEEK_SET || whence == SEEK_CUR))
     {
         /* Move within the last fill if the target is in it: its bytes end
