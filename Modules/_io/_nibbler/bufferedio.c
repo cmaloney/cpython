@@ -1241,32 +1241,6 @@ buffered_read_into(buffered *self, char *dst, Py_ssize_t len, int read1,
     return written;
 }
 
-/* buffered_read_bytes() over a raw stream other than FileIO: its readinto()
-   gets views of the result, which they keep alive. */
-Py_NO_INLINE static PyObject *
-buffered_read_bytes_views(buffered *self, Py_ssize_t n, int read1)
-{
-    PyObject *res = PyBytes_FromStringAndSize(NULL, n);
-    if (res == NULL) {
-        return NULL;
-    }
-    int shared = 0;
-    Py_ssize_t r = buffered_read_into(self, PyBytes_AS_STRING(res), n, read1,
-                                      res, &shared);
-    if (r < 0) {
-        Py_DECREF(res);
-        return r == WOULD_BLOCK ? Py_NewRef(Py_None) : NULL;
-    }
-    if (shared) {
-        /* Python code can still write to res: return a copy. */
-        Py_SETREF(res, PyBytes_FromStringAndSize(PyBytes_AS_STRING(res), r));
-    }
-    else if (r < n) {
-        (void)_PyBytes_Resize(&res, r);
-    }
-    return res;
-}
-
 /* read(n) and read1(n). */
 static PyObject *
 buffered_read_bytes(buffered *self, Py_ssize_t n, int read1)
@@ -1290,20 +1264,27 @@ buffered_read_bytes(buffered *self, Py_ssize_t n, int read1)
     if (n == 0) {
         return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     }
-    if (!self->raw_fileio) {
-        return buffered_read_bytes_views(self, n, read1);
-    }
-    PyBytesWriter *writer = PyBytesWriter_Create(n);
-    if (writer == NULL) {
+    /* A raw stream other than FileIO reads into views of res, which they
+       keep alive. */
+    PyObject *res = PyBytes_FromStringAndSize(NULL, n);
+    if (res == NULL) {
         return NULL;
     }
-    Py_ssize_t r = buffered_read_into(self, PyBytesWriter_GetData(writer), n,
-                                      read1, NULL, NULL);
+    int shared = 0;
+    Py_ssize_t r = buffered_read_into(self, PyBytes_AS_STRING(res), n, read1,
+                                      res, &shared);
     if (r < 0) {
-        PyBytesWriter_Discard(writer);
+        Py_DECREF(res);
         return r == WOULD_BLOCK ? Py_NewRef(Py_None) : NULL;
     }
-    return PyBytesWriter_FinishWithSize(writer, r);
+    if (shared) {
+        /* Python code can still write to res: return a copy. */
+        Py_SETREF(res, PyBytes_FromStringAndSize(PyBytes_AS_STRING(res), r));
+    }
+    else if (r < n) {
+        (void)_PyBytes_Resize(&res, r);
+    }
+    return res;
 }
 
 /* Call raw.read(size) (raw.read() without size) until EOF or it would
