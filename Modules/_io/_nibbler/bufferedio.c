@@ -686,26 +686,23 @@ buffered_raw_writev_py(buffered *self, const _PyIO_Span *spans,
                        PyObject *const *objs, Py_ssize_t cnt,
                        Py_ssize_t total)
 {
-    PyObject *arg = NULL;
-    if (cnt == 1) {
-        arg = buffered_view(&(morsel){objs[0], spans[0].ptr, spans[0].len});
-    }
-    else if ((arg = PyList_New(cnt)) != NULL) {
-        for (Py_ssize_t i = 0; i < cnt; i++) {
-            PyObject *view = buffered_view(
-                &(morsel){objs[i], spans[i].ptr, spans[i].len});
-            if (view == NULL) {
-                Py_CLEAR(arg);
-                break;
-            }
-            PyList_SET_ITEM(arg, i, view);
-        }
-    }
-    if (arg == NULL) {
+    /* write() of one view, _writev() of a list of them. */
+    PyObject *views = PyList_New(cnt);
+    if (views == NULL) {
         return -1;
+    }
+    for (Py_ssize_t i = 0; i < cnt; i++) {
+        PyObject *view = buffered_view(
+            &(morsel){objs[i], spans[i].ptr, spans[i].len});
+        if (view == NULL) {
+            Py_DECREF(views);
+            return -1;
+        }
+        PyList_SET_ITEM(views, i, view);
     }
     const char *method = cnt == 1 ? "write" : "_writev";
     PyObject *name = cnt == 1 ? &_Py_ID(write) : &_Py_ID(_writev);
+    PyObject *arg = cnt == 1 ? PyList_GET_ITEM(views, 0) : views;
     PyObject *res;
     int errnum;
     do {
@@ -717,23 +714,12 @@ buffered_raw_writev_py(buffered *self, const _PyIO_Span *spans,
        the raw stream can't use them after the call (views it made from
        them keep the data valid, through its object).  The others keep
        their bytes alive. */
-    if (cnt == 1) {
-        if (objs[0] == NULL || !PyBytes_CheckExact(objs[0])) {
-            (void)buffered_release_view(arg);
-        }
-        else {
-            Py_DECREF(arg);
+    for (Py_ssize_t i = 0; i < cnt; i++) {
+        if (objs[i] == NULL || !PyBytes_CheckExact(objs[i])) {
+            (void)buffered_release_view(Py_NewRef(PyList_GET_ITEM(views, i)));
         }
     }
-    else {
-        for (Py_ssize_t i = 0; i < cnt; i++) {
-            if (objs[i] == NULL || !PyBytes_CheckExact(objs[i])) {
-                (void)buffered_release_view(
-                    Py_NewRef(PyList_GET_ITEM(arg, i)));
-            }
-        }
-        Py_DECREF(arg);
-    }
+    Py_DECREF(views);
     Py_ssize_t n = buffered_check_progress(
         buffered_raw_result(res, total, method), total, method);
     /* Decrefs may have changed errno, which the BlockingIOError reports. */
