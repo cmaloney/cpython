@@ -1520,7 +1520,9 @@ buffered_raw_read_all(buffered *self)
 static PyObject *
 buffered_read_all(buffered *self)
 {
-    if (buffered_flush_dirty(self, 1) < 0 || morsels_reserve(&self->list) < 0) {
+    if (buffered_flush_dirty(self, 1) < 0
+        || morsels_reserve(&self->list) < 0)
+    {
         return NULL;
     }
     PyObject *rest = buffered_raw_read_all(self);
@@ -2889,7 +2891,8 @@ rwpair_closed_get(PyObject *op, void *Py_UNUSED(closure))
     rwpair *self = rwpair_cast(op);
     if (self->writer == NULL) {
         PyErr_SetString(PyExc_RuntimeError,
-                        "the BufferedRWPair object is being garbage-collected");
+                        "the BufferedRWPair object is being "
+                        "garbage-collected");
         return NULL;
     }
     return PyObject_GetAttr(self->writer, &_Py_ID(closed));
