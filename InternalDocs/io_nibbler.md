@@ -6,8 +6,7 @@ The `_io._nibbler` buffered classes
 `TextIOWrapper`, see below).  Its point is free threading: `_io`'s classes
 hold one lock across every raw call, so a thread writing to a slow pipe
 blocks every other thread that prints.  The nibbler never holds its lock
-across a raw write, and small writes and reads that hit the buffer take no
-lock at all.
+across a raw write: other threads keep appending meanwhile.
 
 It is opt-in and private: `_PYTHON_IO_DEFAULT_IMPL=_nibbler` makes the
 nibbler classes `_io`'s (so `open()`, `io.*` and the standard streams use
@@ -21,136 +20,86 @@ This document is a map; the details are in the comments it points to.
 Reading order
 -------------
 
-1. `nibbler.h`: the header comment, then "Morsel lists", "The open end"
-   and "Locking".  This is the data structure and the concurrency
-   protocol, without any I/O.
-2. `bufferedio.c`: the comment before `typedef struct { ... } buffered`
-   (directions, buffer size 0 and None), then `buffered_enter()` /
-   `buffered_enter_locked()` / `buffered_enter_append()` ("Entering
-   methods"), then the write path (`write()` → `buffered_write_lockfree()`
-   → `buffered_write_data()` → `buffered_write_out()`), then the read path
-   (`buffered_fill()`, `buffered_read_into()`, `buffered_readline()`).
-3. Fork and finalization: "Locking" in `nibbler.h`,
-   `nibbler_set_after_fork()`, `_PyIO_AfterForkChild()`.
-4. `__init__()` (`buffered_init()`), `close()`, `detach()`, dealloc.
-5. "Gathering" (`_gather()`).
-6. The `_iomodule.c` glue: `open()` (`buffering=None`), the
+1. `nibbler.h`: the mutex (holder id, fork generation, takeover).
+2. `bufferedio.c`: "Morsel lists", the comment before `typedef struct {
+   ... } buffered`, "Locking", then "Writing" (`buffered_write()` →
+   `buffered_write_slow()` → `buffered_write_out()`), then "Reading"
+   (`buffered_fill()`, `buffered_readline()`, `buffered_seek()`).
+3. `__init__()` (`buffered_init()`), `close()`, `detach()`, dealloc.
+4. "Bytes for TextIOWrapper" and `textio.c` (see "The text layer").
+5. The `_iomodule.c` glue: `open()` (`buffering=None`), the
    `_set_*_impl()` functions and `iomodule_exec()`.
 
 
 Data structures
 ---------------
 
-- **morsel** (`_PyIO_Morsel`): a run of bytes inside a bytes object that
-  keeps them alive.  A **morsel list** is a queue of them with their total
-  (`nbytes`); dropping from the front is amortized O(1).
-- **nibbler**: the buffered data and the locking of one object: the morsel
-  list (pending writes), the current **block** (a bytes object of
-  `capacity` bytes that small writes are copied into and reads fill), the
-  **threshold** (pending bytes past which writes are written out), the
-  **open end**, the lock, the I/O role and `inflight`.
-- **open end** (`nibbler_end`): one run `block[pos:limit]` that threads
-  use without the lock, moving `pos` with a compare-and-swap.  A *writing*
-  end is the room after the last morsel when it is in the block (appends
-  reserve, copy, then add to `done`); a *reading* end holds the read-ahead
-  (the bytes the last fill read: before `pos` returned, after it unread).
-  Taking the lock *holds* the end (`pos` → `~pos`), releasing it opens it
-  again.  An end that is replaced or dropped stays held and is freed once
-  no thread can use it (QSBR on free-threaded builds).
-- **buffered**: the object: `raw`, the nibbler, the **stash** (data a raw
-  read returned that couldn't go into the read-ahead without a large
-  allocation, read before the raw stream), flags fixed by `__init__()`
-  (`raw_fileio`, `raw_vectored`, `raw_appending`, `raw_regular`,
-  `ref_min`), and the list of `_gather()` records.
-- **raw position** (`nibbler.raw_pos`, negative when unknown): kept only when
+- **morsel**: a run of bytes inside a bytes object that keeps them alive.
+  A **morsel list** is a queue of them with their total (`nbytes`);
+  dropping from the front is amortized O(1).  It holds the pending writes
+  (copies in the block, large exact bytes by reference) or, reading, the
+  **stash** (data a raw read returned after the block's, kept after an
+  error).
+- **block**: a bytes object of `capacity` bytes that small writes are
+  copied into and reads fill: `block[0:pos]` was returned (seek() moves
+  back over it), `block[pos:end]` is the read-ahead, `block[dlo:dhi]` was
+  written over in place by `BufferedRandom` and not written out yet.
+- **threshold**: pending bytes past which writes are written out
+  (`capacity`, or `PY_SSIZE_T_MAX` for buffer size None).
+- **raw position** (`raw_pos`, negative when unknown): kept only when
   `raw_regular` (an exact FileIO of a regular file, not in append mode),
   so that `tell()` and `seek()` inside the read-ahead make no `lseek`, like
-  `_io`'s `abs_pos`.  Raw `seek()`/`tell()` set it, raw reads and
-  write-outs advance it, `readall()`, `truncate()`, `nibbler_free()`, a
-  takeover of the I/O role and a fork make it unknown.  `tell()` with
-  nothing buffered still asks the raw stream.  Pipes and character devices
-  are left out because their position doesn't follow reads (GH-95782).
+  `_io`'s `abs_pos`.  Pipes and character devices are left out because
+  their position doesn't follow reads (GH-95782).
 
 
 Invariants
 ----------
 
 - Data flows one way at a time: there are pending writes or read-ahead
-  (and stash), never both.  `BufferedRandom` hands read-ahead back (seeks)
-  before writing and writes out before reading.
+  (and stash), never both.  `BufferedRandom` writes over a private
+  read-ahead in place (written out before any other raw call), else hands
+  it back (seeks) before writing, and writes out before reading.
 - The logical position is the raw position plus the pending writes, or
   minus the unread read-ahead and the stash.
 - A bytes object is never written to once something else can see it: a
-  block is reused only while uniquely referenced (and, free-threaded,
-  after its QSBR goal); one a Python raw stream may still reach through a
-  view is abandoned to it.
-- Appends without the lock stay within the threshold and inside the
-  block: `limit` only grows for a given `pos`.
+  block is reused only while uniquely referenced; one a Python raw stream
+  may still reach through a view is abandoned to it (gh-60198).
 - `inflight` bytes (the front of the pending writes, given to a raw write
   made without the lock) belong to the I/O-role holder until the raw call
   returns: other threads only append meanwhile.
-- `raw` changes only with the lock held (or with no other users).
-- A known `raw_pos` is the raw stream's position, assuming nothing else
-  moves it while data is buffered (as `_io` does).  It is used and changed
-  only with the I/O role and the lock.
-- While a stream has `_gather()` records, it has no writing end and its
-  reading end stays held (`hold_reading`).
 
 
 Locks and roles per operation
 -----------------------------
 
-There are two mutexes per object, each recording its holder's thread
-state id (so a reentrant call raises `RuntimeError` instead of
-deadlocking): the **lock**, which guards the state, and the **I/O role**,
-which gives one thread the use of the data (taken before the lock; a
-thread holding the lock never waits for the role).
+There are two mutexes per object (`nibbler_mutex`, a `PyMutex` recording
+its holder's thread state id, so that a reentrant call raises
+`RuntimeError` instead of deadlocking): the **lock**, which guards every
+field, and the **I/O role**, which gives one thread the raw stream (taken
+before the lock).  Fast paths take the lock alone; anything needing raw
+I/O releases it, takes the role, takes the lock again and looks again.
 
 | Operation | I/O role | lock | Notes |
 |---|---|---|---|
-| small `write()` (under 512 bytes, room at the writing end) | – | – | reserve/commit at the end; an exact FileIO is checked after reserving, other raw streams are not asked (see "Closing the raw stream alone") |
-| text write through `_PyIONibbler_reserve()`/`_commit()` | – | – | same, from `TextIOWrapper` |
-| other `write()` | only to write out | yes | the lock is released around the raw write (`buffered_write_spans()`) |
-| `read(n)`, `read1()`, `readline()`, `peek()` hitting the read-ahead | – | – | claim at the reading end |
+| `write()` that fits below the threshold | – | yes | an exact FileIO is checked by its fd; others see "Closing the raw stream alone" |
+| other `write()`, `flush()` | yes | yes | the lock is released around the raw write (`buffered_write_spans()`) |
+| `read(n)`, `read1()`, `readline()`, `peek()` hitting the read-ahead | – | yes | |
 | other reads, `readinto()`, `peek()` that fills | yes | yes | raw reads are made with both held |
-| `flush()` | yes | yes | the write-out releases the lock |
-| `seek()`, `tell()`, `truncate()`, `_discard_writes()` | yes | yes | raw calls with both held |
+| `seek()` / `tell()` inside the read-ahead (known raw position) | – | yes | |
+| other `seek()`, `tell()`, `truncate()` | yes | yes | raw calls with both held |
 | `close()`, `detach()`, `__init__()` | yes | yes | flush with both held |
-| `fileno()`, `isatty()`, `seekable()`, `readable()`, `writable()`, `name`, `mode`, `closed`, `raw` | – | – | a reference to raw, taken without the lock |
-| `_gather()` enter / write in a block | – | yes | |
-| `_gather()` exit | only to write out | yes (not interruptible) | |
+| `fileno()`, `isatty()`, `seekable()`, `name`, `mode`, `closed`, `raw` | – | – | a reference to raw, taken atomically |
 
 Waits release the GIL (or detach) and a signal handler that raises
 interrupts them, except the relock after a raw call, whose result must be
-kept.
+kept.  A signal handler writing to the stream during a raw write of its
+own thread finds the role is its own and queues its data (gh-118143).
 
-
-Free-threaded memory ordering
------------------------------
-
-Fields used with the lock need nothing more.  Those used without it:
-
-- `nibbler.end`: release store, acquire load (`nibbler_end_get()`).
-- `end->pos`: compare-and-swap; opened with a release store, loaded
-  relaxed and re-checked by the CAS.
-- `end->limit`, reading: release store after the bytes were written
-  (`nibbler_extend()`), acquire load (`nibbler_end_limit()`).  Writing:
-  relaxed, safe because it only grows for a given `pos`.
-- `end->done`, writing: atomic add by each append, acquire load by the
-  holder waiting for appends to finish (`nibbler_hold()`).
-- `nibbler.block`, `nibbler.capacity`: relaxed (`__sizeof__()`, `read1()`).
-- `buffered.raw`: `_Py_XGetRef()` / atomic exchange (`buffered_ref_raw()`,
-  `buffered_swap_raw()`).
-- `buffered.raw_fileio`, `buffered.dict`: relaxed.
-- `buffered.ngather`: stored relaxed with the lock; read with it.
-- mutex holders: relaxed (a thread only compares with its own id).
-- Blocks and ends that threads without the lock may still read are freed
-  or reused only after a QSBR goal (`block_goal`, `spare`,
-  `_PyMem_FreeDelayed()`, `_PyObject_XDecRefDelayed()`).
-
-Nothing that can wait or detach runs between reserving and committing at
-the writing end, so a holder waiting for appends only waits for threads
-running their copy.
+On free-threaded builds every field is used with the lock, but `raw`
+(`_Py_XGetRef()` / atomic exchange), `dict`, `block` and `capacity`
+(relaxed, for the getters and `__sizeof__()`); mutex holders and
+generations are relaxed (a thread only compares with its own id).
 
 
 Closing the raw stream alone
@@ -160,26 +109,22 @@ After `raw.close()` (rather than the buffered object's `close()`), writes
 must not reach the raw stream.  What small writes see depends on the raw
 stream:
 
-- An exact `FileIO` is checked by every write, also a small one without
-  the lock, by loading its `fd` after reserving: the next write raises.
+- An exact `FileIO` is checked by every write (its `fd`): the next write
+  raises.
 - Other raw streams (`SocketIO`, Python `RawIOBase` subclasses,
   subclasses of `FileIO`) are asked through `closed` only by operations
-  that take the lock.  A small write (under 512 bytes) that fits at the
-  writing end goes without the lock and doesn't ask, so after a direct
-  `raw.close()` small writes are queued without an error until the room
-  left in the current block is used up, or until an operation that takes
-  the lock and checks `closed` runs: `flush()`, a write that doesn't fit,
-  a write of 512 bytes or more, `seek()`, reads.  That operation raises
-  `ValueError` and drops the writing end, so every later write takes the
-  lock and raises too.  With 16-byte writes after one queued write, 511
-  writes are queued at buffer size 8192, 4095 at 65536, and 8191 with
-  buffer size None (whose block is `DEFAULT_BUFFER_SIZE`, 128 KiB).
+  that take the I/O role.  A small write (under 512 bytes) that fits below
+  the threshold trusts the last answer (`raw_open`), so after a direct
+  `raw.close()` small writes are queued without an error until the
+  pending writes reach the threshold, or until an operation that asks
+  `closed` runs: `flush()`, a write that doesn't fit, a write of 512 bytes
+  or more, `seek()`, reads.  That operation raises `ValueError` and clears
+  `raw_open`, so every later write asks and raises too.
 - Queued bytes never reach the closed raw stream: every write-out asks
   `closed` with the lock first.  `close()` of the buffered object then
   finds the raw stream closed and returns without writing them or
   warning (as `_io` does with bytes buffered before `raw.close()`); they
-  are dropped with the object.  It doesn't drop the writing end either,
-  so small writes after it are still queued until an operation raises.
+  are dropped with the object.
 - Text writes through the nibbler `TextIOWrapper` ask the buffered object
   whether it is closed on each write when the raw stream isn't an exact
   FileIO, so they raise at once.
@@ -187,7 +132,7 @@ stream:
 Why small writes don't ask: `closed` of a Python raw stream is an
 attribute lookup and a Python call, about 1750 instructions for a
 `RawIOBase` subclass and 1950 for a `SocketIO` (callgrind, -O3 GIL build),
-more than a whole lock-free small write (about 1120).  Making small writes
+more than a whole small write (about 1100).  Making small writes
 notice sooner without asking was tried and rejected for its complexity
 (branch `raw_closed`):
 
@@ -211,18 +156,17 @@ closed could write to a reused descriptor, with `_io` as here.
 Fork and finalization
 ---------------------
 
-A holder that can never release a mutex is not waited for (see "Locking"
-in `nibbler.h`):
+A holder that can never release a mutex is not waited for (see
+`nibbler.h`):
 
-- **fork**: `PyOS_AfterFork_Child()` calls `_PyIO_AfterForkChild()` before
-  any Python after-fork hook.  For every initialized object (the module's
-  `nibbler_set`) it resets the mutexes other threads held and, if the I/O
-  role was held, drops the bytes in flight (the parent still writes them),
-  holding the end meanwhile.  Read-ahead that a gone thread was filling
-  is lost.  Each tracked object keeps a reference to the module, whose
-  state holds the set, until its dealloc leaves the set.
-- **finalization**: every other thread is detached and hangs as soon as it
-  attaches, so the finalizing thread takes over a mutex such a thread
+- **fork**: `PyOS_AfterFork_Child()` calls `_PyIO_AfterForkChild()`,
+  which bumps a global fork generation.  Every acquisition records the
+  generation; the first lock of a mutex in a newer one claims it, resets
+  it if a thread gone in the fork held it, and tells the caller (which
+  forgets `raw_pos`, or drops the bytes in flight).  No set of objects, no
+  walk.
+- **finalization**: every other thread is detached and hangs as soon as
+  it attaches, so the finalizing thread takes over a mutex such a thread
   holds, dropping the bytes in flight.  If it takes the role over but the
   lock fails (a reentrant call), `drop_inflight` leaves that to the next
   holder of both.
@@ -239,15 +183,6 @@ size None (writers only) buffers writes without limit: the threshold is
 write out.  `open(buffering=None)` gives that, and is only accepted when
 `open()` uses the nibbler classes (it raises before opening the file
 otherwise).
-
-
-`_gather()`
------------
-
-Private and experimental.  See "Gathering" in `bufferedio.c`: a block's
-writes from the context that entered it are kept in a record and added in
-one piece at its end (or at `limit`, or before an operation of that
-context needs the position, or by `close()`/`detach()`/`__init__()`).
 
 
 Differences from `_io`
@@ -279,6 +214,7 @@ When the nibbler classes replace `_io`'s, the C fast paths keyed on
 `peek()`) don't apply to them.
 
 
+
 The text layer
 --------------
 
@@ -286,104 +222,82 @@ The text layer
 bytes of its own.  The buffered object below it is the only queue in both
 directions, so the buffer's position is the text position: `tell()` is the
 buffer's position, and `write()` and `truncate()` after a read act there
-(gh-82891, gh-70346).  Start with the comment at the top of `textio.c`, then
-"Locking" and `tconf` there.
+(gh-82891, gh-70346).  Start with the comment at the top of `textio.c`.
 
 ### The store
 
 Over an exact `_io._nibbler` buffered object, text uses the buffer's bytes
 in place through the byte API ("Bytes for TextIOWrapper" in
-`bufferedio.c`, declared in `_iomodule.h`):
-
-- `_PyIONibbler_peek()` shows the unread bytes without taking them, named
-  by a key and an offset that always mean the same bytes.  To give a long
-  line whole, it lets the block grow (as `buffered_fill()` does for a long
-  binary line) up to 64 blocks, and at least `DEFAULT_BUFFER_SIZE`; past
-  that it returns `_PyIO_NIBBLER_FULL` and the line is taken in parts.
-- `_PyIONibbler_advance()` takes bytes only if they are still at the
-  position (key and offset): that is how a call finds that another thread
-  read first.  `_PyIONibbler_take()` also copies them out.
-- `_PyIONibbler_unread()` puts bytes back in front of the unread ones, as
-  read-ahead (see "Failed reads" below).
-- `_PyIONibbler_write()`, and `_PyIONibbler_reserve()` plus
-  `_PyIONibbler_commit()` for UTF-8 written straight into the buffer.
+`bufferedio.c`, declared in `_iomodule.h`): `_PyIONibbler_begin()` takes
+the buffer's lock (and with `io` its role) and shows the unread bytes,
+`_PyIONibbler_view()` takes some and shows the rest, `_PyIONibbler_fill()`
+reads more after them (growing the block for a long line up to 64 blocks,
+at least `DEFAULT_BUFFER_SIZE`, then `_PyIO_NIBBLER_FULL`),
+`_PyIONibbler_unread()` puts bytes back in front (see "Failed reads"),
+`_PyIONibbler_end()` releases.  `_PyIONibbler_take()` is the quick read's
+one call: take bytes if they are still the next ones.
 
 Over any other buffer, or once the buffer has an instance dict (its methods
 may be overridden), the store is read-ahead kept in the text object
-(`rbuf`), filled with `read1()`.  The byte API returns `_PyIO_NIBBLER_NO`
-for a buffer with a dict, also after waiting for its lock, so that no call
-takes bytes from the buffer once `rbuf` may hold bytes before them.
+(`rbuf`), filled with `read1()`.
 
 After the raw stream alone is closed, what the buffer read ahead is still
-served, locked or not, as by its own `read()`; anything needing the raw
-stream raises `ValueError`.
+served, as by its own `read()`; anything needing the raw stream raises
+`ValueError`.
 
 ### Decoding
 
 UTF-8, Latin-1, ASCII and byte-to-character tables (cp1252 and others),
 with errors `strict` or `surrogateescape` (and `replace` but for UTF-8),
-are native: the bytes of any characters are known, so a read takes just
-the bytes of the text it returns.  The decoded characters are a cache
-(`tcache`; on free-threaded builds a span published whole, `tspan`).
+are native: the bytes of any characters are known.  A chunk of the unread
+bytes is decoded into a cache (`cache`, `cache_ci`, `cache_p`), valid while
+the buffer's unread bytes still start at `cache_p`; the cache holds the
+block, so the buffer never writes over those bytes in place.  A read finds
+its text in the cache and takes the bytes of just that text, counted (the
+"\n" byte of a UTF-8 line; a vectorized count for read(n)).  The usual
+read (`text_read_quick()`) is a trylock of rlock, a memchr, a str and
+`_PyIONibbler_take()`; the general one (`text_read_native()`,
+`text_take()`) handles every newline mode, partial lines and refills.
+`read()` with no size decodes the buffer's `read()` at once.
 
-Other codecs go through the codec's incremental decoder.  Their state is
-kept as flags (an `unsigned long long`, as iso2022_kr's go past 32 bits;
-only `tell()`, whose cookie holds 32 bits, raises `OverflowError`).
+Other codecs go through the codec's incremental decoder, as `_io` does:
+characters decoded ahead (`dchars`) with a snapshot (flags, bytes) for
+`tell()`.  Their state is kept as flags (an `unsigned long long`, as
+iso2022_kr's go past 32 bits; only `tell()`, whose cookie holds 32 bits,
+raises `OverflowError`).
 
 Invalid bytes with `strict` end the read before them (as at the end of the
 stream); the next read takes them and raises, once, with either kind of
-codec.  This holds for `read()` with no size as well: it decodes what the
-buffer's `read()` returned at once, and when that fails, gives the bytes
-back and reads them in parts.
+codec.
 
 ### Failed reads
 
-A read takes the bytes of its text piece by piece (each span decoded, each
-peek), and may fail after it took some: the raw stream raises (or is
+A read that can't end with what the buffer holds (a line longer than the
+buffer gathers, `read()` in pieces, a stream that would block) takes bytes
+as it goes, and may fail after it took some: the raw stream raises (or is
 closed, or raises `BlockingIOError` rather than returning `None`), or
 `KeyboardInterrupt` comes while it waits.  Then, as the buffer does with
 bytes (gh-51571), what the call took is given back and the exception is
-raised; the next read returns it.  With a native codec the call copies the
-bytes it takes (`_PyIONibbler_take()`, into its stack while small) and puts
-them back with `_PyIONibbler_unread()` (or in front of `rbuf`); with the
-decoder the characters are still in the cache, whose position goes back.
-So the text position, `tell()`, and `skip_lf` are as before the call.
-Nothing is swallowed: a read that would block (the buffer returns `None`)
-still returns what it has, as documented, but an exception always
-propagates.
-
-Not taking the bytes until the call succeeds was the alternative.  It
-fails on two counts: a read may want more than the buffer can hold at once
-(past `_PyIO_NIBBLER_FULL`), and once the buffer gathers unread bytes into
-another block (a new key), a call can't tell whether the bytes it saw are
-still the next ones or another thread took them.  Copying costs a
-`memcpy()` of what multi-step reads return; the single-step reads
-(`text_quick()`, the bulk of the text rows of the scoreboard) copy
-nothing.
-
-With free threading other threads may read between a call's pieces; the
-bytes given back then go in front of what is unread now (read after text
-that followed them, never lost or read twice).  The decoder's characters go
-back only if no other call read from the cache meanwhile; the bytes, only
-while the buffer has no pending writes.  A call without the critical
-section whose buffer got an instance dict hands the bytes to
-`text_read_more()`, which puts them in `rbuf`.
+raised; the next read returns it.  With a native codec the call keeps
+copies of the bytes it takes and puts them back with
+`_PyIONibbler_unread()` (or in front of `rbuf`); with the decoder the
+characters are only consumed on success.
 
 ### Locking
 
-With a native codec over an exact nibbler buffer (`tconf.lockfree`),
-reads, `write()`, `tell()`, `flush()` and the attributes run without the
-critical section: the buffer takes bytes atomically, and each call works
-on its own copy of the cache.  Everything else (the codec's decoder and
-encoder, `rbuf`) keeps the critical section.
-
-What calls run by (buffer, codec objects, errors, newline, the lockfree
-flag) is one immutable, refcounted struct, `tconf`, published through one
-pointer.  A call takes it once; `__init__()`, `reconfigure()`, `detach()`
-and the switch to `rbuf` build a new one and swap it in.  Its memory is
-freed with QSBR.  The quick read path (`text_quick()`) borrows it without a
-reference, so lockfree settings are swapped out with a stop-the-world pass
-(rare), after which their objects are released at once.
+- **rlock** (a nibbler mutex, reentrant through `rdepth` for calls nested
+  from Python code it runs): held by reads, `seek()`, `tell()`,
+  `truncate()`, `reconfigure()`, `detach()`, `close()` and `__init__()`,
+  across buffer calls, so that a read is atomic (each line once, whole).
+  The quick read takes it with a trylock; when anyone holds it the read
+  goes the locked way.
+- **wlock**: held only to look at or swap the settings, never across other
+  code: `write()` and the getters take what they need under it.  With the
+  GIL it is a no-op (holding the GIL is the same).  `write()` never takes
+  rlock, so writing never waits for a blocking read (a socket's
+  `makefile("rw")`); after a read it takes rlock to go back to the text
+  position first.  (Critical sections were tried: daemon threads stopped
+  at exit inside one hung the main thread's writes.)
 
 ### Differences from `_io.TextIOWrapper`
 
