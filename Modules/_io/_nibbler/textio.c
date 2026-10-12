@@ -1698,7 +1698,8 @@ text_read_locked(textio *self, Py_ssize_t n, int line)
             res = text_read_native(self, n, line);
         }
     }
-    if (res != NULL) {
+    if (res != NULL || textio_holds(self)) {
+        /* (Also after a read that failed with characters decoded.) */
         FT_ATOMIC_STORE_UINT8_RELAXED(self->decoded, 1);
     }
 end:
@@ -2315,6 +2316,8 @@ text_skip(textio *self, Py_ssize_t n)
     if (r >= 0) {
         self->dpos = n;
     }
+    /* Writes go back to the text position. */
+    FT_ATOMIC_STORE_UINT8_RELAXED(self->decoded, 1);
     return r < 0 ? -1 : 0;
 }
 
