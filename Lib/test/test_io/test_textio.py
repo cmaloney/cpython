@@ -1305,30 +1305,60 @@ class TextIOWrapperTest:
         # once the line is too long to keep: a long line over a seekable
         # buffer costs no extra copy of its bytes.  The nibbler keeps the
         # line's bytes in the buffer until it is read whole, and decodes
-        # them once, into its text.
-        if self.is_nibbler and support.Py_GIL_DISABLED:
-            self.skipTest("free-threaded: the blocks that a long line "
-                          "outgrows are freed only after the call")
+        # them once, into its text (the blocks it outgrows are freed at
+        # once, also with free threading); with the codec's decoder (as
+        # for UTF-16), it takes the text in pieces as they are decoded.
         import tracemalloc
         n = 4 * 1024 * 1024
-        data = b"x" * n + b"\n"
-        t = self.TextIOWrapper(self.BufferedReader(self.BytesIO(data)),
-                               encoding="ascii")
-        tracemalloc.start()
-        try:
+        for encoding in ("ascii", "utf-16-le"):
+            with self.subTest(encoding=encoding):
+                data = ("x" * n + "\n").encode(encoding)
+                t = self.TextIOWrapper(
+                    self.BufferedReader(self.BytesIO(data)),
+                    encoding=encoding)
+                tracemalloc.start()
+                try:
+                    line = t.readline()
+                    peak = tracemalloc.get_traced_memory()[1]
+                finally:
+                    tracemalloc.stop()
+                self.assertEqual(len(line), n + 1)
+                del line, t
+                # The decoded chunks and the joined line: 2x (3x with the
+                # copy).  The nibbler: the line's bytes, in a block not
+                # much bigger, and its text; with the decoder, the pieces
+                # kept to give back if a read fails, and the text.
+                self.assertLess(peak, 2.5 * n)
+
+    def test_readline_long_line_linear(self):
+        # Reading a long line takes time linear in its length, also through
+        # the codec's decoder (UTF-16 here): its text is not copied again
+        # as each piece is decoded.
+        if not self.is_C:
+            self.skipTest("_pyio's readline() is not linear in debug "
+                          "builds")
+        def read_line(n):
+            data = ("x" * n + "\n").encode("utf-16-le")
+            t = self.TextIOWrapper(
+                self.BufferedReader(self.BytesIO(data), 8192),
+                encoding="utf-16-le")
+            start = time.perf_counter()
             line = t.readline()
-            peak = tracemalloc.get_traced_memory()[1]
-        finally:
-            tracemalloc.stop()
-        self.assertEqual(len(line), n + 1)
-        # The decoded chunks and the joined line: 2x (3x with the copy).
-        # The nibbler: the line's bytes, in a block not much bigger, and
-        # its text.
-        self.assertLess(peak, 2.5 * n)
+            elapsed = time.perf_counter() - start
+            self.assertEqual(len(line), n + 1)
+            return elapsed
+
+        # 8 times longer: about 8 times slower if linear, 64 if quadratic.
+        with support.disable_gc():
+            small = min(read_line(256 * 1024) for _ in range(3))
+            large = min(read_line(2048 * 1024) for _ in range(3))
+        self.assertLess(large, 24 * small)
 
     def test_readline_long_lines(self):
         # Lines longer than a chunk and than the buffer, with each kind of
-        # newline; the character after a "\r" takes two bytes.
+        # newline; the character after a "\r" takes two bytes (in UTF-8,
+        # a native codec of the nibbler's, and UTF-16, with the codec's
+        # decoder).
         n = 20000
         a, b, c, d = "a" * n, "\xe9" + "b" * n, "c" * n, "d" * n
         text = a + "\r" + b + "\r\n" + c + "\n" + d
@@ -1339,15 +1369,16 @@ class TextIOWrapperTest:
             "\r": [a + "\r", b + "\r", "\n" + c + "\n" + d],
             "\r\n": [a + "\r" + b + "\r\n", c + "\n" + d],
         }
-        for newline, lines in expected.items():
-            for size in (1024, None):
-                with self.subTest(newline=newline, buffer_size=size):
-                    raw = self.BytesIO(text.encode("utf-8"))
-                    buf = (self.BufferedReader(raw, size) if size
-                           else self.BufferedReader(raw))
-                    t = self.TextIOWrapper(buf, encoding="utf-8",
-                                           newline=newline)
-                    self.assertEqual(list(iter(t.readline, "")), lines)
+        for (newline, lines), size, encoding in itertools.product(
+                expected.items(), (1024, None), ("utf-8", "utf-16")):
+            with self.subTest(newline=newline, buffer_size=size,
+                              encoding=encoding):
+                raw = self.BytesIO(text.encode(encoding))
+                buf = (self.BufferedReader(raw, size) if size
+                       else self.BufferedReader(raw))
+                t = self.TextIOWrapper(buf, encoding=encoding,
+                                       newline=newline)
+                self.assertEqual(list(iter(t.readline, "")), lines)
 
     def test_tell_after_readline_would_block(self):
         # A readline() that would block after a partial line keeps the

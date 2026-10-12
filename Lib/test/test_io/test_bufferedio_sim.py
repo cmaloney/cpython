@@ -434,6 +434,45 @@ class SlowDeviceTest:
         self.assertEqual(f.readline(), "ab\xe9cd\n")
         self.assertEqual(f.readline(), "ef")
 
+    def test_text_readline_error_keeps_long_line(self):
+        # gh-51571 with a line longer than the text layer's chunk, through
+        # a codec's decoder (UTF-16): the nibbler takes its text in pieces
+        # as they are decoded, and a raw error loses none of them.  tell(),
+        # seek() and detach() then work from the start of the line.
+        if not self.is_nibbler:
+            self.skipTest("a long line read before a raw error is lost")
+        line = "".join(chr(0x61 + i % 26) for i in range(40_000)) + "\n"
+        data = (line + "tail").encode("utf-16-le")
+
+        class Raw(make_scripted_reader(self.RawIOBase)):
+            def seekable(self):
+                return True
+            def tell(self):
+                return self.pos
+            def seek(self, pos, whence=0):
+                self.pos = pos + (0, self.pos, len(self.data))[whence]
+                return self.pos
+
+        for exc in (TimeoutError("timed out"), KeyboardInterrupt()):
+            with self.subTest(exc=type(exc)):
+                raw = Raw(data, [30_000, 30_000, exc])
+                f = self.TextIOWrapper(self.BufferedReader(raw, 4096),
+                                       encoding="utf-16-le")
+                self.assertRaises(type(exc), f.readline)
+                pos = f.tell()
+                self.assertEqual(f.readline(), line)
+                self.assertEqual(f.read(), "tail")
+                f.seek(pos)
+                self.assertEqual(f.readline(), line)
+                # Again, then detach(): the buffer goes back to where the
+                # text is.
+                raw = Raw(data, [30_000, 30_000, exc])
+                f = self.TextIOWrapper(self.BufferedReader(raw, 4096),
+                                       encoding="utf-16-le")
+                self.assertEqual(f.read(3), line[:3])
+                self.assertRaises(type(exc), f.readline)
+                self.assertEqual(f.detach().read(), data[6:])
+
     def test_read_all_error_keeps_data(self):
         # read() of a raw stream with only RawIOBase.readall() keeps what
         # it read before a raw read raised.
@@ -620,6 +659,54 @@ class SlowDeviceTest:
             small = min(read_line(64 * 1024) for _ in range(3))
             large = min(read_line(512 * 1024) for _ in range(3))
         self.assertLess(large, 24 * small)
+
+    def test_readline_long_line_memory(self):
+        # A long line takes the room of its bytes about twice at most: the
+        # nibbler gathers it in a block grown for it, and releases the
+        # blocks it outgrew at once, also with free threading.
+        import tracemalloc
+        n = 4 * 1024 * 1024
+        f = self.BufferedReader(self.BytesIO(b"x" * n + b"\n"))
+        tracemalloc.start()
+        try:
+            line = f.readline()
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(len(line), n + 1)
+        self.assertLess(peak, 2.5 * n)
+
+    def test_read_at_every_offset_and_seek_back(self):
+        # Reads filling the buffer from a position of every remainder
+        # modulo 64 (the nibbler puts the bytes read at an address
+        # congruent to it, some bytes into its block), then seeks back
+        # inside what was read and before it, where the bytes in front of
+        # the block's data are not the stream's: the data is right.
+        data = bytes(i * 7 % 251 for i in range(4000))
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(data)
+        raws = {
+            "BytesIO": lambda: self.BytesIO(data),
+            "FileIO": lambda: self.FileIO(os_helper.TESTFN),
+        }
+        for name, make_raw in raws.items():
+            with (self.subTest(raw=name),
+                  self.BufferedReader(make_raw(), 256) as f):
+                for pos in range(1000, 1130):
+                    # Away first, so that the read at pos fills afresh.
+                    f.seek(0)
+                    self.assertEqual(f.read(1), data[:1])
+                    f.seek(pos)
+                    self.assertEqual(f.read(10), data[pos:pos + 10])
+                    for back in (1, 10, 11, 30, 64, 75, 100):
+                        f.seek(pos + 10)
+                        self.assertEqual(f.seek(-back, os.SEEK_CUR),
+                                         pos + 10 - back)
+                        self.assertEqual(f.read(20),
+                                         data[pos + 10 - back:pos + 30 - back])
+                    f.seek(pos - 1)
+                    self.assertEqual(f.read(1), data[pos - 1:pos])
 
     def test_readline_after_seek_back_over_partial_line(self):
         # A readline() that kept a partial line (here because the raw
