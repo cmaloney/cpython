@@ -113,9 +113,6 @@ typedef struct nibbler {
 #endif
     /* NULL for none.  Also read without the lock, see "The open end". */
     struct nibbler_end *end;
-    /* Set by the caller: keep the reading end held when the lock is
-       released, so that reads go through the lock. */
-    uint8_t hold_reading;
     /* How many ends were made (see nibbler_end.id). */
     uint64_t ends;
     /* The nibbler_set it is in (NULL for none); in it, the next one and
@@ -367,12 +364,11 @@ nibbler_open(nibbler *n)
     if (!e->writing) {
         /* At the unread bytes. */
         p = ~FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
-        if (e->done > p || n->hold_reading) {
+        if (e->done > p) {
             /* A readline() found no end of line in the unread bytes (see
                nibbler_noline()): stay held, so that reads without the lock
                fail (lines would be looked for in those bytes again), and
-               go through the lock until they are taken.  Also while the
-               caller wants that. */
+               go through the lock until they are taken. */
             return;
         }
     }
