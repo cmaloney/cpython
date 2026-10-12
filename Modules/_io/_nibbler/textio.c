@@ -768,8 +768,12 @@ textio_drop_chars(textio *self)
     cache_clear(c);
     cache_put(self, c);
     cache_release(c);
-    Py_CLEAR(self->dspan);
-    self->dlost = 0;
+    /* (Only the decoder has dspan, with the critical section: calls
+       without it, with a native codec, find it NULL.) */
+    if (self->dspan != NULL) {
+        Py_CLEAR(self->dspan);
+        self->dlost = 0;
+    }
 }
 
 #ifdef Py_GIL_DISABLED
