@@ -242,13 +242,6 @@ buffered_leave(buffered *self)
     nibbler_unlock_io(&self->nib);
 }
 
-/* raw is set: initialized and not detached. */
-static inline int
-buffered_raw_usable(PyObject *raw)
-{
-    return raw != NULL;
-}
-
 static int
 buffered_not_ready(void)
 {
@@ -299,7 +292,7 @@ static PyObject *
 buffered_get_raw(buffered *self)
 {
     PyObject *raw = buffered_ref_raw(self);
-    if (!buffered_raw_usable(raw)) {
+    if (raw == NULL) {
         buffered_not_ready();
     }
     return raw;
@@ -1729,7 +1722,7 @@ enum {
 Py_NO_INLINE static int
 buffered_enter_locked(buffered *self, const char *closed_msg, int direction)
 {
-    if (!buffered_raw_usable(self->raw)) {
+    if (self->raw == NULL) {
         buffered_not_ready();
         goto error;
     }
@@ -1792,7 +1785,7 @@ buffered_enter(buffered *self, const char *closed_msg, int direction)
         return -1;
     }
     if (direction == READING && nibbler_unread(&self->nib) > 0
-        && buffered_raw_usable(self->raw)
+        && self->raw != NULL
         && FT_ATOMIC_LOAD_INT_RELAXED(self->ngather) == 0)
     {
         return 0;
@@ -1812,21 +1805,12 @@ buffered_enter_append(buffered *self)
         return -1;
     }
     if (self->raw_fileio && nibbler_reading(&self->nib) == NULL
-        && self->stash.nbytes == 0 && buffered_raw_usable(self->raw)
+        && self->stash.nbytes == 0 && self->raw != NULL
         && !_PyFileIO_closed(self->raw))
     {
         return 0;
     }
     return buffered_enter_locked(self, "write to closed file", WRITING);
-}
-
-/* Take the I/O role and the lock and check the object is initialized and
-   attached.  On success the caller must release them with
-   buffered_leave(). */
-static int
-buffered_lock_ready(buffered *self)
-{
-    return buffered_enter(self, NULL, KEEP_DIRECTION);
 }
 
 /*
@@ -1854,8 +1838,7 @@ static int
 gather_end(buffered *self, gather *g, Py_ssize_t *dropped)
 {
     *dropped = 0;
-    int closed = (buffered_raw_usable(self->raw) ? buffered_is_closed(self)
-                                                 : 1);
+    int closed = self->raw != NULL ? buffered_is_closed(self) : 1;
     if (closed != 0) {
         *dropped = g->list.nbytes;
         if (closed > 0 && (*dropped > 0 || g->flush)) {
@@ -1979,7 +1962,7 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
         return NULL;
     }
     int r = -1;
-    if (!buffered_raw_usable(self->raw)) {
+    if (self->raw == NULL) {
         buffered_not_ready();
     }
     else if (buffered_check_closed(self, "gather on closed file") == 0) {
@@ -2300,7 +2283,7 @@ static PyObject *
 _io__Buffered__discard_writes_impl(buffered *self)
 /*[clinic end generated code: output=4a612257ab62b745 input=8c98a37d7a14ddfa]*/
 {
-    if (buffered_lock_ready(self) < 0) {
+    if (buffered_enter(self, NULL, KEEP_DIRECTION) < 0) {
         return NULL;
     }
     Py_ssize_t n = 0;
@@ -2412,7 +2395,7 @@ static PyObject *
 _io__Buffered_close_impl(buffered *self)
 /*[clinic end generated code: output=7280b7b42033be0c input=d20b83d1ddd7d805]*/
 {
-    if (buffered_lock_ready(self) < 0) {
+    if (buffered_enter(self, NULL, KEEP_DIRECTION) < 0) {
         return NULL;
     }
     PyObject *res = NULL;
@@ -2455,7 +2438,7 @@ _io__Buffered_close_impl(buffered *self)
             exc = PyErr_GetRaisedException();
         }
         /* Another thread may have detached it meanwhile. */
-        if (buffered_lock_ready(self) < 0) {
+        if (buffered_enter(self, NULL, KEEP_DIRECTION) < 0) {
             _PyErr_ChainExceptions1(exc);
             return NULL;
         }
@@ -2506,11 +2489,11 @@ _io__Buffered_detach_impl(buffered *self)
 {
     /* flush() takes the lock itself.  Calls racing with detach() may run
        on either side of it; the lock keeps the buffers consistent. */
-    if (!buffered_raw_usable(FT_ATOMIC_LOAD_PTR_RELAXED(self->raw))) {
+    if (FT_ATOMIC_LOAD_PTR_RELAXED(self->raw) == NULL) {
         buffered_not_ready();
         return NULL;
     }
-    if (_PyFile_Flush((PyObject *)self) < 0 || buffered_lock_ready(self) < 0) {
+    if (_PyFile_Flush((PyObject *)self) < 0 || buffered_enter(self, NULL, KEEP_DIRECTION) < 0) {
         return NULL;
     }
     /* Also write out what other threads wrote since flush(), and what
@@ -3056,7 +3039,7 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
     /* Pending writes first go to the raw stream they were written to, as
        FileIO.__init__() first closes the file it had open: if that fails,
        raise, leaving the object as it is. */
-    if (buffered_raw_usable(self->raw)
+    if (self->raw != NULL
         && ((self->ngather > 0 && gather_splice_records(self, 1) < 0)
             || (buffered_writing(self)
                 && buffered_flush_writes(self, 0) < 0)))
@@ -3686,7 +3669,7 @@ _PyIONibbler_unread(PyObject *op, const char *data, Py_ssize_t len)
     if (buffered_dict(self) != NULL) {
         r = _PyIO_NIBBLER_NO;
     }
-    else if (buffered_raw_usable(self->raw) && !buffered_writing(self)
+    else if (self->raw != NULL && !buffered_writing(self)
              && self->ngather == 0)
     {
         /* In front of the unread bytes (from a fresh block, as
