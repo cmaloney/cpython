@@ -1303,10 +1303,12 @@ class TextIOWrapperTest:
         # The tell() snapshot of where a line spanning chunks started (so
         # that it can be kept if the stream would block) stops growing
         # once the line is too long to keep: a long line over a seekable
-        # buffer costs no extra copy of its bytes.
-        if self.is_nibbler:
-            self.skipTest("the nibbler TextIOWrapper reads a long line "
-                          "differently (peak about 4x)")
+        # buffer costs no extra copy of its bytes.  The nibbler keeps the
+        # line's bytes in the buffer until it is read whole, and decodes
+        # them once, into its text.
+        if self.is_nibbler and support.Py_GIL_DISABLED:
+            self.skipTest("free-threaded: the blocks that a long line "
+                          "outgrows are freed only after the call")
         import tracemalloc
         n = 4 * 1024 * 1024
         data = b"x" * n + b"\n"
@@ -1320,7 +1322,32 @@ class TextIOWrapperTest:
             tracemalloc.stop()
         self.assertEqual(len(line), n + 1)
         # The decoded chunks and the joined line: 2x (3x with the copy).
+        # The nibbler: the line's bytes, in a block not much bigger, and
+        # its text.
         self.assertLess(peak, 2.5 * n)
+
+    def test_readline_long_lines(self):
+        # Lines longer than a chunk and than the buffer, with each kind of
+        # newline; the character after a "\r" takes two bytes.
+        n = 20000
+        a, b, c, d = "a" * n, "\xe9" + "b" * n, "c" * n, "d" * n
+        text = a + "\r" + b + "\r\n" + c + "\n" + d
+        expected = {
+            None: [a + "\n", b + "\n", c + "\n", d],
+            "": [a + "\r", b + "\r\n", c + "\n", d],
+            "\n": [a + "\r" + b + "\r\n", c + "\n", d],
+            "\r": [a + "\r", b + "\r", "\n" + c + "\n" + d],
+            "\r\n": [a + "\r" + b + "\r\n", c + "\n" + d],
+        }
+        for newline, lines in expected.items():
+            for size in (1024, None):
+                with self.subTest(newline=newline, buffer_size=size):
+                    raw = self.BytesIO(text.encode("utf-8"))
+                    buf = (self.BufferedReader(raw, size) if size
+                           else self.BufferedReader(raw))
+                    t = self.TextIOWrapper(buf, encoding="utf-8",
+                                           newline=newline)
+                    self.assertEqual(list(iter(t.readline, "")), lines)
 
     def test_tell_after_readline_would_block(self):
         # A readline() that would block after a partial line keeps the

@@ -511,6 +511,7 @@ typedef struct {
     char retry;         /* error: do it with the critical section */
     char stop;          /* invalid bytes follow the characters */
     char again;         /* read everything in parts (see text_read_all()) */
+    char line;          /* readline(): 1, 2 without a size (native_more()) */
     Py_ssize_t held;    /* bytes of m the decoder held (it forgot them) */
     /* What a read took so far, to give back if it fails (see "Keeping
        what a read took"): with keep, it notes it; taken: there is some;
@@ -1462,6 +1463,36 @@ text_decode_error(Py_ssize_t *start, Py_ssize_t *end)
     return r;
 }
 
+/* Where the first line end in s[from:len] is, in bytes (with every native
+   codec, the newline characters are their ASCII bytes, which no other
+   character's bytes include): past its newline, and past the character
+   after a "\r" that may begin a "\r\n" (4 bytes at most).  -1 if there is
+   none. */
+static Py_ssize_t
+native_line_end(tconf *cf, const char *s, Py_ssize_t from, Py_ssize_t len)
+{
+    const char *p = s + from, *end = s + len;
+    if (cf->readuniversal) {
+        const char *lf = memchr(p, '\n', end - p);
+        const char *cr = memchr(p, '\r', (lf ? lf : end) - p);
+        if (cr == NULL) {
+            return lf ? lf - s + 1 : -1;
+        }
+        Py_ssize_t i = cr - s + 1;
+        return Py_MIN(i < len && s[i] == '\n' ? i + 1 : i + 4, len);
+    }
+    /* "\n", "\r" or "\r\n" */
+    Py_ssize_t nl = PyUnicode_GET_LENGTH(cf->readnl);
+    char last = (char)PyUnicode_READ_CHAR(cf->readnl, nl - 1);
+    while ((p = memchr(p, last, end - p)) != NULL) {
+        if (nl == 1 || (p > s && p[-1] == '\r')) {
+            return p - s + 1;
+        }
+        p++;
+    }
+    return -1;
+}
+
 /* Native codecs: decode more of the store's bytes (reading more when all
    that is there was).  Returns 1 if there may be more characters, 0 if
    not for now, or -1. */
@@ -1476,12 +1507,25 @@ native_more(textio *self, store *st)
         return 1;
     }
     Py_ssize_t covered = text_valid(self, st) ? st->c->kbytes : 0;
-    if (st->m.obj != NULL && covered < st->m.len) {
-        /* A bigger span from the position: twice as much (and a whole
-           character more), so that a long line is decoded O(1) times. */
-        Py_ssize_t chunk = FT_ATOMIC_LOAD_SSIZE_RELAXED(self->chunk_size);
-        Py_ssize_t span = Py_MIN(st->m.len,
-                                 Py_MAX(chunk, 2 * covered + 4));
+    /* A bigger span from the position: twice as much (and a whole
+       character more), so that a long text is decoded O(1) times. */
+    Py_ssize_t chunk = FT_ATOMIC_LOAD_SSIZE_RELAXED(self->chunk_size);
+    Py_ssize_t span = Py_MIN(st->m.len, Py_MAX(chunk, 2 * covered + 4));
+    if (st->line && covered > 0 && covered < st->m.len) {
+        /* A line longer than the characters decoded: up to its end, so
+           that they are its text (no copy is made); without a size, not
+           before its end or all there will be for now is there.  So a long
+           line takes the room of its bytes and its text only. */
+        Py_ssize_t nl = native_line_end(st->cf, st->m.ptr, covered - 1,
+                                        st->m.len);
+        if (nl > covered) {
+            span = nl;
+        }
+        else if (nl < 0 && st->line == 2) {
+            span = st->eof || st->status ? st->m.len : covered;
+        }
+    }
+    if (st->m.obj != NULL && covered < span) {
         span = Py_MIN(st->all ? st->m.len : span, SPAN_MAX);
         int final = st->eof && span == st->m.len;
         Py_ssize_t used;
@@ -2663,8 +2707,8 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
        took"). */
     char kstack[KEEP_STACK];
     store st = {.cf = cf, .buffer = cf->buffer, .all = n < 0 && !line,
-                .lockfree = lockfree, .keep = 1, .kbuf = kstack,
-                .kcap = KEEP_STACK};
+                .line = line ? 1 + (n < 0) : 0, .lockfree = lockfree,
+                .keep = 1, .kbuf = kstack, .kcap = KEEP_STACK};
     /* The text so far: res, then in writer once there are two pieces. */
     PyObject *res = NULL;
     _PyUnicodeWriter writer;
@@ -2775,6 +2819,11 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
             }
             break;
         }
+        /* The only piece needs no copy to give back: nothing can fail
+           once it is taken. */
+        st.keep = (pieces > 0
+                   || !(found
+                        || (n >= 0 && got + PyUnicode_GET_LENGTH(text) >= n)));
         int r = text_commit(self, &st, k);
         if (r <= 0) {
             Py_DECREF(text);

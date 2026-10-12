@@ -1169,12 +1169,14 @@ buffered_fill_tail(buffered *self, Py_ssize_t room)
    readline() a partial line); unbuffered, into a new block of `size`
    bytes, so that no more are read.  Unread bytes are read after where
    they are when their block has room (at least half a block), else moved
-   to the start of a fresh block, or of one twice their size when they
-   take more than half a block: so a line of any length is copied a
-   bounded number of times however it trickles in.  Returns the count (0
-   at EOF), WOULD_BLOCK if the raw stream would block, or -1 on error. */
+   to the start of a fresh block, or of a bigger one when they take more
+   than half a block: half as big again as they are (and a block more at
+   least), up to grow_max bytes (or a block more), so that a line of any
+   length is copied a bounded number of times however it trickles in, and
+   its block is not much bigger than it.  Returns the count (0 at EOF),
+   WOULD_BLOCK if the raw stream would block, or -1 on error. */
 static Py_ssize_t
-buffered_fill(buffered *self, Py_ssize_t size)
+buffered_fill_ex(buffered *self, Py_ssize_t size, Py_ssize_t grow_max)
 {
     nibbler *n = &self->nib;
     Py_ssize_t capacity = n->capacity;
@@ -1207,7 +1209,10 @@ buffered_fill(buffered *self, Py_ssize_t size)
     PyObject *block = (capacity == 0
                        ? PyBytes_FromStringAndSize(NULL, size)
                        : keep.len > capacity / 2
-                       ? PyBytes_FromStringAndSize(NULL, 2 * keep.len)
+                       ? PyBytes_FromStringAndSize(
+                           NULL,
+                           Py_MIN(keep.len + Py_MAX(keep.len / 2, capacity),
+                                  Py_MAX(grow_max, keep.len + capacity)))
                        : Py_XNewRef(nibbler_fresh_block(n)));
     Py_ssize_t r = -1;
     if (block != NULL) {
@@ -1249,6 +1254,12 @@ buffered_fill(buffered *self, Py_ssize_t size)
     }
     Py_XDECREF(keep.obj);
     return r;
+}
+
+static Py_ssize_t
+buffered_fill(buffered *self, Py_ssize_t size)
+{
+    return buffered_fill_ex(self, size, PY_SSIZE_T_MAX);
 }
 
 /* After a raw read raised: data[0:len], taken from the read-ahead or read
@@ -3729,7 +3740,8 @@ buffered_text_peek_locked(buffered *self, Py_ssize_t need, morsel *m,
             r = _PyIO_NIBBLER_FULL;
             break;
         }
-        Py_ssize_t n = buffered_fill(self, 0);
+        Py_ssize_t n = buffered_fill_ex(self, 0,
+                                        TEXT_PEEK_MAX(self->nib.capacity));
         if (n == 0) {
             break;
         }
