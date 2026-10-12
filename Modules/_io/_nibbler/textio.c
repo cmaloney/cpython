@@ -1512,13 +1512,15 @@ native_more(textio *self, store *st)
     Py_ssize_t chunk = FT_ATOMIC_LOAD_SSIZE_RELAXED(self->chunk_size);
     Py_ssize_t span = Py_MIN(st->m.len, Py_MAX(chunk, 2 * covered + 4));
     if (st->line && covered > 0 && covered < st->m.len) {
-        /* A line longer than the characters decoded: up to its end, so
-           that they are its text (no copy is made); without a size, not
-           before its end or all there will be for now is there.  So a long
-           line takes the room of its bytes and its text only. */
+        /* A line longer than the characters decoded: if it ends past the
+           span, up to its end, so that they are its text (no copy is
+           made); without a size, not before its end or all there will be
+           for now is there.  So a long line takes the room of its bytes
+           and its text only, and a short one is decoded with those after
+           it. */
         Py_ssize_t nl = native_line_end(st->cf, st->m.ptr, covered - 1,
                                         st->m.len);
-        if (nl > covered) {
+        if (nl > span) {
             span = nl;
         }
         else if (nl < 0 && st->line == 2) {
