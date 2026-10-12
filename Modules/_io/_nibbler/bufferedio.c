@@ -1667,9 +1667,7 @@ gather_add(gather *g, PyObject *obj, const char *data, Py_ssize_t len)
     if (len == 0) {
         return 0;
     }
-    if ((len >= self->ref_min || len > self->nib.capacity)
-        && len >= NIBBLER_REF_MIN && obj != NULL && PyBytes_CheckExact(obj))
-    {
+    if (nibbler_by_ref(&self->nib, obj, len, self->ref_min)) {
         if (morsels_push(&g->list, obj, data, len) < 0) {
             return -1;
         }
