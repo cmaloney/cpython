@@ -665,7 +665,7 @@ nibbler_drop_inflight(nibbler *n)
 
 /* Take the I/O role, then the lock; a signal handler raising interrupts
    the waits.  obj names the object in errors. */
-static Py_ALWAYS_INLINE int
+static inline Py_ALWAYS_INLINE int
 nibbler_lock_io(nibbler *n, PyObject *obj)
 {
     int taken_over = nibbler_mutex_lock(&n->io, obj, 1);

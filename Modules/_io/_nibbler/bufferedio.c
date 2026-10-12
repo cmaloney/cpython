@@ -905,7 +905,7 @@ enum {
    would block or an error is raised: returns WRITE_DONE, WOULD_BLOCK or
    WRITE_ERROR, with the count in *written.  The lock is held again on
    return.  This is the one way data goes to the raw stream. */
-static Py_ALWAYS_INLINE int
+static inline Py_ALWAYS_INLINE int
 buffered_write_spans(buffered *self, _PyIO_Span *spans, PyObject **objs,
                      Py_ssize_t cnt, Py_ssize_t total, int unlocked,
                      Py_ssize_t *written)

@@ -1081,7 +1081,7 @@ store_write_methods(textio *self, tconf *cf, PyObject *obj, const char *data,
 /* Store data[0:len] (owned by obj).  Without the critical section
    (lockfree), only into the buffer itself: _PyIO_NIBBLER_NO if it has to
    be done with it. */
-static Py_ALWAYS_INLINE int
+static inline Py_ALWAYS_INLINE int
 store_write(textio *self, tconf *cf, int lockfree, PyObject *obj,
             const char *data, Py_ssize_t len)
 {
@@ -2055,7 +2055,7 @@ find_char(int kind, const char *s, const char *end, Py_UCS4 ch)
    position (or where a search for a line's end resumes, with none before
    it).  Where the next one is is kept in *cr_at (see tcache), so that
    "\r"-less text is looked at once. */
-static Py_ALWAYS_INLINE const char *
+static inline Py_ALWAYS_INLINE const char *
 find_cr(PyObject *chars, Py_ssize_t *cr_at, int kind, const char *s,
         const char *end)
 {
@@ -2410,7 +2410,7 @@ text_quick_crs(PyObject *chars, Py_ssize_t *cr_at, int kind, const char *s,
 
 /* chars[ci:ci+k] translated to n characters, with "\r"s at crs[:ncr]
    (relative to ci), of at most max. */
-static Py_ALWAYS_INLINE PyObject *
+static inline Py_ALWAYS_INLINE PyObject *
 text_quick_translate(PyObject *chars, Py_ssize_t ci, Py_ssize_t k,
                      Py_ssize_t n, const Py_ssize_t *crs, int ncr,
                      Py_UCS4 max)
@@ -2985,7 +2985,7 @@ text_read(textio *self, Py_ssize_t n, int line)
    room reserved in the buffer, without a bytes object.  Returns 0, -1
    (closed: the bytes are stored, as by write()), or _PyIO_NIBBLER_NO
    (nothing done). */
-static Py_ALWAYS_INLINE int
+static inline Py_ALWAYS_INLINE int
 utf8_write_direct(PyObject *buffer, PyObject *text)
 {
     int kind = PyUnicode_KIND(text);
@@ -3038,7 +3038,7 @@ utf8_write_direct(PyObject *buffer, PyObject *text)
 static int text_write_encoded(textio *self, tconf *cf, int lockfree,
                               PyObject *text);
 
-static Py_ALWAYS_INLINE int
+static inline Py_ALWAYS_INLINE int
 text_write(textio *self, tconf *cf, int lockfree, PyObject *text)
 {
     int enc = cf->enc;
@@ -3188,7 +3188,7 @@ text_sync(textio *self, tconf *cf, int lockfree)
 #define TEXT_RETRY Py_NotImplemented
 
 /* write(); with lockfree, without the critical section (or TEXT_RETRY). */
-static Py_ALWAYS_INLINE PyObject *
+static inline Py_ALWAYS_INLINE PyObject *
 text_write_call(textio *self, PyObject *text, int lockfree)
 {
     tconf *cf = textio_conf(self);
