@@ -2640,7 +2640,7 @@ _io__Buffered_read_impl(buffered *self, Py_ssize_t n)
     nibbler_end *e = nibbler_end_get(&self->nib, 0);
     Py_ssize_t start;
     if (e != NULL && n >= 0 && nibbler_claim(e, n, 1, &start) >= 0) {
-        return nibbler_end_bytes(e, start, n);
+        return block_bytes(e->block, start, n);
     }
     return buffered_read_locked(self, n, 0);
 }
@@ -2679,7 +2679,7 @@ _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
     Py_ssize_t k = e == NULL ? -1 : nibbler_claim(
         e, n < 0 ? PY_SSIZE_T_MAX : n, 0, &start);
     if (k > 0 || (k == 0 && n == 0)) {
-        return nibbler_end_bytes(e, start, k);
+        return block_bytes(e->block, start, k);
     }
     if (n < 0) {
         Py_ssize_t capacity = FT_ATOMIC_LOAD_SSIZE_RELAXED(self->nib.capacity);
@@ -2772,7 +2772,7 @@ _io__Buffered_readline_impl(buffered *self, Py_ssize_t size)
     nibbler_end *e = nibbler_end_get(&self->nib, 0);
     Py_ssize_t start, k;
     if (e != NULL && (k = nibbler_claim_line(e, size, &start)) >= 0) {
-        return nibbler_end_bytes(e, start, k);
+        return block_bytes(e->block, start, k);
     }
     return buffered_readline_locked(self, size);
 }
