@@ -879,30 +879,27 @@ text_take(textio *self, PyObject *chars, Py_ssize_t i, Py_ssize_t want,
  * Reading (with rlock)
  */
 
-/* Copies of the bytes a read took, to give back if it then fails, so that
-   the next read returns them (as the buffer does with bytes, gh-51571). */
+/* The bytes a read took, to give back if it then fails, so that the next
+   read returns them (as the buffer does with bytes, gh-51571): (bytes
+   object, offset, length) of each piece, holding them (the store never
+   writes into bytes held), len bytes in all. */
 typedef struct {
-    char *buf;
+    PyObject *list;
     Py_ssize_t len;
-    Py_ssize_t cap;
 } tkeep;
 
 static int
-keep_add(tkeep *kp, const char *p, Py_ssize_t n)
+keep_add(tkeep *kp, PyObject *block, const char *p, Py_ssize_t n)
 {
-    if (n > kp->cap - kp->len) {
-        Py_ssize_t cap = Py_MAX(kp->len + n, 2 * kp->cap);
-        char *buf = PyMem_Realloc(kp->buf, cap);
-        if (buf == NULL) {
-            PyErr_NoMemory();
-            return -1;
-        }
-        kp->buf = buf;
-        kp->cap = cap;
+    PyObject *t = Py_BuildValue("(Onn)", block,
+                                (Py_ssize_t)(p - PyBytes_AS_STRING(block)), n);
+    if (t != NULL && kp->list == NULL) {
+        kp->list = PyList_New(0);
     }
-    memcpy(kp->buf + kp->len, p, n);
-    kp->len += n;
-    return 0;
+    int r = t != NULL && kp->list != NULL ? PyList_Append(kp->list, t) : -1;
+    Py_XDECREF(t);
+    kp->len += r == 0 ? n : 0;
+    return r;
 }
 
 /* The text read so far: NULL, one str, or a list of them (stolen). */
@@ -1187,7 +1184,7 @@ Py_NO_INLINE static PyObject *
 text_read_native(textio *self, Py_ssize_t want, int line)
 {
     tstore st = {.self = self};
-    tkeep kp = {NULL, 0, 0};
+    tkeep kp = {NULL, 0};
     PyObject *pieces = NULL;
     uint8_t after_cr = self->after_cr;
     Py_ssize_t chunk = FT_ATOMIC_LOAD_SSIZE_RELAXED(self->chunk_size);
@@ -1234,7 +1231,7 @@ again:
                     Py_DECREF(text);
                     goto upgrade;
                 }
-                if ((!done && keep_add(&kp, st.p, n) < 0)
+                if ((!done && keep_add(&kp, st.block, st.p, n) < 0)
                     || add_piece(&pieces, text) < 0)
                 {
                     goto fail;
@@ -1271,7 +1268,7 @@ again:
         }
     }
     store_end(&st, 1);
-    PyMem_Free(kp.buf);
+    Py_XDECREF(kp.list);
     if (pieces == NULL && st.blocked) {
         /* Nothing yet, which "" would say is the end. */
         _PyIO_set_read_blocking_error();
@@ -1289,14 +1286,25 @@ fail:
     if (kp.len > 0) {
         PyObject *exc = PyErr_GetRaisedException();
         Py_CLEAR(self->cache);
-        if (store_unread(&st, kp.buf, kp.len) < 0) {
+        PyObject *b, *all = PyBytes_FromStringAndSize(NULL, kp.len);
+        Py_ssize_t off, n, at = 0;
+        for (Py_ssize_t i = 0; all && i < PyList_GET_SIZE(kp.list); i++) {
+            (void)PyArg_ParseTuple(PyList_GET_ITEM(kp.list, i), "Onn", &b,
+                                   &off, &n);
+            memcpy(PyBytes_AS_STRING(all) + at, PyBytes_AS_STRING(b) + off, n);
+            at += n;
+        }
+        if (all == NULL
+            || store_unread(&st, PyBytes_AS_STRING(all), kp.len) < 0)
+        {
             PyErr_Clear();
         }
+        Py_XDECREF(all);
         PyErr_SetRaisedException(exc);
     }
     self->after_cr = after_cr;
     store_end(&st, 1);
-    PyMem_Free(kp.buf);
+    Py_XDECREF(kp.list);
     Py_XDECREF(pieces);
     return NULL;
 }

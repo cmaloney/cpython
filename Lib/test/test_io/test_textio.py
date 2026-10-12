@@ -1307,14 +1307,18 @@ class TextIOWrapperTest:
         # line's bytes in the buffer until it is read whole, and decodes
         # them once, into its text (the blocks it outgrows are freed at
         # once, also with free threading); with the codec's decoder (as
-        # for UTF-16), it takes the text in pieces as they are decoded.
+        # for UTF-16), it takes the text in pieces as they are decoded.  A
+        # line longer than 64 buffers (64 KiB here) is taken in pieces
+        # too, keeping their bytes, not copies, to give back.
         import tracemalloc
         n = 4 * 1024 * 1024
-        for encoding in ("ascii", "utf-16-le"):
-            with self.subTest(encoding=encoding):
+        for encoding, size in (("ascii", io.DEFAULT_BUFFER_SIZE),
+                               ("utf-16-le", io.DEFAULT_BUFFER_SIZE),
+                               ("ascii", 64 * 1024)):
+            with self.subTest(encoding=encoding, buffer_size=size):
                 data = ("x" * n + "\n").encode(encoding)
                 t = self.TextIOWrapper(
-                    self.BufferedReader(self.BytesIO(data)),
+                    self.BufferedReader(self.BytesIO(data), size),
                     encoding=encoding)
                 tracemalloc.start()
                 try:
