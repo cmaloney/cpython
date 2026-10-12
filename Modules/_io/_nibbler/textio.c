@@ -411,30 +411,45 @@ textio_buffer_get(textio *self)
 }
 
 static PyObject *
-textio_call(textio *self, PyObject *name, PyObject *arg)
+textio_call(textio *self, PyObject *name)
 {
     tconf *cf = textio_conf(self);
     if (cf == NULL) {
         return NULL;
     }
-    PyObject *res = (arg == NULL ? PyObject_CallMethodNoArgs(cf->buffer, name)
-                     : PyObject_CallMethodOneArg(cf->buffer, name, arg));
+    PyObject *res = PyObject_CallMethodNoArgs(cf->buffer, name);
     conf_put(cf);
     return res;
 }
-
+/* A getter of the buffer's attribute named by closure. */
 static PyObject *
-textio_call_getattr(textio *self, PyObject *name)
+textio_getattr(PyObject *op, void *name)
 {
-    tconf *cf = textio_conf(self);
+    tconf *cf = textio_conf(textio_CAST(op));
     if (cf == NULL) {
         return NULL;
     }
-    PyObject *res = PyObject_GetAttr(cf->buffer, name);
+    PyObject *res = PyObject_GetAttr(cf->buffer, (PyObject *)name);
     conf_put(cf);
     return res;
 }
 
+/* Methods passed on to the buffer. */
+#define TEXTIO_PASS_METHOD(name)                                        \
+    static PyObject *                                                   \
+    textio_pass_##name(PyObject *op, PyObject *Py_UNUSED(dummy))        \
+    {                                                                   \
+        return textio_call(textio_CAST(op), &_Py_ID(name));             \
+    }
+TEXTIO_PASS_METHOD(fileno)
+TEXTIO_PASS_METHOD(seekable)
+TEXTIO_PASS_METHOD(readable)
+TEXTIO_PASS_METHOD(writable)
+TEXTIO_PASS_METHOD(isatty)
+#undef TEXTIO_PASS_METHOD
+
+#define PASS_METHODDEF(name) \
+    {#name, textio_pass_##name, METH_NOARGS, #name "($self, /)\n--\n\n"},
 static int
 textio_call_bool(PyObject *obj, PyObject *name)
 {
@@ -3825,73 +3840,6 @@ _io_TextIOWrapper_detach_impl(textio *self)
 }
 
 /*[clinic input]
-_io.TextIOWrapper.fileno
-[clinic start generated code]*/
-
-static PyObject *
-_io_TextIOWrapper_fileno_impl(textio *self)
-/*[clinic end generated code: output=21490a4c3da13e6c input=c488ca83d0069f9b]*/
-{
-    return textio_call(self, &_Py_ID(fileno), NULL);
-}
-
-/*[clinic input]
-_io.TextIOWrapper.seekable
-[clinic start generated code]*/
-
-static PyObject *
-_io_TextIOWrapper_seekable_impl(textio *self)
-/*[clinic end generated code: output=ab223dbbcffc0f00 input=8b005ca06e1fca13]*/
-{
-    return textio_call(self, &_Py_ID(seekable), NULL);
-}
-
-/*[clinic input]
-_io.TextIOWrapper.readable
-[clinic start generated code]*/
-
-static PyObject *
-_io_TextIOWrapper_readable_impl(textio *self)
-/*[clinic end generated code: output=72ff7ba289a8a91b input=0704ea7e01b0d3eb]*/
-{
-    return textio_call(self, &_Py_ID(readable), NULL);
-}
-
-/*[clinic input]
-_io.TextIOWrapper.writable
-[clinic start generated code]*/
-
-static PyObject *
-_io_TextIOWrapper_writable_impl(textio *self)
-/*[clinic end generated code: output=a728c71790d03200 input=c41740bc9d8636e8]*/
-{
-    return textio_call(self, &_Py_ID(writable), NULL);
-}
-
-/*[clinic input]
-_io.TextIOWrapper.isatty
-[clinic start generated code]*/
-
-static PyObject *
-_io_TextIOWrapper_isatty_impl(textio *self)
-/*[clinic end generated code: output=12be1a35bace882e input=fb68d9f2c99bbfff]*/
-{
-    return textio_call(self, &_Py_ID(isatty), NULL);
-}
-
-/*[clinic input]
-@getter
-_io.TextIOWrapper.name
-[clinic start generated code]*/
-
-static PyObject *
-_io_TextIOWrapper_name_get_impl(textio *self)
-/*[clinic end generated code: output=8c2f1d6d8756af40 input=1459cfc515493c6b]*/
-{
-    return textio_call_getattr(self, &_Py_ID(name));
-}
-
-/*[clinic input]
 @getter
 _io.TextIOWrapper.closed
 [clinic start generated code]*/
@@ -3904,7 +3852,7 @@ _io_TextIOWrapper_closed_get_impl(textio *self)
     if (conf_peek(self) == NULL) {
         Py_RETURN_TRUE;
     }
-    return textio_call_getattr(self, &_Py_ID(closed));
+    return textio_getattr((PyObject *)self, &_Py_ID(closed));
 }
 
 /*[clinic input]
@@ -4662,11 +4610,11 @@ static PyMethodDef textiowrapper_methods[] = {
     _IO_TEXTIOWRAPPER_READLINE_METHODDEF
     _IO_TEXTIOWRAPPER_FLUSH_METHODDEF
     _IO_TEXTIOWRAPPER_CLOSE_METHODDEF
-    _IO_TEXTIOWRAPPER_FILENO_METHODDEF
-    _IO_TEXTIOWRAPPER_SEEKABLE_METHODDEF
-    _IO_TEXTIOWRAPPER_READABLE_METHODDEF
-    _IO_TEXTIOWRAPPER_WRITABLE_METHODDEF
-    _IO_TEXTIOWRAPPER_ISATTY_METHODDEF
+    PASS_METHODDEF(fileno)
+    PASS_METHODDEF(seekable)
+    PASS_METHODDEF(readable)
+    PASS_METHODDEF(writable)
+    PASS_METHODDEF(isatty)
     _IO_TEXTIOWRAPPER_SEEK_METHODDEF
     _IO_TEXTIOWRAPPER_TELL_METHODDEF
     _IO_TEXTIOWRAPPER_TRUNCATE_METHODDEF
@@ -4687,7 +4635,7 @@ static PyMemberDef textiowrapper_members[] = {
 };
 
 static PyGetSetDef textiowrapper_getset[] = {
-    _IO_TEXTIOWRAPPER_NAME_GETSETDEF
+    {"name", textio_getattr, NULL, NULL, &_Py_ID(name)},
     _IO_TEXTIOWRAPPER_CLOSED_GETSETDEF
     _IO_TEXTIOWRAPPER_NEWLINES_GETSETDEF
     _IO_TEXTIOWRAPPER_ERRORS_GETSETDEF
