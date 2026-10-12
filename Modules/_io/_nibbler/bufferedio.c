@@ -1080,44 +1080,6 @@ buffered_block_private(buffered *self, PyObject *block)
     return Py_REFCNT(block) <= ours;
 }
 
-/* buffered_fill() into the free tail of the reading end's block. */
-static Py_ssize_t
-buffered_fill_tail(buffered *self, Py_ssize_t room)
-{
-    nibbler_end *e = nibbler_reading(&self->nib);
-    /* The read holds its own reference while it uses the block (see
-       "Locking" in nibbler.h). */
-    PyObject *block = Py_NewRef(e->block);
-    char *start = (char *)nibbler_unread_ptr(&self->nib);
-    Py_ssize_t unread = nibbler_unread(&self->nib);
-    int shared = 0;
-    Py_ssize_t n = buffered_raw_read(self, start + unread, room, block,
-                                     &shared);
-    if (n > 0 && !shared) {
-        nibbler_extend(&self->nib, n);
-    }
-    else if (shared) {
-        /* Python code can still write to the block: abandon it to that
-           code, and keep a copy of what is unread.  An error of the raw
-           read is the context of one raised here. */
-        PyObject *exc = n == -1 ? PyErr_GetRaisedException() : NULL;
-        if (block == self->nib.block) {
-            nibbler_set_block(&self->nib, NULL);
-        }
-        PyObject *copy = PyBytes_FromStringAndSize(start,
-                                                   unread + Py_MAX(n, 0));
-        if (copy == NULL || nibbler_publish(&self->nib, copy,
-                                            PyBytes_GET_SIZE(copy)) < 0)
-        {
-            n = -1;
-        }
-        Py_XDECREF(copy);
-        _PyErr_ChainExceptions1(exc);
-    }
-    Py_DECREF(block);
-    return n;
-}
-
 /* One raw read into the read-ahead, after the bytes still unread, which
    stay in front (TextIOWrapper leaves a partial character there, and
    readline() a partial line); unbuffered, into a new block of `size`
@@ -1133,75 +1095,80 @@ buffered_fill(buffered *self, Py_ssize_t size)
     nibbler *n = &self->nib;
     Py_ssize_t capacity = n->capacity;
     Py_ssize_t unread = nibbler_unread(n);
-    if (unread > 0 && capacity > 0) {
-        nibbler_end *e = nibbler_reading(n);
-        Py_ssize_t room = PyBytes_GET_SIZE(e->block) - e->limit;
-        if (room > 0 && room >= capacity / 2
-            && buffered_block_private(self, e->block))
-        {
-            return buffered_fill_tail(self, room);
-        }
+    nibbler_end *e = nibbler_reading(n);
+    /* The read holds its own reference to the block while it uses it (see
+       "Locking" in nibbler.h); the unread bytes are block[start:]. */
+    PyObject *block;
+    Py_ssize_t start = 0;
+    Py_ssize_t room = (unread > 0 && capacity > 0
+                       ? PyBytes_GET_SIZE(e->block) - e->limit : 0);
+    int in_place = (room > 0 && room >= capacity / 2
+                    && buffered_block_private(self, e->block));
+    if (in_place) {
+        block = Py_NewRef(e->block);
+        start = nibbler_reading_pos(e);
     }
-    /* A few bytes are copied aside, so that the block can be reused. */
-    char aside[512];
-    morsel keep = {NULL, NULL, 0};
-    if (unread > 0) {
-        keep = (morsel){n->end->block, nibbler_unread_ptr(n), unread};
-        if (keep.len <= (Py_ssize_t)sizeof(aside)) {
-            memcpy(aside, keep.ptr, keep.len);
-            keep = (morsel){NULL, aside, keep.len};
-        }
-        else {
-            Py_INCREF(keep.obj);
-        }
-    }
-    (void)nibbler_drop_unread(n);
-    /* The read holds its own reference while it uses the block (see
-       "Locking" in nibbler.h). */
-    PyObject *block = (capacity == 0
-                       ? PyBytes_FromStringAndSize(NULL, size)
-                       : keep.len > capacity / 2
-                       ? PyBytes_FromStringAndSize(NULL, 2 * keep.len)
-                       : Py_XNewRef(nibbler_fresh_block(n)));
-    Py_ssize_t r = -1;
-    if (block != NULL) {
-        char *dst = PyBytes_AS_STRING(block);
-        if (keep.len > 0) {
-            memcpy(dst, keep.ptr, keep.len);
-        }
-        int shared = 0;
-        r = buffered_raw_read(self, dst + keep.len,
-                              PyBytes_GET_SIZE(block) - keep.len, block,
-                              &shared);
-        Py_ssize_t filled = keep.len + Py_MAX(r, 0);
-        /* An error of the raw read is the context of one raised below. */
-        PyObject *exc = r == -1 ? PyErr_GetRaisedException() : NULL;
-        if (shared) {
-            /* Python code can still write to the block: abandon it to that
-               code, and keep a copy of what was read. */
-            if (block == n->block) {
-                nibbler_set_block(n, NULL);
+    else {
+        /* A few bytes are copied aside, so that the block can be reused. */
+        char aside[512];
+        morsel keep = {NULL, NULL, unread};
+        if (unread > 0) {
+            keep.ptr = nibbler_unread_ptr(n);
+            if (unread <= (Py_ssize_t)sizeof(aside)) {
+                keep.ptr = memcpy(aside, keep.ptr, unread);
             }
-            PyObject *copy = PyBytes_FromStringAndSize(dst, filled);
-            Py_SETREF(block, copy);
-            if (block == NULL) {
-                r = -1;
-                filled = 0;
+            else {
+                keep.obj = Py_NewRef(e->block);
             }
         }
-        if (filled > 0 && nibbler_publish(n, block, filled) < 0) {
+        (void)nibbler_drop_unread(n);
+        block = (capacity == 0 ? PyBytes_FromStringAndSize(NULL, size)
+                 : unread > capacity / 2
+                 ? PyBytes_FromStringAndSize(NULL, 2 * unread)
+                 : Py_XNewRef(nibbler_fresh_block(n)));
+        if (block == NULL) {
+            /* Keep the unread bytes. */
+            buffered_push_back(self, keep.ptr, unread);
+        }
+        else if (unread > 0) {
+            memcpy(PyBytes_AS_STRING(block), keep.ptr, unread);
+        }
+        Py_XDECREF(keep.obj);
+        if (block == NULL) {
+            return -1;
+        }
+    }
+    char *dst = PyBytes_AS_STRING(block) + start;
+    int shared = 0;
+    Py_ssize_t r = buffered_raw_read(self, dst + unread,
+                                     PyBytes_GET_SIZE(block) - start - unread,
+                                     block, &shared);
+    Py_ssize_t filled = unread + Py_MAX(r, 0);
+    /* An error of the raw read is the context of one raised below. */
+    PyObject *exc = r == -1 ? PyErr_GetRaisedException() : NULL;
+    if (shared) {
+        /* Python code can still write to the block: abandon it to that
+           code, and keep a copy of what is unread. */
+        if (block == n->block) {
+            nibbler_set_block(n, NULL);
+        }
+        Py_SETREF(block, PyBytes_FromStringAndSize(dst, filled));
+        in_place = 0;
+        if (block == NULL) {
             r = -1;
+            filled = 0;
         }
-        Py_XDECREF(block);
-        _PyErr_ChainExceptions1(exc);
     }
-    else if (keep.len > 0) {
-        /* Keep the unread bytes. */
-        PyObject *exc = PyErr_GetRaisedException();
-        buffered_push_back(self, keep.ptr, keep.len);
-        _PyErr_ChainExceptions1(exc);
+    if (in_place) {
+        if (r > 0) {
+            nibbler_extend(n, r);
+        }
     }
-    Py_XDECREF(keep.obj);
+    else if (filled > 0 && nibbler_publish(n, block, filled) < 0) {
+        r = -1;
+    }
+    Py_XDECREF(block);
+    _PyErr_ChainExceptions1(exc);
     return r;
 }
 
