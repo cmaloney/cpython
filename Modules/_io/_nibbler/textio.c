@@ -2526,7 +2526,7 @@ text_quick(textio *self, tconf *cf, Py_ssize_t n, int line)
     }
     /* Taking the bytes finds out whether the characters are theirs. */
     Py_ssize_t koff = KOFF;
-    if (_PyIONibbler_advance(cf->buffer, C->key, koff, b) != 1) {
+    if (_PyIONibbler_take(cf->buffer, C->key, koff, b, NULL) != 1) {
         Py_CLEAR(text);
         goto done;
     }
@@ -2913,7 +2913,7 @@ static inline PyObject *
 text_read(textio *self, Py_ssize_t n, int line)
 {
     /* The settings borrowed: text_quick() runs no other code, and is done
-       with them once it may wait (in _PyIONibbler_advance(), which keeps
+       with them once it may wait (in _PyIONibbler_take(), which keeps
        the buffer alive then); with free threading, lockfree settings are
        freed only once every thread is past such a call (see conf_set()).
        lockfree settings have a buffer; n == 0 is never quick. */

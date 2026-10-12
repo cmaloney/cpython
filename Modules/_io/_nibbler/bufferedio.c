@@ -3481,7 +3481,7 @@ buffered_text_peek_locked(buffered *self, Py_ssize_t need, morsel *m,
         return -1;
     }
     if (buffered_dict(self) != NULL) {
-        /* Got a dict while this waited (see _PyIONibbler_advance()). */
+        /* Got a dict while this waited (see _PyIONibbler_take()). */
         buffered_leave(self);
         return _PyIO_NIBBLER_NO;
     }
@@ -3580,9 +3580,9 @@ buffered_text_advance_locked(buffered *self, uint64_t key, Py_ssize_t off,
     return r;
 }
 
-static inline int
-buffered_text_advance(PyObject *op, uint64_t key, Py_ssize_t off,
-                      Py_ssize_t n, char *copy)
+int
+_PyIONibbler_take(PyObject *op, uint64_t key, Py_ssize_t off, Py_ssize_t n,
+                  char *copy)
 {
     buffered *self = buffered_cast(op);
     /* Once it has a dict, its methods may be in use: then the bytes at its
@@ -3609,20 +3609,6 @@ buffered_text_advance(PyObject *op, uint64_t key, Py_ssize_t off,
     }
     /* The end is held, or gone, or the raw stream must be asked. */
     return buffered_text_advance_locked(self, key, off, n, copy);
-}
-
-int
-_PyIONibbler_advance(PyObject *op, uint64_t key, Py_ssize_t off,
-                     Py_ssize_t n)
-{
-    return buffered_text_advance(op, key, off, n, NULL);
-}
-
-int
-_PyIONibbler_take(PyObject *op, uint64_t key, Py_ssize_t off, Py_ssize_t n,
-                  char *copy)
-{
-    return buffered_text_advance(op, key, off, n, copy);
 }
 
 int
