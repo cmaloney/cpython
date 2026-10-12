@@ -1066,16 +1066,19 @@ buffered_fill_ex(buffered *self, Py_ssize_t size, Py_ssize_t grow_max)
     Py_ssize_t unread = nibbler_unread(n);
     nibbler_end *e = nibbler_reading(n);
     /* The read holds its own reference to the block while it uses it (see
-       "Locking" in nibbler.h); the unread bytes are block[start:]. */
+       "Locking" in nibbler.h); the unread bytes are block[start:], and it
+       reads up to stop. */
     PyObject *block;
-    Py_ssize_t start = 0;
-    Py_ssize_t room = (unread > 0 && capacity > 0
-                       ? PyBytes_GET_SIZE(e->block) - e->limit : 0);
+    Py_ssize_t start = 0, stop = 0;
+    /* Where the bytes read start in the block (see NIBBLER_PAD). */
+    Py_ssize_t first = 0;
+    Py_ssize_t room = (unread > 0 && capacity > 0 ? e->stop - e->limit : 0);
     int in_place = (room > 0 && room >= capacity / 2
                     && buffered_block_private(self, e->block));
     if (in_place) {
         block = Py_NewRef(e->block);
         start = nibbler_reading_pos(e);
+        stop = e->stop;
     }
     else {
         /* A few bytes are copied aside, so that the block can be reused. */
@@ -1091,8 +1094,9 @@ buffered_fill_ex(buffered *self, Py_ssize_t size, Py_ssize_t grow_max)
             }
         }
         (void)nibbler_drop_unread(n);
+        int padded = capacity > 0 && unread <= capacity / 2;
         block = (capacity == 0 ? PyBytes_FromStringAndSize(NULL, size)
-                 : unread > capacity / 2
+                 : !padded
                  ? PyBytes_FromStringAndSize(
                      NULL, Py_MIN(unread + Py_MAX(unread / 2, capacity),
                                   Py_MAX(grow_max, unread + capacity)))
@@ -1101,8 +1105,15 @@ buffered_fill_ex(buffered *self, Py_ssize_t size, Py_ssize_t grow_max)
             /* Keep the unread bytes. */
             buffered_push_back(self, keep.ptr, unread);
         }
-        else if (unread > 0) {
-            memcpy(PyBytes_AS_STRING(block), keep.ptr, unread);
+        else {
+            /* In a block of the capacity, `capacity` bytes from the
+               offset that puts the raw read at an address congruent to
+               the raw position modulo NIBBLER_PAD (see there). */
+            first = start = padded ? nibbler_fill_start(n, block, unread) : 0;
+            stop = padded ? start + capacity : PyBytes_GET_SIZE(block);
+            if (unread > 0) {
+                memcpy(PyBytes_AS_STRING(block) + start, keep.ptr, unread);
+            }
         }
         Py_XDECREF(keep.obj);
         if (block == NULL) {
@@ -1111,8 +1122,7 @@ buffered_fill_ex(buffered *self, Py_ssize_t size, Py_ssize_t grow_max)
     }
     char *dst = PyBytes_AS_STRING(block) + start;
     int shared = 0;
-    Py_ssize_t r = buffered_raw_read(self, dst + unread,
-                                     PyBytes_GET_SIZE(block) - start - unread,
+    Py_ssize_t r = buffered_raw_read(self, dst + unread, stop - start - unread,
                                      block, &shared);
     Py_ssize_t filled = unread + Py_MAX(r, 0);
     /* An error of the raw read is the context of one raised below. */
@@ -1125,6 +1135,8 @@ buffered_fill_ex(buffered *self, Py_ssize_t size, Py_ssize_t grow_max)
         }
         Py_SETREF(block, PyBytes_FromStringAndSize(dst, filled));
         in_place = 0;
+        first = 0;
+        stop = filled;
         if (block == NULL) {
             r = -1;
             filled = 0;
@@ -1135,7 +1147,9 @@ buffered_fill_ex(buffered *self, Py_ssize_t size, Py_ssize_t grow_max)
             nibbler_extend(n, r);
         }
     }
-    else if (filled > 0 && nibbler_publish(n, block, filled) < 0) {
+    else if (filled > 0
+             && nibbler_publish_at(n, block, first, filled, stop) < 0)
+    {
         r = -1;
     }
     Py_XDECREF(block);

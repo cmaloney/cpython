@@ -676,6 +676,38 @@ class SlowDeviceTest:
         self.assertEqual(len(line), n + 1)
         self.assertLess(peak, 2.5 * n)
 
+    def test_read_at_every_offset_and_seek_back(self):
+        # Reads filling the buffer from a position of every remainder
+        # modulo 64 (the nibbler puts the bytes read at an address
+        # congruent to it, some bytes into its block), then seeks back
+        # inside what was read and before it, where the bytes in front of
+        # the block's data are not the stream's: the data is right.
+        data = bytes(i * 7 % 251 for i in range(4000))
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(data)
+        raws = {
+            "BytesIO": lambda: self.BytesIO(data),
+            "FileIO": lambda: self.FileIO(os_helper.TESTFN),
+        }
+        for name, make_raw in raws.items():
+            with (self.subTest(raw=name),
+                  self.BufferedReader(make_raw(), 256) as f):
+                for pos in range(1000, 1130):
+                    # Away first, so that the read at pos fills afresh.
+                    f.seek(0)
+                    self.assertEqual(f.read(1), data[:1])
+                    f.seek(pos)
+                    self.assertEqual(f.read(10), data[pos:pos + 10])
+                    for back in (1, 10, 11, 30, 64, 75, 100):
+                        f.seek(pos + 10)
+                        self.assertEqual(f.seek(-back, os.SEEK_CUR),
+                                         pos + 10 - back)
+                        self.assertEqual(f.read(20),
+                                         data[pos + 10 - back:pos + 30 - back])
+                    f.seek(pos - 1)
+                    self.assertEqual(f.read(1), data[pos - 1:pos])
+
     def test_readline_after_seek_back_over_partial_line(self):
         # A readline() that kept a partial line (here because the raw
         # stream raised) remembers where it looked for the end of the

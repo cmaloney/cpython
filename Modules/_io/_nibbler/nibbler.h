@@ -308,6 +308,12 @@ typedef struct nibbler_end {
     /* Writing: bytes committed, up to pos.  Reading: block[pos:done] has
        no end of line (see nibbler_noline()); used with the lock only. */
     Py_ssize_t done;
+    /* The bytes of the block it may use: block[start:stop].  Reading,
+       those read start at start (seeking back stops there, see
+       nibbler_move()), and reads may fill it up to stop (see
+       NIBBLER_PAD).  Used with the lock only. */
+    Py_ssize_t start;
+    Py_ssize_t stop;
     int writing;
     /* Free-threaded builds only, used with the lock.  hold (reading): it
        stays held when the lock is released, while the caller wants that
@@ -400,7 +406,7 @@ nibbler_open(nibbler *n)
         FT_ATOMIC_STORE_SSIZE_RELAXED(e->done, p);
         FT_ATOMIC_STORE_SSIZE_RELAXED(
             e->limit, p + Py_MIN(n->threshold - n->list.nbytes,
-                                 PyBytes_GET_SIZE(e->block) - p));
+                                 e->stop - p));
     }
 #ifdef Py_GIL_DISABLED
     e->opened = 1;
@@ -439,18 +445,18 @@ nibbler_drop_end(nibbler *n)
     _PyMem_FreeDelayed(e, sizeof(*e));
 }
 
-/* Publish a new end over block, held at pos until the lock is released,
-   replacing any. */
+/* Publish a new end over block[pos:stop], held at pos until the lock is
+   released, replacing any. */
 static int
 nibbler_new_end(nibbler *n, PyObject *block, Py_ssize_t pos,
-                Py_ssize_t limit, int writing)
+                Py_ssize_t limit, Py_ssize_t stop, int writing)
 {
     nibbler_end *e = PyMem_Malloc(sizeof(*e));
     if (e == NULL) {
         return -1;
     }
     *e = (nibbler_end){Py_NewRef(block), ~pos, limit, writing ? pos : 0,
-                       writing, 0, 0, ++n->ends};
+                       pos, stop, writing, 0, 0, ++n->ends};
     nibbler_drop_end(n);
     FT_ATOMIC_STORE_PTR_RELEASE(n->end, e);
     return 0;
@@ -466,8 +472,9 @@ nibbler_start_appending(nibbler *n)
     {
         return;
     }
-    /* Opened, after the morsels, when the lock is released. */
-    (void)nibbler_new_end(n, n->block, 0, 0, 1);
+    /* Opened, after the morsels, when the lock is released.  (Appends
+       use the capacity, see nibbler_append().) */
+    (void)nibbler_new_end(n, n->block, 0, 0, n->capacity, 1);
 }
 
 /* No more appends without the lock (dropping a writing end). */
@@ -977,7 +984,7 @@ static inline void
 nibbler_extend(nibbler *n, Py_ssize_t k)
 {
     nibbler_end *e = nibbler_reading(n);
-    assert(e != NULL && e->limit + k <= PyBytes_GET_SIZE(e->block));
+    assert(e != NULL && e->limit + k <= e->stop);
     FT_ATOMIC_STORE_SSIZE_RELEASE(e->limit, e->limit + k);
 }
 
@@ -1003,16 +1010,25 @@ nibbler_drop_unread(nibbler *n)
     return unread;
 }
 
-/* Make block[0:filled] the unread bytes, replacing any. */
+/* Make block[start:start+filled] the unread bytes, replacing any; reads
+   may add more up to stop. */
 static int
-nibbler_publish(nibbler *n, PyObject *block, Py_ssize_t filled)
+nibbler_publish_at(nibbler *n, PyObject *block, Py_ssize_t start,
+                   Py_ssize_t filled, Py_ssize_t stop)
 {
     (void)nibbler_drop_unread(n);
-    if (nibbler_new_end(n, block, 0, filled, 0) < 0) {
+    if (nibbler_new_end(n, block, start, start + filled, stop, 0) < 0) {
         PyErr_NoMemory();
         return -1;
     }
     return 0;
+}
+
+/* Make block[0:filled] the unread bytes, replacing any. */
+static int
+nibbler_publish(nibbler *n, PyObject *block, Py_ssize_t filled)
+{
+    return nibbler_publish_at(n, block, 0, filled, PyBytes_GET_SIZE(block));
 }
 
 /* Move the position in the reading end by `offset` bytes, forward over
@@ -1028,7 +1044,7 @@ nibbler_move(nibbler *n, Py_off_t offset)
     }
     Py_ssize_t pos = nibbler_reading_pos(e);
     Py_ssize_t unread = e->limit - pos;
-    if (offset < -pos || offset > unread) {
+    if (offset < e->start - pos || offset > unread) {
         return -1;
     }
     if (offset < 0) {
@@ -1083,12 +1099,40 @@ nibbler_nbytes(nibbler *n)
     return n->list.nbytes;
 }
 
+/* A block of the capacity (n->block, and the spare) has NIBBLER_PAD
+   bytes more, so that a fill can start its raw read at an address
+   congruent to the raw position modulo NIBBLER_PAD (see
+   nibbler_fill_start()); it then uses `capacity` bytes from there.
+
+   The kernel copies a read from the page cache with "rep movsb", which on
+   some CPUs (measured on AMD Zen 4) is several times slower when the
+   destination is a little ahead of the source modulo 32 bytes and their
+   low address bits line up, as with a destination in a transparent huge
+   page and a source in a large page cache folio.  On free-threaded
+   builds mimalloc puts a block at a 64 KiB boundary and its data 48 bytes
+   in, so every read at a page-aligned position was slow: read(4096) took
+   twice as long.  At the same offset as the source modulo 64, the copy is
+   fast.  Appends and other blocks start at their first byte. */
+#define NIBBLER_PAD 64
+
 /* A new block.  Out of line: it is needed once per block at most, and
    Tools/nibblerbench/churn.py counts the calls. */
 Py_NO_INLINE static PyObject *
 nibbler_new_block(nibbler *n)
 {
-    return PyBytes_FromStringAndSize(NULL, n->capacity);
+    return PyBytes_FromStringAndSize(NULL, n->capacity + NIBBLER_PAD);
+}
+
+/* Where to start a fill of block (of the capacity, see NIBBLER_PAD) whose
+   first `keep` bytes are kept from before: the offset that puts the raw
+   read at an address congruent to the raw position modulo NIBBLER_PAD
+   (64-aligned when the position is unknown). */
+static inline Py_ssize_t
+nibbler_fill_start(nibbler *n, PyObject *block, Py_ssize_t keep)
+{
+    uintptr_t want = n->raw_pos >= 0 ? (uintptr_t)n->raw_pos : 0;
+    uintptr_t at = (uintptr_t)(PyBytes_AS_STRING(block) + keep);
+    return (Py_ssize_t)((want - at) & (NIBBLER_PAD - 1));
 }
 
 /* Can block, whose readers without the lock have the given QSBR goal (see
