@@ -1888,11 +1888,12 @@ store_unread(textio *self, store *st, const char *data, Py_ssize_t len)
     return 1;
 }
 
-/* Bytes given back to the store: the "\n" there ends a "\r\n" seen before
-   (as text_seek_skip_lf() does).  Without the critical section if
-   lockfree. */
+/* The "\n" at the position ends a "\r\n" whose "\r" was returned before:
+   bytes given back to the store, or seek() to a cookie of tell()'s with
+   flags 1 and a native codec (see text_skip_lf()).  Without the critical
+   section if lockfree. */
 static int
-text_unread_skip_lf(textio *self, tconf *cf, int lockfree)
+text_set_skip_lf(textio *self, tconf *cf, int lockfree)
 {
     store st = {.cf = cf, .buffer = cf->buffer, .lockfree = lockfree};
     st.c = cache_get(self, STORE_COPY(&st));
@@ -1949,7 +1950,7 @@ text_give_back(textio *self, store *st, tkept *out)
             r = out->bytes != NULL ? HANDED : -1;
         }
         else if (r > 0 && st->kskip
-                 && text_unread_skip_lf(self, st->cf, st->lockfree) < 0)
+                 && text_set_skip_lf(self, st->cf, st->lockfree) < 0)
         {
             /* The bytes are back; only the newlines noted may differ. */
             PyErr_Clear();
@@ -2862,7 +2863,7 @@ text_keep_handed(textio *self, tkept *kept)
     int r = store_unread(self, &st, PyBytes_AS_STRING(kept->bytes),
                          PyBytes_GET_SIZE(kept->bytes));
     cache_release(st.c);
-    if (r > 0 && kept->skip_lf && text_unread_skip_lf(self, cf, 0) < 0) {
+    if (r > 0 && kept->skip_lf && text_set_skip_lf(self, cf, 0) < 0) {
         PyErr_Clear();
     }
     conf_put(cf);
@@ -3522,23 +3523,6 @@ text_skip(textio *self, tconf *cf, Py_ssize_t n)
     return n > 0 ? -1 : 0;
 }
 
-/* After seek() to a cookie of tell()'s with flags 1 and a native codec:
-   the "\n" at the position ends a "\r\n" (see text_skip_lf()). */
-static int
-text_seek_skip_lf(textio *self, tconf *cf)
-{
-    store st = {.cf = cf, .buffer = cf->buffer};
-    st.c = cache_get(self, STORE_COPY(&st));
-    Py_ssize_t avail = text_more(self, &st, 0);
-    if (avail > 0) {
-        st.c->skip_lf = 1;
-        cache_put(self, st.c);
-    }
-    cache_release(st.c);
-    store_release(&st);
-    return avail < 0 ? -1 : 0;
-}
-
 /*[clinic input]
 @critical_section
 _io.TextIOWrapper.seek
@@ -3664,7 +3648,7 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
         goto done;
     }
     if (cf->codec != CODEC_DECODER && c.dec_flags == 1
-        && text_seek_skip_lf(self, cf) < 0)
+        && text_set_skip_lf(self, cf, 0) < 0)
     {
         goto done;
     }
