@@ -80,22 +80,9 @@ find_nibblermodule_state_by_def(PyTypeObject *type)
  *   role, without holding the lock; meanwhile other threads can only queue
  *   more writes.  Small writes that fit are queued without the lock (see
  *   "The open end" in nibbler.h), so all code holding the lock sees them
- *   queued.  They check that an exact FileIO is open (one load of its
- *   fd), so the next write after raw.close() raises.  Other raw streams
- *   are asked through closed only with the lock: asking is a Python call
- *   that costs more than a whole lock-free write (about 1750-1950 against
- *   1120 instructions), and the counts of closes that would let small
- *   writes notice without asking were rejected as too complex (see
- *   "Closing the raw stream alone" in InternalDocs/io_nibbler.md).  Once
- *   one says it is closed, the open end is dropped, so that writes take
- *   the lock and raise; closing through the buffered object drops it too.
- *   So after such a raw stream was closed by itself, small writes are
- *   queued without an error until the room left in the current block is
- *   used up or an operation that takes the lock runs (flush(), a write
- *   that doesn't fit, seek(), ...), which raises.  Queued bytes never
- *   reach the closed raw stream: writing out asks closed first, and
- *   close() finds it closed and returns, keeping the open end, without
- *   writing them or warning; they are dropped with the object.
+ *   queued.  They check that an exact FileIO is open; other raw streams are
+ *   asked whether they are closed only by operations that take the lock
+ *   (see "Closing the raw stream alone" in InternalDocs/io_nibbler.md).
  *
  * - Reading: the reading end holds the bytes the last fill read (see "The
  *   open end" in nibbler.h).  Its position splits them: the bytes before
@@ -108,26 +95,12 @@ find_nibblermodule_state_by_def(PyTypeObject *type)
  * raw position plus pending writes, or minus unread read-ahead.
  *
  * With buffer size 0 (unbuffered; gh-148773), write() writes all of its
- * data straight to the raw stream, retrying partial writes, and keeps none
- * when the raw stream would block.  Reads go straight to the raw stream
- * too, retrying short reads as with a buffer but never asking for more
- * bytes than the caller wants: read1() with no size makes one raw read of
- * up to DEFAULT_BUFFER_SIZE bytes.  peek() and readline() (so also
- * iteration and readlines()) raise UnsupportedOperation, as they can't
- * look ahead without taking the bytes.  The only read-ahead is data kept
- * after a raw read raised (see buffered_push_back()), which reads, and peek(),
- * return first; readline() returns a line from it when all of it is there.
- *
- * With buffer size None (BufferedWriter and BufferedRandom), writes are
- * buffered without limit: the write-out threshold is PY_SSIZE_T_MAX, so
- * write() only queues its data (large exact bytes by reference, the rest
- * copied into blocks of DEFAULT_BUFFER_SIZE, or into a bytes object of its
- * own when larger) and never writes out.  Pending writes reach the raw
- * stream only through flush() and what has to write them out: close()
- * (and dealloc), detach(), seek(), truncate(), reads of BufferedRandom and
- * tell() in append mode.  Reads use blocks of DEFAULT_BUFFER_SIZE.  This
- * is what a _gather() block (see "Gathering") without a limit does, for all
- * writes, and in the pending writes themselves.
+ * data straight to the raw stream, and reads never ask it for more bytes
+ * than the caller wants; peek() and readline() raise UnsupportedOperation.
+ * With buffer size None (writers), the write-out threshold is
+ * PY_SSIZE_T_MAX: pending writes reach the raw stream only through flush()
+ * and the operations that need the position.  See "Buffer size 0 and
+ * None" in InternalDocs/io_nibbler.md.
  */
 
 typedef struct {
