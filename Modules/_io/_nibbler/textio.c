@@ -1299,6 +1299,62 @@ fail:
     return NULL;
 }
 
+/* All of chars (stolen), the end of the text, with "\r\n" and "\r" made
+   "\n" (newline None) in one pass, noting the newlines seen. */
+static PyObject *
+translate_all(textio *self, PyObject *chars)
+{
+    int kind = PyUnicode_KIND(chars), seen = 0;
+    const char *r = PyUnicode_DATA(chars);
+    const char *end = r + PyUnicode_GET_LENGTH(chars) * kind;
+    const char *cr = find_char(kind, r, end, '\r');
+    PyObject *res = chars;
+    char *o = NULL;
+    if (cr != NULL) {
+        res = PyUnicode_New(PyUnicode_GET_LENGTH(chars),
+                            PyUnicode_MAX_CHAR_VALUE(chars));
+        if (res == NULL) {
+            Py_DECREF(chars);
+            return NULL;
+        }
+        o = PyUnicode_DATA(res);
+    }
+    for (;;) {
+        /* The run up to the next "\r" (whose "\n"s are alone). */
+        const char *stop = cr ? cr : end;
+        if (!(seen & SEEN_LF) && !(self->seennl & SEEN_LF)
+            && find_char(kind, r, stop, '\n') != NULL)
+        {
+            seen |= SEEN_LF;
+        }
+        if (o == NULL) {
+            break;
+        }
+        memcpy(o, r, stop - r);
+        o += stop - r;
+        if (cr == NULL) {
+            break;
+        }
+        PyUnicode_WRITE(kind, o, 0, '\n');
+        o += kind;
+        r = cr + kind;
+        int crlf = r < end && PyUnicode_READ(kind, r, 0) == '\n';
+        seen |= crlf ? SEEN_CRLF : SEEN_CR;
+        r += crlf * kind;
+        cr = find_char(kind, r, end, '\r');
+    }
+    if (o != NULL) {
+        Py_DECREF(chars);
+        if (PyUnicode_Resize(&res, (o - (char *)PyUnicode_DATA(res)) / kind)
+            < 0)
+        {
+            return NULL;
+        }
+    }
+    text_note(self, seen);
+    return res;
+}
+
 /* read() of everything with a native codec over the buffer's own bytes:
    its read() (the read-ahead and the rest at once), decoded at once.
    Returns NULL with no exception set if the bytes don't decode: they are
@@ -1348,7 +1404,10 @@ text_read_all(textio *self)
         }
         goto end;
     }
-    if (self->readuniversal && PyUnicode_GET_LENGTH(chars) > 0) {
+    if (self->readtranslate) {
+        res = translate_all(self, chars);
+    }
+    else if (self->readuniversal && PyUnicode_GET_LENGTH(chars) > 0) {
         Py_ssize_t k;
         int found, note;
         res = text_take(self, chars, 0, -1, 0, 1, 0, &k, &found, &note);
