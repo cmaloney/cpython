@@ -2637,10 +2637,9 @@ _io__Buffered_read_impl(buffered *self, Py_ssize_t n)
         return NULL;
     }
     /* Without the lock when the read-ahead has all of it. */
-    nibbler_end *e = nibbler_end_get(&self->nib, 0);
-    Py_ssize_t start;
-    if (e != NULL && n >= 0 && nibbler_claim(e, n, 1, &start) >= 0) {
-        return nibbler_end_bytes(e, start, n);
+    PyObject *res = n >= 0 ? nibbler_claim(&self->nib, n, CLAIM_EXACT) : NULL;
+    if (res != NULL || PyErr_Occurred()) {
+        return res;
     }
     return buffered_read_locked(self, n, 0);
 }
@@ -2674,12 +2673,10 @@ _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
 /*[clinic end generated code: output=bcc4fb4e54d103a3 input=7d22de9630b61774]*/
 {
     /* Without the lock (and no raw read) when there is read-ahead. */
-    nibbler_end *e = nibbler_end_get(&self->nib, 0);
-    Py_ssize_t start;
-    Py_ssize_t k = e == NULL ? -1 : nibbler_claim(
-        e, n < 0 ? PY_SSIZE_T_MAX : n, 0, &start);
-    if (k > 0 || (k == 0 && n == 0)) {
-        return nibbler_end_bytes(e, start, k);
+    PyObject *res = nibbler_claim(&self->nib, n < 0 ? PY_SSIZE_T_MAX : n,
+                                  CLAIM_UPTO);
+    if (res != NULL || PyErr_Occurred()) {
+        return res;
     }
     if (n < 0) {
         Py_ssize_t capacity = FT_ATOMIC_LOAD_SSIZE_RELAXED(self->nib.capacity);
@@ -2769,10 +2766,9 @@ _io__Buffered_readline_impl(buffered *self, Py_ssize_t size)
 /*[clinic end generated code: output=24dd2aa6e33be83c input=673b6240e315ef8a]*/
 {
     /* Without the lock when the line is in the read-ahead. */
-    nibbler_end *e = nibbler_end_get(&self->nib, 0);
-    Py_ssize_t start, k;
-    if (e != NULL && (k = nibbler_claim_line(e, size, &start)) >= 0) {
-        return nibbler_end_bytes(e, start, k);
+    PyObject *res = nibbler_claim(&self->nib, size, CLAIM_LINE);
+    if (res != NULL || PyErr_Occurred()) {
+        return res;
     }
     return buffered_readline_locked(self, size);
 }
