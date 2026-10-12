@@ -232,11 +232,18 @@ Buffer size 0 and None
 ----------------------
 
 Buffer size 0 is unbuffered (gh-148773): writes go straight to the raw
-stream, retrying partial writes; reads never ask for more than the caller
-wants; `peek()` and `readline()` raise `UnsupportedOperation`.  Buffer
-size None (writers only) buffers writes without limit: the threshold is
-`PY_SSIZE_T_MAX` and only `flush()` and operations needing the position
-write out.  `open(buffering=None)` gives that, and is only accepted when
+stream, retrying partial writes, and keep nothing when it would block;
+reads never ask for more than the caller wants (`read1()` with no size
+makes one raw read of up to `DEFAULT_BUFFER_SIZE`); `peek()` and
+`readline()` raise `UnsupportedOperation`, as they can't look ahead
+without taking the bytes.  The only read-ahead is data kept after a raw
+read raised, which reads and `peek()` return first (`readline()` too,
+when a whole line is there).  Buffer size None (writers only) buffers
+writes without limit: the threshold is `PY_SSIZE_T_MAX`, large exact
+bytes are kept by reference and the rest copied into blocks of
+`DEFAULT_BUFFER_SIZE`, and only `flush()` and operations needing the
+position (`close()`, `detach()`, `seek()`, `truncate()`, reads of
+`BufferedRandom`, `tell()` in append mode) write out.  `open(buffering=None)` gives that, and is only accepted when
 `open()` uses the nibbler classes (it raises before opening the file
 otherwise).
 
@@ -300,9 +307,9 @@ in place through the byte API ("Bytes for TextIOWrapper" in
   line whole, it lets the block grow (as `buffered_fill()` does for a long
   binary line) up to 64 blocks, and at least `DEFAULT_BUFFER_SIZE`; past
   that it returns `_PyIO_NIBBLER_FULL` and the line is taken in parts.
-- `_PyIONibbler_advance()` takes bytes only if they are still at the
+- `_PyIONibbler_take()` takes bytes only if they are still at the
   position (key and offset): that is how a call finds that another thread
-  read first.  `_PyIONibbler_take()` also copies them out.
+  read first.  It can also copy them out.
 - `_PyIONibbler_unread()` puts bytes back in front of the unread ones, as
   read-ahead (see "Failed reads" below).
 - `_PyIONibbler_write()`, and `_PyIONibbler_reserve()` plus
@@ -324,7 +331,8 @@ UTF-8, Latin-1, ASCII and byte-to-character tables (cp1252 and others),
 with errors `strict` or `surrogateescape` (and `replace` but for UTF-8),
 are native: the bytes of any characters are known, so a read takes just
 the bytes of the text it returns.  The decoded characters are a cache
-(`tcache`; on free-threaded builds a span published whole, `tspan`).
+(a span published whole, `tspan`, of which each call works on a copy,
+`tcache`; the same on both builds).
 
 Other codecs go through the codec's incremental decoder.  Their state is
 kept as flags (an `unsigned long long`, as iso2022_kr's go past 32 bits;
