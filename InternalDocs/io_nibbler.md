@@ -41,10 +41,14 @@ Data structures
   (copies in the block, large exact bytes by reference) or, reading, the
   **stash** (data a raw read returned after the block's, kept after an
   error).
-- **block**: a bytes object of `capacity` bytes that small writes are
-  copied into and reads fill: `block[0:pos]` was returned (seek() moves
-  back over it), `block[pos:end]` is the read-ahead, `block[dlo:dhi]` was
-  written over in place by `BufferedRandom` and not written out yet.
+- **block**: a bytes object of `capacity` bytes (64 more for reads) that
+  small writes are copied into and reads fill: `block[0:pos]` was returned
+  (seek() moves back over it), `block[pos:end]` is the read-ahead,
+  `block[dlo:dhi]` was written over in place by `BufferedRandom` and not
+  written out yet.  A fresh fill reads `capacity` bytes from the first
+  address congruent to the raw position modulo 64 (64-aligned when it is
+  unknown), where the kernel copies fastest; `stop` records where it ends,
+  and so where its data starts, below which seek() doesn't move back.
 - **threshold**: pending bytes past which writes are written out
   (`capacity`, or `PY_SSIZE_T_MAX` for buffer size None).
 - **raw position** (`raw_pos`, negative when unknown): kept only when

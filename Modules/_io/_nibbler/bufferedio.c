@@ -193,7 +193,8 @@ morsels_take(morsel_list *l, char *dst, Py_ssize_t len)
  *
  * Data flows one way at a time.  Writing, `list` holds the pending writes:
  * copies in block[0:used], and large exact bytes kept by reference.
- * Reading, block[0:end] holds what the last fill read: block[0:pos] was
+ * Reading, block[0:end] holds what the last fill read (but the room a
+ * fresh one leaves in front, see buffered_fill()): block[0:pos] was
  * returned (seek() can move back over it), block[pos:end] is the
  * read-ahead, block[dlo:dhi] was written over in place by BufferedRandom
  * and not written out yet, and `list` is the stash: data a raw read
@@ -226,6 +227,9 @@ typedef struct {
     Py_ssize_t dlo;
     Py_ssize_t dhi;
     Py_ssize_t noline;          /* block[pos:noline] has no end of line */
+    /* Fills stop here, PY_SSIZE_T_MAX: at the block's end (see
+       buffered_fill()). */
+    Py_ssize_t stop;
     morsel_list list;
     Py_ssize_t inflight;
     /* The raw position, kept for an exact FileIO of a regular file (not
@@ -251,6 +255,8 @@ typedef struct {
 /* What raw calls (and the functions here) return when it would block. */
 #define WOULD_BLOCK (-2)
 #define REF_MIN 512
+/* The room before a fresh fill's data in a block of the buffer's size. */
+#define PAD 64
 
 #define buffered_cast(op) ((buffered *)(op))
 
@@ -1726,6 +1732,7 @@ buffered_push_back(buffered *self, const char *data, Py_ssize_t len)
         buffered_set_block(self, block);
         self->pos = self->noline = 0;
         self->end = len + unread;
+        self->stop = PY_SSIZE_T_MAX;
         self->reading = 1;
     }
     _PyErr_ChainExceptions1(exc);
@@ -1748,10 +1755,12 @@ buffered_fill(buffered *self, Py_ssize_t size, Py_ssize_t grow_max)
     Py_ssize_t cap = self->capacity, unread = self->end - self->pos;
     PyObject *block = self->block;
     if (unread == 0 || cap == 0
-        || PyBytes_GET_SIZE(block) - self->end < Py_MAX(cap / 2, 1)
+        || Py_MIN(self->stop, PyBytes_GET_SIZE(block)) - self->end
+           < Py_MAX(cap / 2, 1)
         || !_PyObject_IsUniquelyReferenced(block))
     {
         Py_ssize_t size_new = (cap == 0 ? unread + size
+                               : unread == 0 ? cap + PAD
                                : unread <= cap / 2 ? cap
                                : Py_MIN(unread + Py_MAX(unread / 2, cap),
                                         Py_MAX(grow_max, unread + cap)));
@@ -1775,15 +1784,27 @@ buffered_fill(buffered *self, Py_ssize_t size, Py_ssize_t grow_max)
         self->noline = Py_MAX(0, self->noline - self->pos);
         self->pos = 0;
         self->end = unread;
+        self->stop = PY_SSIZE_T_MAX;
+        if (unread == 0 && cap > 0) {
+            /* A fresh fill of a block of the buffer's size reads cap bytes
+               to the address congruent to the raw position mod PAD (where
+               the kernel copies fastest), 64-aligned if unknown. */
+            Py_off_t at = self->raw_pos >= 0 ? self->raw_pos : 0;
+            self->pos = self->end = (Py_ssize_t)(
+                ((uintptr_t)at - (uintptr_t)PyBytes_AS_STRING(self->block))
+                % PAD);
+            self->stop = self->pos + cap;
+        }
     }
     self->reading = 1;
     /* The read holds its own reference to the block. */
     block = Py_NewRef(self->block);
     char *dst = PyBytes_AS_STRING(block);
     int shared = 0;
-    Py_ssize_t n = buffered_raw_read(self, dst + self->end,
-                                     PyBytes_GET_SIZE(block) - self->end,
-                                     block, &shared);
+    Py_ssize_t n = buffered_raw_read(
+        self, dst + self->end,
+        Py_MIN(self->stop, PyBytes_GET_SIZE(block)) - self->end, block,
+        &shared);
     self->end += Py_MAX(n, 0);
     if (shared && block == self->block) {
         /* Python code can still write to the block: abandon it to that
@@ -1833,6 +1854,7 @@ buffered_read_into(buffered *self, char *dst, Py_ssize_t len, int read1,
             else {
                 /* The block no longer precedes the raw position. */
                 self->pos = self->end = self->noline = 0;
+                self->stop = PY_SSIZE_T_MAX;
                 n = buffered_raw_read(self, dst + written, rest, memobj,
                                       shared);
                 written += Py_MAX(n, 0);
@@ -2639,9 +2661,12 @@ buffered_seek_within(buffered *self, Py_off_t target, int whence,
     {
         return NULL;
     }
+    /* Where block[0] is, and its data (see buffered_fill()). */
     Py_off_t start = raw_pos - self->end;
     Py_off_t at = whence == SEEK_SET ? target : start + self->pos + target;
-    if (at < start || at > raw_pos) {
+    if (at < start + (self->stop == PY_SSIZE_T_MAX ? 0
+                      : self->stop - self->capacity) || at > raw_pos)
+    {
         return NULL;
     }
     self->pos = (Py_ssize_t)(at - start);
