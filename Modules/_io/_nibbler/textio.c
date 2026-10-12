@@ -411,30 +411,45 @@ textio_buffer_get(textio *self)
 }
 
 static PyObject *
-textio_call(textio *self, PyObject *name, PyObject *arg)
+textio_call(textio *self, PyObject *name)
 {
     tconf *cf = textio_conf(self);
     if (cf == NULL) {
         return NULL;
     }
-    PyObject *res = (arg == NULL ? PyObject_CallMethodNoArgs(cf->buffer, name)
-                     : PyObject_CallMethodOneArg(cf->buffer, name, arg));
+    PyObject *res = PyObject_CallMethodNoArgs(cf->buffer, name);
     conf_put(cf);
     return res;
 }
-
+/* A getter of the buffer's attribute named by closure. */
 static PyObject *
-textio_call_getattr(textio *self, PyObject *name)
+textio_getattr(PyObject *op, void *name)
 {
-    tconf *cf = textio_conf(self);
+    tconf *cf = textio_conf(textio_CAST(op));
     if (cf == NULL) {
         return NULL;
     }
-    PyObject *res = PyObject_GetAttr(cf->buffer, name);
+    PyObject *res = PyObject_GetAttr(cf->buffer, (PyObject *)name);
     conf_put(cf);
     return res;
 }
 
+/* Methods passed on to the buffer. */
+#define TEXTIO_PASS_METHOD(name)                                        \
+    static PyObject *                                                   \
+    textio_pass_##name(PyObject *op, PyObject *Py_UNUSED(dummy))        \
+    {                                                                   \
+        return textio_call(textio_CAST(op), &_Py_ID(name));             \
+    }
+TEXTIO_PASS_METHOD(fileno)
+TEXTIO_PASS_METHOD(seekable)
+TEXTIO_PASS_METHOD(readable)
+TEXTIO_PASS_METHOD(writable)
+TEXTIO_PASS_METHOD(isatty)
+#undef TEXTIO_PASS_METHOD
+
+#define PASS_METHODDEF(name) \
+    {#name, textio_pass_##name, METH_NOARGS, #name "($self, /)\n--\n\n"},
 static int
 textio_call_bool(PyObject *obj, PyObject *name)
 {
@@ -1099,9 +1114,11 @@ store_write(textio *self, tconf *cf, int lockfree, PyObject *obj,
  */
 
 /* The UTF-8 bytes of chars[i:i+k] beyond one per character: those of
-   characters from 0x80 on (and again from 0x800 on), counted a word, or a
-   vector of 16 bytes where the compiler has them, at a time (summed by
-   lanes, below their overflow). */
+   characters from 0x80 on (and again from 0x800 on), counted a word at a
+   time for 1 byte characters, and a vector of 16 bytes, where the compiler
+   has them, for 2 byte ones (summed by lanes, below their overflow).  (A
+   vector loop for 1 byte characters cost short lines more than it saved
+   on long ones.) */
 #if defined(__GNUC__) || defined(__clang__)
 typedef uint16_t text_v16 __attribute__((vector_size(16)));
 typedef int16_t text_vs16 __attribute__((vector_size(16)));
@@ -1118,42 +1135,6 @@ utf8_extra_ucs1(const Py_UCS1 *p, Py_ssize_t k)
     const uint64_t h = 0x8080808080808080ull;
     const uint64_t ones = 0x0101010101010101ull;
     Py_ssize_t n = 0, j = 0;
-#ifdef TEXT_VECTORS
-    if (k >= 16) {
-        /* 15 vectors at most per sum (14 and the last), so that its
-           lanes add up to a byte. */
-        while (j + 16 <= k) {
-            text_v8 acc = {0};
-            Py_ssize_t stop = Py_MIN(k, j + 16 * 14);
-            for (; j + 32 <= stop; j += 32) {
-                text_v8 v[2];
-                memcpy(v, p + j, 32);
-                acc += (text_v8)(v[0] < 0) + (text_v8)(v[1] < 0);
-            }
-            if (j + 16 <= stop) {
-                text_v8 v;
-                memcpy(&v, p + j, 16);
-                acc += (text_v8)(v < 0);
-                j += 16;
-            }
-            if (j + 16 > k && j < k) {
-                /* The last ones, in the 16 ending with them. */
-                const text_v8 lane = {0, 1, 2, 3, 4, 5, 6, 7,
-                                      8, 9, 10, 11, 12, 13, 14, 15};
-                text_v8 v;
-                memcpy(&v, p + k - 16, 16);
-                acc += ((text_v8)(v < 0)
-                        & (text_v8)(lane >= (int8_t)(16 - (k - j))));
-                j = k;
-            }
-            acc = -acc;
-            uint64_t w[2];
-            memcpy(w, &acc, 16);
-            n += (Py_ssize_t)(((w[0] + w[1]) * ones) >> 56);
-        }
-        return n;
-    }
-#endif
     for (; j + 32 <= k; j += 32) {
         uint64_t w[4];
         memcpy(w, p + j, 32);
@@ -1934,11 +1915,12 @@ store_unread(textio *self, store *st, const char *data, Py_ssize_t len)
     return 1;
 }
 
-/* Bytes given back to the store: the "\n" there ends a "\r\n" seen before
-   (as text_seek_skip_lf() does).  Without the critical section if
-   lockfree. */
+/* The "\n" at the position ends a "\r\n" whose "\r" was returned before:
+   bytes given back to the store, or seek() to a cookie of tell()'s with
+   flags 1 and a native codec (see text_skip_lf()).  Without the critical
+   section if lockfree. */
 static int
-text_unread_skip_lf(textio *self, tconf *cf, int lockfree)
+text_set_skip_lf(textio *self, tconf *cf, int lockfree)
 {
     store st = {.cf = cf, .buffer = cf->buffer, .lockfree = lockfree};
     st.c = cache_get(self, STORE_COPY(&st));
@@ -1995,7 +1977,7 @@ text_give_back(textio *self, store *st, tkept *out)
             r = out->bytes != NULL ? HANDED : -1;
         }
         else if (r > 0 && st->kskip
-                 && text_unread_skip_lf(self, st->cf, st->lockfree) < 0)
+                 && text_set_skip_lf(self, st->cf, st->lockfree) < 0)
         {
             /* The bytes are back; only the newlines noted may differ. */
             PyErr_Clear();
@@ -2101,8 +2083,8 @@ text_note_newlines(textio *self, PyObject *chars, Py_ssize_t ci,
     }
 #ifdef TEXT_VECTORS
     if (kind == PyUnicode_1BYTE_KIND) {
-        /* 15 vectors per sum at most, so that its lanes add up to a byte
-           (see utf8_extra_ucs1()). */
+        /* 15 vectors per sum at most, so that its lanes add up to a
+           byte. */
         const Py_UCS1 *p = data;
         while (j + 16 <= n) {
             text_v8 vcr = {0}, vlf = {0}, vcrlf = {0};
@@ -2572,7 +2554,7 @@ text_quick(textio *self, tconf *cf, Py_ssize_t n, int line)
     }
     /* Taking the bytes finds out whether the characters are theirs. */
     Py_ssize_t koff = KOFF;
-    if (_PyIONibbler_advance(cf->buffer, C->key, koff, b) != 1) {
+    if (_PyIONibbler_take(cf->buffer, C->key, koff, b, NULL) != 1) {
         Py_CLEAR(text);
         goto done;
     }
@@ -2913,7 +2895,7 @@ text_keep_handed(textio *self, tkept *kept)
     int r = store_unread(self, &st, PyBytes_AS_STRING(kept->bytes),
                          PyBytes_GET_SIZE(kept->bytes));
     cache_release(st.c);
-    if (r > 0 && kept->skip_lf && text_unread_skip_lf(self, cf, 0) < 0) {
+    if (r > 0 && kept->skip_lf && text_set_skip_lf(self, cf, 0) < 0) {
         PyErr_Clear();
     }
     conf_put(cf);
@@ -2964,7 +2946,7 @@ static inline PyObject *
 text_read(textio *self, Py_ssize_t n, int line)
 {
     /* The settings borrowed: text_quick() runs no other code, and is done
-       with them once it may wait (in _PyIONibbler_advance(), which keeps
+       with them once it may wait (in _PyIONibbler_take(), which keeps
        the buffer alive then); with free threading, lockfree settings are
        freed only once every thread is past such a call (see conf_set()).
        lockfree settings have a buffer; n == 0 is never quick. */
@@ -3574,23 +3556,6 @@ text_skip(textio *self, tconf *cf, Py_ssize_t n)
     return n > 0 ? -1 : 0;
 }
 
-/* After seek() to a cookie of tell()'s with flags 1 and a native codec:
-   the "\n" at the position ends a "\r\n" (see text_skip_lf()). */
-static int
-text_seek_skip_lf(textio *self, tconf *cf)
-{
-    store st = {.cf = cf, .buffer = cf->buffer};
-    st.c = cache_get(self, STORE_COPY(&st));
-    Py_ssize_t avail = text_more(self, &st, 0);
-    if (avail > 0) {
-        st.c->skip_lf = 1;
-        cache_put(self, st.c);
-    }
-    cache_release(st.c);
-    store_release(&st);
-    return avail < 0 ? -1 : 0;
-}
-
 /*[clinic input]
 @critical_section
 _io.TextIOWrapper.seek
@@ -3716,7 +3681,7 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
         goto done;
     }
     if (cf->codec != CODEC_DECODER && c.dec_flags == 1
-        && text_seek_skip_lf(self, cf) < 0)
+        && text_set_skip_lf(self, cf, 0) < 0)
     {
         goto done;
     }
@@ -3899,73 +3864,6 @@ _io_TextIOWrapper_detach_impl(textio *self)
 }
 
 /*[clinic input]
-_io.TextIOWrapper.fileno
-[clinic start generated code]*/
-
-static PyObject *
-_io_TextIOWrapper_fileno_impl(textio *self)
-/*[clinic end generated code: output=21490a4c3da13e6c input=c488ca83d0069f9b]*/
-{
-    return textio_call(self, &_Py_ID(fileno), NULL);
-}
-
-/*[clinic input]
-_io.TextIOWrapper.seekable
-[clinic start generated code]*/
-
-static PyObject *
-_io_TextIOWrapper_seekable_impl(textio *self)
-/*[clinic end generated code: output=ab223dbbcffc0f00 input=8b005ca06e1fca13]*/
-{
-    return textio_call(self, &_Py_ID(seekable), NULL);
-}
-
-/*[clinic input]
-_io.TextIOWrapper.readable
-[clinic start generated code]*/
-
-static PyObject *
-_io_TextIOWrapper_readable_impl(textio *self)
-/*[clinic end generated code: output=72ff7ba289a8a91b input=0704ea7e01b0d3eb]*/
-{
-    return textio_call(self, &_Py_ID(readable), NULL);
-}
-
-/*[clinic input]
-_io.TextIOWrapper.writable
-[clinic start generated code]*/
-
-static PyObject *
-_io_TextIOWrapper_writable_impl(textio *self)
-/*[clinic end generated code: output=a728c71790d03200 input=c41740bc9d8636e8]*/
-{
-    return textio_call(self, &_Py_ID(writable), NULL);
-}
-
-/*[clinic input]
-_io.TextIOWrapper.isatty
-[clinic start generated code]*/
-
-static PyObject *
-_io_TextIOWrapper_isatty_impl(textio *self)
-/*[clinic end generated code: output=12be1a35bace882e input=fb68d9f2c99bbfff]*/
-{
-    return textio_call(self, &_Py_ID(isatty), NULL);
-}
-
-/*[clinic input]
-@getter
-_io.TextIOWrapper.name
-[clinic start generated code]*/
-
-static PyObject *
-_io_TextIOWrapper_name_get_impl(textio *self)
-/*[clinic end generated code: output=8c2f1d6d8756af40 input=1459cfc515493c6b]*/
-{
-    return textio_call_getattr(self, &_Py_ID(name));
-}
-
-/*[clinic input]
 @getter
 _io.TextIOWrapper.closed
 [clinic start generated code]*/
@@ -3978,7 +3876,7 @@ _io_TextIOWrapper_closed_get_impl(textio *self)
     if (conf_peek(self) == NULL) {
         Py_RETURN_TRUE;
     }
-    return textio_call_getattr(self, &_Py_ID(closed));
+    return textio_getattr((PyObject *)self, &_Py_ID(closed));
 }
 
 /*[clinic input]
@@ -4736,11 +4634,11 @@ static PyMethodDef textiowrapper_methods[] = {
     _IO_TEXTIOWRAPPER_READLINE_METHODDEF
     _IO_TEXTIOWRAPPER_FLUSH_METHODDEF
     _IO_TEXTIOWRAPPER_CLOSE_METHODDEF
-    _IO_TEXTIOWRAPPER_FILENO_METHODDEF
-    _IO_TEXTIOWRAPPER_SEEKABLE_METHODDEF
-    _IO_TEXTIOWRAPPER_READABLE_METHODDEF
-    _IO_TEXTIOWRAPPER_WRITABLE_METHODDEF
-    _IO_TEXTIOWRAPPER_ISATTY_METHODDEF
+    PASS_METHODDEF(fileno)
+    PASS_METHODDEF(seekable)
+    PASS_METHODDEF(readable)
+    PASS_METHODDEF(writable)
+    PASS_METHODDEF(isatty)
     _IO_TEXTIOWRAPPER_SEEK_METHODDEF
     _IO_TEXTIOWRAPPER_TELL_METHODDEF
     _IO_TEXTIOWRAPPER_TRUNCATE_METHODDEF
@@ -4761,7 +4659,7 @@ static PyMemberDef textiowrapper_members[] = {
 };
 
 static PyGetSetDef textiowrapper_getset[] = {
-    _IO_TEXTIOWRAPPER_NAME_GETSETDEF
+    {"name", textio_getattr, NULL, NULL, &_Py_ID(name)},
     _IO_TEXTIOWRAPPER_CLOSED_GETSETDEF
     _IO_TEXTIOWRAPPER_NEWLINES_GETSETDEF
     _IO_TEXTIOWRAPPER_ERRORS_GETSETDEF

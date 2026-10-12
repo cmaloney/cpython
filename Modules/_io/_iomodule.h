@@ -132,10 +132,7 @@ extern int _PyIONibbler_peek(PyObject *buffered, Py_ssize_t need,
 /* Take n bytes from the position named by key and off (see
    _PyIONibbler_peek()).  Returns 1, 0 (nothing taken) if the unread bytes
    don't start there any more, -1 (ValueError if the raw stream is closed),
-   or _PyIO_NIBBLER_NO. */
-extern int _PyIONibbler_advance(PyObject *buffered, uint64_t key,
-                                Py_ssize_t off, Py_ssize_t n);
-/* Like _PyIONibbler_advance(), copying the bytes taken to copy. */
+   or _PyIO_NIBBLER_NO.  Copies the bytes taken to copy unless it is NULL. */
 extern int _PyIONibbler_take(PyObject *buffered, uint64_t key, Py_ssize_t off,
                              Py_ssize_t n, char *copy);
 /* Put data[0:len] back in front of the unread bytes, as read-ahead (a text

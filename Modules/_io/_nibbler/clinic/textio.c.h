@@ -287,100 +287,6 @@ _io_TextIOWrapper_detach(PyObject *self, PyObject *Py_UNUSED(ignored))
     return return_value;
 }
 
-PyDoc_STRVAR(_io_TextIOWrapper_fileno__doc__,
-"fileno($self, /)\n"
-"--\n"
-"\n");
-
-#define _IO_TEXTIOWRAPPER_FILENO_METHODDEF    \
-    {"fileno", (PyCFunction)_io_TextIOWrapper_fileno, METH_NOARGS, _io_TextIOWrapper_fileno__doc__},
-
-static PyObject *
-_io_TextIOWrapper_fileno_impl(textio *self);
-
-static PyObject *
-_io_TextIOWrapper_fileno(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    return _io_TextIOWrapper_fileno_impl((textio *)self);
-}
-
-PyDoc_STRVAR(_io_TextIOWrapper_seekable__doc__,
-"seekable($self, /)\n"
-"--\n"
-"\n");
-
-#define _IO_TEXTIOWRAPPER_SEEKABLE_METHODDEF    \
-    {"seekable", (PyCFunction)_io_TextIOWrapper_seekable, METH_NOARGS, _io_TextIOWrapper_seekable__doc__},
-
-static PyObject *
-_io_TextIOWrapper_seekable_impl(textio *self);
-
-static PyObject *
-_io_TextIOWrapper_seekable(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    return _io_TextIOWrapper_seekable_impl((textio *)self);
-}
-
-PyDoc_STRVAR(_io_TextIOWrapper_readable__doc__,
-"readable($self, /)\n"
-"--\n"
-"\n");
-
-#define _IO_TEXTIOWRAPPER_READABLE_METHODDEF    \
-    {"readable", (PyCFunction)_io_TextIOWrapper_readable, METH_NOARGS, _io_TextIOWrapper_readable__doc__},
-
-static PyObject *
-_io_TextIOWrapper_readable_impl(textio *self);
-
-static PyObject *
-_io_TextIOWrapper_readable(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    return _io_TextIOWrapper_readable_impl((textio *)self);
-}
-
-PyDoc_STRVAR(_io_TextIOWrapper_writable__doc__,
-"writable($self, /)\n"
-"--\n"
-"\n");
-
-#define _IO_TEXTIOWRAPPER_WRITABLE_METHODDEF    \
-    {"writable", (PyCFunction)_io_TextIOWrapper_writable, METH_NOARGS, _io_TextIOWrapper_writable__doc__},
-
-static PyObject *
-_io_TextIOWrapper_writable_impl(textio *self);
-
-static PyObject *
-_io_TextIOWrapper_writable(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    return _io_TextIOWrapper_writable_impl((textio *)self);
-}
-
-PyDoc_STRVAR(_io_TextIOWrapper_isatty__doc__,
-"isatty($self, /)\n"
-"--\n"
-"\n");
-
-#define _IO_TEXTIOWRAPPER_ISATTY_METHODDEF    \
-    {"isatty", (PyCFunction)_io_TextIOWrapper_isatty, METH_NOARGS, _io_TextIOWrapper_isatty__doc__},
-
-static PyObject *
-_io_TextIOWrapper_isatty_impl(textio *self);
-
-static PyObject *
-_io_TextIOWrapper_isatty(PyObject *self, PyObject *Py_UNUSED(ignored))
-{
-    return _io_TextIOWrapper_isatty_impl((textio *)self);
-}
-
-static PyObject *
-_io_TextIOWrapper_name_get_impl(textio *self);
-
-static PyObject *
-_io_TextIOWrapper_name_get(PyObject *self, void *Py_UNUSED(context))
-{
-    return _io_TextIOWrapper_name_get_impl((textio *)self);
-}
-
 static PyObject *
 _io_TextIOWrapper_closed_get_impl(textio *self);
 
@@ -724,8 +630,6 @@ skip_optional_kwonly:
 exit:
     return return_value;
 }
-#define _IO_TEXTIOWRAPPER_NAME_GETSETDEF {"name", (getter)_io_TextIOWrapper_name_get, (setter)NULL, NULL},
-
 #define _IO_TEXTIOWRAPPER_CLOSED_GETSETDEF {"closed", (getter)_io_TextIOWrapper_closed_get, (setter)NULL, NULL},
 
 #define _IO_TEXTIOWRAPPER_NEWLINES_GETSETDEF {"newlines", (getter)_io_TextIOWrapper_newlines_get, (setter)NULL, NULL},
@@ -736,4 +640,4 @@ exit:
 
 #define _IO_TEXTIOWRAPPER_BUFFER_GETSETDEF {"buffer", (getter)_io_TextIOWrapper_buffer_get, (setter)NULL, NULL},
 
-/*[clinic end generated code: output=2c97e792cd5e1180 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=4c48338c8bffc524 input=a9049054013a1b77]*/

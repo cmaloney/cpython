@@ -228,17 +228,6 @@ morsels_splice(morsel_list *dst, morsel_list *src)
     return 0;
 }
 
-/* m->ptr[0:k] as a bytes object: m->obj itself, without a copy, when that
-   is all of it. */
-static inline PyObject *
-morsel_bytes(const morsel *m, Py_ssize_t k)
-{
-    if (m->ptr == PyBytes_AS_STRING(m->obj) && k == PyBytes_GET_SIZE(m->obj)) {
-        return Py_NewRef(m->obj);
-    }
-    return PyBytes_FromStringAndSize(m->ptr, k);
-}
-
 /* Drop n bytes from the front.  Returns how many there were (up to n). */
 static Py_ssize_t
 morsels_consume(morsel_list *list, Py_ssize_t n)
@@ -773,26 +762,15 @@ nibbler_end_limit(nibbler_end *e)
     return FT_ATOMIC_LOAD_SSIZE_ACQUIRE(e->limit);
 }
 
-/* Without the lock: claim up to `want` bytes of the reading end e (with
-   exact, exactly `want` or none).  Returns how many, starting at *start, or
-   -1 (nothing claimed) when e is held or, with exact, has fewer. */
-static inline Py_ssize_t
-nibbler_claim(nibbler_end *e, Py_ssize_t want, int exact, Py_ssize_t *start)
+/* block[start:start+k] as a bytes object: block itself, without a copy,
+   when that is all of it. */
+static inline PyObject *
+block_bytes(PyObject *block, Py_ssize_t start, Py_ssize_t k)
 {
-    Py_ssize_t c = FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
-    for (;;) {
-        if (c < 0) {
-            return -1;
-        }
-        Py_ssize_t k = Py_MIN(want, nibbler_end_limit(e) - c);
-        if (exact && k < want) {
-            return -1;
-        }
-        if (FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(e->pos, &c, c + k)) {
-            *start = c;
-            return k;
-        }
+    if (start == 0 && k == PyBytes_GET_SIZE(block)) {
+        return Py_NewRef(block);
     }
+    return PyBytes_FromStringAndSize(PyBytes_AS_STRING(block) + start, k);
 }
 
 /* The length of the line at base[c:end], up to `limit` bytes unless that
@@ -813,6 +791,28 @@ nibbler_line_length(const char *base, Py_ssize_t c, Py_ssize_t end,
         return n;
     }
     return -1;
+}
+
+/* Without the lock: claim up to `want` bytes of the reading end e (with
+   exact, exactly `want` or none).  Returns how many, starting at *start, or
+   -1 (nothing claimed) when e is held or, with exact, has fewer. */
+static inline Py_ssize_t
+nibbler_claim(nibbler_end *e, Py_ssize_t want, int exact, Py_ssize_t *start)
+{
+    Py_ssize_t c = FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
+    for (;;) {
+        if (c < 0) {
+            return -1;
+        }
+        Py_ssize_t k = Py_MIN(want, nibbler_end_limit(e) - c);
+        if (exact && k < want) {
+            return -1;
+        }
+        if (FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(e->pos, &c, c + k)) {
+            *start = c;
+            return k;
+        }
+    }
 }
 
 /* Without the lock: claim the line at the position of e, like
@@ -839,14 +839,6 @@ nibbler_claim_line(nibbler_end *e, Py_ssize_t limit, Py_ssize_t *start)
     }
 }
 
-/* e->block[start:start+k] as a bytes object, like morsel_bytes(). */
-static inline PyObject *
-nibbler_end_bytes(nibbler_end *e, Py_ssize_t start, Py_ssize_t k)
-{
-    morsel m = {e->block, PyBytes_AS_STRING(e->block) + start, k};
-    return morsel_bytes(&m, k);
-}
-
 /* Without the lock: the unread bytes, without taking them (for peek());
    b"" when there are none or the end is held. */
 static PyObject *
@@ -858,7 +850,7 @@ nibbler_peek(nibbler *n)
     if (c < 0 || limit == c) {
         return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     }
-    return nibbler_end_bytes(e, c, limit - c);
+    return block_bytes(e->block, c, limit - c);
 }
 
 /* The functions below are called with the lock held.  While reading, the
@@ -908,20 +900,19 @@ nibbler_skip(nibbler *n, Py_ssize_t k)
     FT_ATOMIC_STORE_SSIZE_RELAXED(e->pos, ~(nibbler_reading_pos(e) + k));
 }
 
-/* Take up to `want` unread bytes as a bytes object, like morsel_bytes();
-   b"" when there is none. */
+/* Take up to `want` unread bytes as a bytes object (see block_bytes()). */
 static inline PyObject *
 nibbler_take_bytes(nibbler *n, Py_ssize_t want)
 {
     Py_ssize_t k = Py_MIN(want, nibbler_unread(n));
+    nibbler_end *e = nibbler_reading(n);
     if (k == 0) {
         return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     }
-    morsel m = {n->end->block, nibbler_unread_ptr(n), k};
+    Py_ssize_t pos = nibbler_reading_pos(e);
     nibbler_skip(n, k);
-    return morsel_bytes(&m, k);
+    return block_bytes(e->block, pos, k);
 }
-
 /* Take up to len unread bytes, copying them to dst.  Returns how many. */
 static inline Py_ssize_t
 nibbler_take_into(nibbler *n, char *dst, Py_ssize_t len)
@@ -967,16 +958,16 @@ nibbler_extend(nibbler *n, Py_ssize_t k)
     FT_ATOMIC_STORE_SSIZE_RELEASE(e->limit, e->limit + k);
 }
 
-/* Like nibbler_peek(). */
+/* The unread bytes as a bytes object, without taking them (see
+   block_bytes()). */
 static PyObject *
 nibbler_peek_held(nibbler *n)
 {
-    Py_ssize_t unread = nibbler_unread(n);
-    if (unread == 0) {
+    nibbler_end *e = nibbler_reading(n);
+    if (e == NULL || nibbler_unread(n) == 0) {
         return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     }
-    morsel m = {n->end->block, nibbler_unread_ptr(n), unread};
-    return morsel_bytes(&m, unread);
+    return block_bytes(e->block, nibbler_reading_pos(e), nibbler_unread(n));
 }
 
 /* Drop the unread bytes (and any writing end).  Returns how many there
@@ -1157,10 +1148,19 @@ nibbler_append_copy(nibbler *n, const char *data, Py_ssize_t len)
     return r;
 }
 
-/* Append data[0:len], inside obj (or NULL): by reference when it is at
-   least ref_min bytes or larger than a block (exact bytes only, and at
-   least NIBBLER_REF_MIN), else copied into the block, or into a bytes
-   object of its own when larger. */
+/* Is data of len bytes inside obj (or NULL) kept by reference rather than
+   copied: exact bytes, at least NIBBLER_REF_MIN bytes, and at least ref_min
+   bytes or larger than a block? */
+static inline int
+nibbler_by_ref(nibbler *n, PyObject *obj, Py_ssize_t len, Py_ssize_t ref_min)
+{
+    return ((len >= ref_min || len > n->capacity) && len >= NIBBLER_REF_MIN
+            && obj != NULL && PyBytes_CheckExact(obj));
+}
+
+/* Append data[0:len], inside obj (or NULL): by reference (see
+   nibbler_by_ref()), else copied into the block, or into a bytes object of
+   its own when larger. */
 static int
 nibbler_append(nibbler *n, PyObject *obj, const char *data, Py_ssize_t len,
                Py_ssize_t ref_min)
@@ -1168,15 +1168,12 @@ nibbler_append(nibbler *n, PyObject *obj, const char *data, Py_ssize_t len,
     if (len == 0) {
         return 0;
     }
-    /* Data larger than a block (the caller may let pending writes pass the
-       block size) is never copied into one. */
-    int large = len > n->capacity;
-    if ((len >= ref_min || large) && len >= NIBBLER_REF_MIN && obj != NULL
-        && PyBytes_CheckExact(obj))
-    {
+    if (nibbler_by_ref(n, obj, len, ref_min)) {
         return morsels_push(&n->list, obj, data, len);
     }
-    if (large) {
+    /* Data larger than a block (the caller may let pending writes pass the
+       block size) is never copied into one. */
+    if (len > n->capacity) {
         return nibbler_append_copy(n, data, len);
     }
 
