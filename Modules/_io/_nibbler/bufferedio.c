@@ -2486,61 +2486,141 @@ _io_BufferedWriter_write_impl(buffered *self, PyObject *obj)
     PyBuffer_Release(&view);
     return r < 0 ? NULL : PyLong_FromSsize_t(len);
 }
-
 /*
- * Bytes for TextIOWrapper: for now, through the methods (temporary, until
- * the text layer is rewritten for this buffer).
+ * Bytes for TextIOWrapper (see _iomodule.h)
+ *
+ * _io._nibbler.TextIOWrapper decodes from an exact buffered object's
+ * read-ahead in place, and takes only the bytes of the text it returns.
+ * An instance dict could override the methods: objects with one are used
+ * through them (_PyIO_NIBBLER_NO).
  */
 
-int
-_PyIONibbler_peek(PyObject *op, Py_ssize_t need, _PyIO_Morsel *m,
-                  uint64_t *key)
+#define TEXT_CLOSED "I/O operation on closed file."
+
+Py_ssize_t
+_PyIONibbler_begin(PyObject *op, int io, PyObject **block, const char **p)
 {
-    *m = (_PyIO_Morsel){NULL, NULL, 0};
-    return _PyIO_NIBBLER_NO;
+    buffered *self = buffered_cast(op);
+    if (FT_ATOMIC_LOAD_PTR_RELAXED(self->dict) != NULL) {
+        return _PyIO_NIBBLER_NO;
+    }
+    if ((io ? buffered_enter(self, NULL, READING) : buffered_lock(self)) < 0) {
+        return -1;
+    }
+    Py_ssize_t r = 0;
+    PyObject *dict = FT_ATOMIC_LOAD_PTR_RELAXED(self->dict);
+    if (dict != NULL || self->raw == NULL) {
+        r = self->raw == NULL ? buffered_not_ready() : _PyIO_NIBBLER_NO;
+    }
+    else if (!io && !self->reading && self->list.nbytes > 0) {
+        r = _PyIO_NIBBLER_NEEDIO;
+    }
+    if (r != 0) {
+        _PyIONibbler_end(op, io);
+        return r;
+    }
+    return _PyIONibbler_view(op, 0, block, p);
+}
+
+void
+_PyIONibbler_end(PyObject *op, int io)
+{
+    if (io) {
+        buffered_unlock_io(buffered_cast(op));
+    }
+    else {
+        buffered_unlock(buffered_cast(op));
+    }
+}
+
+Py_ssize_t
+_PyIONibbler_view(PyObject *op, Py_ssize_t k, PyObject **block,
+                  const char **p)
+{
+    buffered *self = buffered_cast(op);
+    self->pos += k;
+    *block = self->block;
+    *p = self->block ? PyBytes_AS_STRING(self->block) + self->pos : NULL;
+    return self->end - self->pos;
+}
+
+/* With the lock: the rest of _PyIONibbler_take(). */
+static inline int
+buffered_take_at(buffered *self, const char *p, Py_ssize_t len,
+                 Py_ssize_t k)
+{
+    int r = (FT_ATOMIC_LOAD_PTR_RELAXED(self->dict) == NULL
+             && self->raw != NULL && self->block != NULL
+             && (self->reading || self->list.nbytes == 0)
+             && PyBytes_AS_STRING(self->block) + self->pos == p
+             && self->end - self->pos >= len);
+    if (r) {
+        self->pos += k;
+    }
+    buffered_unlock(self);
+    return r;
+}
+
+Py_NO_INLINE static int
+buffered_take_wait(buffered *self, const char *p, Py_ssize_t len,
+                   Py_ssize_t k)
+{
+    /* Held briefly by everyone: not interrupted. */
+    int r = nibbler_mutex_lock(&self->lock, (PyObject *)self, 0);
+    if (r < 0) {
+        return -1;
+    }
+    if (r > 0) {
+        self->raw_pos = POS_UNKNOWN;
+    }
+    return buffered_take_at(self, p, len, k);
 }
 
 int
-_PyIONibbler_advance(PyObject *op, uint64_t key, Py_ssize_t off, Py_ssize_t n)
+_PyIONibbler_take(PyObject *op, const char *p, Py_ssize_t len, Py_ssize_t k)
 {
-    return _PyIO_NIBBLER_NO;
+    buffered *self = buffered_cast(op);
+    if (FT_ATOMIC_LOAD_PTR_RELAXED(self->dict) != NULL) {
+        return 0;
+    }
+    if (!nibbler_mutex_trylock(&self->lock)) {
+        return buffered_take_wait(self, p, len, k);
+    }
+    return buffered_take_at(self, p, len, k);
 }
 
-int
-_PyIONibbler_take(PyObject *op, uint64_t key, Py_ssize_t off, Py_ssize_t n,
-                  char *copy)
+Py_ssize_t
+_PyIONibbler_fill(PyObject *op, Py_ssize_t size)
 {
-    return _PyIO_NIBBLER_NO;
+    buffered *self = buffered_cast(op);
+    /* A long line is gathered in one block up to 64 blocks, and at least
+       DEFAULT_BUFFER_SIZE. */
+    Py_ssize_t max = Py_MAX(64 * self->capacity, DEFAULT_BUFFER_SIZE);
+    if (self->end - self->pos >= max) {
+        return _PyIO_NIBBLER_FULL;
+    }
+    if (buffered_check_closed(self, TEXT_CLOSED) < 0) {
+        return -1;
+    }
+    Py_ssize_t n = buffered_fill(self, size, max);
+    return n == WOULD_BLOCK ? _PyIO_NIBBLER_BLOCKED : n;
 }
 
 int
 _PyIONibbler_unread(PyObject *op, const char *data, Py_ssize_t len)
 {
-    return _PyIO_NIBBLER_NO;
+    return buffered_push_back(buffered_cast(op), data, len);
 }
 
 int
 _PyIONibbler_write(PyObject *op, PyObject *obj, const char *data,
                    Py_ssize_t len)
 {
-    return _PyIO_NIBBLER_NO;
-}
-
-char *
-_PyIONibbler_reserve(PyObject *op, Py_ssize_t len, void **end, int *closed)
-{
-    return NULL;
-}
-
-void
-_PyIONibbler_commit(void *end, Py_ssize_t len)
-{
-}
-
-Py_ssize_t
-_PyIONibbler_capacity(PyObject *op)
-{
-    return FT_ATOMIC_LOAD_SSIZE_RELAXED(buffered_cast(op)->capacity);
+    buffered *self = buffered_cast(op);
+    if (FT_ATOMIC_LOAD_PTR_RELAXED(self->dict) != NULL) {
+        return _PyIO_NIBBLER_NO;
+    }
+    return buffered_write(self, obj, data, len, TEXT_CLOSED);
 }
 
 int

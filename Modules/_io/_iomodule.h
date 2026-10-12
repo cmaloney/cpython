@@ -101,66 +101,44 @@ extern int _PyFileIO_appending(PyObject *self);
    find "would block"? */
 extern int _PyFileIO_regular(PyObject *self);
 
-/* An exact _io._nibbler buffered object as the storage of
-   _io._nibbler.TextIOWrapper's bytes, without method calls (see "Bytes for
+/* An exact _io._nibbler buffered object as the store of
+   _io._nibbler.TextIOWrapper's bytes, used in place (see "Bytes for
    TextIOWrapper" in _nibbler/bufferedio.c).  Functions returning int
-   return 0 on success, -1 with an exception set, or _PyIO_NIBBLER_NO
-   (nothing done) when the object must be used through its methods. */
+   return 0 on success or -1 with an exception set, but where noted. */
+#define _PyIO_NIBBLER_NEEDIO (-2)
 #define _PyIO_NIBBLER_NO (-3)
-
-/* A run of bytes inside the bytes object obj, which keeps them alive. */
-typedef struct {
-    PyObject *obj;
-    const char *ptr;
-    Py_ssize_t len;
-} _PyIO_Morsel;
-
-/* *m = the unread bytes, without taking them (a new reference to obj, or
-   NULL when there are none), or ValueError if closed (but bytes read ahead
-   before the raw stream alone was closed): at least `need` (reading more
-   after them when fewer are unread) unless the stream ends first (then 0
-   with fewer), or
-   _PyIO_NIBBLER_BLOCKED when it would block first, or _PyIO_NIBBLER_FULL
-   when `need` is more than the buffer gathers (64 blocks, at least
-   DEFAULT_BUFFER_SIZE).  *key and the offset of
-   m->ptr in m->obj always name the same bytes: a later peek with both the
-   same returns them again. */
-#define _PyIO_NIBBLER_BLOCKED 1
-#define _PyIO_NIBBLER_FULL 2
-extern int _PyIONibbler_peek(PyObject *buffered, Py_ssize_t need,
-                             _PyIO_Morsel *m, uint64_t *key);
-/* Take n bytes from the position named by key and off (see
-   _PyIONibbler_peek()).  Returns 1, 0 (nothing taken) if the unread bytes
-   don't start there any more, -1 (ValueError if the raw stream is closed),
-   or _PyIO_NIBBLER_NO. */
-extern int _PyIONibbler_advance(PyObject *buffered, uint64_t key,
-                                Py_ssize_t off, Py_ssize_t n);
-/* Like _PyIONibbler_advance(), copying the bytes taken to copy. */
-extern int _PyIONibbler_take(PyObject *buffered, uint64_t key, Py_ssize_t off,
-                             Py_ssize_t n, char *copy);
-/* Put data[0:len] back in front of the unread bytes, as read-ahead (a text
-   read that failed after taking them).  Returns 1, 0 if not (there are
-   pending writes, or the object is detached), -1 or _PyIO_NIBBLER_NO. */
+#define _PyIO_NIBBLER_BLOCKED (-4)
+#define _PyIO_NIBBLER_FULL (-5)
+/* Take the buffer's lock, and with io its I/O role too (reading more then
+   possible), and return the count of the unread bytes, at *p in *block
+   (borrowed).  Returns _PyIO_NIBBLER_NEEDIO (nothing held) when reading
+   needs the I/O role (pending writes first), and _PyIO_NIBBLER_NO when the
+   buffer has an instance dict (use its methods). */
+extern Py_ssize_t _PyIONibbler_begin(PyObject *buffered, int io,
+                                     PyObject **block, const char **p);
+extern void _PyIONibbler_end(PyObject *buffered, int io);
+/* Held: take k of them, and return the rest as _PyIONibbler_begin(). */
+extern Py_ssize_t _PyIONibbler_view(PyObject *buffered, Py_ssize_t k,
+                                    PyObject **block, const char **p);
+/* If the unread bytes start at p, with len of them at least, and can be
+   read without the I/O role, take k of them (one locked step).  Returns 1,
+   0 if not, or -1. */
+extern int _PyIONibbler_take(PyObject *buffered, const char *p,
+                             Py_ssize_t len, Py_ssize_t k);
+/* With the I/O role: read more after them (size more, unbuffered), keeping
+   them in front.  Returns the count, 0 at EOF, _PyIO_NIBBLER_BLOCKED,
+   _PyIO_NIBBLER_FULL when no more can be held, or -1. */
+extern Py_ssize_t _PyIONibbler_fill(PyObject *buffered, Py_ssize_t size);
+/* Held: put data[0:len] back in front of them (a read that failed). */
 extern int _PyIONibbler_unread(PyObject *buffered, const char *data,
                                Py_ssize_t len);
-/* Like write(obj), for data[0:len] owned by obj, but ValueError("I/O
-   operation on closed file.") if closed.  buffered may be a borrowed
-   reference. */
+/* Like write(obj) of data[0:len], owned by obj, but ValueError("I/O
+   operation on closed file.") if closed; _PyIO_NIBBLER_NO as above.  The
+   caller holds a reference to buffered (raw.write() could drop others). */
 extern int _PyIONibbler_write(PyObject *buffered, PyObject *obj,
                               const char *data, Py_ssize_t len);
-/* Without the lock, room for len bytes at the end of the buffer, if there
-   is: where to put them, and *end for _PyIONibbler_commit(end, len), which
-   must follow without running any Python code.  NULL: nothing reserved
-   (_PyIONibbler_write() then).  *closed: the raw stream was closed, but
-   the room couldn't be given back: commit it, then raise ValueError("I/O
-   operation on closed file."), as write() does. */
-extern char *_PyIONibbler_reserve(PyObject *buffered, Py_ssize_t len,
-                                  void **end, int *closed);
-extern void _PyIONibbler_commit(void *end, Py_ssize_t len);
-/* Is the raw stream closed?  1, 0, or -1 with an exception set. */
+/* Is the raw stream closed?  1, 0, or -1. */
 extern int _PyIONibbler_closed(PyObject *buffered);
-/* The size of the buffer's blocks. */
-extern Py_ssize_t _PyIONibbler_capacity(PyObject *buffered);
 
 /* Shortcut to the core of the IncrementalNewlineDecoder.decode method */
 extern PyObject *_PyIncrementalNewlineDecoder_decode(
