@@ -473,6 +473,35 @@ class SlowDeviceTest:
                 self.assertRaises(type(exc), f.readline)
                 self.assertEqual(f.detach().read(), data[6:])
 
+    def test_text_read_error_keeps_text_as_decoded(self):
+        # A read() through the decoder that fails gives back the text it
+        # took in pieces as it was decoded, not as returned ("\r\n" made
+        # "\n"), so that tell() and seek() count the characters right.
+        if not self.is_nibbler:
+            self.skipTest("a long read before a raw error is lost")
+        text = "".join(f"{i}\r\n" for i in range(10_000))
+        data = text.encode("utf-16-le")
+
+        class Raw(make_scripted_reader(self.RawIOBase)):
+            def seekable(self):
+                return True
+            def tell(self):
+                return self.pos
+            def seek(self, pos, whence=0):
+                self.pos = pos + (0, self.pos, len(self.data))[whence]
+                return self.pos
+
+        raw = Raw(data, [4096] * 8 + [TimeoutError("timed out")])
+        f = self.TextIOWrapper(self.BufferedReader(raw, 4096),
+                               encoding="utf-16-le")
+        self.assertEqual(f.read(2), "0\n")
+        self.assertRaises(TimeoutError, f.read)
+        self.assertEqual(f.read(4), "1\n2\n")
+        pos = f.tell()
+        self.assertEqual(f.read(4), "3\n4\n")
+        f.seek(pos)
+        self.assertEqual(f.read(4), "3\n4\n")
+
     def test_read_all_error_keeps_data(self):
         # read() of a raw stream with only RawIOBase.readall() keeps what
         # it read before a raw read raised.

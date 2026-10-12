@@ -1529,7 +1529,7 @@ text_read_decoder(textio *self, Py_ssize_t want, int line)
     if (store_begin(&st, 1) < 0) {
         return NULL;
     }
-    PyObject *pieces = NULL, *kchars = NULL;
+    PyObject *pieces = NULL, *kchars = NULL, *kraw = NULL;
     Py_ssize_t chunk = FT_ATOMIC_LOAD_SSIZE_RELAXED(self->chunk_size);
     Py_ssize_t kpos = 0, klost = 0;
     unsigned long long kflags = 0;
@@ -1547,12 +1547,27 @@ text_read_decoder(textio *self, Py_ssize_t want, int line)
             PyObject *text = text_take(self, self->dchars, self->dpos, want,
                                        line, final, more, &k, &found, &note);
             int end = found || final || st.blocked;
+            if (text == NULL && k > 0) {
+                goto fail;
+            }
             if (k > 0 && (end || more)) {
                 if (!end && kchars == NULL) {
                     kchars = Py_NewRef(self->dchars);
                     kpos = self->dpos;
                     kflags = self->dflags;
                     klost = self->dlost + PyBytes_GET_SIZE(self->dbytes);
+                }
+                if (!end) {
+                    /* As decoded ("\r\n" not made "\n"), to give back. */
+                    PyObject *raw = (k == PyUnicode_GET_LENGTH(text)
+                                     ? Py_NewRef(text)
+                                     : PyUnicode_Substring(self->dchars,
+                                                           self->dpos,
+                                                           self->dpos + k));
+                    if (raw == NULL || add_piece(&kraw, raw) < 0) {
+                        Py_DECREF(text);
+                        goto fail;
+                    }
                 }
                 self->dpos += k;
                 text_note(self, note);
@@ -1609,6 +1624,7 @@ text_read_decoder(textio *self, Py_ssize_t want, int line)
     }
     store_end(&st, 1);
     Py_XDECREF(kchars);
+    Py_XDECREF(kraw);
     if (pieces == NULL && st.blocked) {
         _PyIO_set_read_blocking_error();
         return NULL;
@@ -1621,13 +1637,13 @@ fail:
     if (kchars != NULL && self->dchars != NULL) {
         /* Give back the pieces (the exception is kept). */
         PyObject *exc = PyErr_GetRaisedException();
-        PyObject *taken = join_pieces(pieces);
+        PyObject *taken = join_pieces(kraw);
         PyObject *parts = taken == NULL ? NULL : Py_BuildValue(
             "(NNN)", PyUnicode_Substring(kchars, 0, kpos), taken,
             PyUnicode_Substring(self->dchars, self->dpos, PY_SSIZE_T_MAX));
         PyObject *all = parts ? PyUnicode_Join(&_Py_STR(empty), parts) : NULL;
         Py_XDECREF(parts);
-        pieces = NULL;
+        kraw = NULL;
         if (all == NULL) {
             textio_drop_reads(self);
         }
@@ -1641,6 +1657,7 @@ fail:
         PyErr_SetRaisedException(exc);
     }
     Py_XDECREF(kchars);
+    Py_XDECREF(kraw);
     Py_XDECREF(pieces);
     return NULL;
 }
