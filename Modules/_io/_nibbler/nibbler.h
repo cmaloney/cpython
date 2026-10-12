@@ -309,11 +309,24 @@ typedef struct nibbler_end {
        no end of line (see nibbler_noline()); used with the lock only. */
     Py_ssize_t done;
     int writing;
+    /* Free-threaded builds only, used with the lock.  hold (reading): it
+       stays held when the lock is released, while the caller wants that
+       (as text gathering a long line, see buffered_text_peek_locked()).
+       opened: it was opened (see nibbler_open()); before that, no thread
+       without the lock can have used it (see nibbler_drop_end()). */
+    uint8_t hold;
+    uint8_t opened;
     /* Tells this end from the nibbler's others (never reused, as the
        nibbler's ends count only grows), so that, reading, it and an
        offset in the block always name the same bytes. */
     uint64_t id;
 } nibbler_end;
+
+#ifdef Py_GIL_DISABLED
+#  define NIBBLER_END_HOLD(e) ((e)->hold)
+#else
+#  define NIBBLER_END_HOLD(e) 0
+#endif
 
 /* Without the lock: the end, if it goes in the direction given. */
 static inline nibbler_end *
@@ -367,12 +380,12 @@ nibbler_open(nibbler *n)
     if (!e->writing) {
         /* At the unread bytes. */
         p = ~FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
-        if (e->done > p || n->hold_reading) {
+        if (e->done > p || n->hold_reading || NIBBLER_END_HOLD(e)) {
             /* A readline() found no end of line in the unread bytes (see
                nibbler_noline()): stay held, so that reads without the lock
                fail (lines would be looked for in those bytes again), and
                go through the lock until they are taken.  Also while the
-               caller wants that. */
+               caller wants that (hold, or hold_reading). */
             return;
         }
     }
@@ -389,6 +402,9 @@ nibbler_open(nibbler *n)
             e->limit, p + Py_MIN(n->threshold - n->list.nbytes,
                                  PyBytes_GET_SIZE(e->block) - p));
     }
+#ifdef Py_GIL_DISABLED
+    e->opened = 1;
+#endif
     FT_ATOMIC_STORE_SSIZE_RELEASE(e->pos, p);
 }
 
@@ -409,10 +425,16 @@ nibbler_drop_end(nibbler *n)
             ((_PyThreadStateImpl *)_PyThreadState_GET())->qsbr->shared);
         Py_DECREF(e->block);
     }
+    else if (e->opened) {
+        _PyObject_XDecRefDelayed(e->block);
+    }
     else
 #endif
     {
-        _PyObject_XDecRefDelayed(e->block);
+        /* No thread read through the end (as when it stayed held while a
+           long line grew its block, see nibbler_open()): the block may go
+           at once, rather than when the delayed frees are processed. */
+        Py_DECREF(e->block);
     }
     _PyMem_FreeDelayed(e, sizeof(*e));
 }
@@ -428,7 +450,7 @@ nibbler_new_end(nibbler *n, PyObject *block, Py_ssize_t pos,
         return -1;
     }
     *e = (nibbler_end){Py_NewRef(block), ~pos, limit, writing ? pos : 0,
-                       writing, ++n->ends};
+                       writing, 0, 0, ++n->ends};
     nibbler_drop_end(n);
     FT_ATOMIC_STORE_PTR_RELEASE(n->end, e);
     return 0;
@@ -821,12 +843,13 @@ nibbler_claim(nibbler_end *e, Py_ssize_t want, int exact, Py_ssize_t *start)
 static inline Py_ssize_t
 nibbler_claim_line(nibbler_end *e, Py_ssize_t limit, Py_ssize_t *start)
 {
-    const char *base = PyBytes_AS_STRING(e->block);
     Py_ssize_t c = FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
     for (;;) {
         if (c < 0) {
             return -1;
         }
+        /* (Only once it was opened, see nibbler_drop_end().) */
+        const char *base = PyBytes_AS_STRING(e->block);
         Py_ssize_t k = nibbler_line_length(base, c, nibbler_end_limit(e),
                                            limit);
         if (k < 0) {

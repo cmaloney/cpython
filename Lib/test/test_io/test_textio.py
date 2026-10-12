@@ -1304,11 +1304,9 @@ class TextIOWrapperTest:
         # that it can be kept if the stream would block) stops growing
         # once the line is too long to keep: a long line over a seekable
         # buffer costs no extra copy of its bytes.  The nibbler keeps the
-        # line's bytes in the buffer until it is read whole, and decodes
-        # them once, into its text.
-        if self.is_nibbler and support.Py_GIL_DISABLED:
-            self.skipTest("free-threaded: the blocks that a long line "
-                          "outgrows are freed only after the call")
+        # line's bytes in the buffer until it is read whole (the blocks it
+        # outgrows are freed at once, also with free threading), and
+        # decodes them once, into its text.
         import tracemalloc
         n = 4 * 1024 * 1024
         data = b"x" * n + b"\n"

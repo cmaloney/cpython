@@ -3506,6 +3506,8 @@ buffered_text_peek_locked(buffered *self, Py_ssize_t need, morsel *m,
     /* Until there are enough: fewer means the end of the stream.  (Other
        threads may have taken bytes while this one waited for the lock, so
        one fill may not do.) */
+    int filled = 0;
+    (void)filled;
     while (r == 0 && nibbler_unread(&self->nib) < need) {
         if (self->nib.capacity == 0
             || need > TEXT_PEEK_MAX(self->nib.capacity))
@@ -3520,8 +3522,19 @@ buffered_text_peek_locked(buffered *self, Py_ssize_t need, morsel *m,
             break;
         }
         r = n == -1 ? -1 : n == WOULD_BLOCK ? _PyIO_NIBBLER_BLOCKED : 0;
+        filled = 1;
     }
     Py_ssize_t unread = nibbler_unread(&self->nib);
+#ifdef Py_GIL_DISABLED
+    if (filled && unread > 0 && self->nib.end->block != self->nib.block) {
+        /* Gathering a long line into a block grown for it (see
+           buffered_fill_ex()): keep the end held until text takes bytes,
+           so that, as no thread can use it without the lock, the block is
+           released at once when it grows again (see nibbler_drop_end()),
+           rather than after the call.  (With the GIL, it is anyway.) */
+        self->nib.end->hold = 1;
+    }
+#endif
     if (r >= 0 && unread > 0) {
         *m = (morsel){Py_NewRef(self->nib.end->block),
                       nibbler_unread_ptr(&self->nib), unread};
@@ -3579,6 +3592,9 @@ buffered_text_advance_locked(buffered *self, uint64_t key, Py_ssize_t off,
             && nibbler_reading_pos(e) == off
             && nibbler_unread(&self->nib) >= n)
         {
+#ifdef Py_GIL_DISABLED
+            e->hold = 0;
+#endif
             if (copy != NULL) {
                 memcpy(copy, nibbler_unread_ptr(&self->nib), n);
             }

@@ -621,6 +621,22 @@ class SlowDeviceTest:
             large = min(read_line(512 * 1024) for _ in range(3))
         self.assertLess(large, 24 * small)
 
+    def test_readline_long_line_memory(self):
+        # A long line takes the room of its bytes about twice at most: the
+        # nibbler gathers it in a block grown for it, and releases the
+        # blocks it outgrew at once, also with free threading.
+        import tracemalloc
+        n = 4 * 1024 * 1024
+        f = self.BufferedReader(self.BytesIO(b"x" * n + b"\n"))
+        tracemalloc.start()
+        try:
+            line = f.readline()
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(len(line), n + 1)
+        self.assertLess(peak, 2.5 * n)
+
     def test_readline_after_seek_back_over_partial_line(self):
         # A readline() that kept a partial line (here because the raw
         # stream raised) remembers where it looked for the end of the
