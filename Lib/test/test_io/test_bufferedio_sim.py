@@ -434,6 +434,45 @@ class SlowDeviceTest:
         self.assertEqual(f.readline(), "ab\xe9cd\n")
         self.assertEqual(f.readline(), "ef")
 
+    def test_text_readline_error_keeps_long_line(self):
+        # gh-51571 with a line longer than the text layer's chunk, through
+        # a codec's decoder (UTF-16): the nibbler takes its text in pieces
+        # as they are decoded, and a raw error loses none of them.  tell(),
+        # seek() and detach() then work from the start of the line.
+        if not self.is_nibbler:
+            self.skipTest("a long line read before a raw error is lost")
+        line = "".join(chr(0x61 + i % 26) for i in range(40_000)) + "\n"
+        data = (line + "tail").encode("utf-16-le")
+
+        class Raw(make_scripted_reader(self.RawIOBase)):
+            def seekable(self):
+                return True
+            def tell(self):
+                return self.pos
+            def seek(self, pos, whence=0):
+                self.pos = pos + (0, self.pos, len(self.data))[whence]
+                return self.pos
+
+        for exc in (TimeoutError("timed out"), KeyboardInterrupt()):
+            with self.subTest(exc=type(exc)):
+                raw = Raw(data, [30_000, 30_000, exc])
+                f = self.TextIOWrapper(self.BufferedReader(raw, 4096),
+                                       encoding="utf-16-le")
+                self.assertRaises(type(exc), f.readline)
+                pos = f.tell()
+                self.assertEqual(f.readline(), line)
+                self.assertEqual(f.read(), "tail")
+                f.seek(pos)
+                self.assertEqual(f.readline(), line)
+                # Again, then detach(): the buffer goes back to where the
+                # text is.
+                raw = Raw(data, [30_000, 30_000, exc])
+                f = self.TextIOWrapper(self.BufferedReader(raw, 4096),
+                                       encoding="utf-16-le")
+                self.assertEqual(f.read(3), line[:3])
+                self.assertRaises(type(exc), f.readline)
+                self.assertEqual(f.detach().read(), data[6:])
+
     def test_read_all_error_keeps_data(self):
         # read() of a raw stream with only RawIOBase.readall() keeps what
         # it read before a raw read raised.

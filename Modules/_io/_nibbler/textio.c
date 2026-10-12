@@ -209,9 +209,11 @@ typedef struct {
     /* With the decoder, the characters came from the bytes taken last,
        dspan, which the decoder started on with flags dflags; at the
        store's position, the decoder holds nothing and has flags `flags`
-       (see dflags_t).  Used only with the
+       (see dflags_t).  The dlost bytes before dspan made the characters
+       too, but aren't kept (see text_give_back()).  Used only with the
        critical section. */
     PyObject *dspan;
+    Py_ssize_t dlost;
     dflags_t dflags;
     dflags_t flags;
 
@@ -533,7 +535,11 @@ typedef struct {
        kskip: skip_lf where it started.  With a native codec, copies of the
        bytes, kbuf[0:klen] (kcap bytes of room); with the decoder, the
        characters chars[kci:kend] of the cache while its chars are kchars
-       (NULL: they aren't any more). */
+       (NULL: they aren't any more).  When the call took all of them, the
+       decoder's next characters replace them in the cache, and they go to
+       kprev (NULL: none), a list of what the cache had before kchars:
+       then the call took from kpci in kprev's first, which came from
+       bytes with flags kpflags, kpbytes bytes for all of kprev. */
     char keep;
     char taken;
     uint8_t kskip;
@@ -543,6 +549,10 @@ typedef struct {
     PyObject *kchars;
     Py_ssize_t kci;
     Py_ssize_t kend;
+    PyObject *kprev;
+    Py_ssize_t kpci;
+    Py_ssize_t kpbytes;
+    dflags_t kpflags;
     /* The cache as this call knows it: a copy (copy), with free threading
        (see "Locking"); with the GIL, the cache itself. */
     tcache *c;
@@ -759,6 +769,7 @@ textio_drop_chars(textio *self)
     cache_put(self, c);
     cache_release(c);
     Py_CLEAR(self->dspan);
+    self->dlost = 0;
 }
 
 #ifdef Py_GIL_DISABLED
@@ -1337,10 +1348,11 @@ decoder_setstate(PyObject *decoder, dflags_t flags)
 
 /* The decoder's decoding of s[0:len], from (b"", flags): *used gets the
    bytes it decoded (not those it holds, which it is made to forget),
-   *flags its flags after them. */
+   *flags its flags after them.  With bytes, *bytes gets them as a bytes
+   object when they are all of s[0:len] (else NULL). */
 static PyObject *
 decoder_decode(PyObject *decoder, const char *s, Py_ssize_t len, int final,
-               Py_ssize_t *used, dflags_t *flags)
+               Py_ssize_t *used, dflags_t *flags, PyObject **bytes)
 {
     if (decoder_setstate(decoder, *flags) < 0) {
         return NULL;
@@ -1351,7 +1363,6 @@ decoder_decode(PyObject *decoder, const char *s, Py_ssize_t len, int final,
     }
     PyObject *chars = PyObject_CallMethodObjArgs(
         decoder, &_Py_ID(decode), input, final ? Py_True : Py_False, NULL);
-    Py_DECREF(input);
     if (chars != NULL && !PyUnicode_Check(chars)) {
         PyErr_Format(PyExc_TypeError,
                      "decoder should return a string result, not '%.200s'",
@@ -1362,10 +1373,17 @@ decoder_decode(PyObject *decoder, const char *s, Py_ssize_t len, int final,
     if (chars == NULL || decoder_flags(decoder, flags, &held) < 0
         || (held > 0 && decoder_setstate(decoder, *flags) < 0))
     {
+        Py_DECREF(input);
         Py_XDECREF(chars);
         return NULL;
     }
     *used = len - held;
+    if (bytes != NULL && held == 0) {
+        *bytes = input;
+    }
+    else {
+        Py_DECREF(input);
+    }
     return chars;
 }
 
@@ -1387,7 +1405,7 @@ decoder_offset(textio *self, PyObject *decoder, Py_ssize_t ci,
         Py_ssize_t mid = lo + (hi - lo) / 2;
         *flags = dflags;
         PyObject *chars = decoder_decode(decoder, PyBytes_AS_STRING(span),
-                                         mid, 0, &used, flags);
+                                         mid, 0, &used, flags, NULL);
         if (chars == NULL) {
             goto done;
         }
@@ -1575,6 +1593,40 @@ native_more(textio *self, store *st)
     return (text_valid(self, st) ? st->c->kbytes : 0) < st->m.len;
 }
 
+/* The call can't give back the characters it took any more. */
+static void
+text_keep_clear(store *st)
+{
+    Py_CLEAR(st->kchars);
+    Py_CLEAR(st->kprev);
+}
+
+/* The decoder's next characters replace kchars, all of which the call
+   took: keep them in kprev (see store).  Without the memory for it, they
+   can't be given back. */
+static void
+text_keep_prev(textio *self, store *st)
+{
+    if (st->kprev == NULL) {
+        st->kprev = PyList_New(0);
+        if (st->kprev == NULL) {
+            PyErr_Clear();
+            text_keep_clear(st);
+            return;
+        }
+        st->kpci = st->kci;
+        st->kpbytes = 0;
+        st->kpflags = self->dflags;
+    }
+    if (PyList_Append(st->kprev, st->kchars) < 0) {
+        PyErr_Clear();
+        text_keep_clear(st);
+        return;
+    }
+    st->kpbytes += self->dlost + PyBytes_GET_SIZE(self->dspan);
+    Py_CLEAR(st->kchars);
+}
+
 /* The codec's decoder: decode the bytes after those it held (left in the
    store), reading more if there are none, and take them.  Returns 1 if
    there may be more characters, 0 if not for now, or -1. */
@@ -1595,11 +1647,14 @@ decoder_more(textio *self, store *st)
             return 0;
         }
     }
-    /* As for native codecs, more than twice what the decoder held.  (dspan
-       is gone if reconfigure() ran while this call waited.) */
+    /* As for native codecs, more than twice what the decoder held, and
+       as much as before while there are characters left, or the call takes
+       them all (a long line: then what it decodes replaces them, see
+       below).  (dspan is gone if reconfigure() ran while this call
+       waited.) */
     Py_ssize_t avail = text_avail(self, st);
-    Py_ssize_t dspan = (avail && self->dspan ? PyBytes_GET_SIZE(self->dspan)
-                        : 0);
+    Py_ssize_t dspan = ((avail || st->kchars != NULL) && self->dspan
+                        ? PyBytes_GET_SIZE(self->dspan) : 0);
     Py_ssize_t span = Py_MIN(st->m.len,
                              Py_MAX(Py_MAX(FT_ATOMIC_LOAD_SSIZE_RELAXED(
                                                self->chunk_size), dspan),
@@ -1616,8 +1671,10 @@ decoder_more(textio *self, store *st)
         return -1;
     }
     dflags_t flags = self->flags;
+    /* The bytes decoded, as dspan will keep them. */
+    PyObject *bytes = NULL;
     PyObject *chars = decoder_decode(decoder, st->m.ptr, span, final, &used,
-                                     &flags);
+                                     &flags, &bytes);
     Py_ssize_t start, end;
     if (chars == NULL && PyErr_ExceptionMatches(PyExc_UnicodeDecodeError)
         && text_decode_error(&start, &end) == 0)
@@ -1630,7 +1687,7 @@ decoder_more(textio *self, store *st)
             final = 0;
             flags = self->flags;
             chars = decoder_decode(decoder, st->m.ptr, span, 0, &used,
-                                   &flags);
+                                   &flags, &bytes);
             st->stop = 1;
         }
         else if (st->taken) {
@@ -1651,9 +1708,10 @@ decoder_more(textio *self, store *st)
             return -1;
         }
     }
-    PyObject *bytes = chars ? PyBytes_FromStringAndSize(st->m.ptr, used)
-                            : NULL;
-    int r = bytes ? store_take(self, st, used) : -1;
+    if (chars != NULL && bytes == NULL) {
+        bytes = PyBytes_FromStringAndSize(st->m.ptr, used);
+    }
+    int r = chars && bytes ? store_take(self, st, used) : -1;
     if (r <= 0) {
         /* Another thread took bytes: look again. */
         Py_XDECREF(chars);
@@ -1671,17 +1729,30 @@ decoder_more(textio *self, store *st)
         && (st->c->chars != st->kchars || st->c->ci != st->kend))
     {
         /* Another call read meanwhile (see text_give_back()). */
-        Py_CLEAR(st->kchars);
+        text_keep_clear(st);
+    }
+    int all_taken = (st->c->chars != NULL
+                     && st->c->ci == PyUnicode_GET_LENGTH(st->c->chars));
+    if (all_taken && st->kchars != NULL && self->dspan != NULL) {
+        /* The call took them all: they are replaced, not appended to
+           (which would copy them with every decode, and keep their bytes,
+           while a long line is read), and kept to give back. */
+        text_keep_prev(self, st);
     }
     if (st->c->chars == NULL || self->dspan == NULL
-        || (st->c->ci == PyUnicode_GET_LENGTH(st->c->chars)
-            && st->kchars == NULL))
+        || (all_taken && st->kchars == NULL))
     {
         Py_XSETREF(st->c->chars, chars);
         Py_XSETREF(self->dspan, bytes);
+        self->dlost = 0;
         st->c->ci = 0;
         self->dflags = self->flags;
         st->c->cr_at = -1;
+        if (st->kprev != NULL) {
+            /* What the call takes next. */
+            st->kchars = Py_NewRef(chars);
+            st->kci = st->kend = 0;
+        }
     }
     else {
         PyUnicode_Append(&st->c->chars, chars);
@@ -1839,7 +1910,7 @@ text_commit(textio *self, store *st, Py_ssize_t k)
                  && (st->c->chars != st->kchars || ci != st->kend))
         {
             /* Another call read meanwhile (see text_give_back()). */
-            Py_CLEAR(st->kchars);
+            text_keep_clear(st);
         }
         st->kend = ci + k;
     }
@@ -1961,11 +2032,41 @@ text_give_back(textio *self, store *st, tkept *out)
         if (st->kchars != NULL && st->c->chars == st->kchars
             && st->c->ci == st->kend)
         {
-            st->c->ci = st->kci;
-            st->c->skip_lf = st->kskip;
-            st->c->cr_at = -1;
-            cache_put(self, st->c);
             r = GIVEN;
+            if (st->kprev != NULL) {
+                /* The characters kept before them too, all made by the
+                   bytes since kprev's first's; the bytes before dspan
+                   aren't kept (tell() then gives the position of their
+                   start, and how many characters to skip). */
+                PyObject *chars = NULL;
+                if (PyList_Append(st->kprev, st->kchars) == 0) {
+                    chars = PyUnicode_Join(
+                        Py_GetConstant(Py_CONSTANT_EMPTY_STR), st->kprev);
+                }
+                if (chars == NULL) {
+                    r = -1;
+                }
+                else {
+                    Py_SETREF(st->c->chars, chars);
+                    st->c->ci = st->kpci;
+                    st->c->renew = 1;
+                    st->c->nl = 0;
+                    self->dlost += st->kpbytes;
+                    self->dflags = st->kpflags;
+                }
+            }
+            else {
+                st->c->ci = st->kci;
+            }
+            if (r == GIVEN) {
+                st->c->skip_lf = st->kskip;
+                st->c->cr_at = -1;
+                if (cache_put(self, st->c) < 0) {
+                    /* (Only a new span, with free threading, can fail.) */
+                    textio_drop_chars(self);
+                    r = -1;
+                }
+            }
         }
     }
     else {
@@ -1996,7 +2097,7 @@ text_give_back(textio *self, store *st, tkept *out)
     }
     st->taken = 0;
     st->klen = 0;
-    Py_CLEAR(st->kchars);
+    text_keep_clear(st);
     if (exc != NULL) {
         PyErr_SetRaisedException(exc);
     }
@@ -2693,9 +2794,12 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
     store st = {.cf = cf, .buffer = cf->buffer, .all = n < 0 && !line,
                 .line = line ? 1 + (n < 0) : 0, .lockfree = lockfree,
                 .keep = 1, .kbuf = kstack, .kcap = KEEP_STACK};
-    /* The text so far: res, then in writer once there are two pieces. */
+    /* The text so far: res, then in parts once there are two pieces
+       (joined once at the end: the pieces of a long line read with the
+       decoder are the characters it keeps to give back, see
+       decoder_more()). */
     PyObject *res = NULL;
-    _PyUnicodeWriter writer;
+    PyObject *parts = NULL;
     int pieces = 0;
     if (!cf->readable) {
         conf_put(cf);
@@ -2766,22 +2870,29 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
                 goto error;
             }
         }
-        if (k == 0 && avail > have) {
+        /* A line longer than _CHUNK_SIZE with the decoder, which decodes
+           the bytes of the line once taken: its text so far is taken (and
+           kept, see decoder_more()), so that what the decoder makes next
+           needn't be appended to it. */
+        int part = (k == 0 && line && avail > have
+                    && cf->codec == CODEC_DECODER
+                    && avail > FT_ATOMIC_LOAD_SSIZE_RELAXED(self->chunk_size));
+        if (k == 0 && avail > have && !part) {
             /* Undecided ("\r" last, or no end of line yet): more. */
             have = avail;
             continue;
         }
         if (k == 0 && avail > 0 && line
-            && (st.status == _PyIO_NIBBLER_FULL
+            && (part || st.status == _PyIO_NIBBLER_FULL
                 || (st.status == _PyIO_NIBBLER_BLOCKED
                     && (taken || avail > FT_ATOMIC_LOAD_SSIZE_RELAXED(
                                              self->chunk_size)))))
         {
-            /* The buffer can't hold more of the line, or it would block
-               and is longer than _CHUNK_SIZE (the text layer's buffer
-               size, as _io's and _pyio's keep), too long to keep for the
-               next call: take it so far, but a last "\r"
-               (that may begin a "\r\n", universal or the newline: the
+            /* A long line as above, or the buffer can't hold more of the
+               line, or it would block and is longer than _CHUNK_SIZE (the
+               text layer's buffer size, as _io's and _pyio's keep), too
+               long to keep for the next call: take it so far, but a last
+               "\r" (that may begin a "\r\n", universal or the newline: the
                buffer holds 8 bytes or more, so that there are others). */
             k = avail - ((cf->readuniversal
                           || PyUnicode_GET_LENGTH(cf->readnl) == 2)
@@ -2792,7 +2903,7 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
             if (text == NULL) {
                 goto error;
             }
-            found = st.status == _PyIO_NIBBLER_BLOCKED;
+            found = !part && st.status == _PyIO_NIBBLER_BLOCKED;
             taken = 1;
         }
         if (k == 0) {
@@ -2824,12 +2935,12 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
         }
         else {
             if (pieces == 2) {
-                _PyUnicodeWriter_Init(&writer);
-                r = _PyUnicodeWriter_WriteStr(&writer, res);
+                parts = PyList_New(0);
+                r = parts == NULL ? -1 : PyList_Append(parts, res);
                 Py_CLEAR(res);
             }
             if (r >= 0) {
-                r = _PyUnicodeWriter_WriteStr(&writer, text);
+                r = PyList_Append(parts, text);
             }
             Py_DECREF(text);
             if (r < 0) {
@@ -2843,15 +2954,19 @@ text_read_impl(textio *self, Py_ssize_t n, int line, int lockfree,
     }
     /* Done: nothing to give back. */
     st.klen = 0;
-    Py_CLEAR(st.kchars);
+    text_keep_clear(&st);
     if (st.kbuf != kstack) {
         PyMem_Free(st.kbuf);
     }
     store_release(&st);
     cache_release(st.c);
     conf_put(cf);
-    return (pieces > 1 ? _PyUnicodeWriter_Finish(&writer)
-            : res ? res : Py_GetConstant(Py_CONSTANT_EMPTY_STR));
+    if (parts != NULL) {
+        res = PyUnicode_Join(Py_GetConstant(Py_CONSTANT_EMPTY_STR), parts);
+        Py_DECREF(parts);
+        return res;
+    }
+    return res ? res : Py_GetConstant(Py_CONSTANT_EMPTY_STR);
 
 error:
     if (st.retry) {
@@ -2866,7 +2981,7 @@ error:
         /* Retrying, but the bytes couldn't be handed over. */
         *retry = 0;
     }
-    Py_CLEAR(st.kchars);
+    text_keep_clear(&st);
     if (st.kbuf != kstack) {
         PyMem_Free(st.kbuf);
     }
@@ -2874,9 +2989,7 @@ error:
     cache_release(st.c);
     conf_put(cf);
     Py_XDECREF(res);
-    if (pieces > 1) {
-        _PyUnicodeWriter_Dealloc(&writer);
-    }
+    Py_XDECREF(parts);
     return NULL;
 }
 
@@ -3114,6 +3227,41 @@ text_finish_encoder(textio *self, tconf *cf)
     return r < 0 ? -2 : 0;
 }
 
+/* The dlost bytes before dspan weren't kept (see text_give_back()): read
+   them again, from the seekable buffer, with dspan.  The buffer is at the
+   store's position again afterwards, without rbuf. */
+static int
+decoder_reread(textio *self, tconf *cf)
+{
+    Py_ssize_t len = self->dlost + PyBytes_GET_SIZE(self->dspan);
+    PyObject *pos = store_tell(self, cf->buffer);
+    Py_off_t p = pos ? PyLong_AsOff_t(pos) : -1;
+    Py_XDECREF(pos);
+    if (p == -1 && PyErr_Occurred()) {
+        return -1;
+    }
+    Py_CLEAR(self->rbuf);
+    PyObject *res = _PyObject_CallMethod(cf->buffer, &_Py_ID(seek), "(O&)",
+                                         PyLong_FromOff_t, p - len);
+    if (res == NULL) {
+        return -1;
+    }
+    Py_DECREF(res);
+    PyObject *b = _PyObject_CallMethod(cf->buffer, &_Py_ID(read), "n", len);
+    if (b == NULL) {
+        return -1;
+    }
+    if (!PyBytes_Check(b) || PyBytes_GET_SIZE(b) != len) {
+        Py_DECREF(b);
+        PyErr_SetString(PyExc_OSError,
+                        "could not read again the bytes of the text");
+        return -1;
+    }
+    Py_SETREF(self->dspan, b);
+    self->dlost = 0;
+    return 0;
+}
+
 /* The decoder's characters not returned yet came from bytes taken already:
    move the buffer back to the text position (past characters a byte
    decoded to as a group, if it is among them). */
@@ -3124,6 +3272,7 @@ decoder_sync(textio *self, tconf *cf)
     dflags_t flags;
     (void)cache_chars(self, &ci);
     if (!cf->seekable
+        || (self->dlost > 0 && decoder_reread(self, cf) < 0)
         || decoder_offset(self, cf->decoder, ci, &off, &flags) < 0)
     {
         textio_drop_chars(self);
@@ -3473,9 +3622,11 @@ text_tell(textio *self, tconf *cf)
     if (chars != NULL && PyUnicode_GET_LENGTH(chars) > ci) {
         /* The byte position of the text position, if there is one; else
            where the characters were decoded from, and how many to skip. */
-        Py_ssize_t off, start = -PyBytes_GET_SIZE(self->dspan);
+        Py_ssize_t off = 0;
+        Py_ssize_t start = -(self->dlost + PyBytes_GET_SIZE(self->dspan));
         dflags_t dflags = self->dflags;
-        int r = decoder_offset(self, cf->decoder, ci, &off, &flags);
+        int r = (self->dlost > 0 ? 0
+                 : decoder_offset(self, cf->decoder, ci, &off, &flags));
         if (r < 0) {
             Py_DECREF(pos);
             return NULL;
@@ -4278,6 +4429,7 @@ text_drop_cache(textio *self)
     self->cache = (tcache){.cr_at = -1};
 #endif
     Py_CLEAR(self->dspan);
+    self->dlost = 0;
 }
 
 static int
