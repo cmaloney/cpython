@@ -2296,22 +2296,26 @@ _io__Buffered_truncate_impl(buffered *self, PyTypeObject *cls, PyObject *pos)
     return res;
 }
 
+/* A subclass's readline(). */
+Py_NO_INLINE static PyObject *
+buffered_readline_method(PyObject *op)
+{
+    PyObject *line = PyObject_CallMethodNoArgs(op, &_Py_ID(readline));
+    if (line && line != Py_None && !PyBytes_Check(line)) {
+        PyErr_Format(PyExc_OSError,
+                     "readline() should have returned a bytes object, "
+                     "not '%.200s'", Py_TYPE(line)->tp_name);
+        Py_CLEAR(line);
+    }
+    return line;
+}
+
 static PyObject *
 buffered_iternext(PyObject *op)
 {
-    PyObject *line;
-    if (_PyIO_is_nibbler_buffered_type(Py_TYPE(op))) {
-        line = _io__Buffered_readline_impl(buffered_cast(op), -1);
-    }
-    else {
-        line = PyObject_CallMethodNoArgs(op, &_Py_ID(readline));
-        if (line && line != Py_None && !PyBytes_Check(line)) {
-            PyErr_Format(PyExc_OSError,
-                         "readline() should have returned a bytes object, "
-                         "not '%.200s'", Py_TYPE(line)->tp_name);
-            Py_CLEAR(line);
-        }
-    }
+    PyObject *line = (_PyIO_is_nibbler_buffered_type(Py_TYPE(op))
+                      ? _io__Buffered_readline_impl(buffered_cast(op), -1)
+                      : buffered_readline_method(op));
     if (line == Py_None) {
         /* Would block: StopIteration would look like EOF. */
         Py_DECREF(line);
@@ -3072,8 +3076,8 @@ _PyIO_is_nibbler_buffered_type(PyTypeObject *tp)
     }
     void *token = ((PyHeapTypeObject *)tp)->ht_token;
     return (token == &nibbler_bufferedreader_spec ||
-            token == &nibbler_bufferedwriter_spec ||
-            token == &nibbler_bufferedrandom_spec);
+            token == &nibbler_bufferedrandom_spec ||
+            token == &nibbler_bufferedwriter_spec);
 }
 
 static int

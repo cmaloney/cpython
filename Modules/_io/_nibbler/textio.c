@@ -1626,22 +1626,26 @@ _io_TextIOWrapper_readline_impl(textio *self, Py_ssize_t size)
     return text_read(self, size < 0 ? -1 : size, 1);
 }
 
+/* A subclass's readline(). */
+Py_NO_INLINE static PyObject *
+text_readline_method(PyObject *op)
+{
+    PyObject *line = PyObject_CallMethodNoArgs(op, &_Py_ID(readline));
+    if (line != NULL && !PyUnicode_Check(line)) {
+        PyErr_Format(PyExc_OSError,
+                     "readline() should have returned a str object, "
+                     "not '%.200s'", Py_TYPE(line)->tp_name);
+        Py_CLEAR(line);
+    }
+    return line;
+}
+
 static PyObject *
 textiowrapper_iternext(PyObject *op)
 {
-    PyObject *line;
-    if (textio_exact(textio_CAST(op))) {
-        line = text_read(textio_CAST(op), -1, 1);
-    }
-    else {
-        line = PyObject_CallMethodNoArgs(op, &_Py_ID(readline));
-        if (line != NULL && !PyUnicode_Check(line)) {
-            PyErr_Format(PyExc_OSError,
-                         "readline() should have returned a str object, "
-                         "not '%.200s'", Py_TYPE(line)->tp_name);
-            Py_CLEAR(line);
-        }
-    }
+    PyObject *line = (textio_exact(textio_CAST(op))
+                      ? text_read(textio_CAST(op), -1, 1)
+                      : text_readline_method(op));
     if (line != NULL && PyUnicode_GET_LENGTH(line) == 0) {
         /* EOF */
         Py_CLEAR(line);
