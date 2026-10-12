@@ -2470,12 +2470,15 @@ class TextIOWrapper(TextIOBase):
     def close(self):
         if self.buffer is not None and not self.closed:
             try:
-                self._finish_encoder()
+                b = self._encode_final()
                 try:
+                    if b:
+                        self.buffer.write(b)
                     self.flush()
                 except BaseException as exc:
-                    # Close completely, without the buffer's close() writing
-                    # the data out again (gh-83973, gh-55589).
+                    # A write failed: close completely, without the buffer's
+                    # close() writing the data out again (gh-83973,
+                    # gh-55589).
                     discard = getattr(self.buffer, "_discard_writes", None)
                     if discard is not None and (n := discard()):
                         _warn_discarded(n, isinstance(exc, BlockingIOError))
@@ -2484,14 +2487,18 @@ class TextIOWrapper(TextIOBase):
                 self.buffer.close()
 
     def _finish_encoder(self):
-        # gh-79792: give the encoder the end of the text, and write what
-        # it still held.  Only after it encoded text: a fresh or reset
-        # encoder holds nothing, but may still begin with a BOM.
+        b = self._encode_final()
+        if b:
+            self.buffer.write(b)
+
+    def _encode_final(self):
+        # gh-79792: give the encoder the end of the text, for the bytes it
+        # still held.  Only after it encoded text: a fresh or reset encoder
+        # holds nothing, but may still begin with a BOM.
         if self._encoder is not None and self._encoder_fed:
             self._encoder_fed = False
-            b = self._encoder.encode("", final=True)
-            if b:
-                self.buffer.write(b)
+            return self._encoder.encode("", final=True)
+        return b""
 
     @property
     def closed(self):

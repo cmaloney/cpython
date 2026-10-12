@@ -1181,6 +1181,34 @@ class SlowDeviceTest:
         self.assertEqual(raw.calls, 1)
         self.assertEqual(raw.received, b"")
 
+    def test_text_close_finish_encoder_error_no_retry(self):
+        # The same when the write of what the encoder held to the end
+        # (gh-79792) fails: the idna encoder holds the last label, which
+        # doesn't fit the buffer, and the write out of the buffer fails.
+        if self.is_nibbler:
+            self.skipTest("not fixed in the nibbler yet")
+        raw = self.scripted_writer([OSError(errno.EPIPE, "EPIPE")])
+        f = self.TextIOWrapper(self.BufferedWriter(raw, 64), encoding="idna")
+        f.write("x" * 60 + ".abcd")
+        with self.assertWarnsRegex(ResourceWarning,
+                                   "discarded 61 buffered bytes"):
+            with self.assertRaises(BrokenPipeError):
+                f.close()
+        self.assertTrue(f.closed)
+        self.assertEqual(raw.calls, 1)
+        self.assertEqual(raw.received, b"")
+        # When the encoder raises, nothing was written: the close() of the
+        # buffer writes what it holds.
+        raw = self.scripted_writer()
+        f = self.TextIOWrapper(self.BufferedWriter(raw, 64), encoding="idna")
+        f.write("abc." + "x" * 70)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ResourceWarning)
+            with self.assertRaises(UnicodeError):
+                f.close()
+        self.assertTrue(f.closed)
+        self.assertEqual(raw.received, b"abc.")
+
     def test_text_close_flush_error_no_retry_rwpair(self):
         # The same over a BufferedRWPair, as socket.makefile("rw") makes
         # in text mode: the pair discards its writer's pending data.
