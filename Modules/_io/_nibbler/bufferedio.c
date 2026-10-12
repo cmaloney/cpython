@@ -12,6 +12,7 @@
 #include "pycore_abstract.h"            // _PyNumber_Index()
 #include "pycore_fileutils.h"           // _PyFile_Flush()
 #include "pycore_import.h"              // _PyImport_SetModuleString()
+#include "pycore_modsupport.h"          // _PyArg_CheckPositional()
 #include "pycore_object.h"              // _PyObject_GC_UNTRACK()
 #include "pycore_pyatomic_ft_wrappers.h" // FT_ATOMIC_LOAD_PTR_RELAXED()
 #include "pycore_pyerrors.h"            // _PyErr_ChainExceptions1()
@@ -2334,17 +2335,36 @@ buffered_raw_call(buffered *self, PyObject *name)
     return res;
 }
 
+/* Getters of the attributes passed on in the same way: closure is the
+   name. */
 static PyObject *
-buffered_raw_getattr(buffered *self, PyObject *name)
+buffered_raw_getattr(PyObject *op, void *name)
 {
-    PyObject *raw = buffered_get_raw(self);
+    PyObject *raw = buffered_get_raw(buffered_cast(op));
     if (raw == NULL) {
         return NULL;
     }
-    PyObject *res = PyObject_GetAttr(raw, name);
+    PyObject *res = PyObject_GetAttr(raw, (PyObject *)name);
     Py_DECREF(raw);
     return res;
 }
+
+#define BUFFERED_RAW_METHOD(name)                                       \
+    static PyObject *                                                   \
+    buffered_pass_##name(PyObject *op, PyObject *Py_UNUSED(dummy))      \
+    {                                                                   \
+        return buffered_raw_call(buffered_cast(op), &_Py_ID(name));     \
+    }
+BUFFERED_RAW_METHOD(flush)
+BUFFERED_RAW_METHOD(seekable)
+BUFFERED_RAW_METHOD(readable)
+BUFFERED_RAW_METHOD(writable)
+BUFFERED_RAW_METHOD(fileno)
+BUFFERED_RAW_METHOD(isatty)
+#undef BUFFERED_RAW_METHOD
+
+#define RAW_METHODDEF(name) \
+    {#name, buffered_pass_##name, METH_NOARGS, #name "($self, /)\n--\n\n"},
 
 /* raw.flush() with the lock held, directly for an exact FileIO. */
 static int
@@ -2382,29 +2402,6 @@ buffered_flush_is_ours(buffered *self)
     }
     int r = PyDict_Contains(dict, &_Py_ID(flush));
     return r < 0 ? -1 : !r;
-}
-
-/*[clinic input]
-_io._Buffered.flush as _io__Buffered_simple_flush
-[clinic start generated code]*/
-
-static PyObject *
-_io__Buffered_simple_flush_impl(buffered *self)
-/*[clinic end generated code: output=29ebb3820db1bdfd input=f33ef045e7250767]*/
-{
-    return buffered_raw_call(self, &_Py_ID(flush));
-}
-
-/*[clinic input]
-@getter
-_io._Buffered.closed
-[clinic start generated code]*/
-
-static PyObject *
-_io__Buffered_closed_get_impl(buffered *self)
-/*[clinic end generated code: output=f08ce57290703a1a input=00b707b2517eaf8c]*/
-{
-    return buffered_raw_getattr(self, &_Py_ID(closed));
 }
 
 /*[clinic input]
@@ -2534,86 +2531,7 @@ _io__Buffered_detach_impl(buffered *self)
 
 /* Inquiries */
 
-/*[clinic input]
-_io._Buffered.seekable
-[clinic start generated code]*/
-
-static PyObject *
-_io__Buffered_seekable_impl(buffered *self)
-/*[clinic end generated code: output=90172abb5ceb6e8f input=7d35764f5fb5262b]*/
-{
-    return buffered_raw_call(self, &_Py_ID(seekable));
-}
-
-/*[clinic input]
-_io._Buffered.readable
-[clinic start generated code]*/
-
-static PyObject *
-_io__Buffered_readable_impl(buffered *self)
-/*[clinic end generated code: output=92afa07661ecb698 input=640619addb513b8b]*/
-{
-    return buffered_raw_call(self, &_Py_ID(readable));
-}
-
-/*[clinic input]
-_io._Buffered.writable
-[clinic start generated code]*/
-
-static PyObject *
-_io__Buffered_writable_impl(buffered *self)
-/*[clinic end generated code: output=4e3eee8d6f9d8552 input=b35ea396b2201554]*/
-{
-    return buffered_raw_call(self, &_Py_ID(writable));
-}
-
-/*[clinic input]
-@getter
-_io._Buffered.name
-[clinic start generated code]*/
-
-static PyObject *
-_io__Buffered_name_get_impl(buffered *self)
-/*[clinic end generated code: output=d2adf384051d3d10 input=5a60eb8d33149f6e]*/
-{
-    return buffered_raw_getattr(self, &_Py_ID(name));
-}
-
-/*[clinic input]
-@getter
-_io._Buffered.mode
-[clinic start generated code]*/
-
-static PyObject *
-_io__Buffered_mode_get_impl(buffered *self)
-/*[clinic end generated code: output=0feb205748892fa4 input=8d5e4c1fed38e6f0]*/
-{
-    return buffered_raw_getattr(self, &_Py_ID(mode));
-}
-
 /* Lower-level APIs */
-
-/*[clinic input]
-_io._Buffered.fileno
-[clinic start generated code]*/
-
-static PyObject *
-_io__Buffered_fileno_impl(buffered *self)
-/*[clinic end generated code: output=b717648d58a95ee3 input=768ea30b3f6314a7]*/
-{
-    return buffered_raw_call(self, &_Py_ID(fileno));
-}
-
-/*[clinic input]
-_io._Buffered.isatty
-[clinic start generated code]*/
-
-static PyObject *
-_io__Buffered_isatty_impl(buffered *self)
-/*[clinic end generated code: output=c20e55caae67baea input=9ea007b11559bee4]*/
-{
-    return buffered_raw_call(self, &_Py_ID(isatty));
-}
 
 /*[clinic input]
 _io._Buffered.flush
@@ -4029,155 +3947,57 @@ rwpair_forward_call(buffered *self, PyObject *name, PyObject *arg)
     return PyObject_CallMethodOneArg((PyObject *)self, name, arg);
 }
 
-/*[clinic input]
-_io.BufferedRWPair.read
-    size: object(c_default="NULL") = -1
-    /
-[clinic start generated code]*/
+/* Methods passed on to the reader or the writer, in the calling
+   convention Argument Clinic would give them: no argument, one, or an
+   optional one. */
+#define RWPAIR_NOARGS(name, side)                                           \
+    static PyObject *                                                       \
+    rwpair_##name(PyObject *op, PyObject *Py_UNUSED(dummy))                 \
+    {                                                                       \
+        return rwpair_forward_call(rwpair_cast(op)->side, &_Py_ID(name),   \
+                                   NULL);                                   \
+    }
+#define RWPAIR_O(name, side)                                                \
+    static PyObject *                                                       \
+    rwpair_##name(PyObject *op, PyObject *arg)                              \
+    {                                                                       \
+        return rwpair_forward_call(rwpair_cast(op)->side, &_Py_ID(name),   \
+                                   arg);                                    \
+    }
+#define RWPAIR_OPTARG(name, side)                                           \
+    static PyObject *                                                       \
+    rwpair_##name(PyObject *op, PyObject *const *args, Py_ssize_t nargs)    \
+    {                                                                       \
+        if (!_PyArg_CheckPositional(#name, nargs, 0, 1)) {                  \
+            return NULL;                                                    \
+        }                                                                   \
+        return rwpair_forward_call(rwpair_cast(op)->side, &_Py_ID(name),   \
+                                   nargs > 0 ? args[0] : NULL);             \
+    }
+RWPAIR_OPTARG(read, reader)
+RWPAIR_NOARGS(readall, reader)
+RWPAIR_OPTARG(peek, reader)
+/* The reader's readline(), which can keep a partial line for the next
+   call. */
+RWPAIR_OPTARG(readline, reader)
+RWPAIR_OPTARG(read1, reader)
+RWPAIR_O(readinto, reader)
+RWPAIR_O(readinto1, reader)
+RWPAIR_NOARGS(readable, reader)
+RWPAIR_O(write, writer)
+RWPAIR_NOARGS(flush, writer)
+/* For TextIOWrapper.close() over the pair, as over a BufferedWriter. */
+RWPAIR_NOARGS(_discard_writes, writer)
+RWPAIR_NOARGS(writable, writer)
+#undef RWPAIR_NOARGS
+#undef RWPAIR_O
+#undef RWPAIR_OPTARG
 
-static PyObject *
-_io_BufferedRWPair_read_impl(rwpair *self, PyObject *size)
-/*[clinic end generated code: output=0668e3c5dbd3e93d input=eddb5e52aba9ebe5]*/
-{
-    return rwpair_forward_call(self->reader, &_Py_ID(read), size);
-}
-
-/*[clinic input]
-_io.BufferedRWPair.readall
-[clinic start generated code]*/
-
-static PyObject *
-_io_BufferedRWPair_readall_impl(rwpair *self)
-/*[clinic end generated code: output=34f8123873a98737 input=815cdbaf5b6079fe]*/
-{
-    return rwpair_forward_call(self->reader, &_Py_ID(readall), NULL);
-}
-
-/*[clinic input]
-_io.BufferedRWPair.peek
-    size: object(c_default="NULL") = 0
-    /
-[clinic start generated code]*/
-
-static PyObject *
-_io_BufferedRWPair_peek_impl(rwpair *self, PyObject *size)
-/*[clinic end generated code: output=190a267bd694efa0 input=36af95964bebe355]*/
-{
-    return rwpair_forward_call(self->reader, &_Py_ID(peek), size);
-}
-
-/*[clinic input]
-_io.BufferedRWPair.readline
-    size: object(c_default="NULL") = -1
-    /
-[clinic start generated code]*/
-
-static PyObject *
-_io_BufferedRWPair_readline_impl(rwpair *self, PyObject *size)
-/*[clinic end generated code: output=ee5bb2364231e6e1 input=d29b33e6efa2f69e]*/
-{
-    /* The reader's, which can keep a partial line for the next call. */
-    return rwpair_forward_call(self->reader, &_Py_ID(readline), size);
-}
-
-/*[clinic input]
-_io.BufferedRWPair.read1
-    size: object(c_default="NULL") = -1
-    /
-[clinic start generated code]*/
-
-static PyObject *
-_io_BufferedRWPair_read1_impl(rwpair *self, PyObject *size)
-/*[clinic end generated code: output=17ec19608f2bb825 input=9e94db423e490b58]*/
-{
-    return rwpair_forward_call(self->reader, &_Py_ID(read1), size);
-}
-
-/*[clinic input]
-_io.BufferedRWPair.readinto
-    buffer: object
-    /
-[clinic start generated code]*/
-
-static PyObject *
-_io_BufferedRWPair_readinto_impl(rwpair *self, PyObject *buffer)
-/*[clinic end generated code: output=16c86b071015f7a4 input=ccd86ce2666261f7]*/
-{
-    return rwpair_forward_call(self->reader, &_Py_ID(readinto), buffer);
-}
-
-/*[clinic input]
-_io.BufferedRWPair.readinto1
-    buffer: object
-    /
-[clinic start generated code]*/
-
-static PyObject *
-_io_BufferedRWPair_readinto1_impl(rwpair *self, PyObject *buffer)
-/*[clinic end generated code: output=f1577b6f54c2b02a input=613d9bf127f88a4a]*/
-{
-    return rwpair_forward_call(self->reader, &_Py_ID(readinto1), buffer);
-}
-
-/*[clinic input]
-_io.BufferedRWPair.write
-    buffer: object
-    /
-[clinic start generated code]*/
-
-static PyObject *
-_io_BufferedRWPair_write_impl(rwpair *self, PyObject *buffer)
-/*[clinic end generated code: output=6f7509a747410c68 input=66c602422e3ec36f]*/
-{
-    return rwpair_forward_call(self->writer, &_Py_ID(write), buffer);
-}
-
-/*[clinic input]
-_io.BufferedRWPair.flush
-[clinic start generated code]*/
-
-static PyObject *
-_io_BufferedRWPair_flush_impl(rwpair *self)
-/*[clinic end generated code: output=0b2dcbe828718d6b input=e853da796ee61df1]*/
-{
-    return rwpair_forward_call(self->writer, &_Py_ID(flush), NULL);
-}
-
-/*[clinic input]
-_io.BufferedRWPair._discard_writes
-
-Drop the writer's pending writes; return how many bytes they were.
-[clinic start generated code]*/
-
-static PyObject *
-_io_BufferedRWPair__discard_writes_impl(rwpair *self)
-/*[clinic end generated code: output=aa59aa3f077b7fff input=ced7594605661a68]*/
-{
-    /* For TextIOWrapper.close() over the pair, as over a BufferedWriter. */
-    return rwpair_forward_call(self->writer, &_Py_ID(_discard_writes), NULL);
-}
-
-/*[clinic input]
-_io.BufferedRWPair.readable
-[clinic start generated code]*/
-
-static PyObject *
-_io_BufferedRWPair_readable_impl(rwpair *self)
-/*[clinic end generated code: output=615967d4aa58f122 input=0475ed73d0a3167f]*/
-{
-    return rwpair_forward_call(self->reader, &_Py_ID(readable), NULL);
-}
-
-/*[clinic input]
-_io.BufferedRWPair.writable
-[clinic start generated code]*/
-
-static PyObject *
-_io_BufferedRWPair_writable_impl(rwpair *self)
-/*[clinic end generated code: output=c5a43c84e0195c11 input=3cfd44fb4757082f]*/
-{
-    return rwpair_forward_call(self->writer, &_Py_ID(writable), NULL);
-}
+/* Their method table entries: the signature (args after $self) in the
+   docstring. */
+#define RWPAIR_METHODDEF(name, flags, args, doc) \
+    {#name, _PyCFunction_CAST(rwpair_##name), flags, \
+     #name "($self" args ", /)\n--\n\n" doc},
 
 /*[clinic input]
 _io.BufferedRWPair.close
@@ -4247,12 +4067,12 @@ _io_BufferedRWPair_closed_get_impl(rwpair *self)
 static PyMethodDef bufferedreader_methods[] = {
     /* BufferedIOMixin methods */
     _IO__BUFFERED_DETACH_METHODDEF
-    _IO__BUFFERED_SIMPLE_FLUSH_METHODDEF
+    RAW_METHODDEF(flush)
     _IO__BUFFERED_CLOSE_METHODDEF
-    _IO__BUFFERED_SEEKABLE_METHODDEF
-    _IO__BUFFERED_READABLE_METHODDEF
-    _IO__BUFFERED_FILENO_METHODDEF
-    _IO__BUFFERED_ISATTY_METHODDEF
+    RAW_METHODDEF(seekable)
+    RAW_METHODDEF(readable)
+    RAW_METHODDEF(fileno)
+    RAW_METHODDEF(isatty)
     _IO__BUFFERED__DEALLOC_WARN_METHODDEF
     _IO__BUFFERED__DISCARD_WRITES_METHODDEF
 
@@ -4283,9 +4103,9 @@ static PyMemberDef buffered_members[] = {
 
 static PyGetSetDef buffered_getset[] = {
     {"raw", buffered_raw_get, NULL, NULL, NULL},
-    _IO__BUFFERED_CLOSED_GETSETDEF
-    _IO__BUFFERED_NAME_GETSETDEF
-    _IO__BUFFERED_MODE_GETSETDEF
+    {"closed", buffered_raw_getattr, NULL, NULL, &_Py_ID(closed)},
+    {"name", buffered_raw_getattr, NULL, NULL, &_Py_ID(name)},
+    {"mode", buffered_raw_getattr, NULL, NULL, &_Py_ID(mode)},
     {NULL}
 };
 
@@ -4316,10 +4136,10 @@ static PyMethodDef bufferedwriter_methods[] = {
     /* BufferedIOMixin methods */
     _IO__BUFFERED_CLOSE_METHODDEF
     _IO__BUFFERED_DETACH_METHODDEF
-    _IO__BUFFERED_SEEKABLE_METHODDEF
-    _IO__BUFFERED_WRITABLE_METHODDEF
-    _IO__BUFFERED_FILENO_METHODDEF
-    _IO__BUFFERED_ISATTY_METHODDEF
+    RAW_METHODDEF(seekable)
+    RAW_METHODDEF(writable)
+    RAW_METHODDEF(fileno)
+    RAW_METHODDEF(isatty)
     _IO__BUFFERED__DEALLOC_WARN_METHODDEF
     _IO__BUFFERED__DISCARD_WRITES_METHODDEF
 
@@ -4359,20 +4179,22 @@ static PyType_Spec nibbler_bufferedwriter_spec = {
 };
 
 static PyMethodDef bufferedrwpair_methods[] = {
-    _IO_BUFFEREDRWPAIR_READ_METHODDEF
-    _IO_BUFFEREDRWPAIR_READALL_METHODDEF
-    _IO_BUFFEREDRWPAIR_PEEK_METHODDEF
-    _IO_BUFFEREDRWPAIR_READ1_METHODDEF
-    _IO_BUFFEREDRWPAIR_READLINE_METHODDEF
-    _IO_BUFFEREDRWPAIR_READINTO_METHODDEF
-    _IO_BUFFEREDRWPAIR_READINTO1_METHODDEF
+    RWPAIR_METHODDEF(read, METH_FASTCALL, ", size=-1", "")
+    RWPAIR_METHODDEF(readall, METH_NOARGS, "", "")
+    RWPAIR_METHODDEF(peek, METH_FASTCALL, ", size=0", "")
+    RWPAIR_METHODDEF(read1, METH_FASTCALL, ", size=-1", "")
+    RWPAIR_METHODDEF(readline, METH_FASTCALL, ", size=-1", "")
+    RWPAIR_METHODDEF(readinto, METH_O, ", buffer", "")
+    RWPAIR_METHODDEF(readinto1, METH_O, ", buffer", "")
 
-    _IO_BUFFEREDRWPAIR_WRITE_METHODDEF
-    _IO_BUFFEREDRWPAIR_FLUSH_METHODDEF
-    _IO_BUFFEREDRWPAIR__DISCARD_WRITES_METHODDEF
+    RWPAIR_METHODDEF(write, METH_O, ", buffer", "")
+    RWPAIR_METHODDEF(flush, METH_NOARGS, "", "")
+    RWPAIR_METHODDEF(
+        _discard_writes, METH_NOARGS, "",
+        "Drop the writer's pending writes; return how many bytes they were.")
 
-    _IO_BUFFEREDRWPAIR_READABLE_METHODDEF
-    _IO_BUFFEREDRWPAIR_WRITABLE_METHODDEF
+    RWPAIR_METHODDEF(readable, METH_NOARGS, "", "")
+    RWPAIR_METHODDEF(writable, METH_NOARGS, "", "")
 
     _IO_BUFFEREDRWPAIR_CLOSE_METHODDEF
     _IO_BUFFEREDRWPAIR_ISATTY_METHODDEF
@@ -4416,11 +4238,11 @@ static PyMethodDef bufferedrandom_methods[] = {
     /* BufferedIOMixin methods */
     _IO__BUFFERED_CLOSE_METHODDEF
     _IO__BUFFERED_DETACH_METHODDEF
-    _IO__BUFFERED_SEEKABLE_METHODDEF
-    _IO__BUFFERED_READABLE_METHODDEF
-    _IO__BUFFERED_WRITABLE_METHODDEF
-    _IO__BUFFERED_FILENO_METHODDEF
-    _IO__BUFFERED_ISATTY_METHODDEF
+    RAW_METHODDEF(seekable)
+    RAW_METHODDEF(readable)
+    RAW_METHODDEF(writable)
+    RAW_METHODDEF(fileno)
+    RAW_METHODDEF(isatty)
     _IO__BUFFERED__DEALLOC_WARN_METHODDEF
     _IO__BUFFERED__DISCARD_WRITES_METHODDEF
 
