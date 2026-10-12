@@ -1113,9 +1113,11 @@ store_write(textio *self, tconf *cf, int lockfree, PyObject *obj,
  */
 
 /* The UTF-8 bytes of chars[i:i+k] beyond one per character: those of
-   characters from 0x80 on (and again from 0x800 on), counted a word, or a
-   vector of 16 bytes where the compiler has them, at a time (summed by
-   lanes, below their overflow). */
+   characters from 0x80 on (and again from 0x800 on), counted a word at a
+   time for 1 byte characters, and a vector of 16 bytes, where the compiler
+   has them, for 2 byte ones (summed by lanes, below their overflow).  (A
+   vector loop for 1 byte characters cost short lines more than it saved
+   on long ones.) */
 #if defined(__GNUC__) || defined(__clang__)
 typedef uint16_t text_v16 __attribute__((vector_size(16)));
 typedef int16_t text_vs16 __attribute__((vector_size(16)));
@@ -1132,42 +1134,6 @@ utf8_extra_ucs1(const Py_UCS1 *p, Py_ssize_t k)
     const uint64_t h = 0x8080808080808080ull;
     const uint64_t ones = 0x0101010101010101ull;
     Py_ssize_t n = 0, j = 0;
-#ifdef TEXT_VECTORS
-    if (k >= 16) {
-        /* 15 vectors at most per sum (14 and the last), so that its
-           lanes add up to a byte. */
-        while (j + 16 <= k) {
-            text_v8 acc = {0};
-            Py_ssize_t stop = Py_MIN(k, j + 16 * 14);
-            for (; j + 32 <= stop; j += 32) {
-                text_v8 v[2];
-                memcpy(v, p + j, 32);
-                acc += (text_v8)(v[0] < 0) + (text_v8)(v[1] < 0);
-            }
-            if (j + 16 <= stop) {
-                text_v8 v;
-                memcpy(&v, p + j, 16);
-                acc += (text_v8)(v < 0);
-                j += 16;
-            }
-            if (j + 16 > k && j < k) {
-                /* The last ones, in the 16 ending with them. */
-                const text_v8 lane = {0, 1, 2, 3, 4, 5, 6, 7,
-                                      8, 9, 10, 11, 12, 13, 14, 15};
-                text_v8 v;
-                memcpy(&v, p + k - 16, 16);
-                acc += ((text_v8)(v < 0)
-                        & (text_v8)(lane >= (int8_t)(16 - (k - j))));
-                j = k;
-            }
-            acc = -acc;
-            uint64_t w[2];
-            memcpy(w, &acc, 16);
-            n += (Py_ssize_t)(((w[0] + w[1]) * ones) >> 56);
-        }
-        return n;
-    }
-#endif
     for (; j + 32 <= k; j += 32) {
         uint64_t w[4];
         memcpy(w, p + j, 32);
@@ -2071,8 +2037,8 @@ text_note_newlines(textio *self, PyObject *chars, Py_ssize_t ci,
     }
 #ifdef TEXT_VECTORS
     if (kind == PyUnicode_1BYTE_KIND) {
-        /* 15 vectors per sum at most, so that its lanes add up to a byte
-           (see utf8_extra_ucs1()). */
+        /* 15 vectors per sum at most, so that its lanes add up to a
+           byte. */
         const Py_UCS1 *p = data;
         while (j + 16 <= n) {
             text_v8 vcr = {0}, vlf = {0}, vcrlf = {0};
