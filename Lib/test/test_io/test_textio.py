@@ -2735,6 +2735,72 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                     self.assertEqual(data.count(s), 2000)
                 os_helper.unlink(os_helper.TESTFN)
 
+    def test_reentrant_calls_refused(self):
+        # Python code a read runs (a Python buffer's read1(), a decoder)
+        # can't read, seek, tell, close, __init__() or reconfigure() the
+        # same text: they would change or free the read state and the
+        # settings the read is using.  The read itself goes on.
+        text = None
+        errors = []
+        def nested(*calls):
+            for call in calls:
+                try:
+                    call()
+                except RuntimeError as e:
+                    errors.append(str(e))
+        class B(self.BufferedIOBase):
+            chunks = [b"ab", b"cd\n", b"ef\n", b""]
+            def readable(self):
+                return True
+            def read1(self, n=-1):
+                if len(self.chunks) == 3:
+                    nested(text.readline, lambda: text.read(1), text.close,
+                           lambda: text.__init__(self.__class__()))
+                return self.chunks.pop(0) if self.chunks else b""
+            read = read1
+        text = self.TextIOWrapper(B(), encoding="latin-1")
+        self.assertEqual(list(text), ["abcd\n", "ef\n"])
+        self.assertEqual(len(errors), 4)
+        self.assertIn("reentrant call", errors[0])
+
+        class Dec(codecs.IncrementalDecoder):
+            calls = 0
+            def decode(self, data, final=False):
+                Dec.calls += 1
+                if Dec.calls == 1:
+                    nested(lambda: text.read(2), text.tell,
+                           lambda: text.seek(0),
+                           lambda: text.reconfigure(encoding="latin-1"),
+                           lambda: text.__init__(BytesIO(b"zz"),
+                                                 encoding="latin-1"))
+                return bytes(data).decode("latin-1")
+            def getstate(self):
+                return (b"", 0)
+            def setstate(self, state):
+                pass
+        def search(name):
+            if name == "reentrant_decoder_test":
+                return codecs.CodecInfo(
+                    name=name, encode=None, decode=None,
+                    incrementalencoder=codecs.lookup("latin-1")
+                                       .incrementalencoder,
+                    incrementaldecoder=Dec)
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        errors.clear()
+        BytesIO = self.BytesIO
+        for buffer in (self.BytesIO(b"abcdefgh" * 3),
+                       self.BufferedReader(self.BytesIO(b"abcdefgh" * 3))):
+            with self.subTest(buffer=type(buffer)):
+                Dec.calls = 0
+                text = self.TextIOWrapper(buffer,
+                                          encoding="reentrant_decoder_test")
+                text._CHUNK_SIZE = 4
+                self.assertEqual(text.read(6), "abcdef")
+                self.assertEqual(len(errors), 5)
+                errors.clear()
+                self.assertEqual(text.read(), "gh" + "abcdefgh" * 2)
+
     def test_invalid_bytes_strict(self):
         # Invalid bytes end the text before them, and the next read raises
         # (once): they don't look like the end of the stream.

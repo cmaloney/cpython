@@ -311,6 +311,11 @@ to skip, and a write or `detach()` reads the bytes again first.
   from Python code it runs): held by reads, `seek()`, `tell()`,
   `truncate()`, `reconfigure()`, `detach()`, `close()` and `__init__()`,
   across buffer calls, so that a read is atomic (each line once, whole).
+  A nested call must not change what the outer one uses, so it raises
+  `RuntimeError` for reads, `__init__()` and `reconfigure()`, and while
+  the outer call uses the read state across Python code (`rbusy`: reads,
+  going back to the text position, skipping characters after a seek)
+  for `seek()`, `tell()`, `close()` and going back to the text position.
   The quick read takes it with a trylock; when anyone holds it the read
   goes the locked way.
 - **wlock**: held only to look at or swap the settings, never across other

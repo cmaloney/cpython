@@ -64,6 +64,7 @@ typedef struct {
     PyObject_HEAD
     nibbler_mutex rlock;
     Py_ssize_t rdepth;          /* calls of the holder of rlock nested in it */
+    char rbusy;                 /* its read state is used across Python code */
     /* Held only to look at or change the settings (never across other
        code), so that writes see them whole. */
     nibbler_mutex wlock;
@@ -214,10 +215,10 @@ textio_check_closed(textio *self, PyObject *buffer)
     return r == 0 ? 0 : -1;
 }
 
-/* Take rlock (again, in a call nested in one holding it, from Python code
-   it runs: then the settings may change under the outer call, which
-   checks them again) for an operation needing the buffer (and, with
-   check_closed, an open one).  Release with textio_leave(). */
+/* Take rlock, also in a call nested in one holding it (from Python code
+   it runs: a decoder, a Python buffer, a subclass's flush()).  A nested
+   call must not change what the outer one uses: see
+   textio_refuse_nested().  Release with textio_leave(). */
 static int
 textio_lock(textio *self)
 {
@@ -226,6 +227,24 @@ textio_lock(textio *self)
         return 0;
     }
     return nibbler_mutex_lock(&self->rlock, (PyObject *)self, 1) < 0 ? -1 : 0;
+}
+
+/* RuntimeError for a call nested in one holding rlock that would change
+   what that call uses: the settings (__init__(), reconfigure()) or the
+   read state (reads); with busy, only while the outer call uses the read
+   state across Python code (reads, going back to the text position,
+   skipping characters after a seek): seek(), tell(), close(), and going
+   back to the text position.  Other calls (detach(), writes, tell()
+   from another seek()) may nest. */
+static int
+textio_refuse_nested(textio *self, int busy)
+{
+    if (self->rdepth > 0 && (!busy || self->rbusy)) {
+        PyErr_Format(PyExc_RuntimeError, "reentrant call inside %R",
+                     (PyObject *)self);
+        return -1;
+    }
+    return 0;
 }
 
 static void
@@ -1705,7 +1724,7 @@ text_read_locked(textio *self, Py_ssize_t n, int line)
         return NULL;
     }
     PyObject *res = NULL;
-    if (textio_attached(self) < 0
+    if (textio_refuse_nested(self, 0) < 0 || textio_attached(self) < 0
         || ((!FT_ATOMIC_LOAD_UINT8_RELAXED(self->nib) || !textio_exact(self)
              || self->codec == CODEC_DECODER || n == 0)
             && textio_check_closed(self, self->buffer) < 0))
@@ -1716,6 +1735,7 @@ text_read_locked(textio *self, Py_ssize_t n, int line)
         textio_unsupported(self, "not readable");
         goto end;
     }
+    self->rbusy = 1;
     if (n == 0) {
         res = Py_GetConstant(Py_CONSTANT_EMPTY_STR);
     }
@@ -1734,6 +1754,7 @@ text_read_locked(textio *self, Py_ssize_t n, int line)
         /* (Also after a read that failed with characters decoded.) */
         FT_ATOMIC_STORE_UINT8_RELAXED(self->decoded, 1);
     }
+    self->rbusy = 0;
 end:
     textio_leave(self);
     return res;
@@ -1877,12 +1898,17 @@ text_sync(textio *self)
         /* Reads and writes are separate streams. */
         return 0;
     }
+    if (textio_refuse_nested(self, 1) < 0) {
+        return -1;
+    }
+    int r = -1;
+    self->rbusy = 1;
     if (textio_holds(self)) {
         PyObject *pos = store_tell(self);
         Py_off_t p = pos ? PyLong_AsOff_t(pos) : -1, back = 0;
         Py_XDECREF(pos);
         if (p == -1 && PyErr_Occurred()) {
-            return -1;
+            goto end;
         }
         if (self->dchars != NULL
             && self->dpos < PyUnicode_GET_LENGTH(self->dchars))
@@ -1892,7 +1918,7 @@ text_sync(textio *self)
             if ((self->dlost > 0 && decoder_reread(self, p) < 0)
                 || decoder_offset(self, self->dpos, &off, &flags) < 0)
             {
-                return -1;
+                goto end;
             }
             back = PyBytes_GET_SIZE(self->dbytes) - off;
             self->flags = flags;
@@ -1903,11 +1929,14 @@ text_sync(textio *self)
                                              p - back);
         Py_XDECREF(res);
         if (res == NULL) {
-            return -1;
+            goto end;
         }
     }
     textio_drop_reads(self);
-    return 0;
+    r = 0;
+end:
+    self->rbusy = 0;
+    return r;
 }
 
 /* What a write uses of the settings, taken at its start: other calls may
@@ -2293,7 +2322,8 @@ _io_TextIOWrapper_tell_impl(textio *self)
     if (textio_enter(self, 1) < 0) {
         return NULL;
     }
-    PyObject *res = text_tell(self);
+    PyObject *res = (textio_refuse_nested(self, 1) < 0 ? NULL
+                     : text_tell(self));
     textio_leave(self);
     return res;
 }
@@ -2336,6 +2366,7 @@ text_skip(textio *self, Py_ssize_t n)
         return -1;
     }
     int stop = 0, r = 0, final = 0;
+    self->rbusy = 1;
     while (self->dchars == NULL || PyUnicode_GET_LENGTH(self->dchars) < n) {
         if (stop || final) {
             r = -2;
@@ -2356,6 +2387,7 @@ text_skip(textio *self, Py_ssize_t n)
         }
     }
     store_end(&st, 1);
+    self->rbusy = 0;
     if (r == -2) {
         PyErr_SetString(PyExc_OSError, "can't restore logical file position");
     }
@@ -2399,6 +2431,9 @@ _io_TextIOWrapper_seek_impl(textio *self, PyObject *cookieObj, int whence)
     }
     PyObject *res = NULL;
     Py_INCREF(cookieObj);
+    if (textio_refuse_nested(self, 1) < 0) {
+        goto done;
+    }
     if (!self->seekable) {
         textio_unsupported(self, "underlying stream is not seekable");
         goto done;
@@ -2569,6 +2604,10 @@ _io_TextIOWrapper_close_impl(textio *self)
 /*[clinic end generated code: output=056ccf8b4876e4f4 input=9c2114315eae1948]*/
 {
     if (textio_enter(self, 0) < 0) {
+        return NULL;
+    }
+    if (textio_refuse_nested(self, 1) < 0) {
+        textio_leave(self);
         return NULL;
     }
     PyObject *buffer = Py_NewRef(self->buffer);
@@ -3151,6 +3190,10 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
     if (textio_lock(self) < 0) {
         return -1;
     }
+    if (textio_refuse_nested(self, 0) < 0) {
+        textio_leave(self);
+        return -1;
+    }
     textio_wlock(self);
     self->ok = self->quick = 0;
     textio_wunlock(self);
@@ -3282,6 +3325,10 @@ _io_TextIOWrapper_reconfigure_impl(textio *self, PyObject *encoding,
         }
     }
     if (textio_enter(self, 0) < 0) {
+        return NULL;
+    }
+    if (textio_refuse_nested(self, 0) < 0) {
+        textio_leave(self);
         return NULL;
     }
     int codec_change = encoding != Py_None || errors != Py_None;
