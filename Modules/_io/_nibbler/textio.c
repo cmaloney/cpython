@@ -1259,10 +1259,11 @@ text_read_native(textio *self, Py_ssize_t want, int line)
     PyObject *pieces = NULL;
     uint8_t after_cr = self->after_cr;
     Py_ssize_t chunk = FT_ATOMIC_LOAD_SSIZE_RELAXED(self->chunk_size);
-    /* A line's end is looked for in the bytes first (ASCII in every
-       native codec): the store's first `noline` bytes have none. */
+    /* Once a line's end isn't in the decoded chunk, it is looked for in
+       the bytes first (ASCII in every native codec): the store's first
+       `noline` bytes have none. */
     Py_ssize_t span = 0, left = want, noline = 0;
-    int io = 0, done = 0, bytes_first = line && want < 0;
+    int io = 0, done = 0, bytes_first = 0;
 again:
     if (store_begin(&st, io) < 0) {
         goto fail;
@@ -1331,6 +1332,11 @@ again:
         }
         if (self->cache_stop) {
             break;
+        }
+        if (line && want < 0 && chars != NULL) {
+            /* (But the last byte, a "\r" a "\n" may follow.) */
+            bytes_first = 1;
+            noline = Py_MAX(noline, self->cache_end - self->cache_p - 1);
         }
         if (chars != NULL && !whole) {
             /* Decode more of what is there. */
@@ -2376,6 +2382,9 @@ _io_TextIOWrapper_tell_impl(textio *self)
 static int
 text_encoder_reset(textio *self, int start)
 {
+    if (self->encoder == NULL) {
+        return encoder_reset_locked(self, start);
+    }
     if (nibbler_mutex_lock(&self->elock, (PyObject *)self, 1) < 0) {
         return -1;
     }
