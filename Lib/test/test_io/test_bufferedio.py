@@ -2138,6 +2138,26 @@ class PyBufferedRandomTest(BufferedRandomTest, PyTestCase):
 class NibblerBufferedReaderTest(NibblerMixin, CBufferedReaderTest):
     tp = _nibbler.BufferedReader
 
+    def test_extreme_offsets_and_sizes(self):
+        # Offsets and sizes near the limits of their types fail as for any
+        # other bad value, with no arithmetic overflowing (for UBSan).
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with self.open(os_helper.TESTFN, "wb") as f:
+            f.write(b"0123456789" * 100)
+        with self.open(os_helper.TESTFN, "rb") as f:
+            for target, whence in ((sys.maxsize, 1), (-sys.maxsize - 1, 1),
+                                   (sys.maxsize, 0), (-sys.maxsize - 1, 2)):
+                f.seek(0)
+                f.read(5)
+                with self.subTest(target=target, whence=whence):
+                    self.assertRaises((OSError, OverflowError), f.seek,
+                                      target, whence)
+        b = self.tp(self.FileIO(os_helper.TESTFN), 2**58)
+        with self.TextIOWrapper(b, encoding="ascii") as t:
+            self.assertRaises(MemoryError, t.readline)
+        with self.open(os_helper.TESTFN, encoding="ascii") as t:
+            self.assertEqual(len(t.read(sys.maxsize)), 1000)
+
     def test_keeps_read_on_error_marker(self):
         # The reading classes say that they keep data read before a raw
         # read raised (socket.makefile() looks at it).

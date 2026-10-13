@@ -1233,8 +1233,8 @@ again:
             /* A chunk (or what want needs), or twice what didn't do. */
             span = Py_MAX(span, chunk);
             if (left >= 0 && !line) {
-                span = Py_MAX(span, native_span(self, st.p, st.avail,
-                                                left + 1));
+                Py_ssize_t more = left + (left < PY_SSIZE_T_MAX);
+                span = Py_MAX(span, native_span(self, st.p, st.avail, more));
             }
             if (st.avail == 0 && !st.eof) {
                 Py_CLEAR(self->cache);

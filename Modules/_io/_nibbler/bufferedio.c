@@ -2687,14 +2687,16 @@ buffered_seek_within(buffered *self, Py_off_t target, int whence,
     {
         return NULL;
     }
-    /* Where block[0] is, and its data (see buffered_fill()). */
+    /* Where block[0] is, and its data (see buffered_fill()); the target
+       is compared before it is added, which could overflow. */
     Py_off_t start = raw_pos - self->end;
-    Py_off_t at = whence == SEEK_SET ? target : start + self->pos + target;
-    if (at < start + (self->stop == PY_SSIZE_T_MAX ? 0
-                      : self->stop - self->capacity) || at > raw_pos)
-    {
+    Py_off_t base = whence == SEEK_SET ? 0 : start + self->pos;
+    Py_off_t lo = start + (self->stop == PY_SSIZE_T_MAX ? 0
+                           : self->stop - self->capacity);
+    if (target < lo - base || target > raw_pos - base) {
         return NULL;
     }
+    Py_off_t at = base + target;
     self->pos = (Py_ssize_t)(at - start);
     self->noline = 0;
     // GH-95782
@@ -2776,7 +2778,10 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
             goto end;
         }
         buffered_drop_read(self);
-        target -= whence == SEEK_CUR ? unread : 0;
+        if (whence == SEEK_CUR) {
+            target = (target < PY_OFF_T_MIN + unread ? PY_OFF_T_MIN
+                      : target - unread);
+        }
     }
     else if (self->list.nbytes > 0 && buffered_flush_writes(self, 0) < 0) {
         goto end;
@@ -3270,7 +3275,8 @@ _PyIONibbler_fill(PyObject *op, Py_ssize_t size)
     buffered *self = buffered_cast(op);
     /* A long line is gathered in one block up to 64 blocks, and at least
        DEFAULT_BUFFER_SIZE. */
-    Py_ssize_t max = Py_MAX(64 * self->capacity, DEFAULT_BUFFER_SIZE);
+    Py_ssize_t max = Py_MAX(Py_MIN(self->capacity, PY_SSIZE_T_MAX / 64) * 64,
+                            DEFAULT_BUFFER_SIZE);
     if (self->end - self->pos >= max) {
         return _PyIO_NIBBLER_FULL;
     }
