@@ -349,7 +349,7 @@ buffered_unlock(buffered *self)
 /* Lock again after a raw call made without the lock: not interrupted (a
    signal handler runs later), keeping errno and the exception of a call
    that failed. */
-static void
+static inline Py_ALWAYS_INLINE void
 buffered_relock(buffered *self, int failed)
 {
     if (!failed) {
