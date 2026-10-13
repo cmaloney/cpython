@@ -177,9 +177,9 @@ static inline void
 textio_wlock(textio *self)
 {
 #ifdef Py_GIL_DISABLED
-    int r = nibbler_mutex_lock(&self->wlock, (PyObject *)self, 0);
-    assert(r >= 0);
-    (void)r;
+    if (nibbler_mutex_lock(&self->wlock, (PyObject *)self, 0) < 0) {
+        Py_FatalError("TextIOWrapper's wlock taken again by its holder");
+    }
 #endif
 }
 
@@ -3255,6 +3255,9 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
     r = has_read1 < 0 ? -1 : 0;
     if (r == 0) {
         Py_INCREF(buffer);
+        /* (Not under wlock: dropping a decoder's str subclass runs its
+           __del__.) */
+        textio_drop_reads(self);
         textio_wlock(self);
         settings_swap(self, &t);
         /* (The old buffer is dropped with the old settings.) */
@@ -3268,7 +3271,6 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
         FT_ATOMIC_STORE_UINT8_RELAXED(self->write_through, write_through);
         FT_ATOMIC_STORE_SSIZE_RELAXED(self->chunk_size, 8192);
         FT_ATOMIC_STORE_UINT8_RELAXED(self->seennl, 0);
-        textio_drop_reads(self);
         self->fresh = 1;
         FT_ATOMIC_STORE_CHAR_RELAXED(self->encoder_used, 0);
         self->ok = 1;
@@ -3276,7 +3278,9 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
         textio_wunlock(self);
         r = text_fix_encoder_state(self);
         if (r < 0) {
+            textio_wlock(self);
             self->ok = self->quick = 0;
+            textio_wunlock(self);
         }
     }
 end:

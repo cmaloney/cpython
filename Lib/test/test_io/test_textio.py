@@ -2883,6 +2883,42 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
         with self.open(os_helper.TESTFN, "rb") as f:
             self.assertEqual(f.read(), b"second")
 
+    def test_init_drops_decoded_str_subclass(self):
+        # __init__() drops the characters decoded and not returned: a str
+        # subclass a Python decoder returned, whose __del__ writes to the
+        # text (and finds it uninitialized), while no lock writes take is
+        # held.
+        text = None
+        errors = []
+        class S(str):
+            def __del__(self):
+                try:
+                    text.write("x")
+                except ValueError as e:
+                    errors.append(e)
+        class Dec(codecs.IncrementalDecoder):
+            def decode(self, data, final=False):
+                return S(bytes(data).decode("latin-1"))
+            def getstate(self):
+                return (b"", 0)
+            def setstate(self, state):
+                pass
+        def search(name):
+            if name == "str_subclass_test":
+                return codecs.CodecInfo(
+                    name=name, encode=None, decode=None,
+                    incrementalencoder=codecs.lookup("latin-1")
+                                       .incrementalencoder,
+                    incrementaldecoder=Dec)
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        text = self.TextIOWrapper(self.BytesIO(b"abcdefgh"),
+                                  encoding="str_subclass_test")
+        self.assertEqual(text.read(1), "a")
+        text.__init__(self.BytesIO(b"zz"), encoding="latin-1")
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(text.read(), "zz")
+
     def test_invalid_bytes_strict(self):
         # Invalid bytes end the text before them, and the next read raises
         # (once): they don't look like the end of the stream.
