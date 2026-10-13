@@ -2919,6 +2919,33 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
         self.assertEqual(len(errors), 1)
         self.assertEqual(text.read(), "zz")
 
+    def test_invalid_bytes_after_no_text(self):
+        # Through the codec's decoder: invalid bytes after bytes that
+        # decode to no text (an iso2022 escape sequence alone) raise
+        # before read() returns "", which would say the stream ended.
+        cases = [("iso2022_jp", b"ab\x1b$B\x30", "ab"),
+                 ("iso2022_jp", b"ab\x1b$B\x30\x21\x30", "ab\u4e9c"),
+                 ("shift_jis", b"ab\x82", "ab"),
+                 ("utf-16-le", b"a\x00b\x00c", "ab"),
+                 ("gb18030", b"ab\x81", "ab")]
+        for (encoding, data, text), bs, n in itertools.product(
+                cases, (1, 2, 4, 64), (1, 2, 3)):
+            with self.subTest(encoding=encoding, data=data, bs=bs, n=n):
+                t = self.TextIOWrapper(self.BufferedReader(
+                    self.BytesIO(data), bs), encoding=encoding)
+                out = []
+                for _ in range(8):
+                    try:
+                        s = t.read(n)
+                    except UnicodeDecodeError:
+                        out.append(None)
+                        continue
+                    out.append(s)
+                    if s == "":
+                        break
+                self.assertIn(None, out)
+                self.assertEqual("".join(s for s in out if s), text)
+
     def test_invalid_bytes_strict(self):
         # Invalid bytes end the text before them, and the next read raises
         # (once): they don't look like the end of the stream.

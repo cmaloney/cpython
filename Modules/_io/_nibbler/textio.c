@@ -1597,6 +1597,9 @@ text_read_decoder(textio *self, Py_ssize_t want, int line)
     for (;;) {
         Py_ssize_t have = (self->dchars == NULL ? 0
                            : PyUnicode_GET_LENGTH(self->dchars) - self->dpos);
+        /* No text before the invalid bytes (an escape sequence alone):
+           decoding them raises, rather than ending as at EOF. */
+        stop &= have > 0 || pieces != NULL;
         int final = stop || (st.eof && st.avail == 0), more = have > chunk;
         if (have > 0 && (look || final || st.blocked || more
                          || (want >= 0 && have >= want)))
