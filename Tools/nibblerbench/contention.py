@@ -12,6 +12,8 @@
 #   --threads LIST   Comma separated thread counts (default: 1,2,4,16,32).
 #   --lines N        Lines written in all, split between the threads
 #                    (default: 1600000).
+#   --gather N       Write in _gather() blocks of N lines each (writes
+#                    only; 0, the default: no blocks).
 #   --repeats N      Runs per thread count; the median is reported
 #                    (default: 5).
 #
@@ -32,7 +34,7 @@ import time
 LINE = b"0123456789abcdef0123456789\n"
 
 
-def run(path, mode, nthreads, per_thread):
+def run(path, mode, nthreads, per_thread, gather=0):
     f = open(path, "wb" if mode == "b" else "w")
     line = LINE if mode == "b" else LINE.decode()
     barrier = threading.Barrier(nthreads + 1)
@@ -40,8 +42,15 @@ def run(path, mode, nthreads, per_thread):
     def worker():
         write = f.write
         barrier.wait()
-        for _ in range(per_thread):
-            write(line)
+        if not gather:
+            for _ in range(per_thread):
+                write(line)
+            return
+        block = (f if mode == "b" else f.buffer)._gather
+        for _ in range(per_thread // gather):
+            with block():
+                for _ in range(gather):
+                    write(line)
 
     threads = [threading.Thread(target=worker) for _ in range(nthreads)]
     for t in threads:
@@ -96,6 +105,7 @@ def main():
     parser.add_argument("--threads", default="1,2,4,16,32")
     parser.add_argument("--lines", type=int, default=1_600_000)
     parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument("--gather", type=int, default=0)
     args = parser.parse_args()
 
     _io._set_open_impl(args.impl)
@@ -104,11 +114,15 @@ def main():
     try:
         for n in map(int, args.threads.split(",")):
             per_thread = args.lines // n
+            if args.gather:
+                per_thread -= per_thread % args.gather
             func = run if args.op == "write" else run_readline
-            times = [func(path, args.mode, n, per_thread)
+            extra = (args.gather,) if args.gather else ()
+            times = [func(path, args.mode, n, per_thread, *extra)
                      for _ in range(args.repeats)]
             med = statistics.median(times)
-            print(f"{args.impl} {args.op} {args.mode} threads={n:3d}  "
+            g = f" gather={args.gather}" if args.gather else ""
+            print(f"{args.impl} {args.op} {args.mode}{g} threads={n:3d}  "
                   f"{med * 1000:9.1f} ms  "
                   f"{n * per_thread / med / 1e6:6.2f} Mlines/s  "
                   f"(min {min(times) * 1000:.1f}, max {max(times) * 1000:.1f})")
