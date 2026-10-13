@@ -325,16 +325,20 @@ buffered_get_raw(buffered *self)
  * Locking (see nibbler.h)
  */
 
+/* Take the lock (interruptible: a signal handler raising interrupts the
+   wait).  Returns 0 or -1. */
 static inline int
-buffered_lock(buffered *self)
+buffered_lock_ex(buffered *self, int interruptible)
 {
-    int r = nibbler_mutex_lock(&self->lock, (PyObject *)self, 1);
+    int r = nibbler_mutex_lock(&self->lock, (PyObject *)self, interruptible);
     if (r > 0) {
         /* A fork or a takeover: the raw stream may have moved. */
         self->raw_pos = POS_UNKNOWN;
     }
     return r < 0 ? -1 : 0;
 }
+
+#define buffered_lock(self) buffered_lock_ex((self), 1)
 
 static inline void
 buffered_unlock(buffered *self)
@@ -349,12 +353,12 @@ static void
 buffered_relock(buffered *self, int failed)
 {
     if (!failed) {
-        (void)nibbler_mutex_lock(&self->lock, (PyObject *)self, 0);
+        (void)buffered_lock_ex(self, 0);
         return;
     }
     int errnum = errno;
     PyObject *exc = PyErr_GetRaisedException();
-    (void)nibbler_mutex_lock(&self->lock, (PyObject *)self, 0);
+    (void)buffered_lock_ex(self, 0);
     PyErr_SetRaisedException(exc);
     errno = errnum;
 }
@@ -1237,7 +1241,7 @@ gather_lock(buffered *self)
     if (t < 0) {
         return -1;
     }
-    if (nibbler_mutex_lock(&self->lock, (PyObject *)self, 0) < 0) {
+    if (buffered_lock_ex(self, 0) < 0) {
         nibbler_mutex_unlock(&self->io);
         return -1;
     }
