@@ -895,6 +895,34 @@ class BufferedWriterTest(CommonBufferedTests):
         bufio.flush()
         self.assertEqual(b"".join(rawio._write_stack), b"abc")
 
+    def test_reinit_closed_raw(self):
+        # What is pending for a raw stream closed meanwhile is dropped with
+        # a ResourceWarning, rather than written to the closed stream (or
+        # failing every __init__() over a FileIO).
+        if not self.is_nibbler:
+            self.skipTest("__init__() drops pending writes")
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        def mock():
+            return self.MockRawIO()
+        def fileio():
+            return self.FileIO(os_helper.TESTFN, "w+")
+        for make in (mock, fileio):
+            with self.subTest(make.__name__):
+                rawio = make()
+                bufio = self.tp(rawio, 16)
+                bufio.write(b"abc")
+                rawio.close()
+                rawio2 = self.MockRawIO()
+                with self.assertWarnsRegex(ResourceWarning,
+                                           "discarded 3 buffered bytes"):
+                    bufio.__init__(rawio2, 16)
+                if make is mock:
+                    self.assertEqual(rawio._write_stack, [])
+                self.assertIs(bufio.raw, rawio2)
+                bufio.write(b"def")
+                bufio.flush()
+                self.assertEqual(rawio2._write_stack, [b"def"])
+
     def test_detach_flush(self):
         raw = self.MockRawIO()
         buf = self.tp(raw)

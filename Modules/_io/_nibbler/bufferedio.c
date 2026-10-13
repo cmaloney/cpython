@@ -2876,8 +2876,9 @@ buffered_check_raw(_PyIO_State *state, PyObject *raw, int raw_fileio,
 /* Shared constructor: blocks of buffer_size bytes, pending writes written
    out past threshold bytes.  Pending writes first go to the raw stream
    they were written to, as FileIO.__init__() closes its file: if that
-   fails, raise, leaving the object as it was.  Otherwise a failed
-   __init__() leaves it uninitialized. */
+   fails, raise, leaving the object as it was; if it was closed, they are
+   dropped with a ResourceWarning.  Otherwise a failed __init__() leaves
+   it uninitialized. */
 static int
 buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
               Py_ssize_t threshold, int readable, int writable)
@@ -2895,11 +2896,15 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
         _PyErr_ChainExceptions1(exc);
         return -1;
     }
-    if (self->raw != NULL
-        && ((self->ngather > 0 && gather_move_records(self, 1) < 0)
-            || (self->reading ? buffered_flush_dirty(self, 1)
-                : self->list.nbytes > 0 ? buffered_flush_writes(self, 0)
-                : 0) < 0))
+    int closed = self->raw == NULL ? 1 : buffered_is_closed(self);
+    Py_ssize_t discarded = (closed <= 0 ? 0 : self->reading
+                            ? self->dhi - self->dlo : self->list.nbytes);
+    if (closed < 0
+        || (closed == 0
+            && ((self->ngather > 0 && gather_move_records(self, 1) < 0)
+                || (self->reading ? buffered_flush_dirty(self, 1)
+                    : self->list.nbytes > 0 ? buffered_flush_writes(self, 0)
+                    : 0) < 0)))
     {
         buffered_unlock_io(self);
         _PyErr_ChainExceptions1(exc);
@@ -2939,6 +2944,15 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
     PyObject *old = buffered_swap_raw(self, err ? NULL : Py_NewRef(raw));
     buffered_unlock_io(self);
     Py_XDECREF(old);
+    /* Without the lock: the warning may write to this object. */
+    if (discarded > 0
+        && PyErr_WarnFormat(PyExc_ResourceWarning, 1,
+                            "__init__() discarded %zd buffered bytes: the raw "
+                            "stream they were written to is closed",
+                            discarded) < 0)
+    {
+        err = -1;
+    }
     _PyErr_ChainExceptions1(exc);
     return err;
 }

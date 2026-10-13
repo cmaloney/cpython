@@ -215,7 +215,8 @@ Each of these is a bug of `_io`'s classes, which the tests skip for them:
 - `_io` reuses buffer memory a Python raw stream may still reach through a
   view (gh-60198); here such memory is abandoned to it.
 - `_io`'s `__init__()` drops pending writes; here they are written to the
-  old raw stream first.
+  old raw stream first (or, if it was closed meanwhile, dropped with a
+  `ResourceWarning`).
 - `_io` crashes in gh-143375.
 - `_io`'s `readline()` copies a long partial line on each call; here it is
   kept in the read-ahead (up to the buffer size when the raw stream would
