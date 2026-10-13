@@ -2602,6 +2602,22 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                     t.buffer.x = 1
                     self.assertEqual(a + t.read(7) + t.read(), data)
 
+    def test_read_after_buffer_detached(self):
+        # The buffer was detached behind the text's back: reads raise
+        # ValueError, and release nothing they don't hold.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(b"hello\nworld\n")
+        for meth, args in (("read", (3,)), ("readline", ()), ("read", ())):
+            with self.subTest(meth=meth, args=args):
+                raw = self.FileIO(os_helper.TESTFN, "r")
+                self.addCleanup(raw.close)
+                t = self.TextIOWrapper(self.BufferedReader(raw),
+                                       encoding="utf-8")
+                t.buffer.detach()
+                self.assertRaises(ValueError, getattr(t, meth), *args)
+                self.assertRaises(ValueError, getattr(t, meth), *args)
+
     def test_invalid_bytes_strict(self):
         # Invalid bytes end the text before them, and the next read raises
         # (once): they don't look like the end of the stream.

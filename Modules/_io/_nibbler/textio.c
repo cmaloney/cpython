@@ -583,6 +583,8 @@ store_begin(tstore *st, int io)
             return 0;
         }
         if (r != _PyIO_NIBBLER_NO) {
+            /* Nothing is held: store_end() has nothing to release. */
+            st->nib = st->io = 0;
             return -1;
         }
         /* It got an instance dict: its methods from now on. */
