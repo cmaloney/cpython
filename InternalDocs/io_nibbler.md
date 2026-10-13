@@ -319,7 +319,15 @@ to skip, and a write or `detach()` reads the bytes again first.
   only after a read of a seekable stream, to go back to the text position
   first.  On other streams reads and writes are separate streams, and
   writing never waits for a blocking read (a socket's `makefile("rw")`,
-  a `BufferedRWPair` over a serial port or pipes).  (Critical sections were tried: daemon threads stopped
+  a `BufferedRWPair` over a serial port or pipes).
+- **elock**: held across the use of the codec's incremental encoder
+  (codecs but the native ones, whose encoding holds no state) and the
+  store of its bytes, so that the encoder's state (an iso2022 shift
+  state, the BOM) matches where its bytes land; `seek()` and `__init__()`
+  take it to reset the encoder.  A read past the start of the stream only
+  tries it (with the buffer's locks held, it must not wait for a write
+  that waits for them).  Order: rlock, elock, the buffer's I/O role, the
+  buffer's lock.  (Critical sections were tried: daemon threads stopped
   at exit inside one hung the main thread's writes.)
 
 ### Differences from `_io.TextIOWrapper`

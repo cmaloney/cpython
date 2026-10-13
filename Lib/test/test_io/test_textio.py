@@ -2679,6 +2679,62 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                 self.assertRaises(ValueError, getattr(t, meth), *args)
                 self.assertRaises(ValueError, getattr(t, meth), *args)
 
+    @threading_helper.requires_working_threading()
+    def test_threads_write_stateful_encoder(self):
+        # The codec's encoder may hold state (an iso2022 shift state, the
+        # BOM): concurrent writes use it one at a time, and their bytes
+        # reach the buffer in the order it encoded them.  This encoder
+        # numbers its pieces, and lets other threads run meanwhile.
+        class NumberingEncoder(codecs.IncrementalEncoder):
+            n = 0
+            def encode(self, s, final=False):
+                if not s:
+                    return b""
+                n = self.n
+                time.sleep(0)
+                self.n = n + 1
+                return b"%d:%s;" % (n, s.encode("ascii"))
+        def search(name):
+            if name == "numbering_test":
+                return codecs.CodecInfo(
+                    name=name, encode=None, decode=None,
+                    incrementalencoder=NumberingEncoder)
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        raw = self.BytesIO()
+        t = self.TextIOWrapper(self.BufferedWriter(raw), encoding="numbering_test")
+        def write(s):
+            for _ in range(200):
+                t.write(s)
+        threads = [threading.Thread(target=write, args=(s,))
+                   for s in ("a", "bb", "ccc")]
+        with threading_helper.start_threads(threads):
+            pass
+        t.flush()
+        pieces = raw.getvalue().split(b";")[:-1]
+        self.assertEqual([int(p.split(b":")[0]) for p in pieces],
+                         list(range(600)))
+        t.close()
+        os_helper.unlink(os_helper.TESTFN)
+        # A codec of the codecs module, from many threads (on free
+        # threading, they run at once).
+        for encoding in ("iso2022_jp", "utf-16"):
+            with self.subTest(encoding=encoding):
+                with self.open(os_helper.TESTFN, "w", encoding=encoding) as f:
+                    def write(s):
+                        for _ in range(2000):
+                            f.write(s)
+                    threads = [threading.Thread(target=write, args=(s,))
+                               for s in ("日本", "ab", "語x")]
+                    with threading_helper.start_threads(threads):
+                        pass
+                with self.open(os_helper.TESTFN, encoding=encoding) as f:
+                    data = f.read()
+                self.assertEqual(len(data), 6 * 2000)
+                for s in ("日本", "ab", "語x"):
+                    self.assertEqual(data.count(s), 2000)
+                os_helper.unlink(os_helper.TESTFN)
+
     def test_invalid_bytes_strict(self):
         # Invalid bytes end the text before them, and the next read raises
         # (once): they don't look like the end of the stream.

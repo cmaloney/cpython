@@ -67,6 +67,10 @@ typedef struct {
     /* Held only to look at or change the settings (never across other
        code), so that writes see them whole. */
     nibbler_mutex wlock;
+    /* Held across the use of the codec's encoder (CODEC_DECODER), which may
+       hold state, and the store of its bytes, so that they reach the buffer
+       in its order: only to write, flush the encoder or reset it. */
+    nibbler_mutex elock;
     /* The settings: changed with rlock and wlock. */
     char ok;                    /* initialized */
     char quick;                 /* reads may try text_read_quick() */
@@ -1438,6 +1442,24 @@ end:
     return res;
 }
 
+/* With elock: reset the encoder to the stream's start, or past it (no
+   BOM). */
+static int
+encoder_reset_locked(textio *self, int start)
+{
+    FT_ATOMIC_STORE_CHAR_RELAXED(self->encoding_start_of_stream, start);
+    if (self->encoder == NULL) {
+        return 0;
+    }
+    PyObject *res = (start
+                     ? PyObject_CallMethodNoArgs(self->encoder, &_Py_ID(reset))
+                     : PyObject_CallMethodOneArg(self->encoder,
+                                                 &_Py_ID(setstate),
+                                                 _PyLong_GetZero()));
+    Py_XDECREF(res);
+    return res == NULL ? -1 : 0;
+}
+
 /* Decode the store's unread bytes with the codec's decoder, after dchars,
    and take them (but what the decoder holds, which stays).  Returns 1, 0
    if no more characters can come for now, or -1 (*stop: invalid bytes
@@ -1510,15 +1532,14 @@ decoder_more(textio *self, tstore *st, int *stop, int taken)
     store_skip(st, used);
     self->flags = flags;
     if (used > 0 && FT_ATOMIC_LOAD_CHAR_RELAXED(self->encoding_start_of_stream)
-        && self->encoder != NULL)
+        && self->encoder != NULL && nibbler_mutex_trylock(&self->elock))
     {
-        /* Not at the start any more: no BOM. */
-        FT_ATOMIC_STORE_CHAR_RELAXED(self->encoding_start_of_stream, 0);
-        PyObject *r = PyObject_CallMethodOneArg(self->encoder,
-                                                &_Py_ID(setstate),
-                                                _PyLong_GetZero());
-        Py_XDECREF(r);
-        if (r == NULL) {
+        /* Not at the start any more: no BOM.  (Not waiting, with the
+           buffer's locks, for a write, which holds elock while it waits for
+           them: its encoder is past the start already.) */
+        int r = encoder_reset_locked(self, 0);
+        nibbler_mutex_unlock(&self->elock);
+        if (r < 0) {
             return -1;
         }
     }
@@ -1954,29 +1975,44 @@ text_store(textio *self, twriter *w, PyObject *obj, const char *data,
     return res == NULL ? -1 : 0;
 }
 
-/* The encoder's bytes for text (final: the end of the text), stored. */
+/* The encoder's bytes for text, stored; with final, the end of the text,
+   if the codec's encoder needs it.  Returns 0, -1, or -2 if storing them
+   raised. */
 static int
 text_encoder_store(textio *self, twriter *w, PyObject *text, int final)
 {
-    PyObject *b = PyObject_CallMethodObjArgs(w->encoder, &_Py_ID(encode),
-                                             text, final ? Py_True : Py_False,
-                                             NULL);
+    int stateful = w->enc == CODEC_DECODER, r = 0;
+    if (stateful && nibbler_mutex_lock(&self->elock, (PyObject *)self, 1) < 0) {
+        return -1;
+    }
+    if (final) {
+        r = FT_ATOMIC_LOAD_CHAR_RELAXED(self->encoder_used) ? 0 : 1;
+        FT_ATOMIC_STORE_CHAR_RELAXED(self->encoder_used, 0);
+    }
+    PyObject *b = r ? NULL : PyObject_CallMethodObjArgs(
+        w->encoder, &_Py_ID(encode), text, final ? Py_True : Py_False, NULL);
     if (b != NULL && !PyBytes_Check(b)) {
         PyErr_Format(PyExc_TypeError,
                      "encoder should return a bytes object, not '%.200s'",
                      Py_TYPE(b)->tp_name);
         Py_CLEAR(b);
     }
-    if (b == NULL) {
-        return -1;
+    if (b != NULL) {
+        if (stateful && !final) {
+            FT_ATOMIC_STORE_CHAR_RELAXED(self->encoding_start_of_stream, 0);
+            FT_ATOMIC_STORE_CHAR_RELAXED(self->encoder_used, 1);
+        }
+        r = text_store(self, w, b, PyBytes_AS_STRING(b), PyBytes_GET_SIZE(b));
+        r = r < 0 ? -2 : 0;
+        Py_DECREF(b);
     }
-    if (w->enc == CODEC_DECODER && !final) {
-        FT_ATOMIC_STORE_CHAR_RELAXED(self->encoding_start_of_stream, 0);
-        FT_ATOMIC_STORE_CHAR_RELAXED(self->encoder_used, 1);
+    else {
+        r = r ? 0 : -1;
     }
-    int r = text_store(self, w, b, PyBytes_AS_STRING(b), PyBytes_GET_SIZE(b));
-    Py_DECREF(b);
-    return r < 0 ? -2 : 0;
+    if (stateful) {
+        nibbler_mutex_unlock(&self->elock);
+    }
+    return r;
 }
 
 /* Encode text and store it: a str's data is its encoding when ASCII (and
@@ -2027,7 +2063,7 @@ text_finish_encoder(textio *self)
     {
         return 0;
     }
-    FT_ATOMIC_STORE_CHAR_RELAXED(self->encoder_used, 0);
+    /* (encoder_used is looked at again with elock.) */
     int r = text_encoder_store(self, &w, &_Py_STR(empty), 1);
     writer_put(&w);
     return r;
@@ -2266,17 +2302,12 @@ _io_TextIOWrapper_tell_impl(textio *self)
 static int
 text_encoder_reset(textio *self, int start)
 {
-    FT_ATOMIC_STORE_CHAR_RELAXED(self->encoding_start_of_stream, start);
-    if (self->encoder == NULL) {
-        return 0;
+    if (nibbler_mutex_lock(&self->elock, (PyObject *)self, 1) < 0) {
+        return -1;
     }
-    PyObject *res = (start
-                     ? PyObject_CallMethodNoArgs(self->encoder, &_Py_ID(reset))
-                     : PyObject_CallMethodOneArg(self->encoder,
-                                                 &_Py_ID(setstate),
-                                                 _PyLong_GetZero()));
-    Py_XDECREF(res);
-    return res == NULL ? -1 : 0;
+    int r = encoder_reset_locked(self, start);
+    nibbler_mutex_unlock(&self->elock);
+    return r;
 }
 
 /* After moving the buffer to pos: the decoder (if any) there, with flags,
