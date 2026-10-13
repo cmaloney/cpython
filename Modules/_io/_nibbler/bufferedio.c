@@ -1126,15 +1126,26 @@ gather_move(buffered *self, gather *g)
 /* With the lock and the I/O role, for an operation needing the position
    on an open stream: move what the current context's record gathered,
    and what ended records could not move (with all, every record's, also
-   doing their deferred flush). */
+   doing their deferred flush).  The read-ahead is handed back first, so
+   that no raw call (Python code, which may drop records) runs while the
+   list is walked. */
 Py_NO_INLINE static int
 gather_move_records(buffered *self, int all)
 {
     PyObject *ctx = _PyThreadState_GET()->context;
+#define MOVED(g) (all || (g)->state == GATHER_PENDING || (g)->ctx == ctx)
+    for (gather *g = self->gathers; self->reading && g != NULL; g = g->next) {
+        if (MOVED(g) && g->list.nbytes > 0) {
+            if (buffered_rewind(self) < 0) {
+                return -1;
+            }
+            break;
+        }
+    }
     gather *g = self->gathers;
     while (g != NULL) {
         gather *next = g->next;
-        if (all || g->state == GATHER_PENDING || g->ctx == ctx) {
+        if (MOVED(g)) {
             if (gather_move(self, g) < 0) {
                 return -1;
             }
@@ -1145,6 +1156,7 @@ gather_move_records(buffered *self, int all)
         }
         g = next;
     }
+#undef MOVED
     return 0;
 }
 
@@ -1360,12 +1372,16 @@ gather_finish(gather *g)
     buffered *self = g->stream;
     PyObject *exc = PyErr_GetRaisedException();
     /* Code of this thread holding the locks further up its stack may be
-       in the middle of something: the data is dropped then. */
-    int mine = (nibbler_mutex_is_mine(&self->lock)
-                || nibbler_mutex_is_mine(&self->io));
+       in the middle of something: the data is dropped then, with the lock
+       (a write-out in a raw write holds only the I/O role). */
+    int has_lock = nibbler_mutex_is_mine(&self->lock);
+    int has_io = nibbler_mutex_is_mine(&self->io);
     int active = g->state == GATHER_ACTIVE;
     Py_ssize_t dropped = g->list.nbytes;
-    int locked = !mine && gather_lock(self) == 0;
+    int locked = !has_lock && !has_io && gather_lock(self) == 0;
+    if (!has_lock && has_io) {
+        buffered_relock(self, 0);
+    }
     if (!locked || (gather_end(self, g, &dropped) < 0
                     && g->state == GATHER_PENDING))
     {
@@ -1375,6 +1391,9 @@ gather_finish(gather *g)
     }
     if (locked) {
         buffered_unlock_io(self);
+    }
+    else if (!has_lock && has_io) {
+        buffered_unlock(self);
     }
     PyErr_Clear();
     Py_CLEAR(g->block);

@@ -512,6 +512,70 @@ class GatherTest(unittest.TestCase):
             warnings.simplefilter('ignore')
             f.close()
 
+    def test_dropped_in_raw_call(self):
+        # A block dropped from Python code a raw call runs (here from the
+        # raw stream; a signal handler or the GC are others): its data is
+        # dropped, with the lock, with a ResourceWarning.  With threads
+        # writing meanwhile (for TSan).
+        held = []
+        class Raw(io.RawIOBase):
+            def __init__(self):
+                self.b = io.BytesIO(b"0123456789" * 10)
+            def readable(self):
+                return True
+            def writable(self):
+                return True
+            def seekable(self):
+                return True
+            def readinto(self, b):
+                return self.b.readinto(b)
+            def write(self, b):
+                held.clear()
+                return self.b.write(b)
+            def tell(self):
+                return self.b.tell()
+            def seek(self, *args):
+                held.clear()
+                return self.b.seek(*args)
+        def other_block(f, data):
+            g = f._gather()
+            ctx = contextvars.copy_context()
+            ctx.run(g.__enter__)
+            ctx.run(f.write, data)
+            held.append(g)
+
+        # The read-ahead handed back before moving the current context's
+        # data: the raw seek() drops the block after it in the list.
+        raw = Raw()
+        f = _nibbler.BufferedRandom(raw, 16)
+        self.assertEqual(f.read(2), b"01")
+        with f._gather():
+            f.write(b"AB")
+            other_block(f, b"CD")
+            with self.assertWarnsRegex(ResourceWarning, "2 gathered bytes"):
+                self.assertEqual(f.read(1), b"4")
+        f.flush()
+        self.assertEqual(raw.b.getvalue()[:6], b"01AB45")
+
+        # A write-out releases the lock around the raw write.
+        raw = Raw()
+        f = _nibbler.BufferedWriter(raw, 16)
+        stop = threading.Event()
+        def writer():
+            while not stop.is_set():
+                f.write(b"t")
+        with warnings.catch_warnings():
+            # (Any thread's write-out may drop them.)
+            warnings.simplefilter("ignore", ResourceWarning)
+            t = threading.Thread(target=writer)
+            with threading_helper.start_threads([t], stop.set):
+                for i in range(20):
+                    other_block(f, b"CD")
+                    f.write(b"x" * 100)
+            f.flush()
+        self.assertEqual(raw.b.getvalue().count(b"x"), 2000)
+        self.assertNotIn(b"C", raw.b.getvalue())
+
     @threading_helper.requires_working_threading()
     def test_thread_gone_in_block(self):
         f = open(self.path, 'wb')
