@@ -178,8 +178,9 @@ A holder that can never release a mutex is not waited for (see
 - **finalization**: every other thread is detached and hangs as soon as
   it attaches, so the finalizing thread takes over a mutex such a thread
   holds, dropping the bytes in flight.  If it takes the role over but the
-  lock fails (a reentrant call), `drop_inflight` leaves that to the next
-  holder of both.
+  lock fails (a reentrant call, or a wait interrupted after a fork),
+  `drop_inflight` (used only with the role) leaves that to the next
+  holder of the role.
 
 
 Buffer size 0 and None

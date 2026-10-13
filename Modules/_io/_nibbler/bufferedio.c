@@ -240,6 +240,9 @@ typedef struct {
     uint8_t raw_appending;
     uint8_t raw_regular;
     uint8_t raw_open;           /* raw said it is open (see buffered_write) */
+    /* With the I/O role (the lock may be another thread's): a holder
+       of it that can never return was taken over, but its bytes in
+       flight could not be dropped yet. */
     uint8_t drop_inflight;
     uint8_t reading;            /* the data is read-ahead (and stash) */
     char finalizing;
@@ -376,7 +379,8 @@ buffered_lock_io(buffered *self)
         return -1;
     }
     if (buffered_lock(self) < 0) {
-        /* A reentrant call while finalizing: the next holder drops them. */
+        /* A reentrant call while finalizing, or a wait interrupted: the
+           next holder of the I/O role drops them. */
         self->drop_inflight |= taken_over;
         nibbler_mutex_unlock(&self->io);
         return -1;
@@ -1697,9 +1701,12 @@ buffered_write(buffered *self, PyObject *obj, const char *data,
         done = buffered_append(self, obj, data, len) < 0 ? -1 : 1;
     }
     if (done == 0 && open_fileio && self->threshold == 0 && len > 0
-        && self->list.nbytes == 0 && !self->reading && !self->drop_inflight
+        && self->list.nbytes == 0 && !self->reading
         && nibbler_mutex_trylock(&self->io))
     {
+        if (self->drop_inflight) {
+            buffered_drop_inflight(self);
+        }
         return buffered_write_direct(self, obj, data, len);
     }
     if (done == 0) {
