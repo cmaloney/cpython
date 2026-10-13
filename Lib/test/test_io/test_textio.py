@@ -2801,6 +2801,49 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                 errors.clear()
                 self.assertEqual(text.read(), "gh" + "abcdefgh" * 2)
 
+    @support.requires_fork()
+    @threading_helper.requires_working_threading()
+    def test_fork_while_nested_call(self):
+        # A thread in a call nested in another (tell() from a Python
+        # buffer's flush() that tell() calls) when the process forks: in
+        # the child, rlock is free for every thread.
+        text = None
+        started = threading.Event()
+        class B(self.BufferedIOBase):
+            depth = 0
+            def readable(self):
+                return True
+            def seekable(self):
+                return True
+            def tell(self):
+                return 0
+            def read1(self, n=-1):
+                return b"line\n"
+            read = read1
+            def flush(self):
+                self.depth += 1
+                if self.depth == 1:
+                    text.tell()
+                elif self.depth == 2:
+                    started.set()
+                    time.sleep(1)
+        text = self.TextIOWrapper(B(), encoding="ascii")
+        t = threading.Thread(target=text.tell)
+        t.start()
+        self.addCleanup(t.join)
+        started.wait()
+        with warnings.catch_warnings():
+            # (This test is about forking a multi-threaded process.)
+            warnings.simplefilter("ignore", DeprecationWarning)
+            pid = os.fork()
+        if pid == 0:
+            ok = text.readline() == "line\n"
+            child = threading.Thread(target=text.readline)
+            child.start()
+            child.join(support.SHORT_TIMEOUT)
+            os._exit(0 if ok and not child.is_alive() else 1)
+        support.wait_process(pid, exitcode=0)
+
     def test_invalid_bytes_strict(self):
         # Invalid bytes end the text before them, and the next read raises
         # (once): they don't look like the end of the stream.

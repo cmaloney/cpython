@@ -226,7 +226,12 @@ textio_lock(textio *self)
         self->rdepth++;
         return 0;
     }
-    return nibbler_mutex_lock(&self->rlock, (PyObject *)self, 1) < 0 ? -1 : 0;
+    int r = nibbler_mutex_lock(&self->rlock, (PyObject *)self, 1);
+    if (r > 0) {
+        /* Taken from a holder gone in a fork (or hung at exit). */
+        self->rdepth = self->rbusy = 0;
+    }
+    return r < 0 ? -1 : 0;
 }
 
 /* RuntimeError for a call nested in one holding rlock that would change
