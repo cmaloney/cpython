@@ -1692,14 +1692,14 @@ buffered_write(buffered *self, PyObject *obj, const char *data,
     }
     int done = 0;
     int open_fileio = self->raw_fileio && !_PyFileIO_closed(self->raw);
-    if (self->raw_fileio ? !open_fileio : !self->raw_open || len >= REF_MIN)
-    {
-        /* Ask, with the I/O role (see buffered_write_slow()). */
-    }
-    else if (self->reading) {
+    /* Else raw is asked whether it is open, with the I/O role (see
+       buffered_write_slow()). */
+    int trusted = (self->raw_fileio ? open_fileio
+                   : self->raw_open && len < REF_MIN);
+    if (trusted && self->reading) {
         done = buffered_write_in_place(self, data, len);
     }
-    else if (len < self->threshold
+    else if (trusted && len < self->threshold
              && self->list.nbytes + len <= self->threshold)
     {
         done = buffered_append(self, obj, data, len) < 0 ? -1 : 1;
@@ -2109,16 +2109,17 @@ buffered_readline(buffered *self, Py_ssize_t limit)
  * Methods
  */
 
-enum { KEEP_DIRECTION, READING, LEAVE_GATHERED };
+/* Flags of buffered_enter(). */
+enum { ENTER_READ = 1, ENTER_LEAVE_GATHERED = 2 };
 
 /* Start of the methods making raw calls: take the I/O role and the lock,
    check that the object is initialized and, unless closed_msg is NULL,
    that raw is open (but reading what is buffered needs no open raw
    stream), move what the context's _gather() block gathered (but with
-   LEAVE_GATHERED), and with READING, write out pending writes.  Release
-   with buffered_unlock_io(). */
+   ENTER_LEAVE_GATHERED), and with ENTER_READ, write out pending writes.
+   Release with buffered_unlock_io(). */
 static int
-buffered_enter(buffered *self, const char *closed_msg, int direction)
+buffered_enter(buffered *self, const char *closed_msg, int flags)
 {
     if (buffered_lock_io(self) < 0) {
         return -1;
@@ -2127,19 +2128,19 @@ buffered_enter(buffered *self, const char *closed_msg, int direction)
         buffered_not_ready();
         goto error;
     }
-    if (closed_msg != NULL && (direction != READING || self->end == self->pos)
+    if (closed_msg != NULL && (!(flags & ENTER_READ) || self->end == self->pos)
         && buffered_check_closed(self, closed_msg) < 0)
     {
         goto error;
     }
-    if (self->ngather > 0 && direction != LEAVE_GATHERED) {
+    if (self->ngather > 0 && !(flags & ENTER_LEAVE_GATHERED)) {
         /* (When the stream is closed, the block's end raises.) */
         int closed = buffered_is_closed(self);
         if (closed < 0 || (closed == 0 && gather_move_records(self, 0) < 0)) {
             goto error;
         }
     }
-    if (direction == READING && !self->reading && self->list.nbytes > 0
+    if ((flags & ENTER_READ) && !self->reading && self->list.nbytes > 0
         && buffered_flush_writes(self, 0) < 0)
     {
         goto error;
@@ -2252,7 +2253,7 @@ static PyObject *
 _io__Buffered__discard_writes_impl(buffered *self)
 /*[clinic end generated code: output=4a612257ab62b745 input=8c98a37d7a14ddfa]*/
 {
-    if (buffered_enter(self, NULL, KEEP_DIRECTION) < 0) {
+    if (buffered_enter(self, NULL, 0) < 0) {
         return NULL;
     }
     Py_ssize_t n = self->reading ? 0 : self->list.nbytes;
@@ -2333,7 +2334,7 @@ static PyObject *
 _io__Buffered_close_impl(buffered *self)
 /*[clinic end generated code: output=7280b7b42033be0c input=d20b83d1ddd7d805]*/
 {
-    if (buffered_enter(self, NULL, KEEP_DIRECTION) < 0) {
+    if (buffered_enter(self, NULL, 0) < 0) {
         return NULL;
     }
     PyObject *res = NULL, *exc = NULL;
@@ -2363,7 +2364,7 @@ _io__Buffered_close_impl(buffered *self)
         /* flush() was overridden: it takes the locks itself. */
         buffered_unlock_io(self);
         r = _PyFile_Flush((PyObject *)self);
-        if (buffered_enter(self, NULL, KEEP_DIRECTION) < 0) {
+        if (buffered_enter(self, NULL, 0) < 0) {
             return NULL;
         }
     }
@@ -2406,7 +2407,7 @@ _io__Buffered_detach_impl(buffered *self)
     }
     /* Also what other threads wrote since flush(). */
     if (_PyFile_Flush((PyObject *)self) < 0
-        || buffered_enter(self, NULL, KEEP_DIRECTION) < 0)
+        || buffered_enter(self, NULL, 0) < 0)
     {
         return NULL;
     }
@@ -2430,7 +2431,8 @@ static PyObject *
 _io__Buffered_flush_impl(buffered *self)
 /*[clinic end generated code: output=da2674ef1ce71f3a input=fda63444697c6bf4]*/
 {
-    if (buffered_enter(self, "flush of closed file", LEAVE_GATHERED) < 0) {
+    if (buffered_enter(self, "flush of closed file",
+                       ENTER_LEAVE_GATHERED) < 0) {
         return NULL;
     }
     /* Inside a _gather() block, flushing waits for its end. */
@@ -2471,7 +2473,7 @@ _io__Buffered_peek_impl(buffered *self, Py_ssize_t size)
         return res;
     }
     buffered_unlock(self);
-    if (buffered_enter(self, "peek of closed file", READING) < 0) {
+    if (buffered_enter(self, "peek of closed file", ENTER_READ) < 0) {
         return NULL;
     }
     PyObject *res = NULL;
@@ -2498,7 +2500,7 @@ Py_NO_INLINE static PyObject *
 buffered_read_locked(buffered *self, Py_ssize_t n, int read1)
 {
     if (buffered_enter(self, "read of closed file",
-                       n == 0 ? KEEP_DIRECTION : READING) < 0)
+                       n == 0 ? 0 : ENTER_READ) < 0)
     {
         return NULL;
     }
@@ -2579,7 +2581,7 @@ _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
 static PyObject *
 buffered_readinto_common(buffered *self, Py_buffer *buffer, int readinto1)
 {
-    if (buffered_enter(self, "readinto of closed file", READING) < 0) {
+    if (buffered_enter(self, "readinto of closed file", ENTER_READ) < 0) {
         return NULL;
     }
     /* The raw stream reads into the caller's memory, through a view bound
@@ -2642,7 +2644,7 @@ _io__Buffered_readline_impl(buffered *self, Py_ssize_t size)
     }
     buffered_unlock(self);
     if (buffered_enter(self, "readline of closed file",
-                       size == 0 ? KEEP_DIRECTION : READING) < 0)
+                       size == 0 ? 0 : ENTER_READ) < 0)
     {
         return NULL;
     }
@@ -2662,7 +2664,7 @@ static PyObject *
 _io__Buffered_tell_impl(buffered *self)
 /*[clinic end generated code: output=386972ae84716c1e input=ad61e04a6b349573]*/
 {
-    if (buffered_enter(self, NULL, LEAVE_GATHERED) < 0) {
+    if (buffered_enter(self, NULL, ENTER_LEAVE_GATHERED) < 0) {
         return NULL;
     }
     /* Pending writes in append mode go to the end of the file: write them
@@ -2762,7 +2764,7 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
         buffered_unsupported(self, "File or stream is not seekable.");
     }
     if (r <= 0
-        || buffered_enter(self, "seek of closed file", KEEP_DIRECTION) < 0)
+        || buffered_enter(self, "seek of closed file", 0) < 0)
     {
         return NULL;
     }
@@ -2810,7 +2812,7 @@ static PyObject *
 _io__Buffered_truncate_impl(buffered *self, PyTypeObject *cls, PyObject *pos)
 /*[clinic end generated code: output=fe3882fbffe79f1a input=f5b737d97d76303f]*/
 {
-    if (buffered_enter(self, "truncate of closed file", KEEP_DIRECTION) < 0) {
+    if (buffered_enter(self, "truncate of closed file", 0) < 0) {
         return NULL;
     }
     PyObject *res = NULL;
@@ -3185,7 +3187,9 @@ _PyIONibbler_begin(PyObject *op, int io, PyObject **block, const char **p)
     if (FT_ATOMIC_LOAD_PTR_RELAXED(self->dict) != NULL) {
         return _PyIO_NIBBLER_NO;
     }
-    if ((io ? buffered_enter(self, NULL, READING) : buffered_lock(self)) < 0) {
+    if ((io ? buffered_enter(self, NULL, ENTER_READ)
+         : buffered_lock(self)) < 0)
+    {
         return -1;
     }
     Py_ssize_t r = 0;

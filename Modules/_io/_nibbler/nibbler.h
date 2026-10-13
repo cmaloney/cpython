@@ -13,7 +13,14 @@
  *   of the child wait meanwhile.
  *
  * - While finalizing, every other thread is detached and hangs as soon as
- *   it attaches again: a mutex such a thread holds is taken over.
+ *   it attaches again: a mutex such a thread holds is taken over, without
+ *   its bit (a lock with no wait fails), so that the hung holder and the
+ *   finalizing thread both hold it.  That is safe because the hung holder
+ *   never runs again, and what it can still reach stays alive through the
+ *   references on its stack (the block a fill reads into, the objects a
+ *   write-out gives the raw stream).  A thread parked in the wait, woken
+ *   when the finalizing thread releases the mutex, hangs as it attaches
+ *   again, before it stores itself as the holder.
  *
  * Holders keep the data consistent wherever they can be stopped (in a raw
  * call, or detached waiting), so taking a mutex over is safe; what a gone

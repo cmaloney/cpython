@@ -2031,7 +2031,9 @@ static int
 text_encoder_store(textio *self, twriter *w, PyObject *text, int final)
 {
     int stateful = w->enc == CODEC_DECODER, r = 0;
-    if (stateful && nibbler_mutex_lock(&self->elock, (PyObject *)self, 1) < 0) {
+    if (stateful
+        && nibbler_mutex_lock(&self->elock, (PyObject *)self, 1) < 0)
+    {
         return -1;
     }
     if (final) {
