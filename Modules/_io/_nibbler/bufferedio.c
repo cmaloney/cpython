@@ -412,14 +412,14 @@ enum { IO_TAKEN, IO_WAITED, IO_MINE };
 static int
 buffered_take_io(buffered *self)
 {
-    if (nibbler_mutex_is_mine(&self->io)) {
-        return IO_MINE;
-    }
     if (nibbler_mutex_trylock(&self->io)) {
         if (self->drop_inflight) {
             buffered_drop_inflight(self);
         }
         return IO_TAKEN;
+    }
+    if (nibbler_mutex_is_mine(&self->io)) {
+        return IO_MINE;
     }
     buffered_unlock(self);
     return buffered_lock_io(self) < 0 ? -1 : IO_WAITED;
@@ -813,7 +813,7 @@ buffered_append_to(buffered *self, morsel_list *l, PyObject **block,
    writes, until all of it is written (0), the raw stream would block
    (WOULD_BLOCK) or an error is raised (-1); *written gets the count.  With
    unlocked, without the lock meanwhile. */
-static int
+static inline Py_ALWAYS_INLINE int
 buffered_write_spans(buffered *self, _PyIO_Span *spans, PyObject **objs,
                      Py_ssize_t cnt, Py_ssize_t total, int unlocked,
                      Py_ssize_t *written)
@@ -1581,11 +1581,6 @@ buffered_write_slow(buffered *self, PyObject *obj, const char *data,
             }
             break;
         }
-        /* Pending writes, and data too when too large to buffer, or when
-           one vectored write takes both (with a Python _writev(), only
-           data large enough to be kept by reference). */
-        int vectored = (self->raw_vectored
-                        && (self->raw_fileio || rest >= self->ref_min));
         int st;
         if (self->list.nbytes == 0) {
             /* Nothing pending (as unbuffered): the data alone. */
@@ -1596,10 +1591,19 @@ buffered_write_slow(buffered *self, PyObject *obj, const char *data,
             done += written;
         }
         else {
+            /* Pending writes, and data too when too large to buffer, or
+               when one vectored write takes both (with a Python _writev(),
+               only data large enough to be kept by reference). */
+            int vectored = (self->raw_vectored
+                            && (self->raw_fileio || rest >= self->ref_min));
             done += buffered_write_out(self, self->list.nbytes, obj,
                                        data + done,
                                        rest >= th || vectored ? rest : 0, 1,
                                        &st);
+        }
+        if (st == 0 && done == len) {
+            r = 0;
+            break;
         }
         if (st == 0) {
             continue;
@@ -1624,28 +1628,6 @@ buffered_write_slow(buffered *self, PyObject *obj, const char *data,
         break;
     }
 end:
-    buffered_unlock_io(self);
-    return r;
-}
-
-/* write() unbuffered with nothing pending to an open FileIO, with the lock
-   and the I/O role: the data straight to it (what buffered_write_slow()
-   does then, in fewer steps). */
-Py_NO_INLINE static int
-buffered_write_direct(buffered *self, PyObject *obj, const char *data,
-                      Py_ssize_t len)
-{
-    _PyIO_Span span = {data, len};
-    Py_ssize_t done;
-    int st = buffered_write_spans(self, &span, &obj, 1, len, 1, &done);
-    int r = 0;
-    if (st == -1) {
-        r = buffered_write_failed(self, obj, data, len, done);
-    }
-    else if (st != 0) {
-        buffered_set_blocking_error(done);
-        r = -1;
-    }
     buffered_unlock_io(self);
     return r;
 }
@@ -1683,15 +1665,6 @@ buffered_write(buffered *self, PyObject *obj, const char *data,
              && self->list.nbytes + len <= self->threshold)
     {
         done = buffered_append(self, obj, data, len) < 0 ? -1 : 1;
-    }
-    if (done == 0 && open_fileio && self->threshold == 0 && len > 0
-        && self->list.nbytes == 0 && !self->reading
-        && nibbler_mutex_trylock(&self->io))
-    {
-        if (self->drop_inflight) {
-            buffered_drop_inflight(self);
-        }
-        return buffered_write_direct(self, obj, data, len);
     }
     if (done == 0) {
         return buffered_write_slow(self, obj, data, len, closed_msg,
