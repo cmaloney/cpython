@@ -1030,6 +1030,26 @@ cache_fill(textio *self, tstore *st, Py_ssize_t span, int taken)
     return 0;
 }
 
+/* Where the first byte in p[from:len) that may end a line is, a "\n" or
+   "\r" as the newline mode has them (ASCII in every native codec), or
+   len. */
+static Py_ssize_t
+line_end_byte(textio *self, const char *p, Py_ssize_t from, Py_ssize_t len)
+{
+    if (from >= len) {
+        return len;
+    }
+    const char *s = p + from, *end = p + len;
+    int c = (self->readuniversal ? '\n'
+             : (int)PyUnicode_READ_CHAR(self->readnl, 0));
+    const char *e = memchr(s, c, end - s);
+    if (self->readuniversal) {
+        const char *cr = memchr(s, '\r', (e ? e : end) - s);
+        e = cr ? cr : e;
+    }
+    return e ? e - p : len;
+}
+
 /* The end of text_read_quick(): take the n bytes of text (the cache's k
    characters at cache_ci), which saw the newlines `seen`.  Returns text,
    or NULL (with an exception set or not) if the buffer's bytes moved. */
@@ -1226,22 +1246,34 @@ text_read_native(textio *self, Py_ssize_t want, int line)
     PyObject *pieces = NULL;
     uint8_t after_cr = self->after_cr;
     Py_ssize_t chunk = FT_ATOMIC_LOAD_SSIZE_RELAXED(self->chunk_size);
-    Py_ssize_t span = 0, left = want;
-    int io = 0, done = 0;
+    /* A line's end is looked for in the bytes first (ASCII in every
+       native codec): the store's first `noline` bytes have none. */
+    Py_ssize_t span = 0, left = want, noline = 0;
+    int io = 0, done = 0, bytes_first = line && want < 0;
 again:
     if (store_begin(&st, io) < 0) {
         goto fail;
     }
     while (!done) {
         if (!cache_valid(self, &st)) {
-            /* A chunk (or what want needs), or twice what didn't do. */
+            /* A chunk (or what want needs, or a line's bytes), or twice
+               what didn't do. */
             span = Py_MAX(span, chunk);
             if (left >= 0 && !line) {
                 Py_ssize_t more = left + (left < PY_SSIZE_T_MAX);
                 span = Py_MAX(span, native_span(self, st.p, st.avail, more));
             }
-            if (st.avail == 0 && !st.eof) {
+            if (bytes_first) {
+                noline = line_end_byte(self, st.p, noline, st.avail);
+                span = Py_MAX(span, noline + 2);
+            }
+            if ((st.avail == 0 && !st.eof)
+                || (bytes_first && noline == st.avail && !st.eof && !st.full
+                    && !st.blocked))
+            {
+                /* Nothing, or no line's end yet: read more first. */
                 Py_CLEAR(self->cache);
+                self->cache_stop = 0;
             }
             else if (cache_fill(self, &st, span, pieces != NULL) < 0) {
                 goto fail;
@@ -1277,6 +1309,7 @@ again:
                 left -= left >= 0 ? PyUnicode_GET_LENGTH(text) : 0;
                 text_note(self, note);
                 store_skip(&st, n);
+                noline = 0;
                 self->cache_ci += k;
                 self->cache_p += n;
                 st.full = 0;
@@ -1315,8 +1348,10 @@ again:
     return join_pieces(pieces);
 
 upgrade:
+    /* (Other code may take bytes meanwhile.) */
     store_end(&st, 0);
     io = 1;
+    noline = 0;
     goto again;
 
 fail:

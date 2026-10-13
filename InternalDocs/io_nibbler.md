@@ -281,6 +281,10 @@ its text in the cache and takes the bytes of just that text, counted (the
 read (`text_read_quick()`) is a trylock of rlock, a memchr, a str and
 `_PyIONibbler_take()`; the general one (`text_read_native()`,
 `text_take()`) handles every newline mode, partial lines and refills.
+`readline()` looks for the line's end in the bytes first (a `"\n"` or
+`"\r"` byte is that character in every native codec), so that a long
+line is decoded once, when its end (or the most the buffer holds) is
+there.
 `read()` with no size decodes the buffer's `read()` at once.
 
 Other codecs go through the codec's incremental decoder, as `_io` does:
