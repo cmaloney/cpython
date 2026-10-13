@@ -2863,29 +2863,32 @@ textiowrapper_repr(PyObject *op)
  */
 
 /* The codec and newline settings, made before they are swapped in (with
-   rlock and wlock), so that no call sees half of them. */
+   rlock and wlock), so that no call sees half of them: OBJ(field) for
+   objects, VAL(type, field) for the others. */
+#define TEXT_SETTINGS(OBJ, VAL)                                         \
+    OBJ(encoding) OBJ(errors) OBJ(encoder) OBJ(decoder) OBJ(charmap)    \
+    OBJ(readnl) VAL(const char *, errors_str) VAL(const char *, writenl) \
+    VAL(char, codec) VAL(char, enc) VAL(char, readable)                 \
+    VAL(char, readuniversal) VAL(char, readtranslate)                   \
+    VAL(char, writetranslate)
+#define OBJ_FIELD(f) PyObject *f;
+#define VAL_FIELD(type, f) type f;
+#define OBJ_CLEAR(f) Py_CLEAR(t->f);
+#define VAL_NONE(type, f)
+#define VAL_SWAP(type, f) { type tmp = self->f; self->f = t->f; t->f = tmp; }
+#define OBJ_SWAP(f) VAL_SWAP(PyObject *, f)
+#define OBJ_GET(f) t->f = Py_XNewRef(self->f);
+#define VAL_GET(type, f) t->f = self->f;
+
 typedef struct {
-    PyObject *encoding;
-    PyObject *errors;
-    PyObject *encoder;
-    PyObject *decoder;
-    PyObject *charmap;
-    PyObject *readnl;
+    TEXT_SETTINGS(OBJ_FIELD, VAL_FIELD)
     PyObject *old_buffer;       /* __init__() again: the buffer replaced */
-    const char *errors_str;
-    const char *writenl;
-    char codec, enc, readable, readuniversal, readtranslate, writetranslate;
 } tsettings;
 
 static void
 settings_clear(tsettings *t)
 {
-    Py_CLEAR(t->encoding);
-    Py_CLEAR(t->errors);
-    Py_CLEAR(t->encoder);
-    Py_CLEAR(t->decoder);
-    Py_CLEAR(t->charmap);
-    Py_CLEAR(t->readnl);
+    TEXT_SETTINGS(OBJ_CLEAR, VAL_NONE)
     Py_CLEAR(t->old_buffer);
 }
 
@@ -2893,35 +2896,14 @@ settings_clear(tsettings *t)
 static void
 settings_swap(textio *self, tsettings *t)
 {
-#define SWAP(type, f) \
-    do { type tmp = self->f; self->f = t->f; t->f = tmp; } while (0)
-    SWAP(PyObject *, encoding);
-    SWAP(PyObject *, errors);
-    SWAP(PyObject *, encoder);
-    SWAP(PyObject *, decoder);
-    SWAP(PyObject *, charmap);
-    SWAP(PyObject *, readnl);
-    SWAP(const char *, errors_str);
-    SWAP(const char *, writenl);
-    SWAP(char, codec);
-    SWAP(char, enc);
-    SWAP(char, readable);
-    SWAP(char, readuniversal);
-    SWAP(char, readtranslate);
-    SWAP(char, writetranslate);
-#undef SWAP
+    TEXT_SETTINGS(OBJ_SWAP, VAL_SWAP)
 }
 
 static void
 settings_get(textio *self, tsettings *t)
 {
-    *t = (tsettings){
-        Py_XNewRef(self->encoding), Py_XNewRef(self->errors),
-        Py_XNewRef(self->encoder), Py_XNewRef(self->decoder),
-        Py_XNewRef(self->charmap), Py_XNewRef(self->readnl), NULL,
-        self->errors_str, self->writenl, self->codec, self->enc,
-        self->readable, self->readuniversal, self->readtranslate,
-        self->writetranslate};
+    TEXT_SETTINGS(OBJ_GET, VAL_GET)
+    t->old_buffer = NULL;
 }
 
 static int
