@@ -2803,6 +2803,8 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
 
     @support.requires_fork()
     @threading_helper.requires_working_threading()
+    @support.skip_if_sanitizer("TSan doesn't start threads after a "
+                               "multi-threaded fork", thread=True)
     def test_fork_while_nested_call(self):
         # A thread in a call nested in another (tell() from a Python
         # buffer's flush() that tell() calls) when the process forks: in
