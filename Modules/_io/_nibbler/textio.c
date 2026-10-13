@@ -1073,7 +1073,8 @@ quick_take(textio *self, PyObject *text, Py_ssize_t k, Py_ssize_t n,
 /* For text_read_quick(): read(want) translating newlines, from the
    cache's characters at cache_ci, with a "\r" at cache_cr.  Returns the
    text, or NULL (with an exception set or not) when a "\r" is the
-   cache's last character, or the bytes moved. */
+   cache's last character, the text has many, or the bytes moved. */
+#define QUICK_CRS 16
 Py_NO_INLINE static PyObject *
 quick_translate(textio *self, Py_ssize_t want)
 {
@@ -1082,7 +1083,8 @@ quick_translate(textio *self, Py_ssize_t want)
     const char *data = PyUnicode_DATA(chars);
     Py_ssize_t len = PyUnicode_GET_LENGTH(chars);
     Py_ssize_t ci = self->cache_ci, i = ci, out = 0, cr = self->cache_cr;
-    int seen = 0;
+    Py_ssize_t crs[QUICK_CRS];
+    int ncr = 0, seen = 0;
     for (;;) {
         /* A run to the next "\r" (whose "\n"s are alone). */
         Py_ssize_t run = Py_MIN(cr - i, want - out);
@@ -1097,11 +1099,12 @@ quick_translate(textio *self, Py_ssize_t want)
         if (out == want) {
             break;
         }
-        if (i + 1 >= len) {
+        if (i + 1 >= len || ncr == QUICK_CRS) {
             return NULL;
         }
         int lf = PyUnicode_READ(kind, data, i + 1) == '\n';
         seen |= lf ? SEEN_CRLF : SEEN_CR;
+        crs[ncr++] = i;
         i += 1 + lf;
         if (++out == want) {
             break;
@@ -1122,13 +1125,23 @@ quick_translate(textio *self, Py_ssize_t want)
         /* Narrower: copied by characters. */
         Py_SETREF(text, text_translate(PyUnicode_Substring(chars, ci, i),
                                        want));
+        return text ? quick_take(self, text, k, n, seen) : NULL;
     }
-    else if (text != NULL) {
-        int lf = SEEN_LF;
-        (void)translate_newlines(kind, data + ci * kind, data + i * kind,
-                                 PyUnicode_DATA(text), &lf);
+    if (text == NULL) {
+        return NULL;
     }
-    return text ? quick_take(self, text, k, n, seen) : NULL;
+    char *o = PyUnicode_DATA(text);
+    Py_ssize_t from = ci;
+    for (int j = 0; j < ncr; j++) {
+        memcpy(o, data + from * kind, (crs[j] - from) * kind);
+        o += (crs[j] - from) * kind;
+        PyUnicode_WRITE(kind, o, 0, '\n');
+        o += kind;
+        from = crs[j] + 1;
+        from += from < i && PyUnicode_READ(kind, data, from) == '\n';
+    }
+    memcpy(o, data + from * kind, (i - from) * kind);
+    return quick_take(self, text, k, n, seen);
 }
 
 /* The usual native read, without text_take()'s work: the cache has all of
@@ -1390,23 +1403,22 @@ translate_all(textio *self, PyObject *chars)
     int kind = PyUnicode_KIND(chars), seen = self->seennl & SEEN_LF;
     Py_ssize_t len = PyUnicode_GET_LENGTH(chars);
     const char *r = PyUnicode_DATA(chars), *end = r + len * kind;
-    PyObject *res = NULL;
-    if (find_char(kind, r, end, '\r') != NULL
-        && (res = PyUnicode_New(len, PyUnicode_MAX_CHAR_VALUE(chars))) == NULL)
-    {
-        Py_DECREF(chars);
-        return NULL;
+    PyObject *res = chars;
+    if (find_char(kind, r, end, '\r') == NULL) {
+        /* (Nothing to copy: whether there is a "\n".) */
+        seen |= !seen && find_char(kind, r, end, '\n') ? SEEN_LF : 0;
     }
-    len = translate_newlines(kind, r, end, res ? PyUnicode_DATA(res) : NULL,
-                             &seen);
-    if (res != NULL) {
+    else {
+        res = PyUnicode_New(len, PyUnicode_MAX_CHAR_VALUE(chars));
+        len = res ? translate_newlines(kind, r, end, PyUnicode_DATA(res),
+                                       &seen) : 0;
         Py_DECREF(chars);
-        if (PyUnicode_Resize(&res, len) < 0) {
+        if (res == NULL || PyUnicode_Resize(&res, len) < 0) {
             return NULL;
         }
     }
     text_note(self, seen);
-    return res ? res : chars;
+    return res;
 }
 
 /* read() of everything with a native codec over the buffer's own bytes:
