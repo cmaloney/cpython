@@ -191,17 +191,17 @@ textio_wunlock(textio *self)
 #endif
 }
 
-/* Raise ValueError if buffer is closed (a subclass may override
-   closed). */
+/* Raise ValueError if buffer (an exact nibbler one if nib, taken with it
+   from the settings) is closed (a subclass may override closed). */
 static int
-textio_check_closed(textio *self, PyObject *buffer)
+textio_check_closed(textio *self, PyObject *buffer, int nib)
 {
     if (!textio_exact(self)) {
         PyObject *res = _PyIOBase_check_closed((PyObject *)self, Py_True);
         return res == NULL ? -1 : 0;
     }
     int r;
-    if (FT_ATOMIC_LOAD_UINT8_RELAXED(self->nib)) {
+    if (nib) {
         r = _PyIONibbler_closed(buffer);
     }
     else {
@@ -270,7 +270,10 @@ textio_enter(textio *self, int check_closed)
         return -1;
     }
     if (textio_attached(self) < 0
-        || (check_closed && textio_check_closed(self, self->buffer) < 0))
+        || (check_closed
+            && textio_check_closed(self, self->buffer,
+                                   FT_ATOMIC_LOAD_UINT8_RELAXED(self->nib))
+               < 0))
     {
         textio_leave(self);
         return -1;
@@ -1722,17 +1725,19 @@ fail:
 Py_NO_INLINE static PyObject *
 text_read_locked(textio *self, Py_ssize_t n, int line)
 {
-    /* Over the buffer's own bytes with a native codec, what the buffer
-       read ahead is read after its raw stream alone was closed (as the
-       buffer's read() does): reading more checks. */
     if (textio_lock(self) < 0) {
         return NULL;
     }
     PyObject *res = NULL;
+    int nib = FT_ATOMIC_LOAD_UINT8_RELAXED(self->nib);
+    /* Over the buffer's own bytes with a native codec, what the buffer
+       read ahead is read after its raw stream alone was closed (as the
+       buffer's read() does): reading more checks. */
+    int read_ahead_after_close = (nib && textio_exact(self)
+                                  && self->codec != CODEC_DECODER && n != 0);
     if (textio_refuse_nested(self, 0) < 0 || textio_attached(self) < 0
-        || ((!FT_ATOMIC_LOAD_UINT8_RELAXED(self->nib) || !textio_exact(self)
-             || self->codec == CODEC_DECODER || n == 0)
-            && textio_check_closed(self, self->buffer) < 0))
+        || (!read_ahead_after_close
+            && textio_check_closed(self, self->buffer, nib) < 0))
     {
         goto end;
     }
@@ -1748,7 +1753,7 @@ text_read_locked(textio *self, Py_ssize_t n, int line)
         res = text_read_decoder(self, n, line);
     }
     else {
-        if (n < 0 && !line && FT_ATOMIC_LOAD_UINT8_RELAXED(self->nib)) {
+        if (n < 0 && !line && nib) {
             res = text_read_all(self);
         }
         if (res == NULL && !PyErr_Occurred()) {
@@ -1955,6 +1960,7 @@ typedef struct {
     const char *writenl;
     char enc;
     char seekable;
+    char nib;                   /* buffer is an exact nibbler one */
 } twriter;
 
 static int
@@ -1969,7 +1975,7 @@ writer_get(textio *self, twriter *w)
                    Py_NewRef(self->errors), Py_XNewRef(self->readnl),
                    self->errors_str,
                    self->writetranslate ? self->writenl : NULL, self->enc,
-                   self->seekable};
+                   self->seekable, FT_ATOMIC_LOAD_UINT8_RELAXED(self->nib)};
     textio_wunlock(self);
     return 0;
 }
@@ -1988,12 +1994,18 @@ static int
 text_store(textio *self, twriter *w, PyObject *obj, const char *data,
            Py_ssize_t len)
 {
-    if (FT_ATOMIC_LOAD_UINT8_RELAXED(self->nib)) {
+    if (w->nib) {
         int r = _PyIONibbler_write(w->buffer, obj, data, len);
         if (r != _PyIO_NIBBLER_NO) {
             return r;
         }
-        FT_ATOMIC_STORE_UINT8_RELAXED(self->nib, 0);
+        /* It got an instance dict: its methods from now on. */
+        w->nib = 0;
+        textio_wlock(self);
+        if (self->buffer == w->buffer) {
+            FT_ATOMIC_STORE_UINT8_RELAXED(self->nib, 0);
+        }
+        textio_wunlock(self);
     }
     PyObject *b = (PyBytes_CheckExact(obj) ? Py_NewRef(obj)
                    : PyBytes_FromStringAndSize(data, len));
@@ -2169,7 +2181,7 @@ _io_TextIOWrapper_write_impl(textio *self, PyObject *text)
         textio_unsupported(self, "not writable");
         goto end;
     }
-    if (textio_check_closed(self, w.buffer) < 0) {
+    if (textio_check_closed(self, w.buffer, w.nib) < 0) {
         goto end;
     }
     if (w.seekable && FT_ATOMIC_LOAD_UINT8_RELAXED(self->decoded)) {
@@ -2567,7 +2579,7 @@ _io_TextIOWrapper_flush_impl(textio *self)
     if (writer_get(self, &w) < 0) {
         return NULL;
     }
-    PyObject *res = (textio_check_closed(self, w.buffer) < 0 ? NULL
+    PyObject *res = (textio_check_closed(self, w.buffer, w.nib) < 0 ? NULL
                      : PyObject_CallMethodNoArgs(w.buffer, &_Py_ID(flush)));
     writer_put(&w);
     return res;

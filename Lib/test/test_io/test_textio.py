@@ -2844,6 +2844,45 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
             os._exit(0 if ok and not child.is_alive() else 1)
         support.wait_process(pid, exitcode=0)
 
+    def test_init_while_writing(self):
+        # __init__() between a write's look at the settings and its store
+        # (here from the buffer's closed property; on free threading, from
+        # another thread): the write goes on to the buffer it started
+        # with, through its methods, as it wasn't a buffered object of
+        # _io._nibbler.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        text = None
+        class Slotted:
+            # Nothing where a buffered object has its fields.
+            __slots__ = tuple("s%d" % i for i in range(40)) + ("data",)
+            def readable(self):
+                return False
+            def writable(self):
+                return True
+            def seekable(self):
+                return False
+            @property
+            def closed(self):
+                if self.data == b"":
+                    self.data = b"-"
+                    text.__init__(self.new, encoding="latin-1")
+                return False
+            def write(self, b):
+                self.data += b
+                return len(b)
+            def flush(self):
+                pass
+        old = Slotted()
+        old.data = b""
+        Slotted.new = self.open(os_helper.TESTFN, "wb")
+        text = self.TextIOWrapper(old, encoding="latin-1")
+        text.write("first")
+        text.write("second")
+        text.close()
+        self.assertEqual(old.data, b"-first")
+        with self.open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(), b"second")
+
     def test_invalid_bytes_strict(self):
         # Invalid bytes end the text before them, and the next read raises
         # (once): they don't look like the end of the stream.

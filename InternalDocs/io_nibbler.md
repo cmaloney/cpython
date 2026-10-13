@@ -329,7 +329,8 @@ to skip, and a write or `detach()` reads the bytes again first.
   (codecs but the native ones, whose encoding holds no state) and the
   store of its bytes, so that the encoder's state (an iso2022 shift
   state, the BOM) matches where its bytes land; `seek()` and `__init__()`
-  take it to reset the encoder.  A read past the start of the stream only
+  take it to reset the encoder (from the encoder itself, they raise
+  `RuntimeError`).  A read past the start of the stream only
   tries it (with the buffer's locks held, it must not wait for a write
   that waits for them).  Order: rlock, elock, the buffer's I/O role, the
   buffer's lock.  (Critical sections were tried: daemon threads stopped
