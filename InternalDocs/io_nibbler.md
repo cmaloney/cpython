@@ -95,8 +95,9 @@ I/O releases it, takes the role, takes the lock again and looks again.
 | other `seek()`, `tell()`, `truncate()` | yes | yes | raw calls with both held |
 | `close()`, `detach()`, `__init__()` | yes | yes | flush with both held |
 | `fileno()`, `isatty()`, `seekable()`, `name`, `mode`, `closed`, `raw` | – | – | a reference to raw, taken atomically |
-| `_gather()` enter / write in a block | – | yes | |
-| `_gather()` exit | yes | yes (not interruptible) | writes out when the pending writes don't fit |
+| `_gather()` enter / write in a block | – | – | the record's lock; listing a new record takes both |
+| `_gather()` exit, written out directly | – | – | the record's lock, across one `writev()` |
+| other `_gather()` exits | yes | yes (not interruptible) | writes out when the pending writes don't fit |
 
 Waits release the GIL (or detach) and a signal handler that raises
 interrupts them, except the relock after a raw call, whose result must be
@@ -200,11 +201,16 @@ otherwise).
 -----------
 
 Private and experimental.  See "Gathering" in `bufferedio.c`: a block's
-writes from the context that entered it are kept in a record and added in
-one piece at its end (or at `limit`, or before an operation of that
-context needs the position, or by `close()`/`detach()`/`__init__()`).
-While a stream has records (`ngather`), the fast paths that take the lock
-alone go the way that takes the I/O role, where records are moved.
+writes from the context that entered it are kept in the context's record
+for the stream (found through a context variable, with a lock of its own
+that only `close()` and the like wait for), and written in one piece at
+its end: by one `writev()` of its own for a `BufferedWriter` of a regular
+file with nothing pending, which the kernel orders against other writes
+(POSIX), else moved to the pending writes (also at `limit`, before an
+operation of that context needs the position, and by
+`close()`/`detach()`/`__init__()`).  While a stream has records
+(`ngather`), the fast paths that take the lock alone go the way that takes
+the I/O role, where records are moved.
 
 
 Differences from `_io`

@@ -3,9 +3,11 @@ classes, also with text written through a TextIOWrapper over them."""
 import asyncio
 import contextlib
 import contextvars
+import errno
 import gc
 import io
 import os
+import signal
 import threading
 import unittest
 import warnings
@@ -13,6 +15,7 @@ import warnings
 import _io
 from _io import _nibbler
 
+from test import support
 from test.support import import_helper, os_helper, threading_helper
 
 
@@ -184,8 +187,8 @@ class GatherTest(unittest.TestCase):
                 # data accepted), so that other writes can come after it.
                 contextvars.copy_context().run(f.write, b'X')
                 f.write(b'ab')
-            self.assertEqual(self.read(), b'0123456789X')
-        self.assertEqual(self.read(), b'0123456789Xab')
+            # (With nothing pending, the block's end writes the rest.)
+            self.assertEqual(self.read(), b'0123456789Xab')
         for limit in (0, -1):
             with open(self.path, 'wb') as f:
                 self.assertRaises(ValueError, f._gather, limit)
@@ -295,8 +298,9 @@ class GatherTest(unittest.TestCase):
                 self.assertEqual(self.size(), 0)
             # The flush takes effect at the end of the block.
             self.assertEqual(self.size(), 2)
+            f.write(b'c')
             with f._gather():
-                f.write(b'c')
+                f.write(b'd')
             self.assertEqual(self.size(), 2)
 
     def test_line_buffering(self):
@@ -471,7 +475,8 @@ class GatherTest(unittest.TestCase):
         data = [b'%03d' % i for i in range(100)]
         failed = 0
         for start in range(20):
-            f = open(self.path, 'wb', buffering=4)
+            # (A BufferedRandom: its blocks never write out themselves.)
+            f = open(self.path, 'w+b', buffering=4)
             g = f._gather()
             g.__enter__()
             for d in data:
@@ -486,7 +491,7 @@ class GatherTest(unittest.TestCase):
         self.assertGreater(failed, 0)
 
     def test_never_ended(self):
-        # A block dropped before it ends adds its data, with a
+        # A block dropped before it ends ends then, with a
         # ResourceWarning.
         f = open(self.path, 'wb')
         g = f._gather()
@@ -495,7 +500,7 @@ class GatherTest(unittest.TestCase):
         with self.assertWarnsRegex(ResourceWarning, 'never ended'):
             del g
             gc.collect()
-        self.assertEqual(self.size(), 0)
+        self.assertEqual(self.read(), b'ab')
         f.close()
         self.assertEqual(self.read(), b'ab')
 
@@ -605,6 +610,213 @@ class GatherTest(unittest.TestCase):
         # _io's buffered classes can't gather.
         if not getattr(_io.BufferedWriter, '_is_nibbler', False):
             self.assertNotHasAttr(_io.BufferedWriter, '_gather')
+
+    # A BufferedWriter of a regular file with nothing pending writes a
+    # block out itself at its end; elsewhere it is moved to the pending
+    # writes.
+
+    def test_direct(self):
+        with open(self.path, 'wb') as f:
+            with f._gather():
+                f.write(b'abc')
+                f.write(b'x' * 1000)
+                self.assertEqual(self.size(), 0)
+                self.assertEqual(f.tell(), 1003)
+            self.assertEqual(self.size(), 1003)
+            f.write(b'd')
+            self.assertEqual(f.tell(), 1004)
+            f.seek(0)
+            with f._gather():
+                f.write(b'A')
+            self.assertEqual(f.tell(), 1)
+            # More pieces than one writev() takes at once.
+            f.seek(0, 2)
+            pieces = [b'%04d' % i * 200 for i in range(100)]
+            with f._gather():
+                for p in pieces:
+                    f.write(p)
+        self.assertEqual(self.read(),
+                         b'Abc' + b'x' * 1000 + b'd' + b''.join(pieces))
+        # Append mode, with another writer of the file.
+        with open(self.path, 'ab') as f, \
+             open(self.path, 'ab', buffering=0) as other:
+            with f._gather():
+                f.write(b'1')
+                other.write(b'2')
+                f.write(b'3')
+            other.write(b'4')
+        self.assertEqual(self.read()[-4:], b'2134')
+
+    @threading_helper.requires_working_threading()
+    def test_pending_writes_first(self):
+        # A write that happened before the block's end and is still
+        # pending comes first.
+        with open(self.path, 'wb') as f:
+            with f._gather():
+                f.write(b'a1')
+                t = threading.Thread(target=f.write, args=(b'b',))
+                t.start()
+                t.join()
+                f.write(b'a2')
+            self.assertEqual(self.size(), 0)
+        self.assertEqual(self.read(), b'ba1a2')
+
+    def test_read_ahead(self):
+        # The data goes at the logical position, not after the read-ahead.
+        with open(self.path, 'w+b') as f:
+            f.write(b'0123456789')
+            f.seek(0)
+            self.assertEqual(f.read(2), b'01')
+            with f._gather():
+                f.write(b'AB')
+            self.assertEqual(f.read(2), b'45')
+        self.assertEqual(self.read(), b'01AB456789')
+
+    @unittest.skipUnless(hasattr(signal, 'SIGXFSZ'), 'needs SIGXFSZ')
+    def test_direct_partial_write_and_error(self):
+        # Past RLIMIT_FSIZE, writev() writes part, then fails: the rest
+        # stays pending, the error is raised, nothing is written twice.
+        resource = import_helper.import_module('resource')
+        old = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+        self.addCleanup(signal.signal, signal.SIGXFSZ, old)
+        soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+        data = [b'%04d' % i for i in range(1000)]
+        with open(self.path, 'wb') as f:
+            resource.setrlimit(resource.RLIMIT_FSIZE, (1000, hard))
+            try:
+                with self.assertRaises(OSError) as cm:
+                    with f._gather():
+                        for d in data:
+                            f.write(d)
+            finally:
+                resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+            self.assertEqual(cm.exception.errno, errno.EFBIG)
+            self.assertEqual(self.size(), 1000)
+        self.assertEqual(self.read(), b''.join(data))
+
+    def test_partial_writes_and_error(self):
+        # A Python raw stream writing in pieces, then failing once.
+        out = bytearray()
+        class Raw(io.RawIOBase):
+            calls = 0
+            def writable(self):
+                return True
+            def write(self, b):
+                self.calls += 1
+                if self.calls == 3:
+                    raise OSError('fails')
+                out.extend(bytes(b[:5]))
+                return min(len(b), 5)
+        f = _nibbler.BufferedWriter(Raw(), 8)
+        data = [b'%03d' % i for i in range(20)]
+        with self.assertRaisesRegex(OSError, 'fails'):
+            with f._gather():
+                for d in data:
+                    f.write(d)
+        f.flush()
+        self.assertEqual(bytes(out), b''.join(data))
+
+    def check_blocks(self, lines, per_thread):
+        # Lines b'i:k:j:n...': block k of thread i has n lines, j = 0..n-1.
+        # Every block is whole and contiguous, and appears once.
+        pos = 0
+        seen = set()
+        while pos < len(lines):
+            i, k, j, n = map(int, lines[pos].split(b':')[:4])
+            self.assertEqual(j, 0)
+            self.assertNotIn((i, k), seen)
+            seen.add((i, k))
+            block = [line.split(b':')[:4] for line in lines[pos:pos + n]]
+            self.assertEqual(block, [[b'%d' % x for x in (i, k, j, n)]
+                                     for j in range(n)])
+            pos += n
+        self.assertEqual(len(seen), per_thread * len({i for i, k in seen}))
+
+    @threading_helper.requires_working_threading()
+    def test_threads_direct(self):
+        # Threads ending blocks at once.  Their sizes vary, from one line
+        # to many pieces kept by reference (joined for one writev()).
+        nthreads, blocks = 8, 100
+        def worker(f, i):
+            for k in range(blocks):
+                n = 100 if k % 25 == 0 else 1 + (k * 7 + i) % 23
+                with f._gather():
+                    for j in range(n):
+                        tail = b'x' * 600 if j % 3 == 0 else b''
+                        f.write(b'%d:%d:%d:%d:%s\n' % (i, k, j, n, tail))
+        for mode in ('wb', 'ab'):
+            with open(self.path, mode) as f:
+                threads = [threading.Thread(target=worker, args=(f, i))
+                           for i in range(nthreads)]
+                with threading_helper.start_threads(threads):
+                    pass
+            with open(self.path, 'rb') as f:
+                self.check_blocks(f.read().splitlines(), blocks)
+            os_helper.unlink(self.path)
+
+    @threading_helper.requires_working_threading()
+    def test_close_while_gathering(self):
+        # close() while threads write in blocks: what each had gathered is
+        # written once, as a whole; the blocks' later writes and ends
+        # raise ValueError.
+        def worker(f, i, start):
+            start.wait()
+            try:
+                for k in range(10**9):
+                    with f._gather():
+                        for j in range(5):
+                            f.write(b'%d:%d:%d:5\n' % (i, k, j))
+            except ValueError:
+                pass
+        for _ in range(20):
+            f = open(self.path, 'wb')
+            start = threading.Barrier(5)
+            threads = [threading.Thread(target=worker, args=(f, i, start))
+                       for i in range(4)]
+            with threading_helper.start_threads(threads):
+                start.wait()
+                f.close()
+            last = {}
+            for line in self.read().splitlines():
+                i, k, j, n = map(int, line.split(b':'))
+                # In order, each block from its start, cut only at the end.
+                pk, pj = last.get(i, (-1, 4))
+                self.assertIn((k, j), [(pk, pj + 1), (pk + 1, 0)])
+                if k != pk:
+                    self.assertEqual(pj, 4)
+                last[i] = k, j
+
+    @support.requires_fork()
+    @threading_helper.requires_working_threading()
+    @support.skip_if_sanitizer("TSan doesn't start threads after a "
+                               "multi-threaded fork", thread=True)
+    def test_fork_while_writing_out(self):
+        # A fork while another thread writes a block out: in the child,
+        # its record is free (and its data, written by the parent, gone).
+        f = open(self.path, 'wb')
+        stop = threading.Event()
+        def worker():
+            while not stop.is_set():
+                with f._gather():
+                    f.write(b'0123456789' * 10 + b'\n')
+        t = threading.Thread(target=worker)
+        with threading_helper.start_threads([t], stop.set):
+            for _ in range(10):
+                with warnings.catch_warnings():
+                    # (This test is about forking a multi-threaded process.)
+                    warnings.simplefilter("ignore", DeprecationWarning)
+                    pid = os.fork()
+                if pid == 0:
+                    try:
+                        with f._gather():
+                            f.write(b'child\n')
+                        f.close()
+                    finally:
+                        os._exit(0)
+                support.wait_process(pid, exitcode=0)
+        f.close()
+        lines = set(self.read().splitlines())
+        self.assertLessEqual(lines, {b'0123456789' * 10, b'child'})
 
 if __name__ == '__main__':
     unittest.main()

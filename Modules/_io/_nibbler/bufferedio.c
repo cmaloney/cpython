@@ -40,6 +40,7 @@ typedef struct {
     PyTypeObject *PyBufferedRWPair_Type;
     PyTypeObject *PyTextIOWrapper_Type;
     PyTypeObject *Gather_Type;
+    PyTypeObject *Record_Type;
 } nibblermodule_state;
 
 static struct PyModuleDef _PyIO_nibbler_Module;
@@ -123,7 +124,7 @@ morsels_push(morsel_list *l, PyObject *obj, const char *ptr, Py_ssize_t len)
     else {
         l->items[l->count++] = (morsel){Py_NewRef(obj), ptr, len};
     }
-    l->nbytes += len;
+    FT_ATOMIC_STORE_SSIZE_RELAXED(l->nbytes, l->nbytes + len);
     return 0;
 }
 
@@ -144,7 +145,7 @@ morsels_consume(morsel_list *l, Py_ssize_t n)
         Py_DECREF(m->obj);
         l->head++;
     }
-    l->nbytes -= taken;
+    FT_ATOMIC_STORE_SSIZE_RELAXED(l->nbytes, l->nbytes - taken);
     if (l->head == l->count) {
         l->head = l->count = 0;
     }
@@ -168,8 +169,8 @@ morsels_splice(morsel_list *dst, morsel_list *src)
             return -1;
         }
         dst->items[dst->count++] = *m;
-        dst->nbytes += m->len;
-        src->nbytes -= m->len;
+        FT_ATOMIC_STORE_SSIZE_RELAXED(dst->nbytes, dst->nbytes + m->len);
+        FT_ATOMIC_STORE_SSIZE_RELAXED(src->nbytes, src->nbytes - m->len);
     }
     src->head = src->count = 0;
     return 0;
@@ -246,9 +247,13 @@ typedef struct {
     uint8_t drop_inflight;
     uint8_t reading;            /* the data is read-ahead (and stash) */
     char finalizing;
-    /* The records of _gather() blocks (see "Gathering"). */
-    struct gather *gathers;
+    /* _gather() blocks write out themselves (see "Gathering"). */
+    uint8_t direct;
+    /* The records of _gather() blocks, and the context variable finding
+       them. */
+    struct record *recs;
     int ngather;
+    PyObject *gvar;
     PyObject *dict;
     PyObject *weakreflist;
 } buffered;
@@ -264,6 +269,7 @@ typedef struct {
 #define buffered_cast(op) ((buffered *)(op))
 
 static PyType_Spec nibbler_bufferedreader_spec;
+static PyType_Spec nibbler_bufferedwriter_spec;
 
 static int
 buffered_writable(buffered *self)
@@ -770,7 +776,10 @@ buffered_append_to(buffered *self, morsel_list *l, PyObject **block,
     if (len == 0) {
         return 0;
     }
-    if (len >= REF_MIN && (len >= self->ref_min || len > self->capacity)
+    /* (Atomic: _gather() blocks append without the lock.) */
+    if (len >= REF_MIN
+        && (len >= FT_ATOMIC_LOAD_SSIZE_RELAXED(self->ref_min)
+            || len > FT_ATOMIC_LOAD_SSIZE_RELAXED(self->capacity))
         && obj != NULL && PyBytes_CheckExact(obj))
     {
         return morsels_push(l, obj, data, len);
@@ -812,13 +821,14 @@ buffered_append_to(buffered *self, morsel_list *l, PyObject **block,
 /* Write spans[0:cnt] (total bytes) to the raw stream, retrying partial
    writes, until all of it is written (0), the raw stream would block
    (WOULD_BLOCK) or an error is raised (-1); *written gets the count.  With
-   unlocked, without the lock meanwhile. */
+   unlocked, without the lock meanwhile; -1: called without it (and the raw
+   position, see "Gathering"). */
 static inline Py_ALWAYS_INLINE int
 buffered_write_spans(buffered *self, _PyIO_Span *spans, PyObject **objs,
                      Py_ssize_t cnt, Py_ssize_t total, int unlocked,
                      Py_ssize_t *written)
 {
-    if (unlocked) {
+    if (unlocked > 0) {
         buffered_unlock(self);
     }
     Py_ssize_t done = 0;
@@ -851,10 +861,12 @@ buffered_write_spans(buffered *self, _PyIO_Span *spans, PyObject **objs,
             break;
         }
     }
-    if (unlocked) {
+    if (unlocked > 0) {
         buffered_relock(self, st != 0);
     }
-    self->raw_pos += done;
+    if (unlocked >= 0) {
+        self->raw_pos += done;
+    }
     *written = done;
     return st;
 }
@@ -1046,169 +1058,238 @@ buffered_sync(buffered *self, int unlocked)
  *
  * Inside a _gather() block, the write()s of the Context that entered it
  * (by identity: a context copied inside the block, such as an asyncio
- * task's, writes as usual) go to a morsel list of the block's own, its
- * record, past the buffer size.  They are moved to the pending writes in
- * one step, so that no other data gets between them: when the block ends,
- * or earlier when the record holds `limit` bytes (and there is no
- * read-ahead) or an operation of that context needs the position (reads,
- * seek(), truncate()).  close(), detach() and __init__(), from any
- * context, move every record's data.  flush() inside the block takes
- * effect at its end; tell() counts the gathered bytes.  A block nested in
- * one on the same stream and context gathers into that one.
+ * task's, writes as usual) go to the context's record for the stream,
+ * past the buffer size, so that no other data gets between them.  Writes
+ * find it through a context variable of the stream and take only its lock,
+ * which no other thread waits for but to move its data (see below): a
+ * Context runs in one thread at a time.  A block nested in one on the same
+ * stream and context gathers into that one.
  *
- * The stream lists its records (active, or ended but not moved yet) with
- * the lock held, and counts them (ngather): every write and read checks
- * the count, which is all operations outside blocks pay.  A record
- * dropped before its block ended (a thread or generator gone inside it)
- * moves its data then, with a ResourceWarning, or drops it when it can't.
+ * At its end, a block writes its record out itself, with one writev() and
+ * only the record's lock, when the stream is a BufferedWriter of an exact
+ * FileIO of a regular file with no pending writes: POSIX makes writes to
+ * a regular file atomic with respect to each other, so the kernel orders
+ * it against the other threads' writes.  (The stream no longer keeps the
+ * raw position then, which these writes move.)  Otherwise, the record is
+ * moved to the pending writes, with the lock and the I/O role:
+ * - pending writes may have been written before the block ended, and
+ *   must come first;
+ * - a read-ahead is ahead of the logical position, where data goes;
+ * - pipes, sockets and terminals may split a large write, and Python raw
+ *   streams are no help at all.
+ * A record is also moved once it holds `limit` bytes (and there is no
+ * read-ahead), and before an operation of its context needs the position
+ * (reads, seek(), truncate()).  close(), detach() and __init__(), from any
+ * context, move every record's data, and stop the blocks writing out
+ * themselves, waiting for those doing so as they take each record's lock.
+ * flush() inside a block takes effect at its end; tell() counts the
+ * gathered bytes.
+ *
+ * The stream lists its records with the lock held, and counts them
+ * (ngather): every write and read checks the count, which is all
+ * operations outside blocks pay.  A record stays listed when its block
+ * ends, for the next block of its context, until an operation with the
+ * I/O role drops it.  A block dropped before it ends (a thread or
+ * generator gone inside it) ends then, with a ResourceWarning (its data is
+ * dropped when the stream is closed, or this thread is busy with it).
  */
+
+typedef struct record {
+    PyObject_HEAD
+    nibbler_mutex lock;         /* for the fields below, but next */
+    buffered *stream;           /* borrowed: records are found through it */
+    PyObject *ctx;              /* borrowed: the context it is for */
+    PyObject *raw;              /* borrowed: the block's raw stream */
+    struct record *next;        /* in the stream's list (with its lock) */
+    morsel_list list;
+    PyObject *block;            /* small writes are copied to block[used:] */
+    Py_ssize_t used;
+    Py_ssize_t limit;           /* moved to the stream once it holds this */
+    char flush;                 /* flush() was called inside the block */
+    uint8_t state;              /* stored atomically */
+} record;
+
+/* Listed but for REC_FREE; changed from or to it with both locks. */
+enum { REC_FREE, REC_IDLE, REC_ACTIVE, REC_PENDING, REC_WRITING };
 
 typedef struct gather {
     PyObject_HEAD
     buffered *stream;
-    Py_ssize_t limit;           /* moved to the stream once it holds this */
     PyObject *ctx;              /* the Context it was entered in */
-    struct gather *joined;      /* the record of an outer block it is in */
-    struct gather *next;        /* in the stream's list */
-    morsel_list list;
-    PyObject *block;            /* small writes are copied to block[used:] */
-    Py_ssize_t used;
-    char flush;                 /* flush() was called inside the block */
+    PyObject *raw;              /* the raw stream then */
+    record *rec;
+    Py_ssize_t limit;
+    char joined;                /* in the record of an outer block */
     char state;
 } gather;
 
-enum { GATHER_NEW, GATHER_ACTIVE, GATHER_PENDING, GATHER_DONE };
+enum { GATHER_NEW, GATHER_ACTIVE, GATHER_DONE };
 
 #define GATHER_LIMIT (20 * 1024 * 1024)
 #define GATHER_BLOCK_MIN 1024
 #define GATHER_BLOCK_MAX (64 * 1024)
 
-/* With the lock: the active record of the current context, or NULL. */
-static gather *
-gather_find(buffered *self)
-{
-    PyObject *ctx = _PyThreadState_GET()->context;
-    for (gather *g = self->gathers; g != NULL; g = g->next) {
-        if (g->state == GATHER_ACTIVE && g->ctx == ctx) {
-            return g;
-        }
-    }
-    return NULL;
-}
+#define rec_state(rec) FT_ATOMIC_LOAD_UINT8_RELAXED((rec)->state)
+#define rec_set_state(rec, s) FT_ATOMIC_STORE_UINT8_RELAXED((rec)->state, (s))
+#define rec_unlock(rec) nibbler_mutex_unlock(&(rec)->lock)
 
-static void
-gather_unlink(buffered *self, gather *g)
-{
-    gather **pg = &self->gathers;
-    while (*pg != g) {
-        pg = &(*pg)->next;
-    }
-    *pg = g->next;
-    g->next = NULL;
-    g->state = GATHER_DONE;
-    self->ngather--;
-}
-
-/* With the lock and the I/O role: move what g gathered to the pending
-   writes (handing read-ahead back first).  On error, g keeps the rest. */
+/* Take rec's lock (not interrupted).  Taken over from a holder gone while
+   writing it out (in a fork, or hung while finalizing), which may have
+   written any part: its data is dropped, as bytes in flight are. */
 static int
-gather_move(buffered *self, gather *g)
+rec_lock(record *rec)
 {
-    if (g->list.nbytes == 0) {
-        return 0;
+    int r = nibbler_mutex_lock(&rec->lock, (PyObject *)rec->stream, 0);
+    if (r > 0 && rec->state == REC_WRITING) {
+        morsels_clear(&rec->list);
+        rec_set_state(rec, REC_IDLE);
     }
-    if (self->reading && buffered_rewind(self) < 0) {
-        return -1;
+    return r < 0 ? -1 : 0;
+}
+
+/* Without the lock: the current context's record, or NULL. */
+static record *
+gather_current(buffered *self)
+{
+    PyObject *var = FT_ATOMIC_LOAD_PTR_ACQUIRE(self->gvar), *rec = NULL;
+    if (var != NULL && PyContextVar_Get(var, NULL, &rec) < 0) {
+        PyErr_Clear();
     }
-    if (morsels_splice(&self->list, &g->list) < 0) {
-        return -1;
+    /* (The context keeps it.) */
+    Py_XDECREF(rec);
+    return (rec != NULL
+            && ((record *)rec)->ctx == _PyThreadState_GET()->context
+            ? (record *)rec : NULL);
+}
+
+/* With both locks and no read-ahead: move what rec gathered to the
+   pending writes.  On error, rec keeps the rest. */
+static int
+gather_move(buffered *self, record *rec)
+{
+    if (rec->list.nbytes > 0) {
+        if (morsels_splice(&self->list, &rec->list) < 0) {
+            return -1;
+        }
+        /* Shared from now on: never written to again. */
+        Py_CLEAR(rec->block);
+        rec->used = 0;
     }
-    /* Shared from now on: never written to again. */
-    Py_CLEAR(g->block);
-    g->used = 0;
     return 0;
 }
 
 /* With the lock and the I/O role, for an operation needing the position
    on an open stream: move what the current context's record gathered,
-   and what ended records could not move (with all, every record's, also
-   doing their deferred flush).  The read-ahead is handed back first, so
-   that no raw call (Python code, which may drop records) runs while the
+   and what ended blocks could not move (with all, every record's data,
+   doing their deferred flush, see above), and unlist idle records (all
+   that is done with all -1, with the lock alone).  The read-ahead is
+   handed back first, so that no raw call (Python code) runs while the
    list is walked. */
 Py_NO_INLINE static int
 gather_move_records(buffered *self, int all)
 {
     PyObject *ctx = _PyThreadState_GET()->context;
-#define MOVED(g) (all || (g)->state == GATHER_PENDING || (g)->ctx == ctx)
-    for (gather *g = self->gathers; self->reading && g != NULL; g = g->next) {
-        if (MOVED(g) && g->list.nbytes > 0) {
+#define MOVED(r) (all > 0 || (all == 0 && ((r)->ctx == ctx            \
+                                          || rec_state(r) == REC_PENDING)))
+    if (all > 0) {
+        FT_ATOMIC_STORE_UINT8_RELAXED(self->direct, 0);
+    }
+    for (record *r = self->recs; self->reading && r != NULL; r = r->next) {
+        if (all > 0 || (MOVED(r) && FT_ATOMIC_LOAD_SSIZE_RELAXED(
+                                         r->list.nbytes)))
+        {
             if (buffered_rewind(self) < 0) {
                 return -1;
             }
             break;
         }
     }
-    gather *g = self->gathers;
-    while (g != NULL) {
-        gather *next = g->next;
-        if (MOVED(g)) {
-            if (gather_move(self, g) < 0) {
-                return -1;
-            }
-            g->flush &= !all;
-            if (g->state == GATHER_PENDING) {
-                gather_unlink(self, g);
+    record **p = &self->recs;
+    while (*p != NULL) {
+        record *r = *p;
+        if (rec_lock(r) < 0) {
+            return -1;
+        }
+        int err = MOVED(r) ? gather_move(self, r) : 0;
+        if (err == 0 && MOVED(r)) {
+            r->flush &= all == 0;
+            if (r->state == REC_PENDING) {
+                rec_set_state(r, REC_IDLE);
             }
         }
-        g = next;
+        int idle = r->state == REC_IDLE;
+        if (idle) {
+            *p = r->next;
+            r->next = NULL;
+            rec_set_state(r, REC_FREE);
+            FT_ATOMIC_STORE_INT_RELAXED(self->ngather, self->ngather - 1);
+        }
+        else {
+            p = &r->next;
+        }
+        rec_unlock(r);
+        if (idle) {
+            Py_DECREF(r);
+        }
+        if (err < 0) {
+            return -1;
+        }
     }
 #undef MOVED
     return 0;
 }
 
-/* With the lock: add data[0:len] (inside obj, or NULL) to what g
-   gathered, as the pending writes would keep it, in blocks growing with
-   what was gathered; at the limit, move it to the pending writes (which
-   may go past the threshold: the next write, flush or the block's end
-   writes it). */
-static int
-gather_add(gather *g, PyObject *obj, const char *data, Py_ssize_t len)
-{
-    buffered *self = g->stream;
-    Py_ssize_t size = Py_MIN(GATHER_BLOCK_MAX,
-                             Py_MAX(GATHER_BLOCK_MIN, g->list.nbytes));
-    if (buffered_append_to(self, &g->list, &g->block, &g->used, size, obj,
-                           data, len) < 0)
-    {
-        return -1;
-    }
-    if (g->list.nbytes >= g->limit && !self->reading) {
-        if (morsels_splice(&self->list, &g->list) == 0) {
-            Py_CLEAR(g->block);
-            g->used = 0;
-        }
-        else {
-            /* The rest is kept: moved at the next write or the end. */
-            PyErr_Clear();
-        }
-    }
-    return 0;
-}
-
-/* write() with the lock while there are records: gather it if the
-   context has one (then release the lock), else return 1. */
+/* write() while the stream has records: add data[0:len] (inside obj, or
+   NULL) to the current context's active record, as the pending writes
+   would keep it, in blocks growing with what it gathered; at the limit,
+   move it to the pending writes (which may go past the threshold: the
+   next write, flush or the block's end writes it).  Returns 1 if there is
+   no such record. */
 Py_NO_INLINE static int
 gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
              const char *closed_msg)
 {
-    gather *g = gather_find(self);
-    if (g == NULL) {
+    record *rec = gather_current(self);
+    /* (A signal handler run while its block writes it out writes as
+       usual.) */
+    if (rec == NULL || rec_state(rec) != REC_ACTIVE
+        || nibbler_mutex_is_mine(&rec->lock) || rec_lock(rec) < 0)
+    {
         return 1;
     }
-    int r = (self->raw == NULL ? buffered_not_ready()
-             : buffered_check_closed(self, closed_msg) < 0 ? -1
-             : gather_add(g, obj, data, len));
-    buffered_unlock(self);
+    int r = 1;
+    if (rec->state == REC_ACTIVE) {
+        /* The block's raw stream is alive while it is active: no
+           reference is needed while it is the stream's. */
+        PyObject *raw = FT_ATOMIC_LOAD_PTR_RELAXED(self->raw);
+        r = (raw == rec->raw ? buffered_ref_closed(raw) : -2);
+        if (r == -2) {
+            raw = buffered_get_raw(self);
+            r = raw ? buffered_ref_closed(raw) : -1;
+            Py_XDECREF(raw);
+        }
+        if (r > 0) {
+            PyErr_SetString(PyExc_ValueError, closed_msg);
+        }
+        Py_ssize_t size = Py_MIN(GATHER_BLOCK_MAX,
+                                 Py_MAX(GATHER_BLOCK_MIN, rec->list.nbytes));
+        r = (r != 0 ? -1
+             : buffered_append_to(self, &rec->list, &rec->block, &rec->used,
+                                  size, obj, data, len));
+    }
+    int full = r == 0 && rec->list.nbytes >= rec->limit;
+    rec_unlock(rec);
+    if (full) {
+        /* (Kept on error: moved at the next write or the end.) */
+        if (buffered_lock_ex(self, 0) == 0) {
+            if (!self->reading && rec_lock(rec) == 0) {
+                (void)gather_move(self, rec);
+                rec_unlock(rec);
+            }
+            buffered_unlock(self);
+        }
+        PyErr_Clear();
+    }
     return r;
 }
 
@@ -1231,36 +1312,145 @@ gather_lock(buffered *self)
     return 0;
 }
 
-/* With the I/O role and the lock: end g, which is in the list.  Move
-   what it gathered to the pending writes, or drop it when the stream is
-   closed or detached (*dropped: how many bytes; ValueError if any, or a
-   deferred flush).  When it can't be moved, g stays in the list, pending
-   (the next operation needing the position, close(), detach(),
-   __init__() or its dealloc try again).  Returns 0 when moved, else -1
-   (with an exception set but when dropping nothing). */
+/* End rec's block by writing its data out with rec's lock alone, when the
+   stream allows (see above).  Returns 1 if it doesn't, or the raw stream
+   would block, else 0 or -1; rec keeps what wasn't written. */
 static int
-gather_end(buffered *self, gather *g, Py_ssize_t *dropped)
+gather_direct(buffered *self, record *rec)
+{
+    if (!FT_ATOMIC_LOAD_UINT8_RELAXED(self->direct)) {
+        return 1;
+    }
+    if (rec_lock(rec) < 0) {
+        return -1;
+    }
+    morsel_list *l = &rec->list;
+    /* (raw stays while direct is set and rec is locked.) */
+    if (rec->state != REC_ACTIVE || !FT_ATOMIC_LOAD_UINT8(self->direct)
+        || FT_ATOMIC_LOAD_SSIZE_RELAXED(self->list.nbytes) > 0
+        || _PyFileIO_closed(FT_ATOMIC_LOAD_PTR_RELAXED(self->raw)))
+    {
+        rec_unlock(rec);
+        return 1;
+    }
+    int st = 0;
+    if (l->count - l->head > _PyIO_WRITEV_MAX) {
+        /* Joined, for one writev(). */
+        Py_ssize_t n = l->nbytes;
+        PyObject *b = PyBytes_FromStringAndSize(NULL, n);
+        if (b == NULL) {
+            st = -1;
+        }
+        else {
+            (void)morsels_take(l, PyBytes_AS_STRING(b), n);
+            (void)morsels_push(l, b, PyBytes_AS_STRING(b), n);
+            Py_DECREF(b);
+        }
+    }
+    if (st == 0 && l->nbytes > 0) {
+        _PyIO_Span spans[_PyIO_WRITEV_MAX];
+        PyObject *objs[_PyIO_WRITEV_MAX];
+        Py_ssize_t cnt = 0, written;
+        for (Py_ssize_t i = l->head; i < l->count; i++, cnt++) {
+            spans[cnt] = (_PyIO_Span){l->items[i].ptr, l->items[i].len};
+            objs[cnt] = Py_NewRef(l->items[i].obj);
+        }
+        rec_set_state(rec, REC_WRITING);
+        st = buffered_write_spans(self, spans, objs, cnt, l->nbytes, -1,
+                                  &written);
+        for (Py_ssize_t i = 0; i < cnt; i++) {
+            Py_DECREF(objs[i]);
+        }
+        (void)morsels_consume(l, written);
+    }
+    if (st == 0) {
+        /* The block is free again for the next one. */
+        rec->used = 0;
+    }
+    rec_set_state(rec, st == 0 ? REC_IDLE : REC_ACTIVE);
+    rec_unlock(rec);
+    return st == 0 ? 0 : st == WOULD_BLOCK ? 1 : -1;
+}
+
+/* End rec's block: write it out directly (see above), else move it to
+   the pending writes with the I/O role and the lock, then write them out
+   when they don't fit (all of them after a deferred flush()); or drop it
+   when the stream is closed or detached (*dropped: how many bytes;
+   ValueError if any, or a deferred flush).  What can't be moved stays,
+   pending (moved by the next operation needing the position, close(),
+   detach() or __init__()).  Returns 0, or -1 (with an exception set but
+   when dropping nothing). */
+static int
+gather_end(buffered *self, record *rec, Py_ssize_t *dropped)
 {
     *dropped = 0;
-    int closed = self->raw == NULL ? 1 : buffered_is_closed(self);
-    if (closed != 0) {
-        *dropped = g->list.nbytes;
-        if (closed > 0 && (*dropped > 0 || g->flush)) {
-            PyErr_SetString(PyExc_ValueError,
-                            *dropped > 0 ? "write to closed file"
-                                         : "flush of closed file");
+    int r = gather_direct(self, rec);
+    if (r == 0) {
+        return 0;
+    }
+    PyObject *exc = r < 0 ? PyErr_GetRaisedException() : NULL;
+    int locked = gather_lock(self) == 0;
+    int closed = (!locked ? 0 : self->raw == NULL ? 1
+                  : buffered_is_closed(self));
+    r = locked ? 0 : -1;
+    if (locked && closed == 0 && self->reading
+        && FT_ATOMIC_LOAD_SSIZE_RELAXED(rec->list.nbytes) > 0)
+    {
+        r = buffered_rewind(self);
+    }
+    int flush = 0;
+    if (rec_lock(rec) < 0) {
+        r = -1;
+    }
+    else {
+        flush = rec->flush;
+        if (locked && closed != 0) {
+            *dropped = rec->list.nbytes;
+            if (closed > 0 && (*dropped > 0 || flush)) {
+                PyErr_SetString(PyExc_ValueError,
+                                *dropped > 0 ? "write to closed file"
+                                             : "flush of closed file");
+            }
+            morsels_clear(&rec->list);
+            r = -1;
         }
-        Py_CLEAR(g->block);
-        morsels_clear(&g->list);
-        gather_unlink(self, g);
-        return -1;
+        else if (r == 0) {
+            r = gather_move(self, rec);
+        }
+        rec_set_state(rec, r == 0 || closed != 0 ? REC_IDLE : REC_PENDING);
+        rec_unlock(rec);
     }
-    if (gather_move(self, g) < 0) {
-        g->state = GATHER_PENDING;
-        return -1;
+    if (r == 0 && exc == NULL && !self->reading
+        && (self->list.nbytes > self->threshold
+            || (flush && self->list.nbytes > 0)))
+    {
+        int st;
+        (void)buffered_write_out(self, self->list.nbytes, NULL, NULL, 0, 1,
+                                 &st);
+        /* What would block stays pending, but for flush(). */
+        r = st == -1 || (st != 0 && flush) ? -1 : 0;
+        if (st == WOULD_BLOCK && flush) {
+            buffered_set_blocking_error(0);
+        }
     }
-    gather_unlink(self, g);
-    return 0;
+    if (locked) {
+        buffered_unlock_io(self);
+    }
+    if (exc != NULL) {
+        _PyErr_ChainExceptions1(exc);
+        r = -1;
+    }
+    return r;
+}
+
+/* With rec's lock: make it active for g's block. */
+static void
+rec_start(record *rec, gather *g)
+{
+    rec->raw = g->raw;
+    rec->limit = g->limit;
+    rec->flush = 0;
+    rec_set_state(rec, REC_ACTIVE);
 }
 
 static PyObject *
@@ -1282,122 +1472,142 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
         }
         Py_DECREF(copy);
     }
-    if (buffered_lock(self) < 0) {
+    PyObject *raw = buffered_get_raw(self);
+    int r = raw == NULL ? -1 : buffered_ref_closed(raw);
+    if (r > 0) {
+        PyErr_SetString(PyExc_ValueError, "gather on closed file");
+        r = -1;
+    }
+    Py_XSETREF(g->raw, raw);
+    /* The context's record: this block is in it if active; else made
+       active, without the lock while still listed. */
+    record *rec = r == 0 ? gather_current(self) : NULL;
+    int state = REC_FREE;
+    if (rec != NULL) {
+        if (rec_lock(rec) < 0) {
+            return NULL;
+        }
+        state = rec->state;
+        if (state == REC_IDLE) {
+            rec_start(rec, g);
+        }
+        rec_unlock(rec);
+    }
+    if (r == 0 && state != REC_ACTIVE && state != REC_IDLE) {
+        if (rec == NULL || state != REC_FREE) {
+            PyTypeObject *tp = find_nibblermodule_state_by_def(
+                Py_TYPE(self))->Record_Type;
+            rec = (record *)tp->tp_alloc(tp, 0);
+            PyObject *token = rec ? PyContextVar_Set(self->gvar,
+                                                     (PyObject *)rec) : NULL;
+            /* (The context keeps it.) */
+            Py_XDECREF(rec);
+            if (token == NULL) {
+                return NULL;
+            }
+            Py_DECREF(token);
+            rec->stream = self;
+            rec->ctx = tstate->context;
+        }
+        /* Listed with the lock, dropping idle records; written out
+           directly from now on if the stream allows (see above). */
+        if ((r = buffered_lock_io(self)) == 0) {
+            r = (self->raw == NULL ? buffered_not_ready()
+                 : buffered_check_closed(self, "gather on closed file"));
+            if (r == 0 && self->ngather > 0) {
+                r = gather_move_records(self, -1);
+            }
+            if (r == 0 && (r = rec_lock(rec)) == 0) {
+                rec->next = self->recs;
+                self->recs = (record *)Py_NewRef(rec);
+                FT_ATOMIC_STORE_INT_RELAXED(self->ngather, self->ngather + 1);
+                rec_start(rec, g);
+                rec_unlock(rec);
+                int direct = (
+                    self->raw_fileio && _PyFileIO_regular(self->raw)
+                    && PyType_GetBaseByToken(Py_TYPE(self),
+                                             &nibbler_bufferedwriter_spec,
+                                             NULL) > 0);
+                if (direct) {
+                    self->raw_regular = 0;
+                    self->raw_pos = POS_UNKNOWN;
+                    /* Settled first, with the I/O role: FileIO keeps it in
+                       a bit field next to those writes read, which tell()
+                       would store. */
+                    PyObject *res = PyObject_CallMethodNoArgs(
+                        self->raw, &_Py_ID(seekable));
+                    direct = res != NULL;
+                    Py_XDECREF(res);
+                    PyErr_Clear();
+                }
+                FT_ATOMIC_STORE_UINT8(self->direct, direct);
+            }
+            buffered_unlock_io(self);
+        }
+    }
+    if (r < 0) {
         return NULL;
     }
-    int r = (self->raw == NULL ? buffered_not_ready()
-             : buffered_check_closed(self, "gather on closed file"));
-    if (r == 0) {
-        gather *outer = gather_find(self);
-        if (outer != NULL) {
-            g->joined = (gather *)Py_NewRef(outer);
-        }
-        else {
-            gather **pg = &self->gathers;
-            while (*pg != NULL) {
-                pg = &(*pg)->next;
-            }
-            *pg = g;
-            g->ctx = Py_NewRef(tstate->context);
-            self->ngather++;
-        }
-        g->state = GATHER_ACTIVE;
-    }
-    buffered_unlock(self);
-    return r < 0 ? NULL : Py_NewRef(self);
+    g->joined = state == REC_ACTIVE;
+    g->rec = (record *)Py_NewRef(rec);
+    g->ctx = Py_NewRef(tstate->context);
+    g->state = GATHER_ACTIVE;
+    return Py_NewRef(self);
 }
 
-/* The end of a block: what it gathered is moved, also when the block
-   raised (as buffered data would be written), then written out when the
-   pending writes don't fit (all of them after a deferred flush()). */
+/* The end of a block: what it gathered is written out or moved, also when
+   the block raised (as buffered data would be written). */
 static PyObject *
 gather_exit(PyObject *op, PyObject *const *Py_UNUSED(args),
             Py_ssize_t Py_UNUSED(nargs))
 {
     gather *g = (gather *)op;
-    buffered *self = g->stream;
     if (g->state != GATHER_ACTIVE) {
         PyErr_SetString(PyExc_RuntimeError, "_gather() block not entered");
         return NULL;
     }
-    if (g->joined != NULL) {
-        g->state = GATHER_DONE;
-        Py_CLEAR(g->joined);
-        Py_RETURN_FALSE;
-    }
-    if (gather_lock(self) < 0) {
-        return NULL;
-    }
-    int flush = g->flush;
+    g->state = GATHER_DONE;
     Py_ssize_t dropped;
-    int r = gather_end(self, g, &dropped);
-    if (r == 0 && !self->reading
-        && (self->list.nbytes > self->threshold
-            || (flush && self->list.nbytes > 0)))
+    if (!g->joined && gather_end(g->stream, g->rec, &dropped) < 0
+        && PyErr_Occurred())
     {
-        int st;
-        (void)buffered_write_out(self, self->list.nbytes, NULL, NULL, 0, 1,
-                                 &st);
-        /* What would block stays pending, but for flush(). */
-        r = st == -1 || (st != 0 && flush) ? -1 : 0;
-        if (st == WOULD_BLOCK && flush) {
-            buffered_set_blocking_error(0);
-        }
-    }
-    buffered_unlock_io(self);
-    if (r < 0 && PyErr_Occurred()) {
         return NULL;
     }
     Py_RETURN_FALSE;
 }
 
-/* A record dropped while in the stream's list (its block never ended, or
-   ending it failed): move its data, with a ResourceWarning if its block
-   never ended; or drop it, with one. */
+/* A block dropped before it ended: end it, with a ResourceWarning. */
 static void
 gather_finish(gather *g)
 {
     buffered *self = g->stream;
+    record *rec = g->rec;
     PyObject *exc = PyErr_GetRaisedException();
+    Py_ssize_t dropped = 0;
     /* Code of this thread holding the locks further up its stack may be
-       in the middle of something: the data is dropped then, with the lock
-       (a write-out in a raw write holds only the I/O role). */
-    int has_lock = nibbler_mutex_is_mine(&self->lock);
-    int has_io = nibbler_mutex_is_mine(&self->io);
-    int active = g->state == GATHER_ACTIVE;
-    Py_ssize_t dropped = g->list.nbytes;
-    int locked = !has_lock && !has_io && gather_lock(self) == 0;
-    if (!has_lock && has_io) {
-        buffered_relock(self, 0);
-    }
-    if (!locked || (gather_end(self, g, &dropped) < 0
-                    && g->state == GATHER_PENDING))
+       in the middle of something: the data is dropped then. */
+    if (!nibbler_mutex_is_mine(&self->lock)
+        && !nibbler_mutex_is_mine(&self->io))
     {
-        dropped = g->list.nbytes;
-        morsels_clear(&g->list);
-        gather_unlink(self, g);
+        (void)gather_end(self, rec, &dropped);
     }
-    if (locked) {
-        buffered_unlock_io(self);
-    }
-    else if (!has_lock && has_io) {
-        buffered_unlock(self);
+    else if (rec_lock(rec) == 0) {
+        dropped = rec->list.nbytes;
+        morsels_clear(&rec->list);
+        rec_set_state(rec, REC_IDLE);
+        rec_unlock(rec);
     }
     PyErr_Clear();
-    Py_CLEAR(g->block);
     /* Without the lock: the warning may write to the stream. */
-    if (active || dropped > 0) {
-        int w = dropped > 0
-            ? PyErr_WarnFormat(PyExc_ResourceWarning, 1,
-                               "_gather() block %s: %zd gathered bytes "
-                               "were dropped",
-                               active ? "never ended" : "failed", dropped)
-            : PyErr_WarnEx(PyExc_ResourceWarning,
-                           "_gather() block never ended: its data was "
-                           "written when it was dropped", 1);
-        if (w < 0) {
-            PyErr_WriteUnraisable((PyObject *)g);
-        }
+    int w = dropped > 0
+        ? PyErr_WarnFormat(PyExc_ResourceWarning, 1,
+                           "_gather() block never ended: %zd gathered bytes "
+                           "were dropped", dropped)
+        : PyErr_WarnEx(PyExc_ResourceWarning,
+                       "_gather() block never ended: its data was "
+                       "written when it was dropped", 1);
+    if (w < 0) {
+        PyErr_WriteUnraisable((PyObject *)g);
     }
     PyErr_SetRaisedException(exc);
 }
@@ -1409,7 +1619,7 @@ gather_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(Py_TYPE(op));
     Py_VISIT(g->stream);
     Py_VISIT(g->ctx);
-    Py_VISIT(g->joined);
+    Py_VISIT(g->raw);
     return 0;
 }
 
@@ -1417,16 +1627,14 @@ static int
 gather_clear(PyObject *op)
 {
     gather *g = (gather *)op;
-    if (g->stream != NULL && g->ctx != NULL
-        && (g->state == GATHER_ACTIVE || g->state == GATHER_PENDING))
-    {
+    if (g->state == GATHER_ACTIVE && !g->joined) {
+        g->state = GATHER_DONE;
         gather_finish(g);
     }
     Py_CLEAR(g->stream);
     Py_CLEAR(g->ctx);
-    Py_CLEAR(g->joined);
-    Py_CLEAR(g->block);
-    morsels_clear(&g->list);
+    Py_CLEAR(g->raw);
+    Py_CLEAR(g->rec);
     return 0;
 }
 
@@ -1436,7 +1644,6 @@ gather_dealloc(PyObject *op)
     PyTypeObject *tp = Py_TYPE(op);
     PyObject_GC_UnTrack(op);
     (void)gather_clear(op);
-    PyMem_Free(((gather *)op)->list.items);
     tp->tp_free(op);
     Py_DECREF(tp);
 }
@@ -1461,6 +1668,31 @@ static PyType_Spec gather_spec = {
     .flags = (Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC
               | Py_TPFLAGS_IMMUTABLETYPE | Py_TPFLAGS_DISALLOW_INSTANTIATION),
     .slots = gather_slots,
+};
+
+static void
+record_dealloc(PyObject *op)
+{
+    PyTypeObject *tp = Py_TYPE(op);
+    record *rec = (record *)op;
+    morsels_clear(&rec->list);
+    PyMem_Free(rec->list.items);
+    Py_XDECREF(rec->block);
+    tp->tp_free(op);
+    Py_DECREF(tp);
+}
+
+static PyType_Slot record_slots[] = {
+    {Py_tp_dealloc, record_dealloc},
+    {0, NULL},
+};
+
+static PyType_Spec record_spec = {
+    .name = "_io._nibbler.GatherRecord",
+    .basicsize = sizeof(record),
+    .flags = (Py_TPFLAGS_DEFAULT | Py_TPFLAGS_IMMUTABLETYPE
+              | Py_TPFLAGS_DISALLOW_INSTANTIATION),
+    .slots = record_slots,
 };
 
 /*
@@ -1643,14 +1875,14 @@ static int
 buffered_write(buffered *self, PyObject *obj, const char *data,
                Py_ssize_t len, const char *closed_msg)
 {
-    if (buffered_lock(self) < 0) {
-        return -1;
-    }
-    if (self->ngather > 0) {
+    if (FT_ATOMIC_LOAD_INT_RELAXED(self->ngather) > 0) {
         int r = gather_write(self, obj, data, len, closed_msg);
         if (r <= 0) {
             return r;
         }
+    }
+    if (buffered_lock(self) < 0) {
+        return -1;
     }
     int done = 0;
     int open_fileio = self->raw_fileio && !_PyFileIO_closed(self->raw);
@@ -2116,6 +2348,7 @@ buffered_free(buffered *self)
     self->raw_pos = POS_UNKNOWN;
     /* Writes ask again (raw may be NULL now). */
     self->raw_fileio = self->raw_open = 0;
+    FT_ATOMIC_STORE_UINT8_RELAXED(self->direct, 0);
 }
 
 static int
@@ -2139,6 +2372,14 @@ buffered_dealloc(PyObject *op)
     _PyObject_GC_UNTRACK(self);
     FT_CLEAR_WEAKREFS(op, self->weakreflist);
     buffered_free(self);
+    while (self->recs != NULL) {
+        record *rec = self->recs;
+        self->recs = rec->next;
+        rec->next = NULL;
+        rec_set_state(rec, REC_FREE);
+        Py_DECREF(rec);
+    }
+    Py_CLEAR(self->gvar);
     (void)buffered_clear(op);
     tp->tp_free(self);
     Py_DECREF(tp);
@@ -2389,8 +2630,16 @@ _io__Buffered_flush_impl(buffered *self)
         return NULL;
     }
     /* Inside a _gather() block, flushing waits for its end. */
-    gather *g = self->ngather > 0 ? gather_find(self) : NULL;
-    int r = g ? (g->flush = 1, 0) : buffered_sync(self, 1);
+    record *rec = self->ngather > 0 ? gather_current(self) : NULL;
+    int deferred = 0;
+    if (rec != NULL && !nibbler_mutex_is_mine(&rec->lock)
+        && rec_lock(rec) == 0)
+    {
+        deferred = rec->state == REC_ACTIVE;
+        rec->flush |= deferred;
+        rec_unlock(rec);
+    }
+    int r = deferred ? 0 : buffered_sync(self, 1);
     buffered_unlock_io(self);
     return r < 0 ? NULL : Py_NewRef(Py_None);
 }
@@ -2627,8 +2876,9 @@ _io__Buffered_tell_impl(buffered *self)
     if (!self->raw_appending || self->reading
         || buffered_flush_writes(self, 0) == 0)
     {
-        gather *g = self->ngather > 0 ? gather_find(self) : NULL;
-        res = buffered_position(self, g ? g->list.nbytes : 0);
+        record *rec = self->ngather > 0 ? gather_current(self) : NULL;
+        res = buffered_position(self, rec && rec_state(rec) == REC_ACTIVE
+                                      ? rec->list.nbytes : 0);
     }
     buffered_unlock_io(self);
     return res;
@@ -2921,8 +3171,9 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
             && (fileio || !PyObject_TypeCheck(raw, state->PyFileIO_Type))
             && writev != _PyType_Lookup(state->PyRawIOBase_Type,
                                         &_Py_ID(_writev)));
-        self->ref_min = (fileio ? REF_MIN : self->raw_vectored ? 2048
-                         : PY_SSIZE_T_MAX);
+        FT_ATOMIC_STORE_SSIZE_RELAXED(
+            self->ref_min, (fileio ? REF_MIN : self->raw_vectored ? 2048
+                            : PY_SSIZE_T_MAX));
         self->raw_appending = (writable
                                && PyObject_TypeCheck(raw, state->PyFileIO_Type)
                                && _PyFileIO_appending(raw));
@@ -3040,11 +3291,12 @@ Returns a context manager.  Inside its with block, what the current
 context (thread, or asyncio task) writes is kept apart, also past
 the buffer size, and added to the buffered data in one piece when
 the block ends (also when it raises), so that no other output gets
-in between.  Once the block gathered limit bytes, they are added,
-and gathering goes on; with limit None, only at the end.  flush()
-inside the block takes effect at its end.  Reads, seek() and
-truncate() in the context add what it gathered first; close(),
-detach() and __init__(), from any context, what every block
+in between; a BufferedWriter of a regular file with nothing buffered
+writes it to the file then.  Once the block gathered limit bytes,
+they are added, and gathering goes on; with limit None, only at the
+end.  flush() inside the block takes effect at its end.  Reads,
+seek() and truncate() in the context add what it gathered first;
+close(), detach() and __init__(), from any context, what every block
 gathered.  A block on the same stream nested in one gathers into it.
 
 Gathering is by context, as with decimal.localcontext(): a block
@@ -3055,7 +3307,7 @@ the stream is closed, with a ResourceWarning.  Experimental.
 
 static PyObject *
 _io__Buffered__gather_impl(buffered *self, PyObject *limit_obj)
-/*[clinic end generated code: output=707c4e9e896fa736 input=8590831af3586247]*/
+/*[clinic end generated code: output=707c4e9e896fa736 input=154647b2d89feaff]*/
 {
     Py_ssize_t limit = GATHER_LIMIT;
     if (limit_obj == Py_None) {
@@ -3069,6 +3321,15 @@ _io__Buffered__gather_impl(buffered *self, PyObject *limit_obj)
         if (limit <= 0) {
             PyErr_SetString(PyExc_ValueError, "limit must be positive");
             return NULL;
+        }
+    }
+    if (FT_ATOMIC_LOAD_PTR_ACQUIRE(self->gvar) == NULL) {
+        PyObject *var = PyContextVar_New("_gather", NULL), *none = NULL;
+        if (var == NULL) {
+            return NULL;
+        }
+        if (!_Py_atomic_compare_exchange_ptr(&self->gvar, &none, var)) {
+            Py_DECREF(var);
         }
     }
     PyTypeObject *tp = find_nibblermodule_state_by_def(
@@ -3560,7 +3821,6 @@ static PyGetSetDef buffered_getset[] = {
         .slots = buffered##low##_slots,                                    \
     };
 
-static PyType_Spec nibbler_bufferedwriter_spec;
 static PyType_Spec nibbler_bufferedrandom_spec;
 #define ITERNEXT_SLOT {Py_tp_iternext, buffered_iternext},
 BUFFERED_SPEC(BufferedReader, reader, ITERNEXT_SLOT)
@@ -3645,6 +3905,7 @@ nibblermodule_traverse(PyObject *mod, visitproc visit, void *arg)
     Py_VISIT(state->PyBufferedRWPair_Type);
     Py_VISIT(state->PyTextIOWrapper_Type);
     Py_VISIT(state->Gather_Type);
+    Py_VISIT(state->Record_Type);
     return 0;
 }
 
@@ -3659,6 +3920,7 @@ nibblermodule_clear(PyObject *mod)
     Py_CLEAR(state->PyBufferedRWPair_Type);
     Py_CLEAR(state->PyTextIOWrapper_Type);
     Py_CLEAR(state->Gather_Type);
+    Py_CLEAR(state->Record_Type);
     return 0;
 }
 
@@ -3738,6 +4000,8 @@ _PyIO_create_nibbler_submodule(PyObject *io_module, int as_io)
              io_state->PyTextIOBase_Type, prefix, 0)) == NULL
         || (state->Gather_Type = (PyTypeObject *)PyType_FromModuleAndSpec(
              mod, &gather_spec, NULL)) == NULL
+        || (state->Record_Type = (PyTypeObject *)PyType_FromModuleAndSpec(
+             mod, &record_spec, NULL)) == NULL
         || _PyImport_SetModuleString("_io._nibbler", mod) < 0
         || PyModule_AddObjectRef(io_module, "_nibbler", mod) < 0)
     {
