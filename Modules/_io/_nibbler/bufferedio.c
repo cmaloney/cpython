@@ -3231,11 +3231,17 @@ _PyIONibbler_view(PyObject *op, Py_ssize_t k, PyObject **block,
     return self->end - self->pos;
 }
 
-/* With the lock: the rest of _PyIONibbler_take(). */
-static inline int
-buffered_take_at(buffered *self, const char *p, Py_ssize_t len,
-                 Py_ssize_t k)
+int
+_PyIONibbler_take(PyObject *op, const char *p, Py_ssize_t len, Py_ssize_t k)
 {
+    buffered *self = buffered_cast(op);
+    /* (The lock is held briefly by everyone: not interrupted.) */
+    if (FT_ATOMIC_LOAD_PTR_RELAXED(self->dict) != NULL) {
+        return 0;
+    }
+    if (buffered_lock_ex(self, 0) < 0) {
+        return -1;
+    }
     int r = (FT_ATOMIC_LOAD_PTR_RELAXED(self->dict) == NULL
              && self->raw != NULL && self->block != NULL
              && (self->reading || self->list.nbytes == 0)
@@ -3247,34 +3253,6 @@ buffered_take_at(buffered *self, const char *p, Py_ssize_t len,
     }
     buffered_unlock(self);
     return r;
-}
-
-Py_NO_INLINE static int
-buffered_take_wait(buffered *self, const char *p, Py_ssize_t len,
-                   Py_ssize_t k)
-{
-    /* Held briefly by everyone: not interrupted. */
-    int r = nibbler_mutex_lock(&self->lock, (PyObject *)self, 0);
-    if (r < 0) {
-        return -1;
-    }
-    if (r > 0) {
-        self->raw_pos = POS_UNKNOWN;
-    }
-    return buffered_take_at(self, p, len, k);
-}
-
-int
-_PyIONibbler_take(PyObject *op, const char *p, Py_ssize_t len, Py_ssize_t k)
-{
-    buffered *self = buffered_cast(op);
-    if (FT_ATOMIC_LOAD_PTR_RELAXED(self->dict) != NULL) {
-        return 0;
-    }
-    if (!nibbler_mutex_trylock(&self->lock)) {
-        return buffered_take_wait(self, p, len, k);
-    }
-    return buffered_take_at(self, p, len, k);
 }
 
 Py_ssize_t
