@@ -132,9 +132,12 @@ stream:
   finds the raw stream closed and returns without writing them or
   warning (as `_io` does with bytes buffered before `raw.close()`); they
   are dropped with the object.
-- Text writes through the nibbler `TextIOWrapper` ask the buffered object
-  whether it is closed on each write when the raw stream isn't an exact
-  FileIO, so they raise at once.
+- Text writes through the nibbler `TextIOWrapper` are such small writes:
+  the usual ones (text that is its own encoding, or UTF-8 with errors
+  `strict`, with no newline to translate) go straight to the buffered
+  object and are queued the same way.  Other text writes ask the buffered
+  object whether it is closed first (which asks the raw stream), and
+  raise at once.
 
 Why small writes don't ask: `closed` of a Python raw stream is an
 attribute lookup and a Python call, about 1750 instructions for a
@@ -224,9 +227,9 @@ Each of these is a bug of `_io`'s classes, which the tests skip for them:
 - Buffer size 0 and None are only supported here.
 
 And one of the nibbler: after a raw stream other than an exact FileIO is
-closed by itself, small writes are queued without an error until the
-block is full or an operation takes the lock (see "Closing the raw stream
-alone"); `_io` asks `closed` on every write.
+closed by itself, small writes (and the usual text writes) are queued
+without an error until the block is full or an operation takes the lock
+(see "Closing the raw stream alone"); `_io` asks `closed` on every write.
 
 When the nibbler classes replace `_io`'s, the C fast paths keyed on
 `_io`'s exact types (stock `TextIOWrapper`'s `read1()` shortcut, pickle's

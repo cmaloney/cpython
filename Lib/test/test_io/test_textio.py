@@ -2946,6 +2946,31 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                 self.assertIn(None, out)
                 self.assertEqual("".join(s for s in out if s), text)
 
+    def test_write_after_raw_closed(self):
+        # After the raw stream alone is closed, the usual text writes are
+        # the buffer's small writes: queued without asking the raw stream
+        # (which costs a Python call), never written to it; flush() raises.
+        # Others ask, and raise at once (io_nibbler.md).
+        class Raw(self.RawIOBase):
+            data = b""
+            def writable(self):
+                return True
+            def write(self, b):
+                self.data += bytes(b)
+                return len(b)
+        raw = Raw()
+        t = self.TextIOWrapper(self.BufferedWriter(raw), encoding="utf-8")
+        t.write("a")
+        t.flush()
+        raw.close()
+        t.write("x")
+        t.write("\u20ac")
+        self.assertRaises(ValueError, t.write, "\ud800")
+        self.assertRaises(ValueError, t.flush)
+        self.assertEqual(raw.data, b"a")
+        t.buffer._discard_writes()
+        t.close()
+
     def test_invalid_bytes_strict(self):
         # Invalid bytes end the text before them, and the next read raises
         # (once): they don't look like the end of the stream.
