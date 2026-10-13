@@ -19,8 +19,9 @@
     characters decoded but not returned yet (dchars), as _io does.
 
     Reads, seek(), tell() and the changes of the settings hold rlock, so
-    that a read is atomic (each line once, whole); writes only look at the
-    settings with wlock, so that they never wait for a blocking read.  See
+    that a read is atomic (each line once, whole); writes look at the
+    settings with wlock, and take rlock only after a read of a seekable
+    stream, so that they never wait for a blocking read.  See
     InternalDocs/io_nibbler.md.
 */
 
@@ -1898,6 +1899,7 @@ typedef struct {
     const char *errors_str;
     const char *writenl;
     char enc;
+    char seekable;
 } twriter;
 
 static int
@@ -1911,7 +1913,8 @@ writer_get(textio *self, twriter *w)
     *w = (twriter){Py_NewRef(self->buffer), Py_XNewRef(self->encoder),
                    Py_NewRef(self->errors), Py_XNewRef(self->readnl),
                    self->errors_str,
-                   self->writetranslate ? self->writenl : NULL, self->enc};
+                   self->writetranslate ? self->writenl : NULL, self->enc,
+                   self->seekable};
     textio_wunlock(self);
     return 0;
 }
@@ -2042,14 +2045,15 @@ _io_TextIOWrapper_write_impl(textio *self, PyObject *text)
 {
     /* The usual write: text that is its encoding (or strict UTF-8), with
        no newline to translate, in the buffer's own bytes, with no read to
-       go back from (the buffer checks it is open). */
+       go back from (none on a stream that isn't seekable: reads and writes
+       are separate streams there; the buffer checks it is open). */
     Py_ssize_t textlen = PyUnicode_GET_LENGTH(text);
     PyObject *buffer = NULL;
     int itself = 0;
     textio_wlock(self);
     if (self->ok && self->buffer != NULL && self->encoder != NULL
         && FT_ATOMIC_LOAD_UINT8_RELAXED(self->nib)
-        && !FT_ATOMIC_LOAD_UINT8_RELAXED(self->decoded)
+        && (!FT_ATOMIC_LOAD_UINT8_RELAXED(self->decoded) || !self->seekable)
         && !self->line_buffering && textio_exact(self)
         && (!self->writetranslate || self->writenl == NULL))
     {
@@ -2098,8 +2102,9 @@ _io_TextIOWrapper_write_impl(textio *self, PyObject *text)
     if (textio_check_closed(self, w.buffer) < 0) {
         goto end;
     }
-    if (FT_ATOMIC_LOAD_UINT8_RELAXED(self->decoded)) {
-        /* At the text position (gh-82891). */
+    if (w.seekable && FT_ATOMIC_LOAD_UINT8_RELAXED(self->decoded)) {
+        /* At the text position (gh-82891).  (Never on other streams, whose
+           reads may wait for the other end, which waits for this write.) */
         if (textio_enter(self, 0) < 0) {
             goto end;
         }

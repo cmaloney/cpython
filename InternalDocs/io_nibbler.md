@@ -315,10 +315,11 @@ to skip, and a write or `detach()` reads the bytes again first.
   goes the locked way.
 - **wlock**: held only to look at or swap the settings, never across other
   code: `write()` and the getters take what they need under it.  With the
-  GIL it is a no-op (holding the GIL is the same).  `write()` never takes
-  rlock, so writing never waits for a blocking read (a socket's
-  `makefile("rw")`); after a read it takes rlock to go back to the text
-  position first.  (Critical sections were tried: daemon threads stopped
+  GIL it is a no-op (holding the GIL is the same).  `write()` takes rlock
+  only after a read of a seekable stream, to go back to the text position
+  first.  On other streams reads and writes are separate streams, and
+  writing never waits for a blocking read (a socket's `makefile("rw")`,
+  a `BufferedRWPair` over a serial port or pipes).  (Critical sections were tried: daemon threads stopped
   at exit inside one hung the main thread's writes.)
 
 ### Differences from `_io.TextIOWrapper`

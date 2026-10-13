@@ -1679,6 +1679,67 @@ class TextIOWrapperTest:
             for n in range(20):
                 self.assertEqual(content.count("Thread%03d\n" % n), 1)
 
+    @threading_helper.requires_working_threading()
+    def test_write_while_reading_other_end(self):
+        # Over a stream that isn't seekable (a pipe or socket pair, as
+        # socket.makefile("rw") makes), reads and writes are separate
+        # streams: write() must not wait for a read blocked on the other
+        # end, which waits for that write (request/response).
+        import socket
+        def pipes():
+            in_r, in_w = os.pipe()
+            out_r, out_w = os.pipe()
+            fds = [in_r, in_w, out_r, out_w]
+            pair = self.BufferedRWPair(self.FileIO(in_r, "r"),
+                                       self.FileIO(out_w, "w"))
+            def peer_send(b):
+                os.write(in_w, b)
+            def peer_recv(timeout):
+                import select
+                if not select.select([out_r], [], [], timeout)[0]:
+                    raise TimeoutError
+                return os.read(out_r, 100)
+            def close():
+                for fd in fds[1:3]:
+                    os.close(fd)
+            return pair, peer_send, peer_recv, close
+        def sockets():
+            a, b = socket.socketpair()
+            raw = socket.SocketIO(a, "rw")
+            pair = self.BufferedRWPair(raw, raw)
+            def peer_recv(timeout):
+                b.settimeout(timeout)
+                return b.recv(100)
+            def close():
+                a.close()
+                b.close()
+            return pair, b.sendall, peer_recv, close
+        for make in (pipes, sockets):
+            with self.subTest(make.__name__):
+                pair, peer_send, peer_recv, close = make()
+                self.addCleanup(close)
+                t = self.TextIOWrapper(pair, encoding="utf-8", newline="")
+                self.addCleanup(t.close)
+                peer_send(b"hello\n")
+                self.assertEqual(t.readline(), "hello\n")
+                got = []
+                def reader():
+                    got.append(t.readline())
+                def peer():
+                    try:
+                        request = peer_recv(5)
+                    except TimeoutError:
+                        request = b"timeout"
+                    peer_send(b"pong\n" if request == b"ping\n"
+                              else b"no ping\n")
+                threads = [threading.Thread(target=reader),
+                           threading.Thread(target=peer)]
+                with threading_helper.start_threads(threads):
+                    time.sleep(0.1)
+                    t.write("ping\n")
+                    t.flush()
+                self.assertEqual(got, ["pong\n"])
+
     def test_flush_error_on_close(self):
         # Test that text file is closed despite failed flush
         # and that flush() is called before file closed.
