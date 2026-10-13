@@ -757,31 +757,15 @@ buffered_set_block(buffered *self, PyObject *block)
     Py_XDECREF(old);
 }
 
-/* A block of at least size bytes to write into from its start: the block
-   when nothing else references it, else a new one. */
-static PyObject *
-buffered_fresh_block(buffered *self, Py_ssize_t size)
-{
-    if (self->block == NULL || PyBytes_GET_SIZE(self->block) < size
-        || !_PyObject_IsUniquelyReferenced(self->block))
-    {
-        PyObject *block = PyBytes_FromStringAndSize(NULL, size);
-        if (block == NULL) {
-            return NULL;
-        }
-        buffered_set_block(self, block);
-    }
-    self->used = 0;
-    return self->block;
-}
-
-/* Add data[0:len] (inside obj, or NULL) to the pending writes: exact bytes
-   by reference from ref_min (or when larger than a block), else copied
-   into the block, or past a block's size into a bytes object of its
-   own. */
+/* Add data[0:len] (inside obj, or NULL) to the morsels in l: exact bytes
+   by reference from ref_min (or when larger than a buffer), else copied
+   into (*block)[*used:], or a block of size bytes when it has no room
+   (the old one if nothing else references it), or past that size into a
+   bytes object of its own.  The pending writes and _gather() records. */
 static inline Py_ALWAYS_INLINE int
-buffered_append(buffered *self, PyObject *obj, const char *data,
-                Py_ssize_t len)
+buffered_append_to(buffered *self, morsel_list *l, PyObject **block,
+                   Py_ssize_t *used, Py_ssize_t size, PyObject *obj,
+                   const char *data, Py_ssize_t len)
 {
     if (len == 0) {
         return 0;
@@ -789,28 +773,41 @@ buffered_append(buffered *self, PyObject *obj, const char *data,
     if (len >= REF_MIN && (len >= self->ref_min || len > self->capacity)
         && obj != NULL && PyBytes_CheckExact(obj))
     {
-        return morsels_push(&self->list, obj, data, len);
+        return morsels_push(l, obj, data, len);
     }
-    if (len > self->capacity) {
+    if (len > size) {
         PyObject *copy = PyBytes_FromStringAndSize(data, len);
-        int r = copy ? morsels_push(&self->list, copy, PyBytes_AS_STRING(copy),
-                                    len) : -1;
+        int r = copy ? morsels_push(l, copy, PyBytes_AS_STRING(copy), len)
+                : -1;
         Py_XDECREF(copy);
         return r;
     }
-    if ((self->used == 0 || PyBytes_GET_SIZE(self->block) - self->used < len)
-        && buffered_fresh_block(self, self->capacity) == NULL)
-    {
-        return -1;
+    if (*used == 0 || PyBytes_GET_SIZE(*block) - *used < len) {
+        if (*block == NULL || PyBytes_GET_SIZE(*block) < size
+            || !_PyObject_IsUniquelyReferenced(*block))
+        {
+            PyObject *b = PyBytes_FromStringAndSize(NULL, size);
+            if (b == NULL) {
+                return -1;
+            }
+            PyObject *old = *block;
+            FT_ATOMIC_STORE_PTR_RELAXED(*block, b);
+            Py_XDECREF(old);
+        }
+        *used = 0;
     }
-    char *dst = PyBytes_AS_STRING(self->block) + self->used;
+    char *dst = PyBytes_AS_STRING(*block) + *used;
     memcpy(dst, data, len);
-    if (morsels_push(&self->list, self->block, dst, len) < 0) {
+    if (morsels_push(l, *block, dst, len) < 0) {
         return -1;
     }
-    self->used += len;
+    *used += len;
     return 0;
 }
+
+#define buffered_append(self, obj, data, len)                            \
+    buffered_append_to((self), &(self)->list, &(self)->block,             \
+                       &(self)->used, (self)->capacity, (obj), (data), (len))
 
 /* Write spans[0:cnt] (total bytes) to the raw stream, retrying partial
    writes, until all of it is written (0), the raw stream would block
@@ -1128,6 +1125,7 @@ gather_move(buffered *self, gather *g)
     }
     /* Shared from now on: never written to again. */
     Py_CLEAR(g->block);
+    g->used = 0;
     return 0;
 }
 
@@ -1169,43 +1167,25 @@ gather_move_records(buffered *self, int all)
 }
 
 /* With the lock: add data[0:len] (inside obj, or NULL) to what g
-   gathered, by reference as the pending writes would keep it, else
-   copied; at the limit, move it to the pending writes (which may go past
-   the threshold: the next write, flush or the block's end writes it). */
+   gathered, as the pending writes would keep it, in blocks growing with
+   what was gathered; at the limit, move it to the pending writes (which
+   may go past the threshold: the next write, flush or the block's end
+   writes it). */
 static int
 gather_add(gather *g, PyObject *obj, const char *data, Py_ssize_t len)
 {
     buffered *self = g->stream;
-    if (len >= REF_MIN && (len >= self->ref_min || len > self->capacity)
-        && obj != NULL && PyBytes_CheckExact(obj))
+    Py_ssize_t size = Py_MIN(GATHER_BLOCK_MAX,
+                             Py_MAX(GATHER_BLOCK_MIN, g->list.nbytes));
+    if (buffered_append_to(self, &g->list, &g->block, &g->used, size, obj,
+                           data, len) < 0)
     {
-        if (morsels_push(&g->list, obj, data, len) < 0) {
-            return -1;
-        }
-    }
-    else if (len > 0) {
-        if (g->block == NULL || PyBytes_GET_SIZE(g->block) - g->used < len) {
-            /* Blocks grow with what was gathered, or fit the data. */
-            Py_ssize_t size = Py_MIN(GATHER_BLOCK_MAX,
-                                     Py_MAX(GATHER_BLOCK_MIN,
-                                            g->list.nbytes));
-            Py_XSETREF(g->block,
-                       PyBytes_FromStringAndSize(NULL, Py_MAX(size, len)));
-            g->used = 0;
-            if (g->block == NULL) {
-                return -1;
-            }
-        }
-        char *dst = PyBytes_AS_STRING(g->block) + g->used;
-        memcpy(dst, data, len);
-        if (morsels_push(&g->list, g->block, dst, len) < 0) {
-            return -1;
-        }
-        g->used += len;
+        return -1;
     }
     if (g->list.nbytes >= g->limit && !self->reading) {
         if (morsels_splice(&self->list, &g->list) == 0) {
             Py_CLEAR(g->block);
+            g->used = 0;
         }
         else {
             /* The rest is kept: moved at the next write or the end. */
