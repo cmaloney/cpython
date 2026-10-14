@@ -334,9 +334,8 @@ I/O base classes
    character strings).  See :meth:`~IOBase.readline` below.
 
    .. versionchanged:: next
-      On a non-blocking stream, iteration over a buffered binary stream
-      raises :exc:`BlockingIOError` instead of stopping when the next line
-      hasn't arrived yet.
+      On a non-blocking stream, iteration raises :exc:`BlockingIOError`
+      instead of stopping when the next line hasn't arrived yet.
 
    :class:`IOBase` is also a context manager and therefore supports the
    :keyword:`with` statement.  In this example, *file* is closed after the
@@ -391,8 +390,9 @@ I/O base classes
       terminator(s) recognized.
 
       .. versionchanged:: next
-         On a non-blocking stream, buffered binary streams return ``None``
-         instead of returning a partial line; they keep it for the next call.
+         On a non-blocking stream, buffered binary streams return ``None``,
+         and text streams raise :exc:`BlockingIOError`, instead of returning
+         a partial line; they keep it for the next call.
 
    .. method:: readlines(hint=-1, /)
 
@@ -409,7 +409,8 @@ I/O base classes
       .. versionchanged:: next
          On a non-blocking stream, the complete lines that have arrived are
          returned and a partial last line is kept for the next call; with no
-         complete line, buffered binary streams return ``None``.
+         complete line, buffered binary streams return ``None`` and text
+         streams raise :exc:`BlockingIOError`.
 
    .. method:: seek(offset, whence=os.SEEK_SET, /)
 
@@ -964,6 +965,13 @@ Text I/O
 
       Read and return at most *size* characters from the stream as a single
       :class:`str`.  If *size* is negative or ``None``, reads until EOF.
+
+      .. versionchanged:: next
+         On a non-blocking stream, :class:`TextIOWrapper` raises
+         :exc:`BlockingIOError` instead of returning ``""`` when no
+         character is available, and keeps the first bytes of a character
+         that has only partly arrived for the next read, also without a
+         *size* (which raised :exc:`UnicodeDecodeError`).
 
    .. method:: readline(size=-1, /)
 

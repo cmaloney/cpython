@@ -1,0 +1,9 @@
+On a non-blocking stream, :meth:`!read` with a size, :meth:`!readline` and
+iteration of :class:`io.TextIOWrapper` now raise :exc:`BlockingIOError` when
+no character is available, instead of returning ``""``, which means end of
+file. :meth:`!readline` keeps a partial line for the next call when the
+stream would block before the end of the line, unless it is longer than the
+chunk size (8192 by default), and :meth:`!tell` stays at the start of a kept
+line. :meth:`!read` without a size keeps the first bytes of a character
+that has only partly arrived for the next read, instead of raising
+:exc:`UnicodeDecodeError`.
