@@ -1,0 +1,6 @@
+:meth:`io.TextIOWrapper.truncate` without a size now cuts the file at the
+text position, where the next write would go, instead of at the position the
+buffer read up to, and no longer returns decoded text that the file no
+longer holds. A size is a byte count, not a :meth:`~io.TextIOWrapper.tell`
+cookie. While iterating has disabled :meth:`!tell`, :meth:`!truncate` raises
+the same error.

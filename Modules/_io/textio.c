@@ -3202,7 +3202,27 @@ _io_TextIOWrapper_truncate_impl(textio *self, PyObject *pos)
 {
     CHECK_ATTACHED(self)
 
-    if (_PyFile_Flush((PyObject *)self) < 0) {
+    /* After a read, the buffer is past the text position (by the decoded
+       chunk, or more), so truncate() without a size would cut there, and
+       the next read would return text cut away (gh-70346).  seek(tell())
+       first, so that the buffer is where the next write would go.  Both
+       flush first, and tell() raises like it does on its own while
+       iterating has disabled it.  pos stays a byte count. */
+    if (self->seekable
+        && (self->decoded_chars != NULL || self->snapshot != NULL))
+    {
+        PyObject *cookie = _io_TextIOWrapper_tell_impl(self);
+        if (cookie == NULL) {
+            return NULL;
+        }
+        PyObject *res = _io_TextIOWrapper_seek_impl(self, cookie, SEEK_SET);
+        Py_DECREF(cookie);
+        if (res == NULL) {
+            return NULL;
+        }
+        Py_DECREF(res);
+    }
+    else if (_PyFile_Flush((PyObject *)self) < 0) {
         return NULL;
     }
 
