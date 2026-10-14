@@ -102,6 +102,9 @@ typedef struct nibbler {
 #endif
     /* NULL for none.  Also read without the lock, see "The open end". */
     struct nibbler_end *end;
+    /* Set by the caller: keep the reading end held when the lock is
+       released, so that reads go through the lock. */
+    uint8_t hold_reading;
     /* How many ends were made (see nibbler_end.id). */
     uint64_t ends;
     /* The nibbler_set it is in (NULL for none); in it, the next one and
@@ -189,6 +192,28 @@ morsels_push(morsel_list *list, PyObject *obj, const char *ptr,
         list->items[list->count++] = (morsel){Py_NewRef(obj), ptr, len};
     }
     list->nbytes += len;
+    return 0;
+}
+
+/* Move all of src's morsels, with their references, to the end of dst,
+   leaving src empty. */
+static int
+morsels_splice(morsel_list *dst, morsel_list *src)
+{
+    if (dst->count + src->count > dst->capacity
+        && morsels_grow(dst, dst->count + src->count) < 0)
+    {
+        return -1;
+    }
+    if (src->count > 0) {
+        memcpy(dst->items + dst->count, src->items,
+               (size_t)src->count * sizeof(morsel));
+    }
+    dst->count += src->count;
+    dst->nbytes += src->nbytes;
+    src->count = 0;
+    src->nbytes = 0;
+    morsels_compact(src);
     return 0;
 }
 
@@ -344,12 +369,12 @@ nibbler_open(nibbler *n)
     if (!e->writing) {
         /* At the unread bytes. */
         p = ~FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
-        if (e->done > p || NIBBLER_END_HOLD(e)) {
+        if (e->done > p || n->hold_reading || NIBBLER_END_HOLD(e)) {
             /* A readline() found no end of line in the unread bytes (see
                nibbler_noline()): stay held, so that reads without the lock
                fail (lines would be looked for in those bytes again), and
                go through the lock until they are taken.  Also while the
-               caller wants that (hold). */
+               caller wants that (hold, or hold_reading). */
             return;
         }
     }
@@ -1133,10 +1158,19 @@ nibbler_append_copy(nibbler *n, const char *data, Py_ssize_t len)
     return r;
 }
 
-/* Append data[0:len], inside obj (or NULL): by reference when it is at
-   least ref_min bytes or larger than a block (exact bytes only, and at
-   least NIBBLER_REF_MIN), else copied into the block, or into a bytes
-   object of its own when larger. */
+/* Is data of len bytes inside obj (or NULL) kept by reference rather than
+   copied: exact bytes, at least NIBBLER_REF_MIN bytes, and at least ref_min
+   bytes or larger than a block? */
+static inline int
+nibbler_by_ref(nibbler *n, PyObject *obj, Py_ssize_t len, Py_ssize_t ref_min)
+{
+    return ((len >= ref_min || len > n->capacity) && len >= NIBBLER_REF_MIN
+            && obj != NULL && PyBytes_CheckExact(obj));
+}
+
+/* Append data[0:len], inside obj (or NULL): by reference (see
+   nibbler_by_ref()), else copied into the block, or into a bytes object of
+   its own when larger. */
 static int
 nibbler_append(nibbler *n, PyObject *obj, const char *data, Py_ssize_t len,
                Py_ssize_t ref_min)
@@ -1144,15 +1178,12 @@ nibbler_append(nibbler *n, PyObject *obj, const char *data, Py_ssize_t len,
     if (len == 0) {
         return 0;
     }
-    /* Data larger than a block (the caller may let pending writes pass the
-       block size) is never copied into one. */
-    int large = len > n->capacity;
-    if ((len >= ref_min || large) && len >= NIBBLER_REF_MIN && obj != NULL
-        && PyBytes_CheckExact(obj))
-    {
+    if (nibbler_by_ref(n, obj, len, ref_min)) {
         return morsels_push(&n->list, obj, data, len);
     }
-    if (large) {
+    /* Data larger than a block (the caller may let pending writes pass the
+       block size) is never copied into one. */
+    if (len > n->capacity) {
         return nibbler_append_copy(n, data, len);
     }
 
