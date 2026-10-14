@@ -333,6 +333,11 @@ I/O base classes
    stream is a binary stream (yielding bytes), or a text stream (yielding
    character strings).  See :meth:`~IOBase.readline` below.
 
+   .. versionchanged:: next
+      On a non-blocking stream, iteration over a buffered binary stream
+      raises :exc:`BlockingIOError` instead of stopping when the next line
+      hasn't arrived yet.
+
    :class:`IOBase` is also a context manager and therefore supports the
    :keyword:`with` statement.  In this example, *file* is closed after the
    :keyword:`!with` statement's suite is finished---even if an exception occurs::
@@ -385,6 +390,10 @@ I/O base classes
       the *newline* argument to :func:`open` can be used to select the line
       terminator(s) recognized.
 
+      .. versionchanged:: next
+         On a non-blocking stream, buffered binary streams return ``None``
+         instead of returning a partial line; they keep it for the next call.
+
    .. method:: readlines(hint=-1, /)
 
       Read and return a list of lines from the stream.  *hint* can be specified
@@ -396,6 +405,11 @@ I/O base classes
 
       Note that it's already possible to iterate on file objects using ``for
       line in file: ...`` without calling :meth:`!file.readlines`.
+
+      .. versionchanged:: next
+         On a non-blocking stream, the complete lines that have arrived are
+         returned and a partial last line is kept for the next call; with no
+         complete line, buffered binary streams return ``None``.
 
    .. method:: seek(offset, whence=os.SEEK_SET, /)
 
