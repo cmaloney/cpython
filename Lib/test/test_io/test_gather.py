@@ -891,5 +891,238 @@ class GatherTest(unittest.TestCase):
         lines = set(self.read().splitlines())
         self.assertLessEqual(lines, {b'0123456789' * 10, b'child'})
 
+    # Direct blocks (direct=True), meant to last a thread's life: written
+    # out at their start, then written out themselves at their limit,
+    # flush() and end, without waiting for other contexts' pending writes.
+
+    @threading_helper.requires_working_threading()
+    def test_direct_mode_entry(self):
+        with open(self.path, 'wb') as f:
+            f.write(b'p')
+            with f._gather(direct=True):
+                # The context's earlier writes first.
+                self.assertEqual(self.read(), b'p')
+                f.write(b'B')
+                t = threading.Thread(target=f.write, args=(b'o',))
+                t.start()
+                t.join()
+                with self.lock_held(f):
+                    f.write(b'C')
+                    self.assertEqual(self.size(), 1)
+                    f.flush()
+                    # Without waiting for the lock nor the pending 'o'.
+                    self.assertEqual(self.read(), b'pBC')
+                    f.write(b'D')
+                self.assertEqual(self.read(), b'pBC')
+            # The end as well.
+            self.assertEqual(self.read(), b'pBCD')
+        self.assertEqual(self.read(), b'pBCDo')
+
+    def test_direct_mode_limit(self):
+        with open(self.path, 'wb', buffering=10) as f:
+            with f._gather(direct=True):
+                # The buffer size by default.
+                f.write(b'012345678')
+                self.assertEqual(self.size(), 0)
+                f.write(b'9')
+                self.assertEqual(self.size(), 10)
+                f.write(b'x' * 25)
+                self.assertEqual(self.size(), 35)
+                f.write(b'abc')
+                self.assertEqual(f.tell(), 38)
+            self.assertEqual(self.size(), 38)
+            with f._gather(limit=3, direct=True):
+                f.write(b'de')
+                self.assertEqual(self.size(), 38)
+                f.write(b'f')
+                self.assertEqual(self.size(), 41)
+            with f._gather(limit=None, direct=True):
+                f.write(b'g' * 100)
+                self.assertEqual(self.size(), 41)
+        self.assertEqual(self.read(), b'0123456789' + b'x' * 25 + b'abcdef'
+                         + b'g' * 100)
+
+    def test_line_flush(self):
+        for direct in (False, True):
+            with open(self.path, 'wb') as f:
+                with f._gather(line_flush=True, direct=direct):
+                    f.write(b'a\nb')
+                    self.assertEqual(self.read(), b'a\n')
+                    f.write(b'c')
+                    self.assertEqual(self.read(), b'a\n')
+                    f.write(b'\nd\ne')
+                    self.assertEqual(self.read(), b'a\nbc\nd\n')
+                    # Large pieces kept by reference, and more pieces than
+                    # one writev() takes.
+                    f.write(b'y' * 100_000)
+                    for i in range(100):
+                        f.write(b'%d' % (i % 10))
+                    self.assertEqual(self.size(), 7)
+                    f.write(b'z\n')
+                    self.assertEqual(self.size(), 100_110)
+                    f.write(b'tail')
+                self.assertEqual(self.size(), 100_110 if not direct
+                                 else 100_114)
+            self.assertEqual(self.read(),
+                             b'a\nbc\nd\ne' + b'y' * 100_000
+                             + b'0123456789' * 10 + b'z\ntail')
+
+    @threading_helper.requires_working_threading()
+    def test_line_flush_pending(self):
+        # Without direct, lines go after the pending writes, waiting for
+        # the lock; with it, before them.
+        for direct, expected in ((False, b'pA\nB'), (True, b'A\nBp')):
+            with open(self.path, 'wb') as f:
+                with f._gather(line_flush=True, direct=direct):
+                    contextvars.copy_context().run(f.write, b'p')
+                    with self.lock_held(f, release_after=0.2):
+                        f.write(b'A\nB')
+                        self.assertEqual(self.read(), expected[:-1 - direct])
+            self.assertEqual(self.read(), expected)
+
+    def test_line_flush_text(self):
+        with open(self.path, 'w', encoding='utf-8') as f:
+            with f.buffer._gather(line_flush=True, direct=True):
+                f.write('a\nb')
+                f.flush()
+                self.assertEqual(self.read(), b'a\nb')
+                print('c', file=f)
+                f.write('\xe9')
+                # (TextIOWrapper may keep text until its flush.)
+                f.flush()
+                self.assertEqual(self.read(), b'a\nbc\n\xc3\xa9')
+            self.assertEqual(self.read(), b'a\nbc\n\xc3\xa9')
+
+    def test_direct_mode_fallbacks(self):
+        # Where direct writes aren't possible: written out with the lock,
+        # after the pending writes.
+        out = bytearray()
+        class Raw(io.RawIOBase):
+            def writable(self):
+                return True
+            def write(self, b):
+                out.extend(b)
+                return len(b)
+        f = _nibbler.BufferedWriter(Raw(), 8)
+        f.write(b'p')
+        with f._gather(direct=True, line_flush=True):
+            self.assertEqual(out, b'p')
+            f.write(b'0123')
+            contextvars.copy_context().run(f.write, b'X')
+            f.write(b'\n45')
+            self.assertEqual(out, b'pX0123\n')
+            # At the limit (the buffer size).
+            f.write(b'6789ab')
+            self.assertEqual(out, b'pX0123\n456789ab')
+            f.write(b'c')
+            f.flush()
+            self.assertEqual(out, b'pX0123\n456789abc')
+            f.write(b'd')
+        # The end as for other blocks: buffered.
+        self.assertEqual(out, b'pX0123\n456789abc')
+        f.flush()
+        self.assertEqual(out, b'pX0123\n456789abcd')
+        # A read-ahead: at the logical position.
+        with open(self.path, 'w+b') as f:
+            f.write(b'0123456789')
+            f.seek(0)
+            self.assertEqual(f.read(2), b'01')
+            with f._gather(direct=True, line_flush=True):
+                f.write(b'A\n')
+                f.write(b'B')
+            self.assertEqual(f.read(2), b'56')
+        self.assertEqual(self.read(), b'01A\nB56789')
+        # A pipe.
+        r, w = os.pipe()
+        self.addCleanup(os.close, r)
+        os.set_blocking(r, False)
+        with open(w, 'wb') as f:
+            f.write(b'p')
+            with f._gather(direct=True, line_flush=True):
+                self.assertEqual(os.read(r, 100), b'p')
+                f.write(b'a\nb')
+                self.assertEqual(os.read(r, 100), b'a\n')
+            self.assertRaises(BlockingIOError, os.read, r, 100)
+        self.assertEqual(os.read(r, 100), b'b')
+
+    def test_direct_mode_closed(self):
+        f = open(self.path, 'wb')
+        with f._gather(direct=True, line_flush=True):
+            f.write(b'a\nb')
+            # What the block gathered is written.
+            f.close()
+            self.assertRaises(ValueError, f.write, b'c\n')
+            self.assertRaises(ValueError, f.flush)
+        self.assertEqual(self.read(), b'a\nb')
+        self.assertRaises(ValueError, f._gather(direct=True).__enter__)
+
+    @unittest.skipUnless(hasattr(signal, 'SIGXFSZ'), 'needs SIGXFSZ')
+    def test_direct_mode_write_error(self):
+        # Past RLIMIT_FSIZE: the limit's write-out writes part and fails,
+        # quietly; the end raises; nothing is written twice.
+        resource = import_helper.import_module('resource')
+        old = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+        self.addCleanup(signal.signal, signal.SIGXFSZ, old)
+        soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+        data = [b'%04d' % i for i in range(500)]
+        with open(self.path, 'wb', buffering=100) as f:
+            resource.setrlimit(resource.RLIMIT_FSIZE, (1000, hard))
+            try:
+                with self.assertRaises(OSError) as cm:
+                    with f._gather(direct=True):
+                        for d in data:
+                            f.write(d)
+                        self.assertEqual(self.size(), 1000)
+            finally:
+                resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+            self.assertEqual(cm.exception.errno, errno.EFBIG)
+        self.assertEqual(self.read(), b''.join(data))
+
+    @threading_helper.requires_working_threading()
+    def test_threads_whole_life(self):
+        # Threads in one direct block each for their whole life, with
+        # plain writers meanwhile: every line whole, in its thread's order,
+        # once.
+        nthreads, lines = 8, 3000
+        def worker(f, i, **kw):
+            with f._gather(direct=True, **kw):
+                for k in range(lines):
+                    tail = b'x' * 600 if k % 97 == 0 else b''
+                    f.write(b'%d:%d:%s\n' % (i, k, tail))
+                    if kw.get('line_flush') and k % 10 == 0:
+                        f.write(b'%d:' % i)
+                        f.write(b'p:\n')
+        def plain(f, i):
+            for k in range(lines):
+                f.write(b'%d:%d:\n' % (i, k))
+        for mode, kw in (('wb', {}), ('ab', {}), ('wb', {'line_flush': True}),
+                         ('wb', {'limit': 1000})):
+            with self.subTest(mode=mode, **kw):
+                with open(self.path, mode, buffering=4096) as f:
+                    threads = [threading.Thread(target=worker, args=(f, i),
+                                                kwargs=kw)
+                               for i in range(nthreads)]
+                    threads += [threading.Thread(target=plain,
+                                                 args=(f, nthreads + i))
+                                for i in range(2)]
+                    with threading_helper.start_threads(threads):
+                        pass
+                seen = {}
+                extra = 0
+                for line in self.read().splitlines():
+                    i, k, tail = line.split(b':')
+                    if k == b'p':
+                        extra += 1
+                        continue
+                    i, k = int(i), int(k)
+                    self.assertEqual(k, seen.get(i, -1) + 1)
+                    self.assertIn(tail, (b'', b'x' * 600))
+                    seen[i] = k
+                self.assertEqual(seen, {i: lines - 1
+                                        for i in range(nthreads + 2)})
+                self.assertEqual(extra, nthreads * (lines // 10)
+                                 if kw.get('line_flush') else 0)
+                os_helper.unlink(self.path)
+
 if __name__ == '__main__':
     unittest.main()

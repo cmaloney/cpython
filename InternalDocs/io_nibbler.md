@@ -99,6 +99,8 @@ I/O releases it, takes the role, takes the lock again and looks again.
 | `_gather()` exit with the lock free | if free, to write out | yes (trylock) | moved to the pending writes; written out when they don't fit |
 | `_gather()` exit with the lock busy, written out directly | – | – | the record's lock, across one `writev()` |
 | other `_gather()` exits | yes | yes (not interruptible) | writes out when the pending writes don't fit |
+| `_gather(direct=True)` enter | yes | yes | writes out the pending writes |
+| its limit, `flush()`, exit; `line_flush` lines | – | – | written out directly as above, pending writes or not |
 
 Waits release the GIL (or detach) and a signal handler that raises
 interrupts them, except the relock after a raw call, whose result must be
@@ -213,7 +215,12 @@ else moved to the pending writes once the lock is free (also at
 `limit`, before an operation of that context needs the position, and by
 `close()`/`detach()`/`__init__()`).  While a stream has records
 (`ngather`), the fast paths that take the lock alone go the way that takes
-the I/O role, where records are moved.
+the I/O role, where records are moved.  A direct block (for a thread's
+or task's life) writes out the pending writes at its start, then writes
+itself out directly at its limit (the buffer size by default), `flush()`
+and end without regard to pending writes, which are other contexts'; a
+line block (`line_flush`) writes its complete lines out after each write
+with a newline, keeping the partial line.
 
 
 Differences from `_io`

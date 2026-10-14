@@ -658,7 +658,7 @@ exit:
 }
 
 PyDoc_STRVAR(_io__Buffered__gather__doc__,
-"_gather($self, /, limit=20971520)\n"
+"_gather($self, /, limit=20971520, *, direct=False, line_flush=False)\n"
 "--\n"
 "\n"
 "Gather the writes of the current context in a with block.\n"
@@ -676,6 +676,15 @@ PyDoc_STRVAR(_io__Buffered__gather__doc__,
 "__init__(), from any context, what every block gathered.  A block\n"
 "on the same stream nested in one gathers into it.\n"
 "\n"
+"A direct block is for the life of a thread or task: it writes out\n"
+"the buffered data when it starts, then, at its limit (by default\n"
+"the buffer size), flush() and its end, writes what it gathered\n"
+"directly to a regular file (of a BufferedWriter of a FileIO) without\n"
+"waiting for what other contexts buffered meanwhile.  With\n"
+"line_flush, complete lines are written out after each write\n"
+"containing a newline: that way in a direct block, else after what\n"
+"is buffered.\n"
+"\n"
 "Gathering is by context, as with decimal.localcontext(): a block\n"
 "spanning a yield gathers what runs in the context meanwhile.  Data\n"
 "of a block dropped before it ends is added then, or dropped when\n"
@@ -685,7 +694,8 @@ PyDoc_STRVAR(_io__Buffered__gather__doc__,
     {"_gather", _PyCFunction_CAST(_io__Buffered__gather), METH_FASTCALL|METH_KEYWORDS, _io__Buffered__gather__doc__},
 
 static PyObject *
-_io__Buffered__gather_impl(buffered *self, PyObject *limit_obj);
+_io__Buffered__gather_impl(buffered *self, PyObject *limit_obj, int direct,
+                           int line_flush);
 
 static PyObject *
 _io__Buffered__gather(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
@@ -693,7 +703,7 @@ _io__Buffered__gather(PyObject *self, PyObject *const *args, Py_ssize_t nargs, P
     PyObject *return_value = NULL;
     #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
 
-    #define NUM_KEYWORDS 1
+    #define NUM_KEYWORDS 3
     static struct {
         PyGC_Head _this_is_not_used;
         PyObject_VAR_HEAD
@@ -702,7 +712,7 @@ _io__Buffered__gather(PyObject *self, PyObject *const *args, Py_ssize_t nargs, P
     } _kwtuple = {
         .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
         .ob_hash = -1,
-        .ob_item = { &_Py_ID(limit), },
+        .ob_item = { &_Py_ID(limit), &_Py_ID(direct), &_Py_ID(line_flush), },
     };
     #undef NUM_KEYWORDS
     #define KWTUPLE (&_kwtuple.ob_base.ob_base)
@@ -711,16 +721,18 @@ _io__Buffered__gather(PyObject *self, PyObject *const *args, Py_ssize_t nargs, P
     #  define KWTUPLE NULL
     #endif  // !Py_BUILD_CORE
 
-    static const char * const _keywords[] = {"limit", NULL};
+    static const char * const _keywords[] = {"limit", "direct", "line_flush", NULL};
     static _PyArg_Parser _parser = {
         .keywords = _keywords,
         .fname = "_gather",
         .kwtuple = KWTUPLE,
     };
     #undef KWTUPLE
-    PyObject *argsbuf[1];
+    PyObject *argsbuf[3];
     Py_ssize_t noptargs = nargs + (kwnames ? PyTuple_GET_SIZE(kwnames) : 0) - 0;
     PyObject *limit_obj = NULL;
+    int direct = 0;
+    int line_flush = 0;
 
     args = _PyArg_UnpackKeywords(args, nargs, NULL, kwnames, &_parser,
             /*minpos*/ 0, /*maxpos*/ 1, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
@@ -730,9 +742,31 @@ _io__Buffered__gather(PyObject *self, PyObject *const *args, Py_ssize_t nargs, P
     if (!noptargs) {
         goto skip_optional_pos;
     }
-    limit_obj = args[0];
+    if (args[0]) {
+        limit_obj = args[0];
+        if (!--noptargs) {
+            goto skip_optional_pos;
+        }
+    }
 skip_optional_pos:
-    return_value = _io__Buffered__gather_impl((buffered *)self, limit_obj);
+    if (!noptargs) {
+        goto skip_optional_kwonly;
+    }
+    if (args[1]) {
+        direct = PyObject_IsTrue(args[1]);
+        if (direct < 0) {
+            goto exit;
+        }
+        if (!--noptargs) {
+            goto skip_optional_kwonly;
+        }
+    }
+    line_flush = PyObject_IsTrue(args[2]);
+    if (line_flush < 0) {
+        goto exit;
+    }
+skip_optional_kwonly:
+    return_value = _io__Buffered__gather_impl((buffered *)self, limit_obj, direct, line_flush);
 
 exit:
     return return_value;
@@ -835,4 +869,4 @@ skip_optional:
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=eb325179d823764a input=a9049054013a1b77]*/
+/*[clinic end generated code: output=29523462059051ab input=a9049054013a1b77]*/
