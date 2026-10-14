@@ -4334,11 +4334,14 @@ static struct PyModuleDef _PyIO_nibbler_Module = {
 
 /* Create a type from spec with base, named prefix + its class name, and
    add it to mod.  The class attribute _is_nibbler (True) tells tests these
-   classes from _io's, also when they replace them.  Returns a new
-   reference, or NULL on error. */
+   classes from _io's, also when they replace them.  With keeps_read, the
+   class attribute _keeps_read_on_error (True) says that data read before
+   a raw read raised (such as a socket timeout) is kept for the next read,
+   so that reading can go on (socket.makefile() looks at it).  Returns a
+   new reference, or NULL on error. */
 static PyTypeObject *
 nibbler_add_type(PyObject *mod, const PyType_Spec *spec, PyTypeObject *base,
-                 const char *prefix)
+                 const char *prefix, int keeps_read)
 {
     const char *cls = strrchr(spec->name, '.');
     assert(cls != NULL);
@@ -4351,8 +4354,11 @@ nibbler_add_type(PyObject *mod, const PyType_Spec *spec, PyTypeObject *base,
     if (type == NULL) {
         return NULL;
     }
-    if (PyDict_SetItemString(_PyType_GetDict(type), "_is_nibbler",
-                             Py_True) < 0)
+    PyObject *dict = _PyType_GetDict(type);
+    if (PyDict_SetItemString(dict, "_is_nibbler", Py_True) < 0
+        || (keeps_read
+            && PyDict_SetItemString(dict, "_keeps_read_on_error",
+                                    Py_True) < 0))
     {
         Py_DECREF(type);
         return NULL;
@@ -4384,16 +4390,16 @@ _PyIO_create_nibbler_submodule(PyObject *io_module, int as_io)
     PyTypeObject *base = io_state->PyBufferedIOBase_Type;
     state->PyBufferedIOBase_Type = (PyTypeObject *)Py_NewRef(base);
     if ((state->PyBufferedReader_Type = nibbler_add_type(
-             mod, &nibbler_bufferedreader_spec, base, prefix)) == NULL
+             mod, &nibbler_bufferedreader_spec, base, prefix, 1)) == NULL
         || (state->PyBufferedWriter_Type = nibbler_add_type(
-             mod, &nibbler_bufferedwriter_spec, base, prefix)) == NULL
+             mod, &nibbler_bufferedwriter_spec, base, prefix, 0)) == NULL
         || (state->PyBufferedRWPair_Type = nibbler_add_type(
-             mod, &nibbler_bufferedrwpair_spec, base, prefix)) == NULL
+             mod, &nibbler_bufferedrwpair_spec, base, prefix, 1)) == NULL
         || (state->PyBufferedRandom_Type = nibbler_add_type(
-             mod, &nibbler_bufferedrandom_spec, base, prefix)) == NULL
+             mod, &nibbler_bufferedrandom_spec, base, prefix, 1)) == NULL
         || (state->PyTextIOWrapper_Type = nibbler_add_type(
              mod, &_PyIONibbler_textiowrapper_spec,
-             io_state->PyTextIOBase_Type, prefix)) == NULL)
+             io_state->PyTextIOBase_Type, prefix, 0)) == NULL)
     {
         Py_DECREF(mod);
         return NULL;
