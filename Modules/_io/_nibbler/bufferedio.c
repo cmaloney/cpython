@@ -2820,7 +2820,8 @@ _io__Buffered_flush_impl(buffered *self)
 /*[clinic end generated code: output=da2674ef1ce71f3a input=fda63444697c6bf4]*/
 {
     /* But a direct block writes itself out (see "Gathering"). */
-    record *rec = self->ngather > 0 ? gather_current(self) : NULL;
+    record *rec = (FT_ATOMIC_LOAD_INT_RELAXED(self->ngather) > 0
+                   ? gather_current(self) : NULL);
     if (rec != NULL && rec_state(rec) == REC_ACTIVE && rec->direct
         && !nibbler_mutex_is_mine(&rec->lock))
     {

@@ -642,6 +642,8 @@ class GatherTest(unittest.TestCase):
             release.set()
             t.join()
             timer.cancel()
+            if timer.is_alive():
+                timer.join()
             del raw.tell
 
     def test_splice(self):
