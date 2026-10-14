@@ -1,0 +1,5 @@
+:meth:`io.TextIOWrapper.seek` now raises :exc:`OSError` for a cookie that
+:meth:`~io.TextIOWrapper.tell` can't have returned (a position too large for
+a cookie, or decoder state for a stream that doesn't read; in the C
+implementation also negative byte or character counts) instead of silently
+seeking to another position.
