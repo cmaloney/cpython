@@ -763,6 +763,41 @@ class TextIOWrapperTest:
         txt.seek(0)
         self.assertEqual(txt.readlines(5), ["AA\n", "BB\n"])
 
+    def test_read_would_block_keeps_partial_char(self):
+        # gh-57531: a raw stream that would block in the middle of a
+        # multibyte character: its first bytes are kept for the next read,
+        # instead of being decoded as if at EOF.
+        raw = self.MockRawIO((b"a\xc3", None, b"\xa9\xe2", None, b"\x82\xacb"))
+        t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
+        self.assertEqual(t.read(10), "a")
+        self.assertEqual(t.read(10), "\xe9")
+        self.assertEqual(t.read(10), "\u20acb")
+        self.assertEqual(t.read(10), "")
+
+    @unittest.skipUnless(hasattr(os, "set_blocking"),
+                         "requires os.set_blocking()")
+    def test_nonblocking_pipe_partial_char(self):
+        # gh-57531: over a real non-blocking pipe, a read that would block
+        # in the middle of a multibyte character returns the characters
+        # before it and keeps its first bytes for the next read.
+        r, w = os.pipe()
+        try:
+            os.set_blocking(r, False)
+            with self.open(r, "r", encoding="utf-8", closefd=False) as t:
+                os.write(w, b"a\xc3")
+                self.assertEqual(t.read(5), "a")
+                os.write(w, b"\xa9b\ncd\n")
+                self.assertEqual(t.readline(), "\xe9b\n")
+                self.assertEqual(t.read(3), "cd\n")
+                os.close(w)
+                w = None
+                self.assertEqual(t.read(5), "")
+                self.assertEqual(t.readline(), "")
+        finally:
+            os.close(r)
+            if w is not None:
+                os.close(w)
+
     # read in amounts equal to TextIOWrapper._CHUNK_SIZE which is 128.
     def test_read_by_chunk(self):
         # make sure "\r\n" straddles 128 char boundary.
