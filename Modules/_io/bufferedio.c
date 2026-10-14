@@ -1126,20 +1126,30 @@ _buffered_readinto_generic(buffered *self, Py_buffer *buffer, char readinto1)
     CHECK_INITIALIZED(self)
     CHECK_CLOSED(self, "readinto of closed file")
 
+    /* Unlocked only when the buffer has all of it: a partial copy taken
+       before waiting for the lock would let another thread take the rest. */
+    n = Py_SAFE_DOWNCAST(READAHEAD(self), Py_off_t, Py_ssize_t);
+    if (n > 0 && n >= buffer->len) {
+        memcpy(buffer->buf, self->buffer + self->pos, buffer->len);
+        self->pos += buffer->len;
+        return PyLong_FromSsize_t(buffer->len);
+    }
+
+    if (!ENTER_BUFFERED(self))
+        return NULL;
+
     n = Py_SAFE_DOWNCAST(READAHEAD(self), Py_off_t, Py_ssize_t);
     if (n > 0) {
         if (n >= buffer->len) {
             memcpy(buffer->buf, self->buffer + self->pos, buffer->len);
             self->pos += buffer->len;
-            return PyLong_FromSsize_t(buffer->len);
+            res = PyLong_FromSsize_t(buffer->len);
+            goto end;
         }
         memcpy(buffer->buf, self->buffer + self->pos, n);
         self->pos += n;
         written = n;
     }
-
-    if (!ENTER_BUFFERED(self))
-        return NULL;
 
     if (self->writable) {
         res = buffered_flush_and_rewind_unlocked(self);
@@ -1228,6 +1238,36 @@ _io__Buffered_readinto1_impl(buffered *self, Py_buffer *buffer)
 }
 
 
+/* Take a line, or limit bytes when limit >= 0, from the buffered data.
+   Returns NULL with *avail set to the bytes buffered (up to limit) when the
+   buffer holds neither, or NULL with *avail = -1 and an exception set on
+   error. */
+static inline PyObject *
+_buffered_readline_buffered(buffered *self, Py_ssize_t limit,
+                            Py_ssize_t *avail)
+{
+    Py_ssize_t n = Py_SAFE_DOWNCAST(READAHEAD(self), Py_off_t, Py_ssize_t);
+    if (limit >= 0 && n > limit) {
+        n = limit;
+    }
+    const char *start = self->buffer + self->pos;
+    const char *s = memchr(start, '\n', n);
+    if (s != NULL) {
+        n = s - start + 1;
+    }
+    else if (n != limit) {
+        *avail = n;
+        return NULL;
+    }
+    PyObject *res = PyBytes_FromStringAndSize(start, n);
+    if (res == NULL) {
+        *avail = -1;
+        return NULL;
+    }
+    self->pos += n;
+    return res;
+}
+
 static PyObject *
 _buffered_readline(buffered *self, Py_ssize_t limit)
 {
@@ -1238,37 +1278,31 @@ _buffered_readline(buffered *self, Py_ssize_t limit)
     /* First, try to find a line in the buffer. This can run unlocked because
        the calls to the C API are simple enough that they can't trigger
        any thread switch. */
-    Py_ssize_t n = Py_SAFE_DOWNCAST(READAHEAD(self), Py_off_t, Py_ssize_t);
-    if (limit >= 0 && n > limit) {
-        n = limit;
-    }
-    const char *start = self->buffer + self->pos;
-    const char *s = memchr(start, '\n', n);
-    if (s != NULL) {
-        n = s - start + 1;
-        PyObject *res = PyBytes_FromStringAndSize(start, n);
-        if (res == NULL) {
-            return NULL;
-        }
-        self->pos += n;
-        return res;
-    }
-
-    if (n == limit) {
-        PyObject *res = PyBytes_FromStringAndSize(start, n);
-        if (res == NULL) {
-            return NULL;
-        }
-        self->pos += n;
+    Py_ssize_t n;
+    PyObject *res = _buffered_readline_buffered(self, limit, &n);
+    if (res != NULL || n < 0) {
         return res;
     }
 
     PyBytesWriter *writer = NULL;
+    const char *start;
     int locked = 0;
     if (!ENTER_BUFFERED(self)) {
         goto error;
     }
     locked = 1;
+
+    /* Another thread may have used the buffer while this one waited for the
+       lock: look again, so the line is taken whole. */
+    res = _buffered_readline_buffered(self, limit, &n);
+    if (res != NULL || n < 0) {
+        if (res == NULL) {
+            goto error;
+        }
+        LEAVE_BUFFERED(self)
+        return res;
+    }
+    start = self->buffer + self->pos;
 
     /* Now we try to get some more from the raw stream */
     writer = PyBytesWriter_Create(0);
