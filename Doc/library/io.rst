@@ -355,6 +355,10 @@ I/O base classes
       As a convenience, it is allowed to call this method more than once;
       only the first call, however, will have an effect.
 
+      .. versionchanged:: next
+         If the flush fails, buffered and text streams are closed anyway and
+         the data still buffered is discarded, with a :exc:`ResourceWarning`.
+
    .. attribute:: closed
 
       ``True`` if the stream is closed.

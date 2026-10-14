@@ -1,0 +1,10 @@
+When the flush done by :meth:`~io.IOBase.close` of a buffered binary stream
+fails, the data still buffered is now discarded with a
+:exc:`ResourceWarning` saying how many bytes were lost; the stream was
+already closed and its buffer freed, but silently. :meth:`!close` of
+:class:`io.TextIOWrapper` no longer makes its buffer's :meth:`!close` try to
+write the same data again after its own flush failed (also over a
+:class:`io.BufferedRWPair`, and when writing what the encoder held at the
+end failed), which needed a second Ctrl-C at exit after a blocked write was
+interrupted, and reported a broken pipe twice (:gh:`55589`). Both the C and
+Python implementations are changed.

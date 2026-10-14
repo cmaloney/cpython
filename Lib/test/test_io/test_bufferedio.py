@@ -1249,6 +1249,20 @@ class BufferedWriterTest(CommonBufferedTests):
             bufio.flush()
             self.assertEqual(b"".join(raw._write_stack), b"abc")
 
+    def test_close_blocked_flush_warns(self):
+        # When the final flush would block, close() still closes the raw
+        # stream and raises, but warns that the pending data is discarded.
+        raw = self.MockNonBlockWriterIO()
+        bufio = self.tp(raw, 8)
+        bufio.write(b"abc")
+        raw.block_on(b"b")
+        with self.assertWarnsRegex(ResourceWarning,
+                                   "discarded 2 buffered bytes"):
+            with self.assertRaises(self.BlockingIOError):
+                bufio.close()
+        self.assertTrue(bufio.closed)
+        self.assertEqual(raw.pop_written(), b"a")
+
     def test_write_error_on_close(self):
         raw = self.MockRawIO()
         def bad_write(b):

@@ -1539,6 +1539,7 @@ extern "C" {
     INIT_ID(_bootstrap), \
     INIT_ID(_check_retval_), \
     INIT_ID(_dealloc_warn), \
+    INIT_ID(_discard_writes), \
     INIT_ID(_feature_version), \
     INIT_ID(_field_types), \
     INIT_ID(_fields_), \
