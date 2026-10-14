@@ -115,6 +115,13 @@ extern Py_ssize_t _Py_read(
     void *buf,
     size_t count);
 
+// One read() of at most _PY_READ_MAX bytes, for callers that release the GIL
+// themselves: returns the count, or -1 with errno set (including EINTR).
+extern Py_ssize_t _Py_read_noraise(
+    int fd,
+    void *buf,
+    size_t count);
+
 // Export for 'select' shared extension (Solaris devpoll_flush())
 PyAPI_FUNC(Py_ssize_t) _Py_write(
     int fd,
