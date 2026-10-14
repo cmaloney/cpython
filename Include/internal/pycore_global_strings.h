@@ -445,6 +445,7 @@ struct _Py_global_strings {
         STRUCT_FOR_ID(digest_size)
         STRUCT_FOR_ID(digestmod)
         STRUCT_FOR_ID(dir_fd)
+        STRUCT_FOR_ID(direct)
         STRUCT_FOR_ID(discard)
         STRUCT_FOR_ID(dispatch_table)
         STRUCT_FOR_ID(displayhook)

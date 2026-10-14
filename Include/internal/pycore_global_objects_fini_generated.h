@@ -433,6 +433,7 @@ _PyStaticObjects_CheckAll(PyInterpreterState *interp) {
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(digest_size), "digest_size", 11);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(digestmod), "digestmod", 9);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(dir_fd), "dir_fd", 6);
+    _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(direct), "direct", 6);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(discard), "discard", 7);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(dispatch_table), "dispatch_table", 14);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(displayhook), "displayhook", 11);

@@ -1720,6 +1720,7 @@ extern "C" {
     INIT_ID(digest_size), \
     INIT_ID(digestmod), \
     INIT_ID(dir_fd), \
+    INIT_ID(direct), \
     INIT_ID(discard), \
     INIT_ID(dispatch_table), \
     INIT_ID(displayhook), \
