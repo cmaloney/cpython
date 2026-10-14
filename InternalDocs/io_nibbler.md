@@ -313,13 +313,19 @@ to skip, and a write or `detach()` reads the bytes again first.
   for `seek()`, `tell()`, `close()` and going back to the text position.
   The quick read takes it with a trylock; when anyone holds it the read
   goes the locked way.
-- **wlock**: held only to look at or swap the settings, never across other
-  code: `write()` and the getters take what they need under it.  With the
-  GIL it is a no-op (holding the GIL is the same).  `write()` takes rlock
-  only after a read of a seekable stream, to go back to the text position
-  first.  On other streams reads and writes are separate streams, and
-  writing never waits for a blocking read (a socket's `makefile("rw")`,
-  a `BufferedRWPair` over a serial port or pipes).
+- **No settings lock**: the settings (buffer, codec objects, newline
+  modes, flags) are an immutable, reference-counted `tconf`, built whole
+  by `__init__()`, `reconfigure()` and `detach()` and published in one
+  pointer with rlock held.  Calls holding rlock use it as it is; `write()`
+  and the getters take a reference (a compare-and-swap on its count with
+  free threading, which fails once its last reference is gone: its memory
+  is freed with QSBR delay), so a write uses one set of settings
+  throughout.  Only `nib` changes in a published `tconf` (cleared,
+  atomically, when the buffer gets an instance dict).  `write()` takes
+  rlock only after a read of a seekable stream, to go back to the text
+  position first.  On other streams reads and writes are separate
+  streams, and writing never waits for a blocking read (a socket's
+  `makefile("rw")`, a `BufferedRWPair` over a serial port or pipes).
 - **elock**: held across the use of the codec's incremental encoder
   (codecs but the native ones, whose encoding holds no state) and the
   store of its bytes, so that the encoder's state (an iso2022 shift

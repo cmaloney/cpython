@@ -602,6 +602,80 @@ class NibblerTextIOWrapperTest(TestCase):
         self.assertEqual(len(parts), 4 * 20000 + 1)
         self.assertLessEqual(set(parts[1:]), {b"\n", b"\r", b"\r\n"})
 
+    def test_writes_racing_settings_changes(self):
+        # Writes racing reconfigure(newline=...), reconfigure(encoding=...)
+        # and __init__() (with a new buffer each time): no crash, and each
+        # write lands whole, encoded and translated with the settings of one
+        # moment (when both change in one call, one of the pairs set).
+        token = "x\n\xe9\n"
+        encodings = ("utf-8", "latin-1", "utf-16-le")
+        newlines = ("\n", "\r", "\r\n")
+        for together in (True, False):
+            pairs = (list(zip(encodings, newlines)) if together
+                     else [(e, n) for e in encodings for n in newlines])
+            valid = {token.replace("\n", n).encode(e) for e, n in pairs}
+            buffers = []
+
+            def new_buffer():
+                path = "%s_%d" % (os_helper.TESTFN, len(buffers))
+                self.addCleanup(os_helper.unlink, path)
+                buffers.append((path, self.nib.BufferedWriter(
+                    io.FileIO(path, "w"), 256)))
+                return buffers[-1][1]
+
+            f = self.nib.TextIOWrapper(new_buffer(), encoding="utf-8",
+                                       newline="\n")
+            stop = threading.Event()
+            written = [0] * 4
+
+            def writer(k):
+                for _ in range(3000):
+                    try:
+                        f.write(token)
+                    except ValueError:
+                        continue    # being set up again by __init__()
+                    written[k] += 1
+
+            def change(k):
+                i = 0
+                while not stop.is_set() and i < 300:
+                    e, n = pairs[(i + k) % len(pairs)]
+                    try:
+                        if k == 0:
+                            f.__init__(new_buffer(), encoding=e, newline=n)
+                        elif together:
+                            f.reconfigure(encoding=e, newline=n)
+                        elif k == 1:
+                            f.reconfigure(newline=n)
+                        else:
+                            f.reconfigure(encoding=e)
+                    except ValueError:
+                        pass        # being set up again by __init__()
+                    i += 1
+
+            changers = [threading.Thread(target=change, args=(k,))
+                        for k in range(3)]
+            with threading_helper.start_threads(changers):
+                try:
+                    run_concurrently([lambda k=k: writer(k)
+                                      for k in range(4)])
+                finally:
+                    stop.set()
+            f.close()
+            count = 0
+            for path, buffer in buffers:
+                buffer.close()
+                with open(path, "rb") as g:
+                    data = g.read()
+                pos = 0
+                while pos < len(data):
+                    found = [p for p in valid if data.startswith(p, pos)]
+                    self.assertEqual(len(found), 1, (together, path, pos,
+                                                     data[pos:pos + 20]))
+                    pos += len(found[0])
+                    count += 1
+            self.assertEqual(count, sum(written))
+
     def test_write_after_raw_close(self):
         # Small non-ASCII writes (into room reserved without the lock) racing
         # raw.close(): none succeeds once close() has returned, as with the
