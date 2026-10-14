@@ -2332,6 +2332,14 @@ class NibblerBufferedReaderTest(NibblerMixin, CBufferedReaderTest):
         with self.open(os_helper.TESTFN, encoding="ascii") as t:
             self.assertEqual(len(t.read(sys.maxsize)), 1000)
 
+    def test_keeps_read_on_error_marker(self):
+        # The reading classes say that they keep data read before a raw
+        # read raised (socket.makefile() looks at it).
+        for cls in (_nibbler.BufferedReader, _nibbler.BufferedRandom,
+                    _nibbler.BufferedRWPair):
+            self.assertIs(cls._keeps_read_on_error, True)
+        self.assertNotHasAttr(_nibbler.BufferedWriter, '_keeps_read_on_error')
+
     def test_readinto_python_buffer(self):
         # readinto() into a class with __buffer__ (PEP 688), also when the
         # read goes straight to a raw stream other than FileIO.
