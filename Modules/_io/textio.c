@@ -1658,7 +1658,8 @@ static int _textiowrapper_writeflush(textio *self);
    text since it was created or reset: the built-in fast encoders
    (encodefunc) hold nothing, and a fresh or reset encoder may begin with
    a BOM.  The text already encoded goes to the buffer first, so that it
-   is not lost if the final encode raises. */
+   is not lost if the final encode raises.  Returns 0, or with an exception
+   set -2 if a write to the buffer raised, else -1. */
 static int
 textiowrapper_finish_encoder(textio *self)
 {
@@ -1666,7 +1667,7 @@ textiowrapper_finish_encoder(textio *self)
         return 0;
     }
     if (_textiowrapper_writeflush(self) < 0) {
-        return -1;
+        return -2;
     }
     self->enc_fed = 0;
     PyObject *b = PyObject_CallMethodObjArgs(
@@ -1687,7 +1688,7 @@ textiowrapper_finish_encoder(textio *self)
         Py_XDECREF(res);
     }
     Py_DECREF(b);
-    return res == NULL ? -1 : 0;
+    return res == NULL ? -2 : 0;
 }
 
 /*[clinic input]
@@ -3790,6 +3791,41 @@ _io_TextIOWrapper_flush_impl(textio *self)
     return buffer_callmethod_noargs(self, &_Py_ID(flush));
 }
 
+/* close() of the buffer would write out its pending data again after a
+   flush that raised exc: drop it with the buffer's _discard_writes() if
+   it has one, and warn that it was lost (gh-83973, gh-55589).  Steals exc
+   and returns the exception to raise. */
+Py_NO_INLINE static PyObject *
+textiowrapper_discard_writes(textio *self, PyObject *exc)
+{
+    PyObject *buffer = buffer_access_safe(self);
+    if (buffer == NULL) {
+        PyErr_Clear();
+        return exc;
+    }
+    PyObject *meth, *res = NULL;
+    if (PyObject_GetOptionalAttrString(buffer, "_discard_writes",
+                                       &meth) > 0)
+    {
+        res = PyObject_CallNoArgs(meth);
+        Py_DECREF(meth);
+    }
+    Py_DECREF(buffer);
+    Py_ssize_t n = res != NULL ? PyLong_AsSsize_t(res) : 0;
+    Py_XDECREF(res);
+    if (PyErr_Occurred()) {
+        PyErr_Clear();
+    }
+    else if (n > 0) {
+        int would_block = PyErr_GivenExceptionMatches(exc,
+                                                      PyExc_BlockingIOError);
+        PyErr_SetRaisedException(exc);
+        _PyIO_warn_discarded(n, would_block);
+        exc = PyErr_GetRaisedException();
+    }
+    return exc;
+}
+
 /*[clinic input]
 @critical_section
 _io.TextIOWrapper.close
@@ -3830,10 +3866,17 @@ _io_TextIOWrapper_close_impl(textio *self)
                 PyErr_Clear();
             }
         }
-        if (textiowrapper_finish_encoder(self) < 0
-            || _PyFile_Flush((PyObject *)self) < 0)
-        {
+        r = textiowrapper_finish_encoder(self);
+        if (r == 0 && _PyFile_Flush((PyObject *)self) < 0) {
+            r = -2;
+        }
+        if (r < 0) {
             exc = PyErr_GetRaisedException();
+        }
+        if (r == -2) {
+            /* A write failed: close completely, without the buffer's
+               close() writing the data out again. */
+            exc = textiowrapper_discard_writes(self, exc);
         }
 
         res = buffer_callmethod_noargs(self, &_Py_ID(close));
