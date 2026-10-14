@@ -26,8 +26,9 @@ Reading order
    `buffered_write_slow()` → `buffered_write_out()`), then "Reading"
    (`buffered_fill()`, `buffered_readline()`, `buffered_seek()`).
 3. `__init__()` (`buffered_init()`), `close()`, `detach()`, dealloc.
-4. "Bytes for TextIOWrapper" and `textio.c` (see "The text layer").
-5. The `_iomodule.c` glue: `open()` (`buffering=None`), the
+4. "Gathering" (`_gather()`).
+5. "Bytes for TextIOWrapper" and `textio.c` (see "The text layer").
+6. The `_iomodule.c` glue: `open()` (`buffering=None`), the
    `_set_*_impl()` functions and `iomodule_exec()`.
 
 
@@ -94,6 +95,10 @@ I/O releases it, takes the role, takes the lock again and looks again.
 | other `seek()`, `tell()`, `truncate()` | yes | yes | raw calls with both held |
 | `close()`, `detach()`, `__init__()` | yes | yes | flush with both held |
 | `fileno()`, `isatty()`, `seekable()`, `name`, `mode`, `closed`, `raw` | – | – | a reference to raw, taken atomically |
+| `_gather()` enter / write in a block | – | – | the record's lock; listing a new record takes both |
+| `_gather()` exit with the lock free | if free, to write out | yes (trylock) | moved to the pending writes; written out when they don't fit |
+| `_gather()` exit with the lock busy, written out directly | – | – | the record's lock, across one `writev()` |
+| other `_gather()` exits | yes | yes (not interruptible) | writes out when the pending writes don't fit |
 
 Waits release the GIL (or detach) and a signal handler that raises
 interrupts them, except the relock after a raw call, whose result must be
@@ -191,6 +196,24 @@ size None (writers only) buffers writes without limit: the threshold is
 write out.  `open(buffering=None)` gives that, and is only accepted when
 `open()` uses the nibbler classes (it raises before opening the file
 otherwise).
+
+
+`_gather()`
+-----------
+
+Private and experimental.  See "Gathering" in `bufferedio.c`: a block's
+writes from the context that entered it are kept in the context's record
+for the stream (found through a context variable, remembered per thread,
+with a lock of its own that only `close()` and the like wait for), and
+added in one piece at its end: moved to the pending writes when the
+stream's lock can be taken without waiting; when it is busy, by one
+`writev()` of its own for a `BufferedWriter` of a regular file with
+nothing pending, which the kernel orders against other writes (POSIX);
+else moved to the pending writes once the lock is free (also at
+`limit`, before an operation of that context needs the position, and by
+`close()`/`detach()`/`__init__()`).  While a stream has records
+(`ngather`), the fast paths that take the lock alone go the way that takes
+the I/O role, where records are moved.
 
 
 Differences from `_io`
