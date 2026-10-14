@@ -392,7 +392,9 @@ I/O base classes
       .. versionchanged:: next
          On a non-blocking stream, buffered binary streams return ``None``,
          and text streams raise :exc:`BlockingIOError`, instead of returning
-         a partial line; they keep it for the next call.
+         a partial line; they keep it for the next call.  Text streams also
+         keep it when reading the rest of the line raises :exc:`OSError` or
+         :exc:`KeyboardInterrupt`.
 
    .. method:: readlines(hint=-1, /)
 
