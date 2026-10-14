@@ -273,15 +273,24 @@ typedef struct nibbler_end {
        no end of line (see nibbler_noline()); used with the lock only. */
     Py_ssize_t done;
     int writing;
-    /* Free-threaded builds only, used with the lock: it was opened (see
-       nibbler_open()); before that, no thread without the lock can have
-       used it (see nibbler_drop_end()). */
+    /* Free-threaded builds only, used with the lock.  hold (reading): it
+       stays held when the lock is released, while the caller wants that
+       (as text gathering a long line, see buffered_text_peek_locked()).
+       opened: it was opened (see nibbler_open()); before that, no thread
+       without the lock can have used it (see nibbler_drop_end()). */
+    uint8_t hold;
     uint8_t opened;
     /* Tells this end from the nibbler's others (never reused, as the
        nibbler's ends count only grows), so that, reading, it and an
        offset in the block always name the same bytes. */
     uint64_t id;
 } nibbler_end;
+
+#ifdef Py_GIL_DISABLED
+#  define NIBBLER_END_HOLD(e) ((e)->hold)
+#else
+#  define NIBBLER_END_HOLD(e) 0
+#endif
 
 /* Without the lock: the end, if it goes in the direction given. */
 static inline nibbler_end *
@@ -335,11 +344,12 @@ nibbler_open(nibbler *n)
     if (!e->writing) {
         /* At the unread bytes. */
         p = ~FT_ATOMIC_LOAD_SSIZE_RELAXED(e->pos);
-        if (e->done > p) {
+        if (e->done > p || NIBBLER_END_HOLD(e)) {
             /* A readline() found no end of line in the unread bytes (see
                nibbler_noline()): stay held, so that reads without the lock
                fail (lines would be looked for in those bytes again), and
-               go through the lock until they are taken. */
+               go through the lock until they are taken.  Also while the
+               caller wants that (hold). */
             return;
         }
     }
@@ -404,7 +414,7 @@ nibbler_new_end(nibbler *n, PyObject *block, Py_ssize_t pos,
         return -1;
     }
     *e = (nibbler_end){Py_NewRef(block), ~pos, limit, writing ? pos : 0,
-                       writing, 0, ++n->ends};
+                       writing, 0, 0, ++n->ends};
     nibbler_drop_end(n);
     FT_ATOMIC_STORE_PTR_RELEASE(n->end, e);
     return 0;

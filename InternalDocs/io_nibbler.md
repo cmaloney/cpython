@@ -2,11 +2,12 @@ The `_io._nibbler` buffered classes
 ===================================
 
 `Modules/_io/_nibbler` is a second implementation of `BufferedReader`,
-`BufferedWriter`, `BufferedRandom` and `BufferedRWPair`.  Its point is
-free threading: `_io`'s classes hold one lock across every raw call, so a
-thread writing to a slow pipe blocks every other thread that prints.
-The nibbler never holds its lock across a raw write, and small writes and
-reads that hit the buffer take no lock at all.
+`BufferedWriter`, `BufferedRandom` and `BufferedRWPair` (and of
+`TextIOWrapper`, see below).  Its point is free threading: `_io`'s classes
+hold one lock across every raw call, so a thread writing to a slow pipe
+blocks every other thread that prints.  The nibbler never holds its lock
+across a raw write, and small writes and reads that hit the buffer take no
+lock at all.
 
 It is opt-in and private: `_PYTHON_IO_DEFAULT_IMPL=_nibbler` makes the
 nibbler classes `_io`'s (so `open()`, `io.*` and the standard streams use
@@ -93,6 +94,7 @@ thread holding the lock never waits for the role).
 | Operation | I/O role | lock | Notes |
 |---|---|---|---|
 | small `write()` (under 512 bytes, room at the writing end) | – | – | reserve/commit at the end; an exact FileIO is checked after reserving, other raw streams are not asked (see "Closing the raw stream alone") |
+| text write through `_PyIONibbler_reserve()`/`_commit()` | – | – | same, from `TextIOWrapper` |
 | other `write()` | only to write out | yes | the lock is released around the raw write (`buffered_write_spans()`) |
 | `read(n)`, `read1()`, `readline()`, `peek()` hitting the read-ahead | – | – | claim at the reading end |
 | other reads, `readinto()`, `peek()` that fills | yes | yes | raw reads are made with both held |
@@ -160,6 +162,9 @@ stream:
   warning (as `_io` does with bytes buffered before `raw.close()`); they
   are dropped with the object.  It doesn't drop the writing end either,
   so small writes after it are still queued until an operation raises.
+- Text writes through the nibbler `TextIOWrapper` ask the buffered object
+  whether it is closed on each write when the raw stream isn't an exact
+  FileIO, so they raise at once.
 
 Why small writes don't ask: `closed` of a Python raw stream is an
 attribute lookup and a Python call, about 1750 instructions for a
@@ -252,3 +257,125 @@ alone"); `_io` asks `closed` on every write.
 When the nibbler classes replace `_io`'s, the C fast paths keyed on
 `_io`'s exact types (stock `TextIOWrapper`'s `read1()` shortcut, pickle's
 `peek()`) don't apply to them.
+
+
+The text layer
+--------------
+
+`_io._nibbler.TextIOWrapper` (`Modules/_io/_nibbler/textio.c`) keeps no
+bytes of its own.  The buffered object below it is the only queue in both
+directions, so the buffer's position is the text position: `tell()` is the
+buffer's position, and `write()` and `truncate()` after a read act there
+(gh-82891, gh-70346).  Start with the comment at the top of `textio.c`, then
+"Locking" and `tconf` there.
+
+### The store
+
+Over an exact `_io._nibbler` buffered object, text uses the buffer's bytes
+in place through the byte API ("Bytes for TextIOWrapper" in
+`bufferedio.c`, declared in `_iomodule.h`):
+
+- `_PyIONibbler_peek()` shows the unread bytes without taking them, named
+  by a key and an offset that always mean the same bytes.  To give a long
+  line whole, it lets the block grow (as `buffered_fill()` does for a long
+  binary line) up to 64 blocks, and at least `DEFAULT_BUFFER_SIZE`; past
+  that it returns `_PyIO_NIBBLER_FULL` and the line is taken in parts.
+- `_PyIONibbler_take()` takes bytes only if they are still at the
+  position (key and offset): that is how a call finds that another thread
+  read first.  It can also copy them out.
+- `_PyIONibbler_unread()` puts bytes back in front of the unread ones, as
+  read-ahead (see "Failed reads" below).
+- `_PyIONibbler_write()`, and `_PyIONibbler_reserve()` plus
+  `_PyIONibbler_commit()` for UTF-8 written straight into the buffer.
+
+Over any other buffer, or once the buffer has an instance dict (its methods
+may be overridden), the store is read-ahead kept in the text object
+(`rbuf`), filled with `read1()`.  The byte API returns `_PyIO_NIBBLER_NO`
+for a buffer with a dict, also after waiting for its lock, so that no call
+takes bytes from the buffer once `rbuf` may hold bytes before them.
+
+After the raw stream alone is closed, what the buffer read ahead is still
+served, locked or not, as by its own `read()`; anything needing the raw
+stream raises `ValueError`.
+
+### Decoding
+
+UTF-8, Latin-1, ASCII and byte-to-character tables (cp1252 and others),
+with errors `strict` or `surrogateescape` (and `replace` but for UTF-8),
+are native: the bytes of any characters are known, so a read takes just
+the bytes of the text it returns.  The decoded characters are a cache
+(`tcache`; on free-threaded builds a span published whole, `tspan`).
+
+Other codecs go through the codec's incremental decoder.  Their state is
+kept as flags (an `unsigned long long`, as iso2022_kr's go past 32 bits;
+only `tell()`, whose cookie holds 32 bits, raises `OverflowError`).
+
+Invalid bytes with `strict` end the read before them (as at the end of the
+stream); the next read takes them and raises, once, with either kind of
+codec.  This holds for `read()` with no size as well: it decodes what the
+buffer's `read()` returned at once, and when that fails, gives the bytes
+back and reads them in parts.
+
+### Failed reads
+
+A read takes the bytes of its text piece by piece (each span decoded, each
+peek), and may fail after it took some: the raw stream raises (or is
+closed, or raises `BlockingIOError` rather than returning `None`), or
+`KeyboardInterrupt` comes while it waits.  Then, as the buffer does with
+bytes (gh-51571), what the call took is given back and the exception is
+raised; the next read returns it.  With a native codec the call copies the
+bytes it takes (`_PyIONibbler_take()`, into its stack while small) and puts
+them back with `_PyIONibbler_unread()` (or in front of `rbuf`); with the
+decoder the characters are still in the cache, whose position goes back.
+So the text position, `tell()`, and `skip_lf` are as before the call.
+Nothing is swallowed: a read that would block (the buffer returns `None`)
+still returns what it has, as documented, but an exception always
+propagates.
+
+Not taking the bytes until the call succeeds was the alternative.  It
+fails on two counts: a read may want more than the buffer can hold at once
+(past `_PyIO_NIBBLER_FULL`), and once the buffer gathers unread bytes into
+another block (a new key), a call can't tell whether the bytes it saw are
+still the next ones or another thread took them.  Copying costs a
+`memcpy()` of what multi-step reads return; the single-step reads
+(`text_quick()`, the bulk of the text rows of the scoreboard) copy
+nothing.
+
+With free threading other threads may read between a call's pieces; the
+bytes given back then go in front of what is unread now (read after text
+that followed them, never lost or read twice).  The decoder's characters go
+back only if no other call read from the cache meanwhile; the bytes, only
+while the buffer has no pending writes.  A call without the critical
+section whose buffer got an instance dict hands the bytes to
+`text_read_more()`, which puts them in `rbuf`.
+
+### Locking
+
+With a native codec over an exact nibbler buffer (`tconf.lockfree`),
+reads, `write()`, `tell()`, `flush()` and the attributes run without the
+critical section: the buffer takes bytes atomically, and each call works
+on its own copy of the cache.  Everything else (the codec's decoder and
+encoder, `rbuf`) keeps the critical section.
+
+What calls run by (buffer, codec objects, errors, newline, the lockfree
+flag) is one immutable, refcounted struct, `tconf`, published through one
+pointer.  A call takes it once; `__init__()`, `reconfigure()`, `detach()`
+and the switch to `rbuf` build a new one and swap it in.  Its memory is
+freed with QSBR.  The quick read path (`text_quick()`) borrows it without a
+reference, so lockfree settings are swapped out with a stop-the-world pass
+(rare), after which their objects are released at once.
+
+### Differences from `_io.TextIOWrapper`
+
+- Writes and `truncate()` after a read act at the text position.
+- `tell()` is the buffer's position; with a native codec, a `"\r"`
+  returned whose `"\n"` follows is noted as decoder flags 1, which
+  `seek()` restores.  Other cookies `tell()` can't return raise
+  (gh-91112).
+- A partial line that would block is kept until it is longer than
+  `_CHUNK_SIZE`, as `_io` and `_pyio` keep.
+- Decode errors are raised once per run of invalid bytes, which are
+  skipped; the text before them is returned first (by `read()` too).
+- A read that raises keeps the text it took for the next read.
+- `reconfigure(encoding=...)`, `close()` and `detach()` give the old
+  encoder `final=True` (gh-79792).
