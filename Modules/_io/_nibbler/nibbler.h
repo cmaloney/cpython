@@ -69,6 +69,11 @@ typedef struct {
     uint64_t holder;
 } nibbler_mutex;
 
+/* nibbler.raw_pos when unknown: so far below 0 that adding what is read
+   and written leaves it negative, so that it can be advanced without a
+   test. */
+#define NIBBLER_POS_UNKNOWN (-((Py_off_t)1 << (8 * sizeof(Py_off_t) - 2)))
+
 /* Fields are used with the lock held, with plain loads and stores, unless
    noted. */
 typedef struct nibbler {
@@ -81,6 +86,12 @@ typedef struct nibbler {
        the lock could not be had to drop the bytes in flight: the next
        holder of both drops them. */
     uint8_t drop_inflight;
+    /* The raw stream's position as the caller last knew it, kept with the
+       I/O role; negative when unknown (see NIBBLER_POS_UNKNOWN).  It
+       becomes unknown when the role is taken over or the data dropped (a
+       raw call may have been under way, or nothing is known any more), and
+       in the child of a fork. */
+    Py_off_t raw_pos;
 
     /* The block size, which reads fill and small appends are copied into.
        Also read without the lock (FT_ATOMIC relaxed). */
@@ -660,6 +671,7 @@ nibbler_drop_inflight(nibbler *n)
     (void)morsels_consume(&n->list, n->inflight);
     n->inflight = 0;
     n->drop_inflight = 0;
+    n->raw_pos = NIBBLER_POS_UNKNOWN;
 }
 
 /* Take the I/O role, then the lock; a signal handler raising interrupts
@@ -1062,6 +1074,7 @@ nibbler_free(nibbler *n)
     _PyObject_XDecRefDelayed(n->spare);
     n->spare = NULL;
 #endif
+    n->raw_pos = NIBBLER_POS_UNKNOWN;
 }
 
 static inline Py_ssize_t
@@ -1289,6 +1302,8 @@ nibbler_set_after_fork(nibbler_set *s)
         if (nibbler_mutex_after_fork(&n->io, tstate)) {
             nibbler_drop_inflight(n);
         }
+        /* The parent shares the file position. */
+        n->raw_pos = NIBBLER_POS_UNKNOWN;
         if (!locked) {
             nibbler_open(n);
         }
