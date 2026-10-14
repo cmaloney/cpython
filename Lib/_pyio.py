@@ -240,7 +240,8 @@ def open(file, mode="r", buffering=-1, encoding=None, errors=None,
     result = raw
     try:
         line_buffering = False
-        if buffering == 1 or buffering < 0 and raw._isatty_open_only():
+        if (buffering == 1
+                or buffering < 0 and not binary and raw._isatty_open_only()):
             buffering = -1
             line_buffering = True
         if buffering < 0:
