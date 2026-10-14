@@ -792,6 +792,17 @@ class IOTest:
                 self.assertSequenceEqual(buffer[result:], unused)
                 self.assertEqual(len(reader.avail), avail - result)
 
+    def test_BufferedIOBase_readinto_would_block(self):
+        # The default readinto() and readinto1() return None, as read() and
+        # read1() do, when the raw stream would block.
+        class Reader(self.BufferedIOBase):
+            def read(self, size):
+                return None
+            read1 = read
+        reader = Reader()
+        self.assertIsNone(reader.readinto(bytearray(5)))
+        self.assertIsNone(reader.readinto1(bytearray(5)))
+
     def test_close_assert(self):
         class R(self.IOBase):
             def __setattr__(self, name, value):

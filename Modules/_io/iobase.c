@@ -642,6 +642,11 @@ _io__IOBase_readline_impl(PyObject *self, Py_ssize_t limit)
                 }
                 goto fail;
             }
+            if (readahead == Py_None) {
+                /* Would block. */
+                Py_DECREF(readahead);
+                goto would_block;
+            }
             if (!PyBytes_Check(readahead)) {
                 PyErr_Format(PyExc_OSError,
                              "peek() should have returned a bytes object, "
@@ -708,6 +713,11 @@ _io__IOBase_readline_impl(PyObject *self, Py_ssize_t limit)
             break;
     }
 
+    Py_XDECREF(peek);
+    return PyBytesWriter_Finish(writer);
+  would_block:
+    /* Would block before the end of the line: the partial line, which
+       can't be kept, or b"" if nothing arrived. */
     Py_XDECREF(peek);
     return PyBytesWriter_Finish(writer);
   fail:
