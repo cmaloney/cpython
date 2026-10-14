@@ -2237,6 +2237,9 @@ class TextIOWrapper(TextIOBase):
         self._decoded_chars = ''  # buffer for text returned from decoder
         self._decoded_chars_used = 0  # offset into _decoded_chars for read()
         self._snapshot = None  # info for reconstructing decoder state
+        # How many bytes of the snapshot's input the decoder held before
+        # the last chunk was read (the rest is the chunk).
+        self._snapshot_held = 0
         self._seekable = self._telling = self.buffer.seekable()
         self._has_read1 = hasattr(self.buffer, 'read1')
         self._configure(encoding, errors, newline,
@@ -2556,7 +2559,11 @@ class TextIOWrapper(TextIOBase):
             # At the snapshot point, len(dec_buffer) bytes before the read,
             # the next input to be decoded is dec_buffer + input_chunk.
             self._snapshot = (dec_flags, dec_buffer + input_chunk)
+            self._snapshot_held = len(dec_buffer)
 
+        if blocked and not decoded_chars:
+            # Would block, with no character: None (falsy, but not EOF).
+            return None
         return not eof
 
     def _pack_cookie(self, position, dec_flags=0,
@@ -2805,24 +2812,65 @@ class TextIOWrapper(TextIOBase):
             if chunk is None:
                 raise BlockingIOError("Read returned None.")
             # Read everything.
-            result = (self._get_decoded_chars() +
-                      decoder.decode(chunk, final=True))
+            result = self._get_decoded_chars()
+            blocked = False
+            while True:
+                try:
+                    result += decoder.decode(chunk, final=True)
+                    break
+                except UnicodeDecodeError as exc:
+                    error = exc
+                # The buffer may have stopped in the middle of a character
+                # because the stream would block, not at EOF: keep the
+                # character's first bytes in the decoder for the next read,
+                # as read(size) does, and read on.  At EOF, or for bytes
+                # that are invalid anyway, the error stands.
+                try:
+                    result += decoder.decode(chunk)
+                except UnicodeDecodeError:
+                    raise error from None
+                chunk = self.buffer.read()
+                if chunk is None:
+                    blocked = True
+                    break
+                if not chunk:
+                    raise error
             if self._snapshot is not None:
                 self._set_decoded_chars('')
                 self._snapshot = None
+            if blocked and self._telling:
+                # The position is before the bytes the decoder holds.
+                self._resume_telling()
+            if blocked and not result:
+                # Nothing to return: "" would mean EOF.
+                raise BlockingIOError(
+                    errno.EAGAIN, "read could not complete without blocking")
             return result
         else:
             # Keep reading chunks until we have size characters to return.
             eof = False
             result = self._get_decoded_chars(size)
             while len(result) < size and not eof:
-                eof = not self._read_chunk()
+                more = self._read_chunk()
+                eof = not more
                 result += self._get_decoded_chars(size - len(result))
+                if more is None and not result:
+                    # Nothing to return: "" would mean EOF.
+                    raise BlockingIOError(
+                        errno.EAGAIN,
+                        "read could not complete without blocking")
             return result
 
     def __next__(self):
         self._telling = False
-        line = self.readline()
+        try:
+            line = self.readline()
+        except BlockingIOError:
+            # No end of the iteration, but tell() should work again, as at
+            # EOF.
+            if self._seekable:
+                self._resume_telling()
+            raise
         if not line:
             self._snapshot = None
             self._telling = self._seekable
@@ -2844,6 +2892,11 @@ class TextIOWrapper(TextIOBase):
 
         # Grab all the decoded text (we will rewind any extra bits later).
         line = self._get_decoded_chars()
+        # While the line spans chunks, the tell() snapshot of where it
+        # started: if the stream would block before the line ends, the line
+        # is kept for the next call, so the position must stay at its
+        # start.
+        line_snapshot = None
 
         start = 0
         # Make the decoder if it doesn't already exist.
@@ -2904,15 +2957,46 @@ class TextIOWrapper(TextIOBase):
                 break
 
             # No line ending seen yet - get more data'
-            while self._read_chunk():
-                if self._decoded_chars:
+            if len(line) <= self._decoded_chars_used:
+                # The line started in the current chunk.
+                line_snapshot = None
+                if self._telling and self._snapshot is not None:
+                    dec_flags, next_input = self._snapshot
+                    line_snapshot = (self._decoded_chars,
+                                     self._decoded_chars_used - len(line),
+                                     dec_flags, [next_input])
+            while True:
+                more = self._read_chunk()
+                if line_snapshot is not None:
+                    if len(line) > self._CHUNK_SIZE:
+                        # Too long to keep if it would block: no snapshot
+                        # either, so it costs no copy of the line's bytes.
+                        line_snapshot = None
+                    else:
+                        next_input = self._snapshot[1]
+                        line_snapshot[3].append(
+                            next_input[self._snapshot_held:])
+                if not more or self._decoded_chars:
                     break
             if self._decoded_chars:
                 line += self._get_decoded_chars()
+            elif more is None and len(line) <= self._CHUNK_SIZE:
+                # Would block before the end of the line: keep what there
+                # is of it for the next call, and raise, since "" would
+                # mean EOF.  (A line longer than the chunk size, the text
+                # layer's buffer size, is returned as it is.)
+                if line:
+                    self._keep_line(line, line_snapshot)
+                raise BlockingIOError(
+                    errno.EAGAIN, "read could not complete without blocking")
             else:
-                # end of file
+                # End of file, or would block with a partial line too long
+                # to keep, which is returned.  If it would block, keep the
+                # snapshot: the decoder may hold a partial character or a
+                # pending \r, which tell() must count as unread.
                 self._set_decoded_chars('')
-                self._snapshot = None
+                if more is not None:
+                    self._snapshot = None
                 return line
 
         if size >= 0 and endpos > size:
@@ -2921,6 +3005,21 @@ class TextIOWrapper(TextIOBase):
         # Rewind _decoded_chars to just after the line ending we found.
         self._rewind_decoded_chars(len(line) - endpos)
         return line[:endpos]
+
+    def _keep_line(self, line, line_snapshot):
+        if line_snapshot is not None:
+            dec, start, dec_flags, inputs = line_snapshot
+            input = b"".join(inputs)
+            self._set_decoded_chars(dec[:start] + line)
+            self._decoded_chars_used = start
+            self._snapshot = (dec_flags, input)
+            self._b2cratio = len(input) / len(self._decoded_chars)
+        else:
+            # No snapshot of the line's start: tell() can't work until the
+            # next seek().
+            self._set_decoded_chars(line)
+            self._snapshot = None
+            self._telling = False
 
     @property
     def newlines(self):

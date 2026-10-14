@@ -53,6 +53,9 @@ extern int _PyIOBase_finalize(PyObject *self);
 extern int _PyFileIO_closed(PyObject *self);
 /* Was the FileIO (or subclass) opened in append mode? */
 extern int _PyFileIO_appending(PyObject *self);
+/* Was the FileIO (or subclass) opened on a regular file, which reads never
+   find "would block"? */
+extern int _PyFileIO_regular(PyObject *self);
 
 /* Shortcut to the core of the IncrementalNewlineDecoder.decode method */
 extern PyObject *_PyIncrementalNewlineDecoder_decode(
