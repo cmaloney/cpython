@@ -975,6 +975,27 @@ class BufferedWriterTest(CommonBufferedTests):
             self.assertEqual(bufio.tell(), nwriters * nrecords * len(record))
             bufio.close()
 
+    def test_append_mode_tell_after_write(self):
+        # gh-80592: a write to a raw file in append mode goes to the end of
+        # the file, so tell() is the end of the file after it.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with self.open(os_helper.TESTFN, "wb") as f:
+            f.write(b"abc")
+        with self.tp(self.FileIO(os_helper.TESTFN,
+                                 self.write_mode.replace("w", "a"))) as f:
+            self.assertEqual(f.tell(), 3)
+            f.write(b"def")
+            self.assertEqual(f.tell(), 6)
+            self.assertEqual(f.seek(0), 0)
+            self.assertEqual(f.tell(), 0)
+            f.write(b"ghi")
+            self.assertEqual(f.tell(), 9)
+            f.write(b"jkl")
+            self.assertEqual(f.tell(), 12)
+            self.assertEqual(f.seek(0, 1), 12)
+        with self.open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(), b"abcdefghijkl")
+
     def test_misbehaved_io(self):
         rawio = self.MisbehavedRawIO()
         bufio = self.tp(rawio, 5)
@@ -1569,6 +1590,44 @@ class BufferedRandomTest(BufferedReaderTest, BufferedWriterTest):
                 self.assertEqual(f.readline(), b'\n')
                 f.flush()
                 self.assertEqual(raw.getvalue(), b'1b\n2def\n3\n')
+
+    def test_append_mode_write_after_read(self):
+        # gh-64281: a raw stream in append mode writes at the end of the
+        # file whatever the position, so data read before a write must
+        # still read back as it is in the file.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with self.open(os_helper.TESTFN, "wb") as f:
+            f.write(b"testest")
+        with self.tp(self.FileIO(os_helper.TESTFN, "a+")) as f:
+            f.write(b"A")
+            f.seek(0)
+            self.assertEqual(f.read(), b"testestA")
+            f.seek(0)
+            self.assertEqual(f.read(1), b"t")
+            f.write(b"B")
+            f.seek(0)
+            self.assertEqual(f.read(), b"testestAB")
+        with self.open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(), b"testestAB")
+
+    def test_append_mode_seek_in_buffer_after_write(self):
+        # A write to a raw file in append mode lands at the end of the
+        # file, not at the position the buffered object last knew: seek()
+        # within the read buffer afterwards must not count from there.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with self.open(os_helper.TESTFN, "wb") as f:
+            f.write(b"0123456789")
+        with self.tp(self.FileIO(os_helper.TESTFN, "a+"), 8) as f:
+            f.seek(0)
+            f.write(b"X" * 20)
+            with self.open(os_helper.TESTFN, "ab") as g:
+                g.write(b"abcdef")
+            self.assertEqual(f.read(1), b"a")
+            self.assertEqual(f.seek(1, 1), 32)
+            self.assertEqual(f.read(1), b"c")
+            self.assertEqual(f.seek(-3, 1), 30)
+            self.assertEqual(f.read(2), b"ab")
+            self.assertEqual(f.tell(), 32)
 
     # You can't construct a BufferedRandom over a non-seekable stream.
     test_unseekable = None
