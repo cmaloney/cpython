@@ -1775,6 +1775,33 @@ _textiowrapper_writeflush(textio *self)
     return 0;
 }
 
+/* The encoder is in its state at the start of the stream, where it may
+   begin with a BOM (UTF-16, for example).  If the position moved since
+   (reads don't tell the encoder), tell it that it isn't at the start, as
+   seek() does, so that no BOM is written in the middle of the file. */
+Py_NO_INLINE static int
+textiowrapper_check_start_of_stream(textio *self)
+{
+    PyObject *pos = buffer_callmethod_noargs(self, &_Py_ID(tell));
+    if (pos == NULL) {
+        return -1;
+    }
+    int moved = PyObject_RichCompareBool(pos, _PyLong_GetZero(), Py_NE);
+    Py_DECREF(pos);
+    if (moved <= 0) {
+        return moved;
+    }
+    PyObject *res = PyObject_CallMethodOneArg(self->encoder,
+                                              &_Py_ID(setstate),
+                                              _PyLong_GetZero());
+    if (res == NULL) {
+        return -1;
+    }
+    Py_DECREF(res);
+    self->encoding_start_of_stream = 0;
+    return 0;
+}
+
 /*[clinic input]
 @critical_section
 _io.TextIOWrapper.write
@@ -1797,6 +1824,14 @@ _io_TextIOWrapper_write_impl(textio *self, PyObject *text)
 
     if (self->encoder == NULL) {
         return _unsupported(self->state, "not writable");
+    }
+    /* (Only an encoder that may start with a BOM cares.) */
+    if (self->encoding_start_of_stream
+        && (self->encodefunc == NULL || self->encodefunc == utf16_encode
+            || self->encodefunc == utf32_encode)
+        && textiowrapper_check_start_of_stream(self) < 0)
+    {
+        return NULL;
     }
 
     Py_INCREF(text);
@@ -1823,7 +1858,6 @@ _io_TextIOWrapper_write_impl(textio *self, PyObject *text)
          PyUnicode_FindChar(text, '\r', 0, PyUnicode_GET_LENGTH(text), 1) != -1))
         needflush = 1;
 
-    /* XXX What if we were just reading? */
     if (self->encodefunc != NULL) {
         if (PyUnicode_IS_ASCII(text) &&
                 // See bpo-43260
@@ -1841,6 +1875,7 @@ _io_TextIOWrapper_write_impl(textio *self, PyObject *text)
         if (b != NULL && PyBytes_Check(b)) {
             self->enc_fed = 1;
         }
+        self->encoding_start_of_stream = 0;
     }
 
     Py_DECREF(text);
