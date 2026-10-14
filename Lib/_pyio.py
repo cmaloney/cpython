@@ -1332,6 +1332,9 @@ class BufferedWriter(_BufferedIOMixin):
                     "write could not complete without blocking", 0)
             if n > len(self._write_buf) or n < 0:
                 raise OSError("write() returned incorrect number of bytes")
+            if n == 0:
+                # Retrying could loop forever (gh-158414).
+                raise OSError("raw write() made no progress")
             del self._write_buf[:n]
 
     def tell(self):
