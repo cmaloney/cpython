@@ -348,6 +348,457 @@ class TextIOWrapperTest(TestCase):
         run_concurrently([reader, detacher])
 
 
+class NibblerTextIOWrapperTest(TestCase):
+    """_io._nibbler.TextIOWrapper over a nibbler buffered object, used by
+    several threads at once."""
+
+    def setUp(self):
+        import _io
+        self.nib = _io._nibbler
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+
+    def open(self, mode, encoding="utf-8", **kwargs):
+        cls = {"r": self.nib.BufferedReader, "w": self.nib.BufferedWriter,
+               "r+": self.nib.BufferedRandom}[mode]
+        raw = io.FileIO(os_helper.TESTFN, mode)
+        return self.nib.TextIOWrapper(cls(raw, **kwargs), encoding=encoding)
+
+    def lines(self, n):
+        return ["%05d \xe9\u20ac%s\n" % (i, "x" * (i % 50)) for i in range(n)]
+
+    def test_concurrent_readline(self):
+        # Each line is returned once, whole, to one of the threads, also
+        # with tell() and iteration mixed in.  (UTF-16 goes through the
+        # codec's decoder, with the critical section, which another thread
+        # can take while one waits for the buffer: only no crash there.)
+        for encoding in ("utf-8", "latin-1", "utf-16"):
+            lines = self.lines(3000)
+            if encoding == "latin-1":
+                lines = [line.replace("\u20ac", "") for line in lines]
+            with self.subTest(encoding=encoding):
+                with open(os_helper.TESTFN, "w", encoding=encoding) as f:
+                    f.writelines(lines)
+                with self.open("r", encoding, buffer_size=1000) as f:
+                    got = [[] for _ in range(4)]
+
+                    def reader(i):
+                        while True:
+                            if i % 2:
+                                line = f.readline()
+                                f.tell()
+                            else:
+                                line = next(f, "")
+                            if not line:
+                                return
+                            got[i].append(line)
+
+                    run_concurrently([lambda i=i: reader(i) for i in range(4)])
+                    if encoding == "utf-16":
+                        continue
+                    self.assertEqual(sorted(sum(got, [])), lines)
+                    for g in got:
+                        self.assertEqual(g, sorted(g))
+
+    def test_concurrent_readline_long_lines(self):
+        # Lines longer than the buffer's block are still read whole, each by
+        # one thread: the block grows to hold them.
+        lines = ["%06d:%s\n" % (i, "x" * (3000 * (i % 7)))
+                 for i in range(1500)]
+        with open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        for newline in (None, ""):
+            with self.subTest(newline=newline):
+                f = self.nib.TextIOWrapper(
+                    self.nib.BufferedReader(io.FileIO(os_helper.TESTFN, "r"),
+                                            8192),
+                    encoding="utf-8", newline=newline)
+                with f:
+                    got = [[] for _ in range(8)]
+
+                    def reader(k):
+                        got[k].extend(f)
+
+                    run_concurrently([lambda k=k: reader(k)
+                                      for k in range(8)])
+                self.assertEqual(sorted(sum(got, [])), lines)
+
+    def test_text_and_binary_reads(self):
+        # Text reads and binary reads of its buffer take every byte once.
+        # (ASCII: a binary read may stop inside a character.)
+        data = "".join(self.lines(2000)).encode("ascii", "ignore")
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(data)
+        with self.open("r") as f:
+            text, binary = [], []
+
+            def text_reader():
+                while line := f.readline():
+                    text.append(line.encode())
+                    text.append(f.read(3).encode())
+
+            def binary_reader():
+                while chunk := f.buffer.read(7):
+                    binary.append(chunk)
+
+            run_concurrently([text_reader, binary_reader])
+            self.assertEqual(sum(map(len, text)) + sum(map(len, binary)),
+                             len(data))
+            self.assertEqual(f.read(), "")
+
+    def test_concurrent_write(self):
+        # Each write lands whole, in its thread's order, also with flush()
+        # and tell() racing them; also unbuffered (writes run without the
+        # critical section then too, the stream being write-only).
+        nthreads, count = 4, 2000
+        for buffer_size in (700, 0):
+            with self.subTest(buffer_size=buffer_size):
+                self.check_concurrent_write(nthreads, count, buffer_size)
+
+    def check_concurrent_write(self, nthreads, count, buffer_size):
+        stop = threading.Event()
+        with self.open("w", buffer_size=buffer_size) as f:
+            def writer(t):
+                for i in range(count):
+                    f.write("%d:%05d \xe9%s\n" % (t, i, "." * (i % 30)))
+
+            def other():
+                while not stop.is_set():
+                    f.flush()
+                    f.tell()
+
+            others = [threading.Thread(target=other) for _ in range(2)]
+            with threading_helper.start_threads(others):
+                try:
+                    run_concurrently([lambda t=t: writer(t)
+                                      for t in range(nthreads)])
+                finally:
+                    stop.set()
+        with open(os_helper.TESTFN, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        self.assertEqual(len(lines), nthreads * count)
+        for t in range(nthreads):
+            mine = [line for line in lines if line.startswith("%d:" % t)]
+            self.assertEqual(mine, ["%d:%05d \xe9%s" % (t, i, "." * (i % 30))
+                                    for i in range(count)])
+
+    def test_read_write_close_race(self):
+        # Reads, writes, flush(), tell(), seek() and close() of one file in
+        # several threads: no crash, and only the errors of a closed file.
+        for _ in range(20):
+            with open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+                f.writelines(self.lines(300))
+            f = self.open("r+", buffer_size=500)
+
+            def worker(op):
+                for i in range(200):
+                    try:
+                        op(i)
+                    except ValueError:
+                        # Closed (by another thread).
+                        return
+
+            ops = [
+                lambda i: f.readline(),
+                lambda i: f.read(7),
+                lambda i: f.write("w%d\xe9\n" % i),
+                lambda i: (f.flush(), f.tell()),
+                lambda i: f.seek(0) if i % 50 == 0 else f.tell(),
+                lambda i: i == 150 and f.close(),
+            ]
+            run_concurrently([lambda op=op: worker(op) for op in ops])
+            f.close()
+
+
+    def test_reconfigure_detach_race(self):
+        # reconfigure() of what can change after reading, tell(), reads and
+        # writes racing, then detach() racing them: no crash, and only the
+        # errors of a detached file.
+        for _ in range(20):
+            with open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+                f.writelines(self.lines(300))
+            f = self.open("r+", buffer_size=500)
+            stop = threading.Event()
+
+            def worker(op):
+                while not stop.is_set():
+                    try:
+                        op()
+                    except ValueError:
+                        return
+
+            def reconfigure():
+                for i in range(200):
+                    try:
+                        f.reconfigure(line_buffering=bool(i % 2),
+                                      write_through=bool(i % 3))
+                    except ValueError:
+                        return
+                    f.line_buffering, f.write_through, f.encoding, f.errors
+
+            def detach():
+                for _ in range(100):
+                    f.tell()
+                stop.set()
+                f.detach().close()
+
+            ops = [lambda: f.readline(), lambda: f.write("x\n"),
+                   lambda: (f.tell(), f.newlines, f.name, f.buffer)]
+            run_concurrently([lambda op=op: worker(op) for op in ops]
+                             + [reconfigure, detach])
+
+    def test_reconfigure_encoding_race(self):
+        # reconfigure(encoding=...) racing the first reads: no crash (the
+        # codec used to be cleared under them), only the errors of reading
+        # with either codec, or of setting it too late.
+        data = ("abc\n" * 2000).encode("utf-16-le")
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(data)
+        for i in range(300):
+            f = self.open("r", "latin-1", buffer_size=64)
+
+            def reader():
+                try:
+                    for _ in range(20):
+                        f.readline()
+                except UnicodeDecodeError:
+                    pass
+
+            def reconfigure(encoding=("utf-16", "cp1252", "utf-8")[i % 3]):
+                try:
+                    f.reconfigure(encoding=encoding)
+                except io.UnsupportedOperation:
+                    pass
+
+            run_concurrently([reader] * 4 + [reconfigure])
+            f.close()
+
+    def test_reconfigure_newline_while_writing(self):
+        # reconfigure(newline=...) keeps the codec: writes racing it never
+        # find the stream unwritable, and each lands whole, with one of the
+        # newlines.
+        stop = threading.Event()
+        with self.open("w", buffer_size=1 << 16) as f:
+            def writer():
+                for _ in range(20000):
+                    f.write("ab\n")
+
+            def reconfigure():
+                newlines = ("\r\n", "\n", "\r", "")
+                i = 0
+                while not stop.is_set():
+                    f.reconfigure(newline=newlines[i % 4])
+                    i += 1
+
+            with threading_helper.start_threads(
+                    [threading.Thread(target=reconfigure)]):
+                try:
+                    run_concurrently([writer] * 4)
+                finally:
+                    stop.set()
+        with open(os_helper.TESTFN, "rb") as f:
+            data = f.read()
+        parts = data.split(b"ab")
+        self.assertEqual(parts[0], b"")
+        self.assertEqual(len(parts), 4 * 20000 + 1)
+        self.assertLessEqual(set(parts[1:]), {b"\n", b"\r", b"\r\n"})
+
+    def test_writes_racing_settings_changes(self):
+        # Writes racing reconfigure(newline=...), reconfigure(encoding=...)
+        # and __init__() (with a new buffer each time): no crash, and each
+        # write lands whole, encoded and translated with the settings of one
+        # moment (when both change in one call, one of the pairs set).
+        token = "x\n\xe9\n"
+        encodings = ("utf-8", "latin-1", "utf-16-le")
+        newlines = ("\n", "\r", "\r\n")
+        for together in (True, False):
+            pairs = (list(zip(encodings, newlines)) if together
+                     else [(e, n) for e in encodings for n in newlines])
+            valid = {token.replace("\n", n).encode(e) for e, n in pairs}
+            buffers = []
+
+            def new_buffer():
+                path = "%s_%d" % (os_helper.TESTFN, len(buffers))
+                self.addCleanup(os_helper.unlink, path)
+                buffers.append((path, self.nib.BufferedWriter(
+                    io.FileIO(path, "w"), 256)))
+                return buffers[-1][1]
+
+            f = self.nib.TextIOWrapper(new_buffer(), encoding="utf-8",
+                                       newline="\n")
+            stop = threading.Event()
+            written = [0] * 4
+
+            def writer(k):
+                for _ in range(3000):
+                    try:
+                        f.write(token)
+                    except ValueError:
+                        continue    # being set up again by __init__()
+                    written[k] += 1
+
+            def change(k):
+                i = 0
+                while not stop.is_set() and i < 300:
+                    e, n = pairs[(i + k) % len(pairs)]
+                    try:
+                        if k == 0:
+                            f.__init__(new_buffer(), encoding=e, newline=n)
+                        elif together:
+                            f.reconfigure(encoding=e, newline=n)
+                        elif k == 1:
+                            f.reconfigure(newline=n)
+                        else:
+                            f.reconfigure(encoding=e)
+                    except ValueError:
+                        pass        # being set up again by __init__()
+                    i += 1
+
+            changers = [threading.Thread(target=change, args=(k,))
+                        for k in range(3)]
+            with threading_helper.start_threads(changers):
+                try:
+                    run_concurrently([lambda k=k: writer(k)
+                                      for k in range(4)])
+                finally:
+                    stop.set()
+            f.close()
+            count = 0
+            for path, buffer in buffers:
+                buffer.close()
+                with open(path, "rb") as g:
+                    data = g.read()
+                pos = 0
+                while pos < len(data):
+                    found = [p for p in valid if data.startswith(p, pos)]
+                    self.assertEqual(len(found), 1, (together, path, pos,
+                                                     data[pos:pos + 20]))
+                    pos += len(found[0])
+                    count += 1
+            self.assertEqual(count, sum(written))
+
+    def test_write_after_raw_close(self):
+        # Small non-ASCII writes (into room reserved without the lock) racing
+        # raw.close(): none succeeds once close() has returned, as with the
+        # buffer's own write().
+        late = 0
+        for _ in range(100):
+            raw = io.FileIO(os_helper.TESTFN, "w")
+            f = self.nib.TextIOWrapper(self.nib.BufferedWriter(raw, 1 << 20),
+                                       encoding="utf-8")
+            closed = threading.Event()
+            started = threading.Barrier(7)
+            done = [0] * 6
+            after = [0] * 6
+
+            def writer(k):
+                started.wait()
+                for _ in range(20000):
+                    was_closed = closed.is_set()
+                    try:
+                        f.write("\xe9")
+                    except ValueError:
+                        return
+                    done[k] += 1
+                    after[k] += was_closed
+
+            def closer():
+                started.wait()
+                while sum(done) < 3000:
+                    pass
+                raw.close()
+                closed.set()
+
+            run_concurrently([lambda k=k: writer(k) for k in range(6)]
+                             + [closer])
+            late += sum(after)
+            try:
+                f.close()
+            except ValueError:
+                pass
+        self.assertEqual(late, 0)
+
+    def test_reinit_race(self):
+        # __init__() called again while other threads read, write and
+        # tell(): no crash (the old buffer and codec were freed under
+        # them).
+        with open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.writelines(self.lines(1000))
+        for _ in range(100):
+            f = self.open("r+", buffer_size=64)
+
+            def worker(k):
+                for _ in range(100):
+                    try:
+                        if k % 3 == 0:
+                            f.readline()
+                        elif k % 3 == 1:
+                            f.write("zz€\n")
+                        else:
+                            f.read(5)
+                            f.tell()
+                    except (ValueError, OSError, UnicodeError):
+                        # Not writable, or not initialized meanwhile, or
+                        # reading what a write cut.
+                        pass
+
+            def reinit():
+                f.__init__(self.nib.BufferedReader(
+                    io.FileIO(os_helper.TESTFN, "r"), 64),
+                    encoding="cp1252", errors="replace")
+
+            run_concurrently([lambda k=k: worker(k) for k in range(6)]
+                             + [reinit])
+            f.close()
+
+    def test_instance_dict_while_reading(self):
+        # An attribute set on the buffer while threads iterate: from then
+        # on its methods are used, and each line is still read once, whole.
+        lines = ["%06d \xe9€ %s\n" % (i, "x" * (i % 30))
+                 for i in range(5000)]
+        with open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        for i in range(20):
+            with self.open("r", buffer_size=64) as f:
+                got = [[] for _ in range(6)]
+                started = threading.Barrier(7)
+
+                def reader(k):
+                    started.wait()
+                    got[k].extend(f)
+
+                def set_attribute():
+                    started.wait()
+                    for _ in range(i * 20):
+                        pass
+                    f.buffer.foo = 1
+
+                run_concurrently([lambda k=k: reader(k) for k in range(6)]
+                                 + [set_attribute])
+                self.assertEqual(sorted(sum(got, [])), lines)
+
+    @support.requires_subprocess()
+    def test_daemon_writers_at_exit(self):
+        # Daemon threads still writing through sys.stdout when the process
+        # exits: no hang at the exit flush (a writer waiting on a lock held
+        # by a thread that can't run any more).
+        import subprocess, sys
+        code = """if 1:
+            import sys, threading, time
+            def w():
+                while True:
+                    sys.stdout.write("x" * 50 + "\\n")
+            for _ in range(4):
+                threading.Thread(target=w, daemon=True).start()
+            time.sleep(0.01)
+            """
+        env = dict(os.environ, _PYTHON_IO_DEFAULT_IMPL="_nibbler")
+        for _ in range(30):
+            proc = subprocess.run([sys.executable, "-c", code], env=env,
+                                  stdout=subprocess.DEVNULL,
+                                  timeout=support.SHORT_TIMEOUT)
+            self.assertEqual(proc.returncode, 0)
+
+
 class BufferedWriterTest(TestCase):
     def test_write_detach_race(self):
         # write() waiting for the buffered lock while detach() ran used to
@@ -530,6 +981,34 @@ class NibblerReinitTest(TestCase):
                  lambda: f.read1(10), t.readline, lambda: t.read(5)]
         self.run_with_reinit(f, users, make_raws)
         self.close_text(f, t)
+
+    def test_instance_dict_while_used(self):
+        # The text layer looks at the instance dict without the lock (an
+        # attribute could override a method): give one to an object in use.
+        with open(os_helper.TESTFN, "wb") as w:
+            w.write(b"line\n" * 10000)
+        for _ in range(100):
+            r = _nibbler.BufferedReader(io.FileIO(os_helper.TESTFN, "r"), 64)
+            w = _nibbler.BufferedWriter(
+                io.FileIO(os_helper.TESTFN + "2", "w"), 64)
+            tr = io.TextIOWrapper(r, encoding="utf-8")
+            tw = io.TextIOWrapper(w, encoding="utf-8", write_through=True)
+
+            def reader():
+                for _ in range(50):
+                    tr.readline()
+
+            def writer():
+                for _ in range(50):
+                    tw.write("text\n")
+
+            def setter():
+                r.attr = 1
+                w.attr = 1
+
+            run_concurrently([reader, writer, setter])
+            tr.close()
+            tw.close()
 
 
 class SetOpenImplTest(TestCase):
