@@ -568,6 +568,38 @@ class BufferedReaderTest(CommonBufferedTests):
 class CBufferedReaderTest(BufferedReaderTest, SizeofTest, CTestCase):
     tp = io.BufferedReader
 
+    @threading_helper.requires_working_threading()
+    def test_concurrent_reads_keep_records_whole(self):
+        # A readline() or readinto() needing more than the buffer holds must
+        # not let another thread take the rest of its data while it waits
+        # for the lock.
+        records = [b"%015d\n" % i for i in range(4000)]
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with self.open(os_helper.TESTFN, "wb") as f:
+            f.write(b"".join(records))
+
+        def readline(bufio):
+            return bufio.readline()
+
+        def readinto(bufio):
+            b = bytearray(16)
+            return bytes(b[:bufio.readinto(b)])
+
+        for read_record in (readline, readinto):
+            with self.subTest(read=read_record.__name__):
+                got = []
+                raw = self.FileIO(os_helper.TESTFN, "rb")
+                with self.tp(raw, 24) as bufio:
+                    def reader():
+                        while record := read_record(bufio):
+                            got.append(record)
+
+                    threads = [threading.Thread(target=reader)
+                               for _ in range(8)]
+                    with threading_helper.start_threads(threads):
+                        pass
+                self.assertEqual(sorted(got), records)
+
     def test_initialization(self):
         rawio = self.MockRawIO([b"abc"])
         bufio = self.tp(rawio)
