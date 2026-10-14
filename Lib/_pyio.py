@@ -524,6 +524,9 @@ class IOBase(metaclass=abc.ABCMeta):
         if hasattr(self, "peek"):
             def nreadahead():
                 readahead = self.peek(1)
+                if readahead is None:
+                    # Would block.
+                    return None
                 if not readahead:
                     return 1
                 n = (readahead.find(b"\n") + 1) or len(readahead)
@@ -544,7 +547,11 @@ class IOBase(metaclass=abc.ABCMeta):
                 size = size_index()
         res = bytearray()
         while size < 0 or len(res) < size:
-            b = self.read(nreadahead())
+            n = nreadahead()
+            b = None if n is None else self.read(n)
+            if b is None:
+                # Would block before the end of the line.
+                return self._readline_would_block(res, size)
             if not b:
                 break
             res += b
@@ -552,12 +559,22 @@ class IOBase(metaclass=abc.ABCMeta):
                 break
         return res.take_bytes()
 
+    def _readline_would_block(self, res, size):
+        # What readline() returns when the stream would block after res:
+        # None if nothing arrived, else the partial line.
+        return res.take_bytes() if res else None
+
     def __iter__(self):
         self._checkClosed()
         return self
 
     def __next__(self):
         line = self.readline()
+        if line is None:
+            # Would block: raise BlockingIOError, since StopIteration
+            # would look like EOF.
+            raise BlockingIOError(
+                errno.EAGAIN, "read could not complete without blocking")
         if not line:
             raise StopIteration
         return line
@@ -570,14 +587,25 @@ class IOBase(metaclass=abc.ABCMeta):
         lines so far exceeds hint.
         """
         if hint is None or hint <= 0:
-            return list(self)
+            hint = None
         n = 0
         lines = []
-        for line in self:
-            lines.append(line)
-            n += len(line)
-            if n >= hint:
-                break
+        try:
+            for line in self:
+                lines.append(line)
+                if hint is not None:
+                    n += len(line)
+                    if n >= hint:
+                        break
+        except BlockingIOError:
+            # Would block before the end of a line (which the stream keeps
+            # for the next call): the lines so far.  Without any, do as
+            # readline() does: return None for binary, raise for text (""
+            # and [] would mean EOF).
+            if not lines:
+                if isinstance(self, TextIOBase):
+                    raise
+                return None
         return lines
 
     def writelines(self, lines):
@@ -1151,6 +1179,19 @@ class BufferedReader(_BufferedIOMixin):
         self._read_pos = 0
         return out[:n] if out else nodata_val
 
+    def _readline_would_block(self, res, size):
+        # Keep the partial line for the next call, which can then find its
+        # end, unless it is longer than the buffer size: then it is
+        # returned as it is.
+        if len(res) > self.buffer_size:
+            return res.take_bytes()
+        if res:
+            with self._read_lock:
+                self._read_buf = (res.take_bytes() +
+                                  self._read_buf[self._read_pos:])
+                self._read_pos = 0
+        return None
+
     def peek(self, size=0):
         """Returns buffered bytes without advancing the position.
 
@@ -1450,6 +1491,9 @@ class BufferedRWPair(BufferedIOBase):
 
     def read1(self, size=-1):
         return self.reader.read1(size)
+
+    def readline(self, size=-1):
+        return self.reader.readline(size)
 
     def readinto1(self, b):
         return self.reader.readinto1(b)

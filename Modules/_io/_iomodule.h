@@ -80,6 +80,10 @@ extern Py_ssize_t _PyIO_find_line_ending(
    Should only be called when PyErr_Occurred() is true.
 */
 extern int _PyIO_trap_eintr(void);
+/* Raise BlockingIOError for a read that got nothing because the stream
+   would block, where returning None or an empty result can't say so
+   (iteration, text reads). */
+extern void _PyIO_set_read_blocking_error(void);
 
 #define DEFAULT_BUFFER_SIZE (128 * 1024)  /* bytes */
 

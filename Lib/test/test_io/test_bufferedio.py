@@ -1,5 +1,6 @@
 import array
 import errno
+import os
 import pickle
 import random
 import sys
@@ -435,6 +436,92 @@ class BufferedReaderTest(CommonBufferedTests):
         self.assertEqual(bufio.peek(1), b"")
         self.assertEqual(bufio.read1(10), b"")
         self.assertEqual(bufio.readinto1(bytearray(10)), 0)
+
+    def test_readline_would_block_keeps_partial_line(self):
+        # gh-57531: readline() that would block before the end of the line
+        # returns None and keeps the partial line for the next call;
+        # iteration raises BlockingIOError.
+        rawio = self.MockRawIO((b"ab", None, b"c", None, b"d\nef", None,
+                                b"g"))
+        bufio = self.tp(rawio)
+        self.assertIsNone(bufio.readline())
+        self.assertIsNone(bufio.readline())
+        self.assertEqual(bufio.readline(), b"abcd\n")
+        self.assertRaises(BlockingIOError, next, bufio)
+        self.assertEqual(next(bufio), b"efg")
+        self.assertRaises(StopIteration, next, bufio)
+
+    @unittest.skipUnless(hasattr(os, "set_blocking"),
+                         "requires os.set_blocking()")
+    def test_readline_nonblocking_pipe(self):
+        # The same on a real non-blocking pipe.
+        if self.tp is not self.BufferedReader:
+            self.skipTest("a pipe is not seekable")
+        r, w = os.pipe()
+        try:
+            os.set_blocking(r, False)
+            raw = self.FileIO(r, "r", closefd=False)
+            with self.tp(raw) as bufio:
+                self.assertIsNone(bufio.readline())
+                os.write(w, b"ab")
+                self.assertIsNone(bufio.readline())
+                self.assertRaises(BlockingIOError, next, bufio)
+                os.write(w, b"c\nd")
+                self.assertEqual(bufio.readline(), b"abc\n")
+                self.assertIsNone(bufio.readline())
+                os.write(w, b"e\n")
+                self.assertEqual(next(bufio), b"de\n")
+                os.close(w)
+                w = None
+                self.assertEqual(bufio.readline(), b"")
+        finally:
+            os.close(r)
+            if w is not None:
+                os.close(w)
+
+    def test_readlines_would_block(self):
+        # readlines() that would block returns the complete lines so far
+        # and keeps the partial last line for the next call; with none,
+        # it returns None, as readline() does.
+        rawio = self.MockRawIO((b"ab\ncd\nef", None, b"g\nh", None, None,
+                                b"i\n"))
+        bufio = self.tp(rawio)
+        self.assertEqual(bufio.readlines(), [b"ab\n", b"cd\n"])
+        self.assertEqual(bufio.readlines(), [b"efg\n"])
+        self.assertIsNone(bufio.readlines())
+        self.assertEqual(bufio.readlines(), [b"hi\n"])
+        self.assertEqual(bufio.readlines(), [])
+        # With a hint.
+        rawio = self.MockRawIO((b"ab\ncd\nef", None, b"g\n", None))
+        bufio = self.tp(rawio)
+        self.assertEqual(bufio.readlines(2), [b"ab\n"])
+        self.assertEqual(bufio.readlines(100), [b"cd\n"])
+        self.assertEqual(bufio.readlines(100), [b"efg\n"])
+        self.assertEqual(bufio.readlines(100), [])
+
+    def test_readline_would_block_limit(self):
+        # With a limit: what arrived up to it is a line.
+        rawio = self.MockRawIO((b"ab", None, b"cdef", None, b"g\n"))
+        bufio = self.tp(rawio)
+        self.assertIsNone(bufio.readline(3))
+        self.assertEqual(bufio.readline(3), b"abc")
+        self.assertIsNone(bufio.readline(5))
+        self.assertEqual(bufio.readline(5), b"defg\n")
+        self.assertEqual(bufio.readline(5), b"")
+
+    def test_readline_would_block_long_partial_line(self):
+        # A partial line is kept up to the buffer size; a longer one is
+        # returned as it is, with or without a size.
+        for size in -1, 100:
+            with self.subTest(size=size):
+                rawio = self.MockRawIO((b"x" * 16, None, b"y\n"))
+                bufio = self.tp(rawio, 16)
+                self.assertIsNone(bufio.readline(size))
+                self.assertEqual(bufio.readline(size), b"x" * 16 + b"y\n")
+                rawio = self.MockRawIO((b"x" * 17, None, b"y\n"))
+                bufio = self.tp(rawio, 16)
+                self.assertEqual(bufio.readline(size), b"x" * 17)
+                self.assertEqual(bufio.readline(size), b"y\n")
 
     def test_read_past_eof(self):
         rawio = self.MockRawIO((b"abc", b"d", b"efg"))
@@ -1299,6 +1386,18 @@ class BufferedRWPairTest:
         self.assertEqual(pair().readlines(), [b"abc\n", b"def\n", b"h"])
         self.assertEqual(pair().readlines(), [b"abc\n", b"def\n", b"h"])
         self.assertEqual(pair().readlines(5), [b"abc\n", b"def\n"])
+
+    def test_readline_would_block(self):
+        # readline() is the reader's: when the raw stream would block, it
+        # returns None and keeps a partial line for the next call.
+        raw = self.MockRawIO((b"ab", None, b"c\nd", None, None, b"e"))
+        pair = self.tp(raw, self.MockRawIO())
+        self.assertIsNone(pair.readline())
+        self.assertEqual(pair.readline(), b"abc\n")
+        self.assertIsNone(pair.readline())
+        self.assertRaises(BlockingIOError, next, pair)
+        self.assertEqual(pair.readline(), b"de")
+        self.assertEqual(pair.readline(), b"")
 
     def test_read1(self):
         # .read1() is delegated to the underlying reader object, so this test
