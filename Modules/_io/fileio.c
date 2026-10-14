@@ -125,6 +125,22 @@ _io_FileIO__dealloc_warn_impl(fileio *self, PyObject *source)
     Py_RETURN_NONE;
 }
 
+/* _Py_fstat_noraise(), saving a failure's GetLastError() or errno in
+   *error: other code runs before it is raised.  Called without the GIL. */
+static int
+fileio_fstat(int fd, struct _Py_stat_struct *st, unsigned long *error)
+{
+    int res = _Py_fstat_noraise(fd, st);
+    if (res < 0) {
+#ifdef MS_WINDOWS
+        *error = GetLastError();
+#else
+        *error = (unsigned long)errno;
+#endif
+    }
+    return res;
+}
+
 /* Returns 0 on success, -1 with exception set on failure. */
 static int
 internal_close(fileio *self)
@@ -277,6 +293,8 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
     int *atomic_flag_works = NULL;
 #endif
     int fstat_result;
+    int fstat_done = 0;         /* fstat() ran in open()'s release */
+    unsigned long fstat_error = 0;
     int async_err = 0;
 
 #ifdef Py_DEBUG
@@ -407,6 +425,12 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
         goto error;
     }
 
+    PyMem_Free(self->stat_atopen);
+    self->stat_atopen = PyMem_New(struct _Py_stat_struct, 1);
+    if (self->stat_atopen == NULL) {
+        PyErr_NoMemory();
+        goto error;
+    }
     if (fd >= 0) {
         self->fd = fd;
         self->closefd = closefd;
@@ -428,6 +452,11 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
 #else
                 self->fd = open(name, flags, 0666);
 #endif
+                if (self->fd >= 0) {
+                    fstat_result = fileio_fstat(self->fd, self->stat_atopen,
+                                                &fstat_error);
+                    fstat_done = 1;
+                }
                 Py_END_ALLOW_THREADS
             } while (self->fd < 0 && errno == EINTR &&
                      !(async_err = PyErr_CheckSignals()));
@@ -478,24 +507,22 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
 #endif
     }
 
-    PyMem_Free(self->stat_atopen);
-    self->stat_atopen = PyMem_New(struct _Py_stat_struct, 1);
-    if (self->stat_atopen == NULL) {
-        PyErr_NoMemory();
-        goto error;
+    if (!fstat_done) {
+        Py_BEGIN_ALLOW_THREADS
+        fstat_result = fileio_fstat(self->fd, self->stat_atopen,
+                                    &fstat_error);
+        Py_END_ALLOW_THREADS
     }
-    Py_BEGIN_ALLOW_THREADS
-    fstat_result = _Py_fstat_noraise(self->fd, self->stat_atopen);
-    Py_END_ALLOW_THREADS
     if (fstat_result < 0) {
         /* Tolerate fstat() errors other than EBADF.  See Issue #25717, where
         an anonymous file on a Virtual Box shared folder filesystem would
         raise ENOENT. */
 #ifdef MS_WINDOWS
-        if (GetLastError() == ERROR_INVALID_HANDLE) {
-            PyErr_SetFromWindowsErr(0);
+        if (fstat_error == ERROR_INVALID_HANDLE) {
+            PyErr_SetFromWindowsErr(fstat_error);
 #else
-        if (errno == EBADF) {
+        if (fstat_error == EBADF) {
+            errno = (int)fstat_error;
             PyErr_SetFromErrno(PyExc_OSError);
 #endif
             goto error;
