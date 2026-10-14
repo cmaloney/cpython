@@ -1402,10 +1402,18 @@ _io__Buffered_tell_impl(buffered *self)
     Py_off_t pos;
 
     CHECK_INITIALIZED(self)
-    pos = _buffered_raw_tell(self);
-    if (pos == -1)
+    /* Hold the lock so that the raw position and the buffer offsets come
+       from the same moment: a write flushing in another thread changes
+       both. */
+    if (!ENTER_BUFFERED(self))
         return NULL;
+    pos = _buffered_raw_tell(self);
+    if (pos == -1) {
+        LEAVE_BUFFERED(self)
+        return NULL;
+    }
     pos -= RAW_OFFSET(self);
+    LEAVE_BUFFERED(self)
 
     // GH-95782
     if (pos < 0)
