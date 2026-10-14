@@ -1309,6 +1309,10 @@ class BufferedReader(_BufferedIOMixin):
             self._reset_read_buf()
             return pos
 
+    def _discard_writes(self):
+        # Nothing to drop (see BufferedWriter._discard_writes()).
+        return 0
+
 class BufferedWriter(_BufferedIOMixin):
 
     """A buffer for a writeable sequential RawIO object.
@@ -1438,12 +1442,30 @@ class BufferedWriter(_BufferedIOMixin):
         # probably just re-take the lock) in case flush has been overridden in
         # a subclass or the user set self.flush to something. This is the same
         # behavior as the C implementation.
+        discarded = 0
         try:
             # may raise BlockingIOError or BrokenPipeError etc
             self.flush()
+        except BaseException as exc:
+            # The pending data is lost, and nothing writes it again
+            # (gh-83973, gh-55589).
+            discarded = self._discard_writes()
+            would_block = isinstance(exc, BlockingIOError)
+            raise
         finally:
             with self._write_lock:
                 self.raw.close()
+            if discarded:
+                _warn_discarded(discarded, would_block)
+
+    def _discard_writes(self):
+        # Drop the pending writes; return how many bytes they were.
+        # TextIOWrapper.close() calls this when its flush failed, so that
+        # the close() of its buffer doesn't try to write them again.
+        with self._write_lock:
+            n = len(self._write_buf)
+            self._write_buf.clear()
+        return n
 
 
 class BufferedRWPair(BufferedIOBase):
@@ -1507,6 +1529,10 @@ class BufferedRWPair(BufferedIOBase):
 
     def flush(self):
         return self.writer.flush()
+
+    def _discard_writes(self):
+        # For TextIOWrapper.close() over the pair, as over a BufferedWriter.
+        return self.writer._discard_writes()
 
     def close(self):
         try:
@@ -1608,6 +1634,13 @@ class BufferedRandom(BufferedWriter, BufferedReader):
                 self.raw.seek(self._read_pos - len(self._read_buf), 1)
                 self._reset_read_buf()
         return BufferedWriter.write(self, b)
+
+
+def _warn_discarded(n, would_block):
+    import warnings
+    warnings.warn(f"close() discarded {n} buffered bytes: writing them "
+                  f"{'would block' if would_block else 'failed'}",
+                  ResourceWarning, stacklevel=3)
 
 
 def _new_buffersize(bytes_read):
@@ -2409,20 +2442,35 @@ class TextIOWrapper(TextIOBase):
     def close(self):
         if self.buffer is not None and not self.closed:
             try:
-                self._finish_encoder()
-                self.flush()
+                b = self._encode_final()
+                try:
+                    if b:
+                        self.buffer.write(b)
+                    self.flush()
+                except BaseException as exc:
+                    # A write failed: close completely, without the buffer's
+                    # close() writing the data out again (gh-83973,
+                    # gh-55589).
+                    discard = getattr(self.buffer, "_discard_writes", None)
+                    if discard is not None and (n := discard()):
+                        _warn_discarded(n, isinstance(exc, BlockingIOError))
+                    raise
             finally:
                 self.buffer.close()
 
     def _finish_encoder(self):
-        # gh-79792: give the encoder the end of the text, and write what
-        # it still held.  Only after it encoded text: a fresh or reset
-        # encoder holds nothing, but may still begin with a BOM.
+        b = self._encode_final()
+        if b:
+            self.buffer.write(b)
+
+    def _encode_final(self):
+        # gh-79792: give the encoder the end of the text, for the bytes it
+        # still held.  Only after it encoded text: a fresh or reset encoder
+        # holds nothing, but may still begin with a BOM.
         if self._encoder is not None and self._encoder_fed:
             self._encoder_fed = False
-            b = self._encoder.encode("", final=True)
-            if b:
-                self.buffer.write(b)
+            return self._encoder.encode("", final=True)
+        return b""
 
     @property
     def closed(self):

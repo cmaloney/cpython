@@ -382,3 +382,23 @@ class BufferedWriterTest(TestCase):
                        for func in [writer] * 3 + [reader] * 3 + [detacher]]
             with threading_helper.start_threads(threads):
                 go.set()
+
+    def test_discard_writes_race(self):
+        # _discard_writes() changes the buffer offsets that the unlocked
+        # fast paths of reads use: it must hold the critical section, as
+        # every other method does (a data race TSan reports otherwise).
+        f = io.BufferedRandom(io.BytesIO(b"line\n" * 1000), 64)
+
+        def reader():
+            for _ in range(500):
+                f.peek(1)
+                f.read1(3)
+                f.readline()
+                f.seek(0)
+
+        def writer():
+            for _ in range(500):
+                f.write(b"ab")
+                f._discard_writes()
+
+        run_concurrently([reader] * 2 + [writer] * 2)
