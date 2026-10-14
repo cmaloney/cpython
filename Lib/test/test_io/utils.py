@@ -5,6 +5,9 @@ import unittest
 
 import io  # C implementation of io
 import _pyio as pyio # Python implementation of io
+import _io
+# _io._nibbler: C buffered classes cloned into an _io submodule.
+from _io import _nibbler
 
 
 try:
@@ -283,7 +286,26 @@ class PyMockNonBlockWriterIO(MockNonBlockWriterIO, pyio.RawIOBase):
 # Build classes which point to all the right mocks per io implementation
 class CTestCase(unittest.TestCase):
     io = io
+    # Implementation predicates.  Tests gate behavior differences on these
+    # rather than on per-feature flags:
+    #   is_C: a C implementation (_io's stock buffered classes or
+    #       _io._nibbler's).
+    #   is_nibbler: the buffered layer is _io._nibbler. CTestCase's
+    #       classes are _io._nibbler's with _PYTHON_IO_DEFAULT_IMPL=_nibbler
+    #       (and with NibblerMixin); they have the class attribute
+    #       _is_nibbler.
+    #   is_stock_C: the buffered layer is _io's stock one, for its limits
+    #       that _pyio doesn't share (peek() returns the read-ahead however
+    #       short).
     is_C = True
+
+    @property
+    def is_nibbler(self):
+        return getattr(self.BufferedReader, '_is_nibbler', False)
+
+    @property
+    def is_stock_C(self):
+        return not self.is_nibbler
 
     MockRawIO = CMockRawIO
     MisbehavedRawIO = CMisbehavedRawIO
@@ -303,6 +325,8 @@ class CTestCase(unittest.TestCase):
 class PyTestCase(unittest.TestCase):
     io = pyio
     is_C = False
+    is_nibbler = False
+    is_stock_C = False
 
     MockRawIO = PyMockRawIO
     MisbehavedRawIO = PyMisbehavedRawIO
@@ -317,3 +341,30 @@ class PyTestCase(unittest.TestCase):
     # Use the class as a proxy to the _pyio module members.
     def __getattr__(self, name):
         return getattr(pyio, name)
+
+
+# Only the concrete classes route to nibbler; BufferedIOBase stays the shared
+# io ABC so isinstance/ABCMeta checks work across implementations.
+_NIBBLER_BUFFERED = {
+    "BufferedReader": _nibbler.BufferedReader,
+    "BufferedWriter": _nibbler.BufferedWriter,
+    "BufferedRWPair": _nibbler.BufferedRWPair,
+    "BufferedRandom": _nibbler.BufferedRandom,
+}
+
+
+class NibblerMixin:
+    """Route the buffered layer (self.* types and open()) to _io._nibbler.
+
+    CTestCase's is_nibbler and is_stock_C follow."""
+
+    def setUp(self):
+        super().setUp()
+        prev = _io._set_open_impl('_nibbler')
+        self.addCleanup(_io._set_open_impl, prev)
+
+    def __getattr__(self, name):
+        try:
+            return _NIBBLER_BUFFERED[name]
+        except KeyError:
+            return super().__getattr__(name)

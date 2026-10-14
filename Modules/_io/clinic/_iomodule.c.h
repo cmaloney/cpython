@@ -134,8 +134,9 @@ PyDoc_STRVAR(_io_open__doc__,
 
 static PyObject *
 _io_open_impl(PyObject *module, PyObject *file, const char *mode,
-              int buffering, const char *encoding, const char *errors,
-              const char *newline, int closefd, PyObject *opener);
+              PyObject *buffering_obj, const char *encoding,
+              const char *errors, const char *newline, int closefd,
+              PyObject *opener);
 
 static PyObject *
 _io_open(PyObject *module, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
@@ -172,7 +173,7 @@ _io_open(PyObject *module, PyObject *const *args, Py_ssize_t nargs, PyObject *kw
     Py_ssize_t noptargs = nargs + (kwnames ? PyTuple_GET_SIZE(kwnames) : 0) - 1;
     PyObject *file;
     const char *mode = "r";
-    int buffering = -1;
+    PyObject *buffering_obj = NULL;
     const char *encoding = NULL;
     const char *errors = NULL;
     const char *newline = NULL;
@@ -202,10 +203,7 @@ _io_open(PyObject *module, PyObject *const *args, Py_ssize_t nargs, PyObject *kw
         }
     }
     if (args[2]) {
-        buffering = PyLong_AsInt(args[2]);
-        if (buffering == -1 && PyErr_Occurred()) {
-            goto exit;
-        }
+        buffering_obj = args[2];
         if (!--noptargs) {
             goto skip_optional_pos;
         }
@@ -275,7 +273,7 @@ _io_open(PyObject *module, PyObject *const *args, Py_ssize_t nargs, PyObject *kw
     }
     opener = args[7];
 skip_optional_pos:
-    return_value = _io_open_impl(module, file, mode, buffering, encoding, errors, newline, closefd, opener);
+    return_value = _io_open_impl(module, file, mode, buffering_obj, encoding, errors, newline, closefd, opener);
 
 exit:
     return return_value;
@@ -392,4 +390,68 @@ _io_open_code(PyObject *module, PyObject *const *args, Py_ssize_t nargs, PyObjec
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=4570f4466d711d60 input=a9049054013a1b77]*/
+
+PyDoc_STRVAR(_io__set_open_impl__doc__,
+"_set_open_impl($module, name, /)\n"
+"--\n"
+"\n"
+"Make open() use the \"_io\" or \"_nibbler\" buffered classes.\n"
+"\n"
+"Returns the previous name.  For tests.");
+
+#define _IO__SET_OPEN_IMPL_METHODDEF    \
+    {"_set_open_impl", (PyCFunction)_io__set_open_impl, METH_O, _io__set_open_impl__doc__},
+
+static PyObject *
+_io__set_open_impl_impl(PyObject *module, PyObject *name);
+
+static PyObject *
+_io__set_open_impl(PyObject *module, PyObject *arg)
+{
+    PyObject *return_value = NULL;
+    PyObject *name;
+
+    if (!PyUnicode_Check(arg)) {
+        _PyArg_BadArgument("_set_open_impl", "argument", "str", arg);
+        goto exit;
+    }
+    name = arg;
+    return_value = _io__set_open_impl_impl(module, name);
+
+exit:
+    return return_value;
+}
+
+PyDoc_STRVAR(_io__set_unbuffered_impl__doc__,
+"_set_unbuffered_impl($module, name, /)\n"
+"--\n"
+"\n"
+"Choose what binary open(buffering=0) returns: \"_io\" or \"_nibbler\".\n"
+"\n"
+"With \"_io\", it returns the raw file.  With \"_nibbler\", it returns an\n"
+"_io._nibbler BufferedReader, BufferedWriter or BufferedRandom (by mode)\n"
+"with buffer size 0 wrapping it.  Returns the previous name.  For tests.");
+
+#define _IO__SET_UNBUFFERED_IMPL_METHODDEF    \
+    {"_set_unbuffered_impl", (PyCFunction)_io__set_unbuffered_impl, METH_O, _io__set_unbuffered_impl__doc__},
+
+static PyObject *
+_io__set_unbuffered_impl_impl(PyObject *module, PyObject *name);
+
+static PyObject *
+_io__set_unbuffered_impl(PyObject *module, PyObject *arg)
+{
+    PyObject *return_value = NULL;
+    PyObject *name;
+
+    if (!PyUnicode_Check(arg)) {
+        _PyArg_BadArgument("_set_unbuffered_impl", "argument", "str", arg);
+        goto exit;
+    }
+    name = arg;
+    return_value = _io__set_unbuffered_impl_impl(module, name);
+
+exit:
+    return return_value;
+}
+/*[clinic end generated code: output=6216803617f432c1 input=a9049054013a1b77]*/

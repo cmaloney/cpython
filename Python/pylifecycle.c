@@ -3034,7 +3034,13 @@ create_stdio(const PyConfig *config, PyObject* io,
             goto error;
     }
     else {
-        raw = Py_NewRef(buf);
+        /* open() returns the raw stream, or with
+           _io._set_unbuffered_impl("_nibbler") a buffered object over it
+           with buffer size 0, used as the buffer all the same. */
+        if (PyObject_GetOptionalAttr(buf, &_Py_ID(raw), &raw) < 0)
+            goto error;
+        if (raw == NULL)
+            raw = Py_NewRef(buf);
     }
 
 #ifdef HAVE_WINDOWS_CONSOLE_IO
