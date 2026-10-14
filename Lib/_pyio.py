@@ -733,6 +733,9 @@ class BufferedIOBase(IOBase):
             data = self.read1(len(b))
         else:
             data = self.read(len(b))
+        if data is None:
+            # The raw stream would block.
+            return None
         n = len(data)
 
         b[:n] = data
@@ -1168,6 +1171,9 @@ class BufferedReader(_BufferedIOMixin):
             if current:
                 self._read_buf = self._read_buf[self._read_pos:] + current
                 self._read_pos = 0
+            elif current is None and have <= 0:
+                # Would block, with nothing to return: b"" means EOF.
+                return None
         return self._read_buf[self._read_pos:]
 
     def read1(self, size=-1):
@@ -1180,7 +1186,8 @@ class BufferedReader(_BufferedIOMixin):
         if size == 0:
             return b""
         with self._read_lock:
-            self._peek_unlocked(1)
+            if self._peek_unlocked(1) is None:
+                return None
             return self._read_unlocked(
                 min(size, len(self._read_buf) - self._read_pos))
 
@@ -1222,13 +1229,18 @@ class BufferedReader(_BufferedIOMixin):
                 if len(buf) - written > self.buffer_size:
                     n = self.raw.readinto(buf[written:])
                     if not n:
+                        if n is None and not written:
+                            return None  # would block
                         break # eof
                     written += n
 
                 # Otherwise refill internal buffer - unless we're
                 # in read1 mode and already got some data
                 elif not (read1 and written):
-                    if not self._peek_unlocked(1):
+                    peeked = self._peek_unlocked(1)
+                    if not peeked:
+                        if peeked is None and not written:
+                            return None  # would block
                         break # eof
 
                 # In readinto1 mode, return as soon as we have some data
@@ -2434,8 +2446,13 @@ class TextIOWrapper(TextIOBase):
             input_chunk = self.buffer.read1(self._CHUNK_SIZE)
         else:
             input_chunk = self.buffer.read(self._CHUNK_SIZE)
+        # None: the raw stream would block.  There is no data for now, but
+        # it is not EOF either: a partial character stays in the decoder.
+        blocked = input_chunk is None
+        if blocked:
+            input_chunk = b""
         eof = not input_chunk
-        decoded_chars = self._decoder.decode(input_chunk, eof)
+        decoded_chars = self._decoder.decode(input_chunk, eof and not blocked)
         self._set_decoded_chars(decoded_chars)
         if decoded_chars:
             self._b2cratio = len(input_chunk) / len(self._decoded_chars)
