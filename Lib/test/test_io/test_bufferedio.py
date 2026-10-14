@@ -315,6 +315,16 @@ class BufferedReaderTest(CommonBufferedTests):
         self.assertEqual(bufio.readinto(b), 1)
         self.assertEqual(b, b"cb")
 
+    def test_readinto_several_refills(self):
+        # A readinto() that needs more than one refill of the buffer, the
+        # last one returning more than is left of b, fills b exactly.
+        rawio = self.MockRawIO((b"abc", b"defgh"))
+        bufio = self.tp(rawio, 8)
+        b = bytearray(6)
+        self.assertEqual(bufio.readinto(b), 6)
+        self.assertEqual(b, b"abcdef")
+        self.assertEqual(bufio.read(), b"gh")
+
     def test_readinto1(self):
         buffer_size = 10
         rawio = self.MockRawIO((b"abc", b"de", b"fgh", b"jkl"))
