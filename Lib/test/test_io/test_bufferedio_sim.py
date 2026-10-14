@@ -649,8 +649,10 @@ class SlowDeviceTest:
 
     def test_read_at_every_offset_and_seek_back(self):
         # Reads filling the buffer from a position of every remainder
-        # modulo 64, then seeks back inside what was read and before it:
-        # the data is right.
+        # modulo 64 (the nibbler puts the bytes read at an address
+        # congruent to it, some bytes into its block), then seeks back
+        # inside what was read and before it, where the bytes in front of
+        # the block's data are not the stream's: the data is right.
         data = bytes(i * 7 % 251 for i in range(4000))
         self.addCleanup(os_helper.unlink, os_helper.TESTFN)
         with open(os_helper.TESTFN, "wb") as f:
