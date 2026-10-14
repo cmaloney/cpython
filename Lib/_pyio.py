@@ -1339,7 +1339,15 @@ class BufferedWriter(_BufferedIOMixin):
         # come from the same moment: a write flushing in another thread
         # changes both.
         with self._write_lock:
+            if self._write_buf and self._raw_appending():
+                # gh-80592: in append mode, pending writes go to the end
+                # of the file, wherever the position is.
+                self._flush_unlocked()
             return _BufferedIOMixin.tell(self) + len(self._write_buf)
+
+    def _raw_appending(self):
+        mode = getattr(self.raw, "mode", "")
+        return isinstance(mode, str) and "a" in mode
 
     def seek(self, pos, whence=0):
         if whence not in valid_seek_flags:
@@ -1472,6 +1480,9 @@ class BufferedRandom(BufferedWriter, BufferedReader):
         # write() drops the read buffer under _read_lock, then buffers
         # under _write_lock: hold both to see a consistent state.
         with self._write_lock, self._read_lock:
+            if self._write_buf and self._raw_appending():
+                # gh-80592: see BufferedWriter.tell().
+                self._flush_unlocked()
             pos = _BufferedIOMixin.tell(self)
             if self._write_buf:
                 return pos + len(self._write_buf)

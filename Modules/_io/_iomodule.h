@@ -51,6 +51,8 @@ extern int _PyIOBase_finalize(PyObject *self);
 /* Returns true if the given FileIO object is closed.
    Doesn't check the argument type, so be careful! */
 extern int _PyFileIO_closed(PyObject *self);
+/* Was the FileIO (or subclass) opened in append mode? */
+extern int _PyFileIO_appending(PyObject *self);
 
 /* Shortcut to the core of the IncrementalNewlineDecoder.decode method */
 extern PyObject *_PyIncrementalNewlineDecoder_decode(
