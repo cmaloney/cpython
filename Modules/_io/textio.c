@@ -3359,6 +3359,46 @@ _io_TextIOWrapper_isatty_impl(textio *self)
     return buffer_callmethod_noargs(self, &_Py_ID(isatty));
 }
 
+/* Let tell() work again after next() disabled it, if the position is
+   known: when all decoded text was returned, it is the buffer's, less what
+   the decoder holds, so make that the snapshot.  (Otherwise the snapshot
+   of where the text left starts was not taken while iterating, so tell()
+   stays disabled.)  Keeps the raised exception, if any. */
+Py_NO_INLINE static void
+textiowrapper_resume_telling(textio *self)
+{
+    if (self->decoded_chars != NULL
+        && self->decoded_chars_used
+           < PyUnicode_GET_LENGTH(self->decoded_chars))
+    {
+        return;
+    }
+    if (self->decoder == NULL) {
+        /* Not readable: no decoded text, the position is the buffer's. */
+        self->telling = 1;
+        return;
+    }
+    PyObject *exc = PyErr_GetRaisedException();
+    PyObject *state = PyObject_CallMethodNoArgs(self->decoder,
+                                                &_Py_ID(getstate));
+    PyObject *dec_buffer, *dec_flags;
+    if (state != NULL && PyTuple_Check(state)
+        && PyArg_ParseTuple(state, "OO", &dec_buffer, &dec_flags)
+        && PyBytes_Check(dec_buffer))
+    {
+        PyObject *snapshot = PyTuple_Pack(2, dec_flags, dec_buffer);
+        if (snapshot != NULL) {
+            textiowrapper_set_decoded_chars(self, NULL);
+            Py_XSETREF(self->snapshot, snapshot);
+            self->telling = 1;
+        }
+    }
+    Py_XDECREF(state);
+    /* On failure, tell() stays disabled. */
+    PyErr_Clear();
+    PyErr_SetRaisedException(exc);
+}
+
 /*[clinic input]
 @critical_section
 _io.TextIOWrapper.flush
@@ -3370,7 +3410,11 @@ _io_TextIOWrapper_flush_impl(textio *self)
 {
     CHECK_ATTACHED(self);
     CHECK_CLOSED(self);
-    self->telling = self->seekable;
+    if (!self->telling && self->seekable) {
+        /* Not just telling = seekable: the snapshot was not kept while
+           iterating. */
+        textiowrapper_resume_telling(self);
+    }
     if (_textiowrapper_writeflush(self) < 0)
         return NULL;
     return buffer_callmethod_noargs(self, &_Py_ID(flush));

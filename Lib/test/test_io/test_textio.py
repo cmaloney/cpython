@@ -679,6 +679,24 @@ class TextIOWrapperTest:
         self.assertEqual(f.tell(), p2)
         f.close()
 
+    def test_tell_after_next_and_flush(self):
+        # flush() while iterating doesn't make tell() use a snapshot that
+        # wasn't kept: it gives the position, or raises as it does while
+        # iterating if that isn't known.
+        with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.write("a\nbc\nd\n")
+        with self.open(os_helper.TESTFN, "r+", encoding="utf-8") as f:
+            self.assertEqual(next(f), "a\n")
+            f.flush()
+            self.assertRaisesRegex(OSError, "disabled by next", f.tell)
+            self.assertEqual(next(f), "bc\n")
+            self.assertEqual(next(f), "d\n")
+            # All the text read was returned: the position is known.
+            f.flush()
+            self.assertEqual(f.tell(), 7)
+            f.seek(2)
+            self.assertEqual(f.readline(), "bc\n")
+
     def test_seeking(self):
         chunk_size = _default_chunk_size()
         prefix_size = chunk_size - 2
