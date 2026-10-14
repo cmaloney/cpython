@@ -1,5 +1,6 @@
 import array
 import codecs
+import itertools
 import locale
 import os
 import pickle
@@ -890,6 +891,95 @@ class TextIOWrapperTest:
 
     @unittest.skipUnless(hasattr(os, "set_blocking"),
                          "requires os.set_blocking()")
+    def test_nonblocking_pipe_readline(self):
+        # Over a real non-blocking pipe, readline() and iteration that
+        # would block raise BlockingIOError and keep the partial line.
+        r, w = os.pipe()
+        try:
+            os.set_blocking(r, False)
+            with self.open(r, "r", encoding="utf-8", closefd=False) as t:
+                self.assertRaises(BlockingIOError, t.readline)
+                os.write(w, b"ab")
+                self.assertRaises(BlockingIOError, t.readline)
+                self.assertRaises(BlockingIOError, next, t)
+                os.write(w, b"c\nd")
+                self.assertEqual(t.readline(), "abc\n")
+                self.assertRaises(BlockingIOError, t.readline)
+                os.write(w, b"e\n")
+                self.assertEqual(next(t), "de\n")
+                os.close(w)
+                w = None
+                self.assertEqual(t.readline(), "")
+        finally:
+            os.close(r)
+            if w is not None:
+                os.close(w)
+
+    @unittest.skipUnless(hasattr(os, "set_blocking"),
+                         "requires os.set_blocking()")
+    def test_nonblocking_pipe_read_all_partial_char(self):
+        # read() without a size keeps the first bytes of a character that
+        # has only partly arrived, as read(size) does; at EOF they are an
+        # error.
+        r, w = os.pipe()
+        try:
+            os.set_blocking(r, False)
+            with self.open(r, "r", encoding="utf-8", closefd=False) as t:
+                os.write(w, b"a\xc3")
+                self.assertEqual(t.read(), "a")
+                self.assertRaises(BlockingIOError, t.read)
+                os.write(w, b"\xa9b\xe2\x82")
+                self.assertEqual(t.read(), "\xe9b")
+                os.write(w, b"\xac")
+                self.assertEqual(t.read(), "\u20ac")
+                os.write(w, b"\xc3")
+                os.close(w)
+                w = None
+                self.assertRaises(UnicodeDecodeError, t.read)
+        finally:
+            os.close(r)
+            if w is not None:
+                os.close(w)
+
+    def test_read_all_would_block_partial_char_tell(self):
+        # After read() without a size kept a partial character, tell()
+        # is the position before it.
+        class BlockTwice(self.RawIOBase):
+            # Would block twice at position at: once for the first read of
+            # the buffer, once more for the read after the partial char.
+            def __init__(self, data, at):
+                self.data, self.at, self.pos = data, at, 0
+                self.blocks = 2
+            def readable(self): return True
+            def seekable(self): return True
+            def tell(self): return self.pos
+            def seek(self, pos, whence=0):
+                self.pos = pos
+                return pos
+            def readinto(self, b):
+                if self.pos == self.at:
+                    self.blocks -= 1
+                    if not self.blocks:
+                        self.at = None
+                    return None
+                end = len(self.data) if self.at is None else self.at
+                n = min(len(b), end - self.pos)
+                b[:n] = self.data[self.pos:self.pos + n]
+                self.pos += n
+                return n
+        data = "ab\u20accd".encode()
+        for seek in (False, True):
+            with self.subTest(seek=seek):
+                t = self.TextIOWrapper(self.BufferedReader(BlockTwice(data, 3)),
+                                       encoding="utf-8")
+                self.assertEqual(t.read(), "ab")
+                self.assertEqual(t.tell(), 2)
+                if seek:
+                    t.seek(2)
+                self.assertEqual(t.read(), "\u20accd")
+
+    @unittest.skipUnless(hasattr(os, "set_blocking"),
+                         "requires os.set_blocking()")
     def test_nonblocking_pipe_partial_char(self):
         # gh-57531: over a real non-blocking pipe, a read that would block
         # in the middle of a multibyte character returns the characters
@@ -900,7 +990,14 @@ class TextIOWrapperTest:
             with self.open(r, "r", encoding="utf-8", closefd=False) as t:
                 os.write(w, b"a\xc3")
                 self.assertEqual(t.read(5), "a")
-                os.write(w, b"\xa9b\ncd\n")
+                # Nothing to return: "" would mean EOF.
+                self.assertRaises(BlockingIOError, t.read, 5)
+                self.assertRaises(BlockingIOError, t.readline)
+                os.write(w, b"\xa9b")
+                # A partial line is kept for the next call.
+                self.assertRaises(BlockingIOError, t.readline)
+                self.assertRaises(BlockingIOError, next, t)
+                os.write(w, b"\ncd\n")
                 self.assertEqual(t.readline(), "\xe9b\n")
                 self.assertEqual(t.read(3), "cd\n")
                 os.close(w)
@@ -911,6 +1008,269 @@ class TextIOWrapperTest:
             os.close(r)
             if w is not None:
                 os.close(w)
+
+    def test_read_would_block_raises(self):
+        # gh-57531: when the stream would block before any character is
+        # available, read(n), readline() and iteration raise
+        # BlockingIOError, as read() does: "" means EOF.  What there is is
+        # returned by read(n), as a short read.
+        raw = self.MockRawIO((None, None, None, b"ab", None, b"c\nd", None,
+                              None, b"e"))
+        t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
+        self.assertRaises(BlockingIOError, t.read, 5)
+        self.assertRaises(BlockingIOError, t.readline)
+        self.assertRaises(BlockingIOError, next, t)
+        self.assertEqual(t.read(5), "ab")
+        self.assertEqual(t.readline(), "c\n")
+        # A partial line is kept for the next call (see
+        # test_readline_would_block_keeps_partial_line).
+        self.assertRaises(BlockingIOError, t.readline)
+        self.assertRaises(BlockingIOError, t.readline)
+        self.assertEqual(t.read(5), "de")
+        self.assertEqual(t.read(5), "")
+        self.assertEqual(t.readline(), "")
+
+    def test_readlines_would_block(self):
+        # readlines() that would block returns the complete lines so far
+        # and keeps the partial last line for the next call; with none,
+        # it raises BlockingIOError, as readline() does.
+        raw = self.MockRawIO((b"ab\ncd\nef", None, b"g\nh", None, None,
+                              b"i\n"))
+        t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
+        self.assertEqual(t.readlines(), ["ab\n", "cd\n"])
+        self.assertEqual(t.readlines(), ["efg\n"])
+        self.assertRaises(BlockingIOError, t.readlines)
+        self.assertEqual(t.readlines(), ["hi\n"])
+        self.assertEqual(t.readlines(), [])
+        # With a hint.
+        raw = self.MockRawIO((b"ab\ncd\nef", None, b"g\n", None))
+        t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
+        self.assertEqual(t.readlines(2), ["ab\n"])
+        self.assertEqual(t.readlines(100), ["cd\n"])
+        self.assertEqual(t.readlines(100), ["efg\n"])
+        self.assertEqual(t.readlines(100), [])
+
+    def test_readline_would_block_keeps_partial_line(self):
+        # A readline() that would block before the end of the line raises
+        # BlockingIOError and keeps the partial line for the next call.
+        raw = self.MockRawIO((b"ab", None, b"c", None, b"d\nef", None,
+                              b"g\r", None, b"\nh"))
+        t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8",
+                               newline="")
+        self.assertRaises(BlockingIOError, t.readline)
+        self.assertRaises(BlockingIOError, t.readline)
+        self.assertEqual(t.readline(), "abcd\n")
+        self.assertRaises(BlockingIOError, next, t)
+        # "\r" may be followed by "\n": wait for it.
+        self.assertRaises(BlockingIOError, t.readline)
+        self.assertEqual(next(t), "efg\r\n")
+        self.assertEqual(t.readline(), "h")
+        self.assertEqual(t.readline(), "")
+        # With a limit: what arrived up to it is a line.
+        raw = self.MockRawIO((b"ab", None, b"cdef", None, b"g\n"))
+        t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
+        self.assertRaises(BlockingIOError, t.readline, 3)
+        self.assertEqual(t.readline(3), "abc")
+        self.assertRaises(BlockingIOError, t.readline, 5)
+        self.assertEqual(t.readline(5), "defg\n")
+
+    def test_readline_would_block_long_partial_line(self):
+        # A partial line is kept up to the chunk size (the text layer's
+        # buffer size); a longer one is returned as it is, as at EOF, with
+        # or without a size.
+        for size in -1, 100:
+            with self.subTest(size=size):
+                raw = self.MockRawIO((b"x" * 5, None, b"y\n"))
+                t = self.TextIOWrapper(self.BufferedReader(raw),
+                                       encoding="utf-8")
+                t._CHUNK_SIZE = 4
+                self.assertEqual(t.readline(size), "x" * 5)
+                self.assertEqual(t.readline(size), "y\n")
+                raw = self.MockRawIO((b"xx", b"xx", None, b"y\n"))
+                t = self.TextIOWrapper(self.BufferedReader(raw),
+                                       encoding="utf-8")
+                t._CHUNK_SIZE = 4
+                self.assertRaises(BlockingIOError, t.readline, size)
+                self.assertEqual(t.readline(size), "x" * 4 + "y\n")
+
+    def test_readline_long_line_memory(self):
+        # The tell() snapshot of where a line spanning chunks started (so
+        # that it can be kept if the stream would block) stops growing
+        # once the line is too long to keep: a long line over a seekable
+        # buffer costs no extra copy of its bytes.
+        import tracemalloc
+        n = 4 * 1024 * 1024
+        for encoding in ("ascii", "utf-16-le"):
+            with self.subTest(encoding=encoding):
+                data = ("x" * n + "\n").encode(encoding)
+                t = self.TextIOWrapper(
+                    self.BufferedReader(self.BytesIO(data)),
+                    encoding=encoding)
+                tracemalloc.start()
+                try:
+                    line = t.readline()
+                    peak = tracemalloc.get_traced_memory()[1]
+                finally:
+                    tracemalloc.stop()
+                self.assertEqual(len(line), n + 1)
+                del line, t
+                # The decoded chunks and the joined line: 2x (3x with the
+                # copy).
+                self.assertLess(peak, 2.5 * n)
+
+    def test_readline_long_line_linear(self):
+        # Reading a long line takes time linear in its length, also through
+        # the codec's decoder (UTF-16 here): its text is not copied again
+        # as each piece is decoded.
+        if not self.is_C:
+            self.skipTest("_pyio's readline() is not linear in debug "
+                          "builds")
+        def read_line(n):
+            data = ("x" * n + "\n").encode("utf-16-le")
+            t = self.TextIOWrapper(
+                self.BufferedReader(self.BytesIO(data), 8192),
+                encoding="utf-16-le")
+            start = time.perf_counter()
+            line = t.readline()
+            elapsed = time.perf_counter() - start
+            self.assertEqual(len(line), n + 1)
+            return elapsed
+
+        # 8 times longer: about 8 times slower if linear, 64 if quadratic.
+        with support.disable_gc():
+            small = min(read_line(256 * 1024) for _ in range(3))
+            large = min(read_line(2048 * 1024) for _ in range(3))
+        self.assertLess(large, 24 * small)
+
+    def test_readline_long_lines(self):
+        # Lines longer than a chunk and than the buffer, with each kind of
+        # newline; the character after a "\r" takes two bytes (in UTF-8,
+        # and UTF-16, through the codec's decoder).
+        n = 20000
+        a, b, c, d = "a" * n, "\xe9" + "b" * n, "c" * n, "d" * n
+        text = a + "\r" + b + "\r\n" + c + "\n" + d
+        expected = {
+            None: [a + "\n", b + "\n", c + "\n", d],
+            "": [a + "\r", b + "\r\n", c + "\n", d],
+            "\n": [a + "\r" + b + "\r\n", c + "\n", d],
+            "\r": [a + "\r", b + "\r", "\n" + c + "\n" + d],
+            "\r\n": [a + "\r" + b + "\r\n", c + "\n" + d],
+        }
+        for (newline, lines), size, encoding in itertools.product(
+                expected.items(), (1024, None), ("utf-8", "utf-16")):
+            with self.subTest(newline=newline, buffer_size=size,
+                              encoding=encoding):
+                raw = self.BytesIO(text.encode(encoding))
+                buf = (self.BufferedReader(raw, size) if size
+                       else self.BufferedReader(raw))
+                t = self.TextIOWrapper(buf, encoding=encoding,
+                                       newline=newline)
+                self.assertEqual(list(iter(t.readline, "")), lines)
+
+    def test_tell_after_readline_would_block(self):
+        # A readline() that would block after a partial line keeps the
+        # decoder's held bytes (a partial character) or pending \r in the
+        # tell() position, so seek(tell()) then read() loses nothing.
+        class BlockOnce(self.RawIOBase):
+            def __init__(self, data, at):
+                self.data, self.at, self.pos = data, at, 0
+            def readable(self): return True
+            def seekable(self): return True
+            def tell(self): return self.pos
+            def seek(self, pos, whence=0):
+                self.pos = pos
+                return pos
+            def readinto(self, b):
+                if self.pos == self.at:
+                    self.at = None
+                    return None
+                end = len(self.data) if self.at is None else self.at
+                n = min(len(b), end - self.pos)
+                b[:n] = self.data[self.pos:self.pos + n]
+                self.pos += n
+                return n
+        cases = [
+            ("utf-8", None, "ab\u20accd", 3),
+            ("utf-16", None, "abcd", 5),
+            ("utf-16-le", None, "a\U0001f600b", 4),
+            ("utf-7", None, "a\u20ac\u20acb", 4),
+            ("utf-8", None, "ab\rcd", 3),
+            ("utf-8", "", "ab\rcd", 3),
+        ]
+        # A readline() that would block keeps the partial line and raises;
+        # one that has grown too long to keep (longer than the chunk size)
+        # returns it.
+        prefix = "x" * 70
+        for encoding, newline, text, at in cases:
+            for long in (False, True):
+                with self.subTest(encoding=encoding, newline=newline,
+                                  text=text, long=long):
+                    if long:
+                        at += (len((prefix + text).encode(encoding))
+                               - len(text.encode(encoding)))
+                        text = prefix + text
+                    data = text.encode(encoding)
+                    expected = self.TextIOWrapper(
+                        self.BytesIO(data), encoding=encoding,
+                        newline=newline).read()
+                    for seek in (False, True):
+                        raw = BlockOnce(data, at)
+                        t = self.TextIOWrapper(self.BufferedReader(raw),
+                                               encoding=encoding,
+                                               newline=newline)
+                        if long:
+                            t._CHUNK_SIZE = 1
+                            line = t.readline()
+                            self.assertNotEqual(line, expected)
+                        else:
+                            self.assertRaises(BlockingIOError, t.readline)
+                            line = ""
+                        pos = t.tell()
+                        if seek:
+                            t.seek(pos)
+                        self.assertEqual(line + t.read(), expected)
+
+    def test_tell_after_next_would_block(self):
+        # A BlockingIOError from next() doesn't leave tell() disabled as
+        # during iteration: it reports the position after the last line,
+        # counting what the decoder holds as unread.
+        class BlockOnce(self.RawIOBase):
+            def __init__(self, data, at):
+                self.data, self.at, self.pos = data, at, 0
+            def readable(self): return True
+            def seekable(self): return True
+            def tell(self): return self.pos
+            def seek(self, pos, whence=0):
+                self.pos = pos
+                return pos
+            def readinto(self, b):
+                if self.pos == self.at:
+                    self.at = None
+                    return None
+                end = len(self.data) if self.at is None else self.at
+                n = min(len(b), end - self.pos)
+                b[:n] = self.data[self.pos:self.pos + n]
+                self.pos += n
+                return n
+        cases = [
+            ("utf-8", "ab\ncd", 3),
+            ("latin-1", "ab\ncd", 3),
+            ("utf-8", "ab\n\u20accd", 4),
+            ("utf-16", "ab\ncd", 9),
+        ]
+        for encoding, text, at in cases:
+            data = text.encode(encoding)
+            for seek in (False, True):
+                with self.subTest(encoding=encoding, at=at, seek=seek):
+                    raw = BlockOnce(data, at)
+                    t = self.TextIOWrapper(self.BufferedReader(raw),
+                                           encoding=encoding)
+                    self.assertEqual(next(t), "ab\n")
+                    self.assertRaises(BlockingIOError, next, t)
+                    pos = t.tell()
+                    if seek:
+                        t.seek(pos)
+                    self.assertEqual("ab\n" + t.read(), text)
 
     # read in amounts equal to TextIOWrapper._CHUNK_SIZE which is 128.
     def test_read_by_chunk(self):

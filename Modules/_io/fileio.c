@@ -1074,6 +1074,14 @@ _PyFileIO_appending(PyObject *op)
     return PyFileIO_CAST(op)->appending;
 }
 
+int
+_PyFileIO_regular(PyObject *op)
+{
+    struct _Py_stat_struct *st =
+        FT_ATOMIC_LOAD_PTR_ACQUIRE(PyFileIO_CAST(op)->stat_atopen);
+    return st != NULL && S_ISREG(st->st_mode);
+}
+
 /* XXX Windows support below is likely incomplete */
 
 /* Cribbed from posix_lseek() */
