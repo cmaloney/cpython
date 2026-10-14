@@ -947,6 +947,23 @@ class TextIOWrapperTest:
             with self.open(filename, 'rb') as f:
                 self.assertEqual(f.read(), 'aaaxxx'.encode(charset))
 
+    def test_read_write_bom(self):
+        # Same test, but writing after reading to the end: the encoder
+        # isn't at the start of the stream any more.
+        filename = os_helper.TESTFN
+        for charset in ('utf-8-sig', 'utf-16', 'utf-32'):
+            with self.subTest(charset):
+                with self.open(filename, 'w', encoding=charset) as f:
+                    f.write('aaa')
+                with self.open(filename, 'r+', encoding=charset) as f:
+                    self.assertEqual(f.read(), 'aaa')
+                    f.write('xxx')
+                    f.seek(0)
+                    self.assertEqual(f.read(), 'aaaxxx')
+                    f.write('yyy')
+                with self.open(filename, 'rb') as f:
+                    self.assertEqual(f.read(), 'aaaxxxyyy'.encode(charset))
+
     def test_errors_property(self):
         with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
             self.assertEqual(f.errors, "strict")
@@ -1625,6 +1642,18 @@ class CTextIOWrapperTest(TextIOWrapperTest, CTestCase):
             del t._CHUNK_SIZE
         # a failed assignment does not change the value
         self.assertEqual(t._CHUNK_SIZE, 1024)
+
+    def test_first_write_no_tell_without_bom(self):
+        # Only an encoding that may start with a BOM needs the position.
+        tells = []
+        class Buffer(self.BytesIO):
+            def tell(self):
+                tells.append(None)
+                return super().tell()
+        t = self.TextIOWrapper(Buffer(), encoding='utf-8')
+        tells.clear()
+        t.write('a')
+        self.assertEqual(tells, [])
 
     def test_initialization(self):
         r = self.BytesIO(b"\xc3\xa9\n\n")
