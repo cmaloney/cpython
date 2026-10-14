@@ -1901,6 +1901,7 @@ extern "C" {
     INIT_ID(limit), \
     INIT_ID(line), \
     INIT_ID(line_buffering), \
+    INIT_ID(line_flush), \
     INIT_ID(lineno), \
     INIT_ID(little), \
     INIT_ID(lo), \

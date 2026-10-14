@@ -626,6 +626,7 @@ struct _Py_global_strings {
         STRUCT_FOR_ID(limit)
         STRUCT_FOR_ID(line)
         STRUCT_FOR_ID(line_buffering)
+        STRUCT_FOR_ID(line_flush)
         STRUCT_FOR_ID(lineno)
         STRUCT_FOR_ID(little)
         STRUCT_FOR_ID(lo)

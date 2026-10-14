@@ -614,6 +614,7 @@ _PyStaticObjects_CheckAll(PyInterpreterState *interp) {
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(limit), "limit", 5);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(line), "line", 4);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(line_buffering), "line_buffering", 14);
+    _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(line_flush), "line_flush", 10);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(lineno), "lineno", 6);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(little), "little", 6);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(lo), "lo", 2);
