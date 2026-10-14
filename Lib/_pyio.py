@@ -2269,6 +2269,7 @@ class TextIOWrapper(TextIOBase):
         self._write_through = write_through
 
         # don't write a BOM in the middle of a file
+        self._encoding_start_of_stream = False
         if self._seekable and self.writable():
             position = self.buffer.tell()
             if position != 0:
@@ -2277,6 +2278,8 @@ class TextIOWrapper(TextIOBase):
                 except LookupError:
                     # Sometimes the encoder doesn't exist
                     pass
+            else:
+                self._encoding_start_of_stream = True
 
     # self._snapshot is either None, or a tuple (dec_flags, next_input)
     # where dec_flags is the second (integer) item of the decoder state
@@ -2426,7 +2429,13 @@ class TextIOWrapper(TextIOBase):
         if haslf and self._writetranslate and self._writenl != "\n":
             s = s.replace("\n", self._writenl)
         encoder = self._encoder or self._get_encoder()
-        # XXX What if we were just reading?
+        if self._encoding_start_of_stream:
+            # The encoder may begin with a BOM.  If the position moved since
+            # (reads don't tell the encoder), tell it that it isn't at the
+            # start, as seek() does.
+            if self.buffer.tell() != 0:
+                encoder.setstate(0)
+            self._encoding_start_of_stream = False
         b = encoder.encode(s)
         self._encoder_fed = True
         self.buffer.write(b)
@@ -2676,6 +2685,7 @@ class TextIOWrapper(TextIOBase):
                     encoder.setstate(0)
                 else:
                     encoder.reset()
+                self._encoding_start_of_stream = position == 0
                 self._encoder_fed = False
 
         if self.closed:
