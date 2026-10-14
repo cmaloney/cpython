@@ -1,0 +1,8 @@
+Fix a possible heap corruption and use after free in :class:`io.FileIO` on
+the :term:`free threaded <free threading>` build when
+:meth:`~io.FileIO.close`, :meth:`~io.FileIO.truncate` or re-initialization
+with :meth:`!__init__` runs concurrently with :meth:`~io.FileIO.readall`,
+:meth:`~io.FileIO.isatty` or another of those calls. The result of the
+:func:`os.fstat` call made when the file was opened is now kept until the
+object is deallocated, also on the default build, where this has no
+observable effect.
