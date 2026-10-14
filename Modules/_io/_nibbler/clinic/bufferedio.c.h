@@ -667,13 +667,14 @@ PyDoc_STRVAR(_io__Buffered__gather__doc__,
 "context (thread, or asyncio task) writes is kept apart, also past\n"
 "the buffer size, and added to the buffered data in one piece when\n"
 "the block ends (also when it raises), so that no other output gets\n"
-"in between; a BufferedWriter of a regular file with nothing buffered\n"
-"writes it to the file then.  Once the block gathered limit bytes,\n"
-"they are added, and gathering goes on; with limit None, only at the\n"
-"end.  flush() inside the block takes effect at its end.  Reads,\n"
-"seek() and truncate() in the context add what it gathered first;\n"
-"close(), detach() and __init__(), from any context, what every block\n"
-"gathered.  A block on the same stream nested in one gathers into it.\n"
+"in between; while another thread uses the buffer, a BufferedWriter\n"
+"of a regular file with nothing buffered writes it to the file then.\n"
+"Once the block gathered limit bytes, they are added, and gathering\n"
+"goes on; with limit None, only at the end.  flush() inside the block\n"
+"takes effect at its end.  Reads, seek() and truncate() in the\n"
+"context add what it gathered first; close(), detach() and\n"
+"__init__(), from any context, what every block gathered.  A block\n"
+"on the same stream nested in one gathers into it.\n"
 "\n"
 "Gathering is by context, as with decimal.localcontext(): a block\n"
 "spanning a yield gathers what runs in the context meanwhile.  Data\n"
@@ -834,4 +835,4 @@ skip_optional:
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=09f3aa3bc3900a7f input=a9049054013a1b77]*/
+/*[clinic end generated code: output=eb325179d823764a input=a9049054013a1b77]*/

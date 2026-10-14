@@ -187,8 +187,8 @@ class GatherTest(unittest.TestCase):
                 # data accepted), so that other writes can come after it.
                 contextvars.copy_context().run(f.write, b'X')
                 f.write(b'ab')
-            # (With nothing pending, the block's end writes the rest.)
-            self.assertEqual(self.read(), b'0123456789Xab')
+            self.assertEqual(self.read(), b'0123456789X')
+        self.assertEqual(self.read(), b'0123456789Xab')
         for limit in (0, -1):
             with open(self.path, 'wb') as f:
                 self.assertRaises(ValueError, f._gather, limit)
@@ -500,7 +500,7 @@ class GatherTest(unittest.TestCase):
         with self.assertWarnsRegex(ResourceWarning, 'never ended'):
             del g
             gc.collect()
-        self.assertEqual(self.read(), b'ab')
+        self.assertEqual(self.size(), 0)
         f.close()
         self.assertEqual(self.read(), b'ab')
 
@@ -611,41 +611,110 @@ class GatherTest(unittest.TestCase):
         if not getattr(_io.BufferedWriter, '_is_nibbler', False):
             self.assertNotHasAttr(_io.BufferedWriter, '_gather')
 
-    # A BufferedWriter of a regular file with nothing pending writes a
-    # block out itself at its end; elsewhere it is moved to the pending
-    # writes.
+    # A block's end moves its data to the pending writes when it gets the
+    # stream's lock without waiting.  When another thread holds it, a
+    # BufferedWriter of a regular file with nothing pending writes the
+    # block out itself; else the end waits for the lock.
 
-    def test_direct(self):
-        with open(self.path, 'wb') as f:
+    @contextlib.contextmanager
+    def lock_held(self, f, release_after=support.SHORT_TIMEOUT):
+        # Another thread holds f's lock and I/O role, in raw.tell() of
+        # f.tell(), until the with block ends or release_after seconds
+        # passed.  The context's record is listed first (listing takes the
+        # lock).
+        with f._gather():
+            pass
+        raw = f.raw
+        entered, release = threading.Event(), threading.Event()
+        def tell():
+            entered.set()
+            release.wait()
+            return os.lseek(raw.fileno(), 0, os.SEEK_CUR)
+        raw.tell = tell
+        t = threading.Thread(target=f.tell)
+        timer = threading.Timer(release_after, release.set)
+        try:
+            t.start()
+            entered.wait()
+            timer.start()
+            yield release
+        finally:
+            release.set()
+            t.join()
+            timer.cancel()
+            del raw.tell
+
+    def test_splice(self):
+        with open(self.path, 'wb', buffering=8192) as f:
             with f._gather():
                 f.write(b'abc')
-                f.write(b'x' * 1000)
-                self.assertEqual(self.size(), 0)
-                self.assertEqual(f.tell(), 1003)
-            self.assertEqual(self.size(), 1003)
+            # Moved to the pending writes.
+            self.assertEqual(self.size(), 0)
+            self.assertEqual(f.tell(), 3)
+            f.write(b'd')
+            with f._gather():
+                f.write(b'x' * 10000)
+            # Past the threshold: written out at the end.
+            self.assertEqual(self.size(), 10004)
+            with f._gather():
+                f.write(b'e')
+                f.flush()
+            # The deferred flush.
+            self.assertEqual(self.size(), 10005)
+        self.assertEqual(self.read(), b'abcd' + b'x' * 10000 + b'e')
+
+    @threading_helper.requires_working_threading()
+    def test_direct(self):
+        with open(self.path, 'wb') as f:
+            with self.lock_held(f):
+                with f._gather():
+                    f.write(b'abc')
+                    f.write(b'x' * 1000)
+                    self.assertEqual(self.size(), 0)
+                self.assertEqual(self.size(), 1003)
+            self.assertEqual(f.tell(), 1003)
             f.write(b'd')
             self.assertEqual(f.tell(), 1004)
+            f.flush()
             f.seek(0)
-            with f._gather():
-                f.write(b'A')
+            with self.lock_held(f):
+                with f._gather():
+                    f.write(b'A')
+                self.assertEqual(self.read()[:2], b'Ab')
             self.assertEqual(f.tell(), 1)
             # More pieces than one writev() takes at once.
             f.seek(0, 2)
             pieces = [b'%04d' % i * 200 for i in range(100)]
-            with f._gather():
-                for p in pieces:
-                    f.write(p)
+            with self.lock_held(f):
+                with f._gather():
+                    for p in pieces:
+                        f.write(p)
+                self.assertEqual(self.size(), 1004 + 80000)
         self.assertEqual(self.read(),
                          b'Abc' + b'x' * 1000 + b'd' + b''.join(pieces))
         # Append mode, with another writer of the file.
         with open(self.path, 'ab') as f, \
              open(self.path, 'ab', buffering=0) as other:
-            with f._gather():
-                f.write(b'1')
-                other.write(b'2')
-                f.write(b'3')
-            other.write(b'4')
+            with self.lock_held(f):
+                with f._gather():
+                    f.write(b'1')
+                    other.write(b'2')
+                    f.write(b'3')
+                other.write(b'4')
         self.assertEqual(self.read()[-4:], b'2134')
+
+    @threading_helper.requires_working_threading()
+    def test_wait_for_lock(self):
+        # With the lock busy and writes pending, which must come first,
+        # the end waits for the lock and adds the block after them.
+        with open(self.path, 'wb') as f:
+            with self.lock_held(f, release_after=0.2) as release:
+                f.write(b'p')
+                with f._gather():
+                    f.write(b'B')
+                self.assertTrue(release.is_set())
+                self.assertEqual(self.size(), 0)
+        self.assertEqual(self.read(), b'pB')
 
     @threading_helper.requires_working_threading()
     def test_pending_writes_first(self):
@@ -684,7 +753,9 @@ class GatherTest(unittest.TestCase):
         with open(self.path, 'wb') as f:
             resource.setrlimit(resource.RLIMIT_FSIZE, (1000, hard))
             try:
-                with self.assertRaises(OSError) as cm:
+                # (The rest waits for the lock.)
+                with self.lock_held(f, release_after=0.1), \
+                     self.assertRaises(OSError) as cm:
                     with f._gather():
                         for d in data:
                             f.write(d)

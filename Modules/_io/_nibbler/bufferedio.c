@@ -1065,18 +1065,23 @@ buffered_sync(buffered *self, int unlocked)
  * Context runs in one thread at a time.  A block nested in one on the same
  * stream and context gathers into that one.
  *
- * At its end, a block writes its record out itself, with one writev() and
- * only the record's lock, when the stream is a BufferedWriter of an exact
- * FileIO of a regular file with no pending writes: POSIX makes writes to
- * a regular file atomic with respect to each other, so the kernel orders
- * it against the other threads' writes.  (The stream no longer keeps the
- * raw position then, which these writes move.)  Otherwise, the record is
- * moved to the pending writes, with the lock and the I/O role:
+ * At its end, a block whose stream's lock is free (taken without waiting)
+ * moves its record to the pending writes under it, as a write that fits
+ * adds its data, and writes them out when they no longer fit if the I/O
+ * role is free too: no system call per block.  When the lock is busy, the
+ * block writes its record out itself, with one writev() and only the
+ * record's lock, when the stream is a BufferedWriter of an exact FileIO of
+ * a regular file with no pending writes: POSIX makes writes to a regular
+ * file atomic with respect to each other, so the kernel orders it against
+ * the other threads' writes.  (The stream no longer keeps the raw position
+ * then, which these writes move.)  Otherwise, the record is moved to the
+ * pending writes, waiting for the lock and the I/O role:
  * - pending writes may have been written before the block ended, and
  *   must come first;
  * - a read-ahead is ahead of the logical position, where data goes;
  * - pipes, sockets and terminals may split a large write, and Python raw
- *   streams are no help at all.
+ *   streams are no help at all (nor is asking whether they are closed
+ *   with the lock alone).
  * A record is also moved once it holds `limit` bytes (and there is no
  * read-ahead), and before an operation of its context needs the position
  * (reads, seek(), truncate()).  close(), detach() and __init__(), from any
@@ -1147,19 +1152,69 @@ rec_lock(record *rec)
     return r < 0 ? -1 : 0;
 }
 
-/* Without the lock: the current context's record, or NULL. */
-static record *
-gather_current(buffered *self)
+/* What gather_current() found last in this thread (rec borrowed, NULL
+   for none), and for what: it stays right while the thread state (by
+   address and id), the stream's variable, the context and the thread's
+   context version (bumped on every switch of context) are the same, since
+   only this thread then sets variables of the context, and only
+   gather_enter() sets the stream's, storing here what it set.  (The
+   context's variables keep rec alive meanwhile.)  It spares writes the
+   variable's lookup, which free-threaded builds don't cache. */
+static _Py_thread_local struct {
+    PyThreadState *ts;
+    uint64_t id;
+    uint64_t ver;
+    PyObject *var;
+    PyObject *ctx;
+    record *rec;
+} gather_last;
+
+static inline void
+gather_remember(PyThreadState *ts, PyObject *var, record *rec)
 {
-    PyObject *var = FT_ATOMIC_LOAD_PTR_ACQUIRE(self->gvar), *rec = NULL;
-    if (var != NULL && PyContextVar_Get(var, NULL, &rec) < 0) {
+    gather_last.ts = ts;
+    gather_last.id = ts->id;
+    gather_last.ver = ts->context_ver;
+    gather_last.var = var;
+    gather_last.ctx = ts->context;
+    gather_last.rec = rec;
+}
+
+/* gather_current() without the last one found: look the variable up. */
+Py_NO_INLINE static record *
+gather_lookup(PyThreadState *ts, PyObject *var)
+{
+    PyObject *rec = NULL;
+    if (var == NULL) {
+        return NULL;
+    }
+    if (PyContextVar_Get(var, NULL, &rec) < 0) {
         PyErr_Clear();
     }
     /* (The context keeps it.) */
     Py_XDECREF(rec);
-    return (rec != NULL
-            && ((record *)rec)->ctx == _PyThreadState_GET()->context
-            ? (record *)rec : NULL);
+    if (rec != NULL && ((record *)rec)->ctx != ts->context) {
+        rec = NULL;
+    }
+    if (ts->context != NULL) {
+        gather_remember(ts, var, (record *)rec);
+    }
+    return (record *)rec;
+}
+
+/* Without the lock: the current context's record, or NULL. */
+static inline record *
+gather_current(buffered *self)
+{
+    PyThreadState *ts = _PyThreadState_GET();
+    PyObject *var = FT_ATOMIC_LOAD_PTR_ACQUIRE(self->gvar);
+    if (gather_last.ts == ts && gather_last.var == var
+        && gather_last.ctx == ts->context && gather_last.ver == ts->context_ver
+        && gather_last.id == ts->id)
+    {
+        return gather_last.rec;
+    }
+    return gather_lookup(ts, var);
 }
 
 /* With both locks and no read-ahead: move what rec gathered to the
@@ -1312,6 +1367,78 @@ gather_lock(buffered *self)
     return 0;
 }
 
+/* With the lock and the I/O role, after a block's data was moved: write
+   out the pending writes if they don't fit (all of them after a deferred
+   flush()); what would block stays pending, but for flush().  Returns 0
+   or -1. */
+static int
+gather_write_out(buffered *self, int flush)
+{
+    if (self->reading || !(self->list.nbytes > self->threshold
+                           || (flush && self->list.nbytes > 0)))
+    {
+        return 0;
+    }
+    int st;
+    (void)buffered_write_out(self, self->list.nbytes, NULL, NULL, 0, 1, &st);
+    if (st == WOULD_BLOCK && flush) {
+        buffered_set_blocking_error(0);
+    }
+    return st == -1 || (st != 0 && flush) ? -1 : 0;
+}
+
+/* End rec's block by moving its data to the pending writes with the lock
+   taken without waiting, as a write that fits would add it (and the I/O
+   role when they don't fit then).  Returns 1 when the lock is busy (or
+   the I/O role is, for a deferred flush() or twice the threshold), or the
+   stream needs more than that (a read-ahead to hand back, a raw stream
+   other than an exact FileIO to ask whether it is closed), else 0 or -1
+   (rec keeps what it couldn't move, as gather_end() does). */
+static int
+gather_splice(buffered *self, record *rec)
+{
+    if (!nibbler_mutex_trylock(&self->lock)) {
+        return 1;
+    }
+    if (self->raw == NULL || !self->raw_fileio || self->reading
+        || _PyFileIO_closed(self->raw) || nibbler_mutex_is_mine(&rec->lock)
+        || rec_lock(rec) < 0)
+    {
+        buffered_unlock(self);
+        return 1;
+    }
+    int flush = rec->flush, io = 0;
+    Py_ssize_t over = self->list.nbytes + rec->list.nbytes - self->threshold;
+    if (rec->state != REC_ACTIVE) {
+        goto busy;
+    }
+    if (over > 0 || flush) {
+        io = nibbler_mutex_trylock(&self->io);
+        if (io && self->drop_inflight) {
+            buffered_drop_inflight(self);
+        }
+        /* (Without the role, too much pending waits for it.) */
+        if (!io && (flush || over > self->threshold)) {
+            goto busy;
+        }
+    }
+    int r = gather_move(self, rec);
+    rec_set_state(rec, r == 0 ? REC_IDLE : REC_PENDING);
+    rec_unlock(rec);
+    if (r == 0 && io) {
+        r = gather_write_out(self, flush);
+    }
+    if (io) {
+        nibbler_mutex_unlock(&self->io);
+    }
+    buffered_unlock(self);
+    return r;
+busy:
+    rec_unlock(rec);
+    buffered_unlock(self);
+    return 1;
+}
+
 /* End rec's block by writing its data out with rec's lock alone, when the
    stream allows (see above).  Returns 1 if it doesn't, or the raw stream
    would block, else 0 or -1; rec keeps what wasn't written. */
@@ -1384,7 +1511,11 @@ static int
 gather_end(buffered *self, record *rec, Py_ssize_t *dropped)
 {
     *dropped = 0;
-    int r = gather_direct(self, rec);
+    int r = gather_splice(self, rec);
+    if (r <= 0) {
+        return r;
+    }
+    r = gather_direct(self, rec);
     if (r == 0) {
         return 0;
     }
@@ -1420,18 +1551,8 @@ gather_end(buffered *self, record *rec, Py_ssize_t *dropped)
         rec_set_state(rec, r == 0 || closed != 0 ? REC_IDLE : REC_PENDING);
         rec_unlock(rec);
     }
-    if (r == 0 && exc == NULL && !self->reading
-        && (self->list.nbytes > self->threshold
-            || (flush && self->list.nbytes > 0)))
-    {
-        int st;
-        (void)buffered_write_out(self, self->list.nbytes, NULL, NULL, 0, 1,
-                                 &st);
-        /* What would block stays pending, but for flush(). */
-        r = st == -1 || (st != 0 && flush) ? -1 : 0;
-        if (st == WOULD_BLOCK && flush) {
-            buffered_set_blocking_error(0);
-        }
+    if (r == 0 && exc == NULL) {
+        r = gather_write_out(self, flush);
     }
     if (locked) {
         buffered_unlock_io(self);
@@ -1508,6 +1629,7 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
             Py_DECREF(token);
             rec->stream = self;
             rec->ctx = tstate->context;
+            gather_remember(tstate, self->gvar, rec);
         }
         /* Listed with the lock, dropping idle records; written out
            directly from now on if the stream allows (see above). */
@@ -3291,13 +3413,14 @@ Returns a context manager.  Inside its with block, what the current
 context (thread, or asyncio task) writes is kept apart, also past
 the buffer size, and added to the buffered data in one piece when
 the block ends (also when it raises), so that no other output gets
-in between; a BufferedWriter of a regular file with nothing buffered
-writes it to the file then.  Once the block gathered limit bytes,
-they are added, and gathering goes on; with limit None, only at the
-end.  flush() inside the block takes effect at its end.  Reads,
-seek() and truncate() in the context add what it gathered first;
-close(), detach() and __init__(), from any context, what every block
-gathered.  A block on the same stream nested in one gathers into it.
+in between; while another thread uses the buffer, a BufferedWriter
+of a regular file with nothing buffered writes it to the file then.
+Once the block gathered limit bytes, they are added, and gathering
+goes on; with limit None, only at the end.  flush() inside the block
+takes effect at its end.  Reads, seek() and truncate() in the
+context add what it gathered first; close(), detach() and
+__init__(), from any context, what every block gathered.  A block
+on the same stream nested in one gathers into it.
 
 Gathering is by context, as with decimal.localcontext(): a block
 spanning a yield gathers what runs in the context meanwhile.  Data
@@ -3307,7 +3430,7 @@ the stream is closed, with a ResourceWarning.  Experimental.
 
 static PyObject *
 _io__Buffered__gather_impl(buffered *self, PyObject *limit_obj)
-/*[clinic end generated code: output=707c4e9e896fa736 input=154647b2d89feaff]*/
+/*[clinic end generated code: output=707c4e9e896fa736 input=19bc211b17cb9a82]*/
 {
     Py_ssize_t limit = GATHER_LIMIT;
     if (limit_obj == Py_None) {
