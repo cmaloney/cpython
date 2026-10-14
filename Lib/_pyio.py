@@ -2253,6 +2253,9 @@ class TextIOWrapper(TextIOBase):
         self._encoding = encoding
         self._errors = errors
         self._encoder = None
+        # The encoder encoded text since it was made or reset, so close()
+        # and detach() give it final=True.
+        self._encoder_fed = False
         self._decoder = None
         self._b2cratio = 0.0
 
@@ -2382,9 +2385,20 @@ class TextIOWrapper(TextIOBase):
     def close(self):
         if self.buffer is not None and not self.closed:
             try:
+                self._finish_encoder()
                 self.flush()
             finally:
                 self.buffer.close()
+
+    def _finish_encoder(self):
+        # gh-79792: give the encoder the end of the text, and write what
+        # it still held.  Only after it encoded text: a fresh or reset
+        # encoder holds nothing, but may still begin with a BOM.
+        if self._encoder is not None and self._encoder_fed:
+            self._encoder_fed = False
+            b = self._encoder.encode("", final=True)
+            if b:
+                self.buffer.write(b)
 
     @property
     def closed(self):
@@ -2414,6 +2428,7 @@ class TextIOWrapper(TextIOBase):
         encoder = self._encoder or self._get_encoder()
         # XXX What if we were just reading?
         b = encoder.encode(s)
+        self._encoder_fed = True
         self.buffer.write(b)
         if self._line_buffering and (haslf or "\r" in s):
             self.flush()
@@ -2642,6 +2657,7 @@ class TextIOWrapper(TextIOBase):
     def detach(self):
         if self.buffer is None:
             raise ValueError("buffer is already detached")
+        self._finish_encoder()
         self.flush()
         buffer = self._buffer
         self._buffer = None
@@ -2660,6 +2676,7 @@ class TextIOWrapper(TextIOBase):
                     encoder.setstate(0)
                 else:
                     encoder.reset()
+                self._encoder_fed = False
 
         if self.closed:
             raise ValueError("tell on closed file")
