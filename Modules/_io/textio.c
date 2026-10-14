@@ -2015,6 +2015,14 @@ textiowrapper_read_chunk(textio *self, Py_ssize_t size_hint)
     if (input_chunk == NULL)
         goto fail;
 
+    /* None: the buffer would block (gh-57531).  There is no data for now,
+       but it is not EOF either, so a partial character stays in the
+       decoder. */
+    int blocked = (input_chunk == Py_None);
+    if (blocked) {
+        Py_SETREF(input_chunk, Py_GetConstant(Py_CONSTANT_EMPTY_BYTES));
+    }
+
     if (PyObject_GetBuffer(input_chunk, &input_chunk_buf, 0) != 0) {
         PyErr_Format(PyExc_TypeError,
                      "underlying %s() should have returned a bytes-like object, "
@@ -2027,7 +2035,7 @@ textiowrapper_read_chunk(textio *self, Py_ssize_t size_hint)
     eof = (nbytes == 0);
 
     decoded_chars = _textiowrapper_decode(self->state, self->decoder,
-                                          input_chunk, eof);
+                                          input_chunk, eof && !blocked);
     PyBuffer_Release(&input_chunk_buf);
     if (decoded_chars == NULL)
         goto fail;

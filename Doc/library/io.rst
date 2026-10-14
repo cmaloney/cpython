@@ -606,6 +606,10 @@ I/O base classes
          either raise :exc:`BlockingIOError` or return ``None`` if no data is
          available. :mod:`!io` implementations return ``None``.
 
+      .. versionchanged:: next
+         :class:`BufferedReader` and :class:`BufferedRandom` return ``None``
+         instead of ``b""`` when the raw stream would block.
+
    .. method:: readinto(b, /)
 
       Read bytes into a pre-allocated, writable
@@ -807,7 +811,11 @@ than raw I/O does.
 
       Return bytes from the stream without advancing the position. The number of
       bytes returned may be less or more than requested. If the underlying raw
-      stream is non-blocking and the operation would block, returns empty bytes.
+      stream is non-blocking and the operation would block, returns ``None``.
+
+      .. versionchanged:: next
+         Return ``None`` instead of ``b""`` when the raw stream would block
+         and no bytes are buffered.
 
    .. method:: read(size=-1, /)
 
