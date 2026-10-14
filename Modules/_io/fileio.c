@@ -792,7 +792,8 @@ _io_FileIO_readall_impl(fileio *self, PyTypeObject *cls)
     Py_ssize_t n;
     size_t bufsize;
 
-    if (self->fd < 0) {
+    int fd = self->fd;
+    if (fd < 0) {
         return err_closed();
     }
     if (!self->readable) {
@@ -833,9 +834,9 @@ _io_FileIO_readall_impl(fileio *self, PyTypeObject *cls)
             Py_BEGIN_ALLOW_THREADS
             _Py_BEGIN_SUPPRESS_IPH
 #ifdef MS_WINDOWS
-            pos = _lseeki64(self->fd, 0L, SEEK_CUR);
+            pos = _lseeki64(fd, 0L, SEEK_CUR);
 #else
-            pos = lseek(self->fd, 0L, SEEK_CUR);
+            pos = lseek(fd, 0L, SEEK_CUR);
 #endif
             _Py_END_SUPPRESS_IPH
             Py_END_ALLOW_THREADS
@@ -868,24 +869,50 @@ _io_FileIO_readall_impl(fileio *self, PyTypeObject *cls)
             }
         }
 
-        n = _Py_read(self->fd,
-                     (char*)PyBytesWriter_GetData(writer) + bytes_read,
-                     bufsize - bytes_read);
+        /* Growing the buffer and signal handlers run Python code, which
+           may close the file. */
+        fd = self->fd;
+        if (fd < 0) {
+            PyBytesWriter_Discard(writer);
+            return err_closed();
+        }
+        /* Fill the buffer with the GIL released once: typically a file's
+           data and the read() that finds its end both fit. */
+        char *data = PyBytesWriter_GetData(writer);
+        int err;
+        Py_BEGIN_ALLOW_THREADS
+        do {
+            n = _Py_read_noraise(fd, data + bytes_read,
+                                 bufsize - bytes_read);
+            if (n > 0) {
+                bytes_read += n;
+            }
+        } while (n > 0 && bytes_read < (Py_ssize_t)bufsize);
+        err = errno;
+        Py_END_ALLOW_THREADS
 
         if (n == 0)
             break;
-        if (n == -1) {
-            if (errno == EAGAIN) {
-                PyErr_Clear();
+        if (n < 0) {
+            if (err == EINTR) {
+                /* Run signal handlers, then retry (PEP 475). */
+                if (PyErr_CheckSignals() < 0) {
+                    PyBytesWriter_Discard(writer);
+                    return NULL;
+                }
+                continue;
+            }
+            if (err == EAGAIN) {
                 if (bytes_read > 0)
                     break;
                 PyBytesWriter_Discard(writer);
                 Py_RETURN_NONE;
             }
+            errno = err;
+            PyErr_SetFromErrno(PyExc_OSError);
             PyBytesWriter_Discard(writer);
             return NULL;
         }
-        bytes_read += n;
     }
 
     return PyBytesWriter_FinishWithSize(writer, bytes_read);
