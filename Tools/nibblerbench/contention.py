@@ -49,7 +49,7 @@ def run(path, mode, nthreads, per_thread, gather=0, kw={}, lb=False):
         write = f.write
         flush = f.flush
         barrier.wait()
-        block = (f if mode == "b" else f.buffer)._gather
+        block = getattr(f if mode == "b" else f.buffer, "_gather", None)
         if gather < 0:
             with block(**kw):
                 for _ in range(per_thread):
