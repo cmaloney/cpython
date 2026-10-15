@@ -1673,14 +1673,14 @@ encoder_reset(PyObject *encoder, int start)
     return res == NULL ? -1 : 0;
 }
 
-/* With elock: reset the published encoder (if any), as encoder_reset():
-   it needs no final=True until it encodes again. */
+/* With elock: reset the published encoder, as encoder_reset(): it needs
+   no final=True until it encodes again. */
 static int
 encoder_reset_locked(textio *self, PyObject *encoder, int start)
 {
     FT_ATOMIC_STORE_CHAR_RELAXED(self->encoding_start_of_stream, start);
     FT_ATOMIC_STORE_CHAR_RELAXED(self->encoder_used, 0);
-    return encoder == NULL ? 0 : encoder_reset(encoder, start);
+    return encoder_reset(encoder, start);
 }
 
 /* Decode the store's unread bytes with the codec's decoder, after dchars,
@@ -2544,21 +2544,6 @@ _io_TextIOWrapper_tell_impl(textio *self)
     return res;
 }
 
-/* Reset encoder (if any) to the stream's start, or past it (no BOM). */
-static int
-text_encoder_reset(textio *self, PyObject *encoder, int start)
-{
-    if (encoder == NULL) {
-        return encoder_reset_locked(self, NULL, start);
-    }
-    if (nibbler_mutex_lock(&self->elock, (PyObject *)self, 1) < 0) {
-        return -1;
-    }
-    int r = encoder_reset_locked(self, encoder, start);
-    nibbler_mutex_unlock(&self->elock);
-    return r;
-}
-
 /* After moving the buffer to pos: the decoder (if any) there, with flags,
    reset at the stream's start; the encoder too. */
 static int
@@ -2567,13 +2552,21 @@ text_moved(textio *self, Py_off_t pos, uint32_t flags)
     textio_drop_reads(self);
     self->fresh = pos == 0 && flags == 0;
     self->flags = flags;
-    if ((self->conf->decoder != NULL
-         && decoder_setstate(self->conf->decoder, flags, self->fresh) < 0)
-        || text_encoder_reset(self, self->conf->encoder, self->fresh) < 0)
+    if (self->conf->decoder != NULL
+        && decoder_setstate(self->conf->decoder, flags, self->fresh) < 0)
     {
         return -1;
     }
-    return 0;
+    PyObject *encoder = self->conf->encoder;
+    if (encoder == NULL) {
+        return 0;
+    }
+    if (nibbler_mutex_lock(&self->elock, (PyObject *)self, 1) < 0) {
+        return -1;
+    }
+    int r = encoder_reset_locked(self, encoder, self->fresh);
+    nibbler_mutex_unlock(&self->elock);
+    return r;
 }
 
 /* After seek() to a cookie with characters to skip: decode them again. */
