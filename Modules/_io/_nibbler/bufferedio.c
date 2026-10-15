@@ -1344,6 +1344,9 @@ gather_move_records(buffered *self, int all)
         if (idle) {
             *p = r->next;
             r->next = NULL;
+            /* (Its context may keep it long after: not its block.) */
+            Py_CLEAR(r->block);
+            r->used = 0;
             rec_set_state(r, REC_FREE);
             FT_ATOMIC_STORE_INT_RELAXED(self->ngather, self->ngather - 1);
         }
@@ -2686,6 +2689,8 @@ buffered_dealloc(PyObject *op)
         self->recs = rec->next;
         rec->next = NULL;
         rec->stream = NULL;
+        morsels_clear(&rec->list);
+        Py_CLEAR(rec->block);
         rec_set_state(rec, REC_FREE);
         Py_DECREF(rec);
     }
