@@ -2959,6 +2959,57 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                 self.assertEqual(calls, [0, b"li", False])
                 self.assertEqual(t.read(), "line2\n")
 
+    def test_nested_detach_or_init_in_write(self):
+        # Python code a write runs before it stores (the buffer's closed,
+        # the codec's encoder) detaches the text: the write raises
+        # ValueError, and stores nothing in the buffer handed out.  If it
+        # sets the text up again instead, the text goes to the new buffer.
+        got = []
+        class B(self.BytesIO):
+            armed = None
+            @property
+            def closed(self):
+                if B.armed == "closed":
+                    B.armed = None
+                    got.append(t.detach())
+                elif B.armed == "init":
+                    B.armed = None
+                    got.append(self)
+                    t.__init__(B(), encoding="ascii")
+                return super().closed
+        class Enc(codecs.IncrementalEncoder):
+            def encode(self, s, final=False):
+                if B.armed == "encode":
+                    B.armed = None
+                    got.append(t.detach())
+                return s.encode("ascii")
+        def search(name):
+            if name == "detach_on_encode_test":
+                return codecs.CodecInfo(
+                    name=name, encode=None, decode=None,
+                    incrementalencoder=Enc,
+                    incrementaldecoder=codecs.getincrementaldecoder("ascii"))
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        for where, enc in (("closed", "ascii"), ("closed", "utf-16"),
+                           ("encode", "detach_on_encode_test")):
+            with self.subTest(where=where, enc=enc):
+                got.clear()
+                # (Translated: not the write that stores at once.)
+                t = self.TextIOWrapper(B(), encoding=enc, newline="\r\n")
+                B.armed = where
+                with self.assertRaisesRegex(ValueError, "detached"):
+                    t.write("x\n")
+                self.assertEqual(got[0].getvalue(), b"")
+        with self.subTest(where="init"):
+            got.clear()
+            t = self.TextIOWrapper(B(), encoding="ascii", newline="\r\n")
+            B.armed = "init"
+            self.assertEqual(t.write("x\n"), 2)
+            t.flush()
+            self.assertEqual(got[0].getvalue(), b"")
+            self.assertEqual(t.buffer.getvalue(), b"x\n")
+
     def test_nested_detach_in_reconfigure(self):
         # reconfigure() doesn't attach again a buffer that a nested
         # detach() (from the buffer's writable() or tell()) handed out.
@@ -3156,9 +3207,9 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
     def test_init_while_writing(self):
         # __init__() between a write's look at the settings and its store
         # (here from the buffer's closed property; on free threading, from
-        # another thread): the write goes on to the buffer it started
-        # with, through its methods, as it wasn't a buffered object of
-        # _io._nibbler.
+        # another thread): the write starts again with the new settings,
+        # as _io's goes to the new buffer, and never takes the old one
+        # for a buffered object of _io._nibbler.
         self.addCleanup(os_helper.unlink, os_helper.TESTFN)
         text = None
         class Slotted:
@@ -3188,9 +3239,9 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
         text.write("first")
         text.write("second")
         text.close()
-        self.assertEqual(old.data, b"-first")
+        self.assertEqual(old.data, b"-")
         with self.open(os_helper.TESTFN, "rb") as f:
-            self.assertEqual(f.read(), b"second")
+            self.assertEqual(f.read(), b"firstsecond")
 
     def test_init_drops_decoded_str_subclass(self):
         # __init__() drops the characters decoded and not returned: a str

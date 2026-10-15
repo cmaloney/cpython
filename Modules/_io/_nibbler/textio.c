@@ -2175,10 +2175,18 @@ end:
     return r;
 }
 
-/* Store data[0:len] (owned by obj) in cf's buffer. */
+/* Store data[0:len] (owned by obj) in cf's buffer while it is the text's
+   (Python code the write ran may have detached it, or set up another):
+   returns 0, -1, or 1 if __init__() set up another meanwhile (the write
+   starts again). */
 static int
-text_store(tconf *cf, PyObject *obj, const char *data, Py_ssize_t len)
+text_store(textio *self, tconf *cf, PyObject *obj, const char *data,
+           Py_ssize_t len)
 {
+    tconf *now = FT_ATOMIC_LOAD_PTR_ACQUIRE(self->conf);
+    if (now == NULL || now->buffer != cf->buffer) {
+        return now != NULL && now->buffer != NULL ? 1 : conf_attached(now);
+    }
     if (FT_ATOMIC_LOAD_UINT8_RELAXED(cf->nib)) {
         int r = _PyIONibbler_write(cf->buffer, obj, data, len);
         if (r != _PyIO_NIBBLER_NO) {
@@ -2203,8 +2211,8 @@ text_store(tconf *cf, PyObject *obj, const char *data, Py_ssize_t len)
 
 /* The encoder's bytes for text, stored; with final, the end of the text,
    if the codec's encoder needs it.  Returns 0, -1, -2 if storing them
-   raised, or 1 if cf's encoder was replaced meanwhile (nothing done: the
-   caller starts again with the settings published). */
+   raised, or 1 if cf's encoder or buffer was replaced meanwhile (nothing
+   stored: the caller starts again with the settings published). */
 static int
 text_encoder_store(textio *self, tconf *cf, PyObject *text, int final)
 {
@@ -2236,8 +2244,9 @@ text_encoder_store(textio *self, tconf *cf, PyObject *text, int final)
             FT_ATOMIC_STORE_CHAR_RELAXED(self->encoding_start_of_stream, 0);
             FT_ATOMIC_STORE_CHAR_RELAXED(self->encoder_used, 1);
         }
-        r = text_store(cf, b, PyBytes_AS_STRING(b), PyBytes_GET_SIZE(b));
-        r = r < 0 ? -2 : 0;
+        r = text_store(self, cf, b, PyBytes_AS_STRING(b),
+                       PyBytes_GET_SIZE(b));
+        r = r < 0 ? -2 : r;
         Py_DECREF(b);
     }
     else {
@@ -2261,7 +2270,7 @@ text_encode_store(textio *self, tconf *cf, PyObject *text)
             || (enc == CODEC_LATIN1
                 && PyUnicode_KIND(text) == PyUnicode_1BYTE_KIND)))
     {
-        return text_store(cf, text, PyUnicode_DATA(text),
+        return text_store(self, cf, text, PyUnicode_DATA(text),
                           PyUnicode_GET_LENGTH(text));
     }
     PyObject *b;
@@ -2281,7 +2290,8 @@ text_encode_store(textio *self, tconf *cf, PyObject *text)
     if (b == NULL) {
         return -1;
     }
-    int r = text_store(cf, b, PyBytes_AS_STRING(b), PyBytes_GET_SIZE(b));
+    int r = text_store(self, cf, b, PyBytes_AS_STRING(b),
+                       PyBytes_GET_SIZE(b));
     Py_DECREF(b);
     return r;
 }
