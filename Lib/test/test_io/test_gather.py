@@ -517,6 +517,28 @@ class GatherTest(unittest.TestCase):
             warnings.simplefilter('ignore')
             f.close()
 
+    def test_never_ended_in_cycle(self):
+        # A dropped block in a reference cycle with its stream ends from
+        # its finalizer, before either is cleared, with Python code (the
+        # raw stream) run meanwhile: its data is written.
+        out = []
+        class Raw(io.RawIOBase):
+            def writable(self):
+                return True
+            def write(self, b):
+                out.append(bytes(b))
+                return len(b)
+        raw = Raw()
+        f = _nibbler.BufferedWriter(raw)
+        f.g = g = f._gather()
+        g.__enter__()
+        f.write(b'ab')
+        del f, g
+        with self.assertWarnsRegex(ResourceWarning, 'never ended'):
+            gc.collect()
+        self.assertEqual(b''.join(out), b'ab')
+        self.assertTrue(raw.closed)
+
     def test_dropped_in_raw_call(self):
         # A block dropped from Python code a raw call runs (here from the
         # raw stream; a signal handler or the GC are others): its data is

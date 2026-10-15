@@ -1797,8 +1797,13 @@ gather_exit(PyObject *op, PyObject *const *Py_UNUSED(args),
 
 /* A block dropped before it ended: end it, with a ResourceWarning. */
 static void
-gather_finish(gather *g)
+gather_finalize(PyObject *op)
 {
+    gather *g = (gather *)op;
+    if (g->state != GATHER_ACTIVE || g->joined) {
+        return;
+    }
+    g->state = GATHER_DONE;
     buffered *self = g->stream;
     record *rec = g->rec;
     PyObject *exc = PyErr_GetRaisedException();
@@ -1846,10 +1851,6 @@ static int
 gather_clear(PyObject *op)
 {
     gather *g = (gather *)op;
-    if (g->state == GATHER_ACTIVE && !g->joined) {
-        g->state = GATHER_DONE;
-        gather_finish(g);
-    }
     Py_CLEAR(g->stream);
     Py_CLEAR(g->ctx);
     Py_CLEAR(g->raw);
@@ -1861,6 +1862,9 @@ static void
 gather_dealloc(PyObject *op)
 {
     PyTypeObject *tp = Py_TYPE(op);
+    if (PyObject_CallFinalizerFromDealloc(op) < 0) {
+        return;
+    }
     PyObject_GC_UnTrack(op);
     (void)gather_clear(op);
     tp->tp_free(op);
@@ -1877,6 +1881,7 @@ static PyType_Slot gather_slots[] = {
     {Py_tp_dealloc, gather_dealloc},
     {Py_tp_traverse, gather_traverse},
     {Py_tp_clear, gather_clear},
+    {Py_tp_finalize, gather_finalize},
     {Py_tp_methods, gather_methods},
     {0, NULL},
 };
