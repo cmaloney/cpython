@@ -88,7 +88,14 @@ nibbler_mutex_wait(nibbler_mutex *m, PyObject *obj, int interruptible,
 {
     PyThreadState *tstate = _PyThreadState_GET();
     if (nibbler_mutex_is_mine(m)) {
-        PyErr_Format(PyExc_RuntimeError, "reentrant call inside %R", obj);
+        /* (By the type's name when repr() fails, as for an object not set
+           up yet.) */
+        PyObject *repr = PyObject_Repr(obj);
+        PyErr_Clear();
+        PyErr_Format(PyExc_RuntimeError, repr ? "reentrant call inside %U"
+                                              : "reentrant call inside %T",
+                     repr ? repr : obj);
+        Py_XDECREF(repr);
         return -1;
     }
     if (_Py_IsInterpreterFinalizing(tstate->interp)) {

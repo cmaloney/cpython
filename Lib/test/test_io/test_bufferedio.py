@@ -2424,6 +2424,19 @@ class NibblerBufferedReaderTest(NibblerMixin, CBufferedReaderTest):
         self.assertEqual(line, b'b' * 15 + b'c' * 484 + b'\n')
         self.assertEqual(hash(line), hash(bytes(bytearray(line))))
 
+    def test_reentrant_call_with_failing_repr(self):
+        # A reentrant call raises RuntimeError also when the object's
+        # repr() (in the message) raises.
+        class Raw(self.MockRawIO):
+            @property
+            def name(self):
+                raise KeyError('name')
+            def readinto(self, b):
+                return bufio.read(1)
+        bufio = self.tp(Raw())
+        with self.assertRaisesRegex(RuntimeError, 'reentrant call'):
+            bufio.read(1)
+
     def test_keeps_read_on_error_marker(self):
         # The reading classes say that they keep data read before a raw
         # read raised (socket.makefile() looks at it).
