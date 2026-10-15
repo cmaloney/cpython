@@ -1215,6 +1215,30 @@ class SlowDeviceTest:
         f.flush()
         self.assertEqual(bytes(raw.received), b"x" * 40)
 
+    @unittest.skipUnless(hasattr(signal, 'SIGUSR1'), 'needs SIGUSR1')
+    def test_size_zero_signal_handler_write_goes_out(self):
+        # Unbuffered, what a signal handler writes during a raw write of
+        # the same object is written out before write() returns.
+        if not self.is_nibbler:
+            self.skipTest("buffer_size=0 not supported")
+        sent = []
+        class Raw(self.RawIOBase):
+            out = b''
+            def writable(self):
+                return True
+            def write(self, b):
+                if not sent:
+                    sent.append(1)
+                    signal.raise_signal(signal.SIGUSR1)
+                self.out += bytes(b)
+                return len(b)
+        raw = Raw()
+        f = self.BufferedWriter(raw, 0)
+        old = signal.signal(signal.SIGUSR1, lambda *a: f.write(b'<h>'))
+        self.addCleanup(signal.signal, signal.SIGUSR1, old)
+        f.write(b'main')
+        self.assertEqual(raw.out, b'main<h>')
+
     def test_size_zero_write_error_reports_written(self):
         if not self.is_nibbler:
             self.skipTest("buffer_size=0 not supported")

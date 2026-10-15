@@ -1142,7 +1142,9 @@ buffered_write_slow(buffered *self, PyObject *obj, const char *data,
     }
     for (;;) {
         Py_ssize_t rest = len - done, th = self->threshold;
-        if (rest == 0 || (rest < th && self->list.nbytes + rest <= th)) {
+        /* Done when the rest fits; also pending writes past the threshold
+           go out (what a signal handler queued, see IO_MINE). */
+        if ((rest == 0 || rest < th) && self->list.nbytes + rest <= th) {
             r = buffered_append(self, obj, data + done, rest);
             if (r < 0 && done > 0) {
                 buffered_set_written(done);
@@ -1169,7 +1171,7 @@ buffered_write_slow(buffered *self, PyObject *obj, const char *data,
                                        rest >= th || vectored ? rest : 0, 1,
                                        &st);
         }
-        if (st == 0 && done < len) {
+        if (st == 0 && (done < len || self->list.nbytes > th)) {
             continue;
         }
         r = st == 0 ? 0 : buffered_write_stopped(self, obj, data, len, done,
