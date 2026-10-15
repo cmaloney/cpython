@@ -21,9 +21,6 @@ from _io import _nibbler
 from test import support
 from test.support import import_helper, os_helper, threading_helper
 
-# Blocks write themselves out only with writev().
-requires_writev = unittest.skipUnless(hasattr(os, 'writev'), 'needs writev()')
-
 
 class GatherTest(unittest.TestCase):
 
@@ -874,7 +871,7 @@ class GatherTest(unittest.TestCase):
         self.assertEqual(self.read(), b'abcd' + b'x' * 10000 + b'e')
 
     @threading_helper.requires_working_threading()
-    @requires_writev
+    @unittest.skipUnless(hasattr(os, 'writev'), 'needs writev()')
     def test_direct(self):
         with open(self.path, 'wb') as f:
             with self.lock_held(f):
@@ -953,7 +950,7 @@ class GatherTest(unittest.TestCase):
         self.assertEqual(self.read(), b'01AB456789')
 
     @unittest.skipUnless(hasattr(signal, 'SIGXFSZ'), 'needs SIGXFSZ')
-    @requires_writev
+    @unittest.skipUnless(hasattr(os, 'writev'), 'needs writev()')
     def test_direct_partial_write_and_error(self):
         # Past RLIMIT_FSIZE, writev() writes part, then fails: the rest
         # stays pending, the error is raised, nothing is written twice.
@@ -1139,7 +1136,7 @@ class GatherTest(unittest.TestCase):
     # flush() and end, without waiting for other contexts' pending writes.
 
     @threading_helper.requires_working_threading()
-    @requires_writev
+    @unittest.skipUnless(hasattr(os, 'writev'), 'needs writev()')
     def test_direct_mode_entry(self):
         with open(self.path, 'wb') as f:
             f.write(b'p')
@@ -1162,7 +1159,7 @@ class GatherTest(unittest.TestCase):
             self.assertEqual(self.read(), b'pBCD')
         self.assertEqual(self.read(), b'pBCDo')
 
-    @requires_writev
+    @unittest.skipUnless(hasattr(os, 'writev'), 'needs writev()')
     def test_direct_mode_limit(self):
         with open(self.path, 'wb', buffering=10) as f:
             with f._gather(direct=True):
@@ -1187,7 +1184,7 @@ class GatherTest(unittest.TestCase):
         self.assertEqual(self.read(), b'0123456789' + b'x' * 25 + b'abcdef'
                          + b'g' * 100)
 
-    @requires_writev
+    @unittest.skipUnless(hasattr(os, 'writev'), 'needs writev()')
     def test_line_flush(self):
         for direct in (False, True):
             with open(self.path, 'wb') as f:
@@ -1214,7 +1211,7 @@ class GatherTest(unittest.TestCase):
                              + b'0123456789' * 10 + b'z\ntail')
 
     @threading_helper.requires_working_threading()
-    @requires_writev
+    @unittest.skipUnless(hasattr(os, 'writev'), 'needs writev()')
     def test_line_flush_pending(self):
         # Without direct, lines go after the pending writes, waiting for
         # the lock; with it, before them.
@@ -1354,7 +1351,7 @@ class GatherTest(unittest.TestCase):
             self.assertEqual(cm.exception.errno, errno.EFBIG)
         self.assertEqual(self.read(), b''.join(data))
 
-    @requires_writev
+    @unittest.skipUnless(hasattr(os, 'writev'), 'needs writev()')
     def test_direct_mode_entry_pending_record(self):
         # A direct block's entry writes out first what its context's
         # earlier block could not move (here for lack of memory).
@@ -1375,7 +1372,7 @@ class GatherTest(unittest.TestCase):
             self.assertEqual(self.read(), b'AB')
         self.assertGreater(failed, 0)
 
-    @requires_writev
+    @unittest.skipUnless(hasattr(os, 'writev'), 'needs writev()')
     @unittest.skipUnless(hasattr(signal, 'SIGXFSZ'), 'needs SIGXFSZ')
     def test_direct_mode_data_pending(self):
         # Once some of a direct block's data is pending (moved by seek(),
