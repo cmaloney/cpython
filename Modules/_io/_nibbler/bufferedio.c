@@ -1409,10 +1409,12 @@ gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
        no reference is needed while it is the stream's.  Other than an
        exact FileIO, it is asked whether it is closed first, without rec's
        lock: Python code may wait for this stream's lock, held by close(),
-       detach() or __init__() waiting for rec's. */
-    PyObject *raw = FT_ATOMIC_LOAD_PTR_RELAXED(self->raw);
+       detach() or __init__() waiting for rec's.  (rec is referenced
+       across Python code, which may make the context drop it.) */
+    PyObject *raw = FT_ATOMIC_LOAD_PTR_RELAXED(self->raw), *hold = NULL;
     int r = 0;
     if (raw != rec->raw || !rec->fileio) {
+        hold = Py_NewRef(rec);
         raw = buffered_get_raw(self);
         r = raw ? buffered_ref_closed(raw) : -1;
         Py_XDECREF(raw);
@@ -1422,6 +1424,7 @@ gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
         PyErr_SetString(PyExc_ValueError, closed_msg);
     }
     if (r != 0 || rec_lock(rec) < 0) {
+        Py_XDECREF(hold);
         return -1;
     }
     r = 1;
@@ -1480,6 +1483,7 @@ gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
             buffered_set_written(len);
         }
     }
+    Py_XDECREF(hold);
     return r;
 }
 
@@ -1765,8 +1769,10 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
     }
     Py_XSETREF(g->raw, raw);
     /* The context's record: this block is in it if active; else made
-       active, without the lock while still listed. */
+       active, without the lock while still listed.  (Referenced: the
+       Python code run below may make the context drop it.) */
     record *rec = r == 0 ? gather_current(self) : NULL;
+    Py_XINCREF(rec);
     /* Its context's earlier writes first (see above), also what its
        records could not move. */
     if (r == 0 && g->direct && !(rec && rec_state(rec) == REC_ACTIVE)
@@ -1778,6 +1784,7 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
     int state = REC_FREE;
     if (r == 0 && rec != NULL) {
         if (rec_lock(rec) < 0) {
+            Py_DECREF(rec);
             return NULL;
         }
         state = rec->state;
@@ -1790,12 +1797,11 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
         if (rec == NULL || state != REC_FREE) {
             PyTypeObject *tp = find_nibblermodule_state_by_def(
                 Py_TYPE(self))->Record_Type;
-            rec = (record *)tp->tp_alloc(tp, 0);
+            Py_XSETREF(rec, (record *)tp->tp_alloc(tp, 0));
             PyObject *token = rec ? PyContextVar_Set(self->gvar,
                                                      (PyObject *)rec) : NULL;
-            /* (The context keeps it.) */
-            Py_XDECREF(rec);
             if (token == NULL) {
+                Py_XDECREF(rec);
                 return NULL;
             }
             Py_DECREF(token);
@@ -1841,10 +1847,11 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
         }
     }
     if (r < 0) {
+        Py_XDECREF(rec);
         return NULL;
     }
     g->joined = state == REC_ACTIVE;
-    g->rec = (record *)Py_NewRef(rec);
+    g->rec = rec;
     g->ctx = Py_NewRef(tstate->context);
     g->state = GATHER_ACTIVE;
     return Py_NewRef(self);

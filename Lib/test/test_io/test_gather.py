@@ -765,6 +765,55 @@ class GatherTest(unittest.TestCase):
             contextvars.Context().run(run, f)
         self.assertEqual(self.read(), b'axy')
 
+    def test_private_variable_set_by_raw(self):
+        # Python code a write or a block's entry runs (here a raw stream's
+        # closed) setting the variable and making the stream drop the
+        # record: it stays alive meanwhile.  (Checked under valgrind or
+        # ASan, which see the use after free it was.)
+        class Raw(io.RawIOBase):
+            hook = None
+            def writable(self):
+                return True
+            def write(self, b):
+                return len(b)
+            def seekable(self):
+                return True
+            def seek(self, *args):
+                return 0
+            @property
+            def closed(self):
+                hook, Raw.hook = Raw.hook, None
+                if hook:
+                    hook()
+                return super().closed
+        f = _nibbler.BufferedWriter(Raw())
+        def run():
+            g = f._gather()
+            g.__enter__()
+            [v] = self.gather_vars()
+            def hook():
+                nonlocal g
+                v.set(None)
+                g.__exit__(None, None, None)
+                g = None
+                f.seek(0, 1)
+            Raw.hook = hook
+            f.write(b'x')
+            with f._gather():
+                f.write(b'y')
+            calls = 0
+            def hook():
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    Raw.hook = hook
+                else:
+                    v.set(None)
+            Raw.hook = hook
+            with f._gather(direct=True):
+                f.write(b'z')
+        contextvars.Context().run(run)
+
     def test_not_nibbler(self):
         # _io's buffered classes can't gather.
         if not getattr(_io.BufferedWriter, '_is_nibbler', False):
