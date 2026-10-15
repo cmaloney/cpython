@@ -493,6 +493,26 @@ class GatherTest(unittest.TestCase):
             self.assertEqual(self.read(), b''.join(data))
         self.assertGreater(failed, 0)
 
+    def test_memory_error_at_limit(self):
+        # Moving the data at the limit failing for lack of memory raises
+        # from write(), which says all of its data was accepted: kept, and
+        # written once.
+        _testcapi = import_helper.import_module('_testcapi')
+        failed = 0
+        for start in range(10):
+            with open(self.path, 'wb') as f:
+                with f._gather(limit=8):
+                    f.write(b'abc')
+                    f.write(b'def')
+                    try:
+                        _testcapi.call_with_nomemory(start, start + 1,
+                                                     f.write, b'ghi')
+                    except MemoryError as e:
+                        self.assertEqual(e.characters_written, 3)
+                        failed += 1
+            self.assertEqual(self.read(), b'abcdefghi')
+        self.assertGreater(failed, 0)
+
     def test_never_ended(self):
         # A block dropped before it ends ends then, with a
         # ResourceWarning.

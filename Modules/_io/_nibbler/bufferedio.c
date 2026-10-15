@@ -1346,6 +1346,7 @@ gather_move_records(buffered *self, int all)
    direct block, as its complete lines in a line block.  Returns 1 if
    there is no such record. */
 static int gather_end(buffered *, record *, Py_ssize_t, Py_ssize_t *);
+static void buffered_set_written(Py_ssize_t);
 
 /* What a direct or line block writes out after data[0:len] was added to
    rec: all of it at the limit of a direct block, else for a line block
@@ -1423,16 +1424,22 @@ gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
         (void)gather_end(self, rec, out, NULL);
         PyErr_Clear();
     }
-    else if (full) {
-        /* (Kept on error: moved at the next write or the end.) */
-        if (buffered_lock_ex(self, 0) == 0) {
+    else if (full && !nibbler_mutex_is_mine(&self->lock)) {
+        /* (Kept on error, which says all of data was accepted: moved at
+           the next write or the end.) */
+        if (buffered_lock_ex(self, 0) < 0) {
+            r = -1;
+        }
+        else {
             if (!self->reading && rec_lock(rec) == 0) {
-                (void)gather_move(self, rec, PY_SSIZE_T_MAX);
+                r = gather_move(self, rec, PY_SSIZE_T_MAX);
                 rec_unlock(rec);
             }
             buffered_unlock(self);
         }
-        PyErr_Clear();
+        if (r < 0) {
+            buffered_set_written(len);
+        }
     }
     return r;
 }
