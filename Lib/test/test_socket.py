@@ -1988,6 +1988,63 @@ class GeneralModuleTests(unittest.TestCase):
                             "mode"):
                         sock.makefile(mode, buffering=1).close()
 
+    def test_makefile_timeout_retryable(self):
+        # makefile() lets reading go on after a timeout only when the
+        # buffered class (and in text mode, the text class) says that it
+        # keeps what it read before an error (gh-51571).
+        class Keeps(io.BufferedReader):
+            _keeps_read_on_error = True
+        class KeepsPair(io.BufferedRWPair):
+            _keeps_read_on_error = True
+        class KeepsText(io.TextIOWrapper):
+            _keeps_read_on_error = True
+        class LosesText(io.TextIOWrapper):
+            _keeps_read_on_error = False
+        default = getattr(io.BufferedReader, "_keeps_read_on_error", False)
+        T = io.TextIOWrapper
+        cases = [
+            ('rb', 'BufferedReader', io.BufferedReader, T, default),
+            ('rb', 'BufferedReader', Keeps, T, True),
+            ('rb', 'BufferedReader', Keeps, LosesText, True),
+            ('r', 'BufferedReader', Keeps, KeepsText, True),
+            ('r', 'BufferedReader', Keeps, LosesText, False),
+            ('r', 'BufferedReader', io.BufferedReader, KeepsText, default),
+            ('rwb', 'BufferedRWPair', KeepsPair, T, True),
+            ('wb', 'BufferedWriter', io.BufferedWriter, T, False),
+        ]
+        for mode, name, cls, text_cls, expected in cases:
+            with self.subTest(mode=mode, cls=cls.__name__,
+                              text_cls=text_cls.__name__):
+                raws = []
+                real_socketio = socket.SocketIO
+                def socketio(*args):
+                    raws.append(real_socketio(*args))
+                    return raws[-1]
+                with (mock.patch.object(io, name, cls),
+                      mock.patch.object(io, 'TextIOWrapper', text_cls),
+                      mock.patch.object(socket, 'SocketIO', socketio),
+                      socket.socket() as sock):
+                    encoding = None if "b" in mode else "utf-8"
+                    with sock.makefile(mode, encoding=encoding):
+                        self.assertIs(raws[0]._timeout_retryable, expected)
+
+        # An instance attribute doesn't count: the class says it.
+        class InstanceOnly(io.BufferedReader):
+            _keeps_read_on_error = False
+            def __init__(self, *args):
+                super().__init__(*args)
+                self._keeps_read_on_error = True
+        raws = []
+        real_socketio = socket.SocketIO
+        def socketio(*args):
+            raws.append(real_socketio(*args))
+            return raws[-1]
+        with (mock.patch.object(io, 'BufferedReader', InstanceOnly),
+              mock.patch.object(socket, 'SocketIO', socketio),
+              socket.socket() as sock):
+            with sock.makefile('rb'):
+                self.assertIs(raws[0]._timeout_retryable, False)
+
     def test_makefile_invalid_mode(self):
         for mode in 'rt', 'x', '+', 'a':
             with self.subTest(mode=mode):
@@ -5725,13 +5782,29 @@ class FileObjectClassTestCase(SocketConnectedTest):
         self.write_file = None
         SocketConnectedTest.clientTearDown(self)
 
+    def _keeps_data_on_timeout(self):
+        # Does the buffered reader (and in text mode, the TextIOWrapper)
+        # keep what it read before a timeout for the next read?  (gh-51571)
+        # As in makefile(), which then lets reading go on.  Also called
+        # from the client thread.
+        return (self.bufsize != 0
+                and getattr(io.BufferedReader, "_keeps_read_on_error", False)
+                and ('b' in self.read_mode
+                     or getattr(io.TextIOWrapper, "_keeps_read_on_error",
+                                False)))
+
     def testReadAfterTimeout(self):
         # Issue #7322: A file object must disallow further reads
-        # after a timeout has occurred.
+        # after a timeout has occurred, unless its buffered reader keeps
+        # the data read before it (gh-51571).
         self.cli_conn.settimeout(1)
         self.read_file.read(3)
         # First read raises a timeout
         self.assertRaises(TimeoutError, self.read_file.read, 1)
+        if self._keeps_data_on_timeout():
+            # Second read times out again
+            self.assertRaises(TimeoutError, self.read_file.read, 1)
+            return
         # Second read is disallowed
         with self.assertRaises(OSError) as ctx:
             self.read_file.read(1)
@@ -5740,6 +5813,48 @@ class FileObjectClassTestCase(SocketConnectedTest):
     def _testReadAfterTimeout(self):
         self.write_file.write(self.write_msg[0:3])
         self.write_file.flush()
+        self.serv_finished.wait()
+
+    def testReadlineAfterTimeout(self):
+        # gh-51571: a timeout in the middle of a line loses nothing, and
+        # reading goes on once the rest arrives.
+        if not self._keeps_data_on_timeout():
+            self.skipTest("data read before a timeout is lost")
+        self.cli_conn.settimeout(0.5)
+        self.assertRaises(TimeoutError, self.read_file.readline)
+        self.evt1.set()
+        self.cli_conn.settimeout(support.LONG_TIMEOUT)
+        self.assertEqual(self.read_file.readline(), self.read_msg)
+
+    def _testReadlineAfterTimeout(self):
+        if not self._keeps_data_on_timeout():
+            return
+        self.write_file.write(self.write_msg[0:3])
+        self.write_file.flush()
+        self.evt1.wait()
+        self.write_file.write(self.write_msg[3:])
+        self.write_file.flush()
+        self.serv_finished.wait()
+
+    def testReadAllAfterTimeout(self):
+        # gh-51571: the same for read() to the end.
+        if not self._keeps_data_on_timeout():
+            self.skipTest("data read before a timeout is lost")
+        self.cli_conn.settimeout(0.5)
+        self.assertRaises(TimeoutError, self.read_file.read)
+        self.evt1.set()
+        self.cli_conn.settimeout(support.LONG_TIMEOUT)
+        self.assertEqual(self.read_file.read(), self.read_msg)
+
+    def _testReadAllAfterTimeout(self):
+        if not self._keeps_data_on_timeout():
+            return
+        self.write_file.write(self.write_msg[0:3])
+        self.write_file.flush()
+        self.evt1.wait()
+        self.write_file.write(self.write_msg[3:])
+        self.write_file.flush()
+        self.serv_conn.shutdown(socket.SHUT_WR)
         self.serv_finished.wait()
 
     def testSmallRead(self):
