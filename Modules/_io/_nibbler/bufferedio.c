@@ -3922,6 +3922,15 @@ _PyIONibbler_write(PyObject *op, PyObject *obj, const char *data,
 }
 
 int
+_PyIONibbler_gathering(PyObject *op)
+{
+    buffered *self = buffered_cast(op);
+    record *rec = (FT_ATOMIC_LOAD_INT_RELAXED(self->ngather) > 0
+                   ? gather_current(self) : NULL);
+    return rec != NULL && rec_state(rec) == REC_ACTIVE;
+}
+
+int
 _PyIONibbler_closed(PyObject *op)
 {
     PyObject *raw = buffered_get_raw(buffered_cast(op));

@@ -69,6 +69,15 @@ class GatherTest(unittest.TestCase):
         with open(self.path, encoding='utf-8') as f:
             self.assertEqual(f.read(), 'ab' + '\xe9' * 10000 + 'cd')
 
+    def test_text_stateful_encoder(self):
+        # Its state would follow the writes, not where their bytes land.
+        with open(self.path, 'w', encoding='utf-16') as f:
+            with f.buffer._gather():
+                self.assertRaises(io.UnsupportedOperation, f.write, 'a')
+            f.write('b')
+        with open(self.path, encoding='utf-16') as f:
+            self.assertEqual(f.read(), 'b')
+
     def test_unbuffered(self):
         with open(self.path, 'wb', buffering=0) as f:
             with f._gather():

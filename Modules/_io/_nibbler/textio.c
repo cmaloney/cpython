@@ -2222,6 +2222,15 @@ static int
 text_encoder_store(textio *self, tconf *cf, PyObject *text, int final)
 {
     int stateful = cf->enc == CODEC_DECODER, r = 0;
+    /* A block's bytes land at its end, after other contexts' writes that
+       the encoder's state already followed. */
+    if (stateful && !final && FT_ATOMIC_LOAD_UINT8_RELAXED(cf->nib)
+        && _PyIONibbler_gathering(cf->buffer))
+    {
+        textio_unsupported(self, "_gather() needs an encoding whose "
+                           "encoder keeps no state");
+        return -1;
+    }
     if (stateful
         && nibbler_mutex_lock(&self->elock, (PyObject *)self, 1) < 0)
     {
