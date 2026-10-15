@@ -1334,7 +1334,14 @@ Py_NO_INLINE static Py_ssize_t
 gather_out(record *rec, const char *data, Py_ssize_t len)
 {
     Py_ssize_t n = rec->list.nbytes;
-    const char *nl = rec->line ? memrchr(data, '\n', len) : NULL;
+    const char *nl = NULL;
+#ifdef HAVE_MEMRCHR
+    nl = rec->line ? memrchr(data, '\n', len) : NULL;
+#else
+    for (const char *p = data + len; rec->line && nl == NULL && p > data;) {
+        nl = *--p == '\n' ? p : NULL;
+    }
+#endif
     rec->tail = nl ? data + len - nl - 1 : Py_MIN(rec->tail, n - len) + len;
     return (rec->direct && n >= rec->limit ? PY_SSIZE_T_MAX
             : nl ? n - rec->tail : 0);
