@@ -1408,12 +1408,10 @@ gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
     {
         return 1;
     }
-    /* The block's raw stream is alive while it is active and rec locked:
-       no reference is needed while it is the stream's.  Other than an
-       exact FileIO, it is asked whether it is closed first, without rec's
-       lock: Python code may wait for this stream's lock, held by close(),
-       detach() or __init__() waiting for rec's.  (rec is referenced
-       across Python code, which may make the context drop it.) */
+    /* The block's raw stream lives while rec is active and locked.  But
+       for an exact FileIO, its closed is asked before rec's lock, with rec
+       referenced: Python code may wait for this stream's lock, which
+       close(), detach() or __init__() hold waiting for rec's. */
     PyObject *raw = FT_ATOMIC_LOAD_PTR_RELAXED(self->raw), *hold = NULL;
     int r = 0;
     if (raw != rec->raw || !rec->fileio) {
@@ -1451,11 +1449,9 @@ gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
     int full = r == 0 && rec->list.nbytes >= rec->limit;
     rec_unlock(rec);
     if (out > 0) {
-        /* (Kept on error: written out at the next one, or by the end,
-           which raises an OSError; anything else is raised now, saying
-           all of data was accepted.  From code of this thread holding the
-           stream's locks, as a signal handler in a write-out, left for
-           the next one.) */
+        /* Kept on error for the next write-out; an OSError is left to
+           it, anything else raised now (all of data accepted).  Not from a
+           signal handler in this stream's write-out. */
         hold = hold ? hold : Py_NewRef(rec);
         int e = (nibbler_mutex_is_mine(&self->io)
                  || nibbler_mutex_is_mine(&self->lock)
