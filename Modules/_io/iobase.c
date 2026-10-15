@@ -1119,11 +1119,84 @@ _io__RawIOBase_write(PyObject *self, PyObject *buffer)
     return NULL;
 }
 
+/*[clinic input]
+_io._RawIOBase._writev
+    buffers: object
+    /
+
+Write a sequence of buffers, in order.
+
+Like write(): returns the number of bytes written, which may be
+fewer than all of them (stopping anywhere, also inside a buffer),
+or None if the stream would block before writing anything.  This
+default calls write() on each buffer, stopping at the first that
+writes less than all of it; raw streams that can write several
+buffers in one call override it.
+
+Private: used by buffered I/O to write several pieces without
+joining them first.
+[clinic start generated code]*/
+
+static PyObject *
+_io__RawIOBase__writev(PyObject *self, PyObject *buffers)
+/*[clinic end generated code: output=6fab129957bfcdca input=e0cf86efc4fd3da9]*/
+{
+    /* A tuple snapshot: write() can run code that changes a list. */
+    PyObject *seq = PySequence_Tuple(buffers);
+    if (seq == NULL) {
+        return NULL;
+    }
+    Py_ssize_t written = 0;
+    PyObject *res = NULL;
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(seq); i++) {
+        PyObject *item = PyTuple_GET_ITEM(seq, i);
+        Py_buffer view;
+        if (PyObject_GetBuffer(item, &view, PyBUF_SIMPLE) < 0) {
+            goto done;
+        }
+        Py_ssize_t len = view.len;
+        PyBuffer_Release(&view);
+        PyObject *r = PyObject_CallMethodOneArg(self, &_Py_ID(write), item);
+        if (r == NULL) {
+            goto done;
+        }
+        if (r == Py_None) {
+            /* Would block: report what was written before, if anything. */
+            if (written == 0) {
+                res = r;
+                goto done;
+            }
+            Py_DECREF(r);
+            break;
+        }
+        Py_ssize_t n = PyNumber_AsSsize_t(r, PyExc_ValueError);
+        Py_DECREF(r);
+        if (n == -1 && PyErr_Occurred()) {
+            goto done;
+        }
+        if (n < 0 || n > len) {
+            PyErr_Format(PyExc_ValueError,
+                         "write() returned %zd outside buffer size %zd",
+                         n, len);
+            goto done;
+        }
+        written += n;
+        if (n < len) {
+            break;
+        }
+    }
+    res = PyLong_FromSsize_t(written);
+done:
+    Py_DECREF(seq);
+    return res;
+}
+
 static PyMethodDef rawiobase_methods[] = {
     _IO__RAWIOBASE_READ_METHODDEF
     _IO__RAWIOBASE_READALL_METHODDEF
     _IO__RAWIOBASE_READINTO_METHODDEF
     _IO__RAWIOBASE_WRITE_METHODDEF
+    _IO__RAWIOBASE__WRITEV_METHODDEF
     {NULL, NULL}
 };
 

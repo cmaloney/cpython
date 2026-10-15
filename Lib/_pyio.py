@@ -681,6 +681,34 @@ class RawIOBase(IOBase):
         """
         self._unsupported("write")
 
+    def _writev(self, buffers):
+        """Write a sequence of buffers, in order.
+
+        Like write(): returns the number of bytes written, which may be
+        fewer than all of them (stopping anywhere, also inside a buffer),
+        or None if the stream would block before writing anything.  This
+        default calls write() on each buffer, stopping at the first that
+        writes less than all of it.
+
+        Private: used by buffered I/O to write several pieces without
+        joining them first.
+        """
+        written = 0
+        for b in tuple(buffers):
+            with memoryview(b) as view:
+                size = view.nbytes
+            n = self.write(b)
+            if n is None:
+                return None if written == 0 else written
+            n = n.__index__()
+            if n < 0 or n > size:
+                raise ValueError(f"write() returned {n} outside buffer "
+                                 f"size {size}")
+            written += n
+            if n < size:
+                break
+        return written
+
 io.RawIOBase.register(RawIOBase)
 
 
