@@ -21,6 +21,9 @@ from _io import _nibbler
 from test import support
 from test.support import import_helper, os_helper, threading_helper
 
+# Blocks write themselves out only with writev().
+requires_writev = unittest.skipUnless(hasattr(os, 'writev'), 'needs writev()')
+
 
 class GatherTest(unittest.TestCase):
 
@@ -822,6 +825,7 @@ class GatherTest(unittest.TestCase):
         self.assertEqual(self.read(), b'abcd' + b'x' * 10000 + b'e')
 
     @threading_helper.requires_working_threading()
+    @requires_writev
     def test_direct(self):
         with open(self.path, 'wb') as f:
             with self.lock_held(f):
@@ -900,6 +904,7 @@ class GatherTest(unittest.TestCase):
         self.assertEqual(self.read(), b'01AB456789')
 
     @unittest.skipUnless(hasattr(signal, 'SIGXFSZ'), 'needs SIGXFSZ')
+    @requires_writev
     def test_direct_partial_write_and_error(self):
         # Past RLIMIT_FSIZE, writev() writes part, then fails: the rest
         # stays pending, the error is raised, nothing is written twice.

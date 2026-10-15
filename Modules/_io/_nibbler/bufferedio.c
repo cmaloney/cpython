@@ -1149,6 +1149,13 @@ enum { GATHER_NEW, GATHER_ACTIVE, GATHER_DONE };
 #define GATHER_LIMIT (20 * 1024 * 1024)
 #define GATHER_BLOCK_MIN 1024
 #define GATHER_BLOCK_MAX (64 * 1024)
+/* The most a block writes out itself: one writev() writes it whole, below
+   _PY_WRITE_MAX and Linux's MAX_RW_COUNT.  Never without writev(). */
+#ifdef HAVE_WRITEV
+#  define GATHER_DIRECT_MAX ((Py_ssize_t)1 << 30)
+#else
+#  define GATHER_DIRECT_MAX 0
+#endif
 
 #define rec_state(rec) FT_ATOMIC_LOAD_UINT8_RELAXED((rec)->state)
 #define rec_set_state(rec, s) FT_ATOMIC_STORE_UINT8_RELAXED((rec)->state, (s))
@@ -1565,6 +1572,7 @@ gather_direct(buffered *self, record *rec, Py_ssize_t n)
     morsel_list *l = &rec->list;
     /* (raw stays while direct is set and rec is locked.) */
     if (rec->state != REC_ACTIVE || !FT_ATOMIC_LOAD_UINT8(self->direct)
+        || l->nbytes > GATHER_DIRECT_MAX
         || (!rec->direct && FT_ATOMIC_LOAD_SSIZE_RELAXED(self->list.nbytes))
         || _PyFileIO_closed(FT_ATOMIC_LOAD_PTR_RELAXED(self->raw)))
     {
@@ -1784,7 +1792,8 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
                 rec_start(rec, g);
                 rec_unlock(rec);
                 int direct = (
-                    self->raw_fileio && _PyFileIO_regular(self->raw)
+                    GATHER_DIRECT_MAX > 0
+                    && self->raw_fileio && _PyFileIO_regular(self->raw)
                     && PyType_GetBaseByToken(Py_TYPE(self),
                                              &nibbler_bufferedwriter_spec,
                                              NULL) > 0);
