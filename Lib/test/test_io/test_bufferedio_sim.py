@@ -2455,8 +2455,12 @@ class LockReleaseTest:
             def holder():
                 {daemon_op}
 
+            # Not through f: on free-threaded builds a waiter handed its
+            # critical section at exit hangs holding it.
+            buffer = f.buffer
+
             def waiter():
-                f.buffer.flush()
+                buffer.flush()
 
             @atexit.register
             def block_at_exit():
