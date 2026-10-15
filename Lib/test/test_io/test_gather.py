@@ -637,6 +637,45 @@ class GatherTest(unittest.TestCase):
         with open(other, 'rb') as r:
             self.assertEqual(r.read(), b'G')
 
+    @threading_helper.requires_working_threading()
+    def test_private_variable_set(self):
+        # Setting the variable takes effect at once: writes don't go on
+        # using the record found last (freed when nothing else holds it).
+        def run(f):
+            with f._gather():
+                [v] = self.gather_vars()
+                f.write(b'a')
+                v.set(None)
+                f.write(b'b' * 20)
+                self.assertEqual(self.read(), b'b' * 20)
+        with open(self.path, 'wb', buffering=8) as f:
+            contextvars.Context().run(run, f)
+        self.assertEqual(self.read(), b'b' * 20 + b'a')
+
+        ready, done = threading.Event(), threading.Event()
+        def other(f):
+            # Keeps a record listed.
+            with f._gather():
+                ready.set()
+                done.wait()
+        def run(f):
+            with f._gather():
+                f.write(b'a')
+            [v] = self.gather_vars()
+            t = threading.Thread(target=other, args=(f,),
+                                 context=contextvars.Context())
+            with threading_helper.start_threads([t], done.set):
+                ready.wait()
+                v.set(None)
+                # Unlists the idle record: freed.
+                f.seek(0, 1)
+                f.write(b'x')
+                with f._gather():
+                    f.write(b'y')
+        with open(self.path, 'wb') as f:
+            contextvars.Context().run(run, f)
+        self.assertEqual(self.read(), b'axy')
+
     def test_not_nibbler(self):
         # _io's buffered classes can't gather.
         if not getattr(_io.BufferedWriter, '_is_nibbler', False):

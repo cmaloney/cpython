@@ -10,6 +10,7 @@
 
 #include "Python.h"
 #include "pycore_abstract.h"            // _PyNumber_Index()
+#include "pycore_context.h"             // PyContext
 #include "pycore_fileutils.h"           // _PyFile_Flush()
 #include "pycore_import.h"              // _PyImport_SetModuleString()
 #include "pycore_modsupport.h"          // _PyArg_CheckPositional()
@@ -1166,21 +1167,27 @@ rec_lock(record *rec)
 }
 
 /* What gather_current() found last in this thread (rec borrowed, NULL
-   for none), and for what: it stays right while the thread state (by
-   address and id), the stream's variable, the context and the thread's
-   context version (bumped on every switch of context) are the same, since
-   only this thread then sets variables of the context, and only
-   gather_enter() sets the stream's, storing here what it set.  (The
-   context's variables keep rec alive meanwhile.)  It spares writes the
+   for none), and for what.  It stays right while the thread state (by
+   address and id), the stream's variable, the context, the context's
+   variables (a set() replaces them) and the thread's context version
+   (bumped on every switch of context) are the same: only this thread sets
+   variables of the context then, and they keep rec alive.  No record may
+   have been freed since either: a variable map freed and made again at
+   the same address would pass for the old one.  It spares writes the
    variable's lookup, which free-threaded builds don't cache. */
 static _Py_thread_local struct {
     PyThreadState *ts;
     uint64_t id;
     uint64_t ver;
+    uint64_t freed;
     PyObject *var;
     PyObject *ctx;
+    PyHamtObject *vars;
     record *rec;
 } gather_last;
+
+/* How many records were freed (see gather_last). */
+static uint64_t gather_freed;
 
 static inline void
 gather_remember(PyThreadState *ts, PyObject *var, record *rec)
@@ -1188,8 +1195,10 @@ gather_remember(PyThreadState *ts, PyObject *var, record *rec)
     gather_last.ts = ts;
     gather_last.id = ts->id;
     gather_last.ver = ts->context_ver;
+    gather_last.freed = _Py_atomic_load_uint64_relaxed(&gather_freed);
     gather_last.var = var;
     gather_last.ctx = ts->context;
+    gather_last.vars = ((PyContext *)ts->context)->ctx_vars;
     gather_last.rec = rec;
 }
 
@@ -1230,7 +1239,9 @@ gather_current(buffered *self)
     PyObject *var = FT_ATOMIC_LOAD_PTR_ACQUIRE(self->gvar);
     if (gather_last.ts == ts && gather_last.var == var
         && gather_last.ctx == ts->context && gather_last.ver == ts->context_ver
-        && gather_last.id == ts->id)
+        && gather_last.id == ts->id
+        && gather_last.vars == ((PyContext *)ts->context)->ctx_vars
+        && gather_last.freed == _Py_atomic_load_uint64_relaxed(&gather_freed))
     {
         return gather_last.rec;
     }
@@ -1883,6 +1894,7 @@ record_dealloc(PyObject *op)
 {
     PyTypeObject *tp = Py_TYPE(op);
     record *rec = (record *)op;
+    _Py_atomic_add_uint64(&gather_freed, 1);
     morsels_clear(&rec->list);
     PyMem_Free(rec->list.items);
     Py_XDECREF(rec->block);
