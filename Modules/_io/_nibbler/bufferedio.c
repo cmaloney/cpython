@@ -1303,6 +1303,21 @@ gather_move(buffered *self, record *rec, Py_ssize_t n)
         (void)morsels_push(&self->list, b, PyBytes_AS_STRING(b), n);
         Py_DECREF(b);
     }
+    else if (rec->list.nbytes > 0 && rec->list.nbytes <= GATHER_BLOCK_MIN) {
+        /* Copied: rec keeps its block for the next block, which then
+           allocates nothing. */
+        char buf[GATHER_BLOCK_MIN];
+        Py_ssize_t k = 0;
+        for (Py_ssize_t i = rec->list.head; i < rec->list.count; i++) {
+            memcpy(buf + k, rec->list.items[i].ptr, rec->list.items[i].len);
+            k += rec->list.items[i].len;
+        }
+        if (buffered_append(self, NULL, buf, k) < 0) {
+            return -1;
+        }
+        morsels_clear(&rec->list);
+        rec->used = 0;
+    }
     else if (rec->list.nbytes > 0) {
         if (morsels_splice(&self->list, &rec->list) < 0) {
             return -1;
