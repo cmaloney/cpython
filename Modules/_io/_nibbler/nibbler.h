@@ -54,7 +54,8 @@ nibbler_mutex_is_mine(nibbler_mutex *m)
 }
 
 /* The first lock of m in the child of a fork: release it from a holder
-   gone in the fork.  Returns 1 if this thread did that check (the first
+   gone in the fork.  (The generation is loaded with acquire, so that a
+   thread finding it current also sees the mutex reinitialized.)  Returns 1 if this thread did that check (the first
    in the child). */
 Py_NO_INLINE static int
 nibbler_mutex_after_fork(nibbler_mutex *m, uint64_t gen)
@@ -88,7 +89,14 @@ nibbler_mutex_wait(nibbler_mutex *m, PyObject *obj, int interruptible,
 {
     PyThreadState *tstate = _PyThreadState_GET();
     if (nibbler_mutex_is_mine(m)) {
-        PyErr_Format(PyExc_RuntimeError, "reentrant call inside %R", obj);
+        /* (By the type's name when repr() fails, as for an object not set
+           up yet.) */
+        PyObject *repr = PyObject_Repr(obj);
+        PyErr_Clear();
+        PyErr_Format(PyExc_RuntimeError, repr ? "reentrant call inside %U"
+                                              : "reentrant call inside %T",
+                     repr ? repr : obj);
+        Py_XDECREF(repr);
         return -1;
     }
     if (_Py_IsInterpreterFinalizing(tstate->interp)) {
@@ -116,7 +124,7 @@ nibbler_mutex_lock(nibbler_mutex *m, PyObject *obj, int interruptible)
 {
     uint64_t gen = _PyIO_nibbler_fork_gen;
     int taken_over = 0;
-    if (_Py_atomic_load_uint64_relaxed(&m->gen) != gen) {
+    if (_Py_atomic_load_uint64_acquire(&m->gen) != gen) {
         taken_over = nibbler_mutex_after_fork(m, gen);
     }
     if (!PyMutex_LockFast(&m->mutex)) {
@@ -131,7 +139,7 @@ nibbler_mutex_lock(nibbler_mutex *m, PyObject *obj, int interruptible)
 static inline int
 nibbler_mutex_trylock(nibbler_mutex *m)
 {
-    if (_Py_atomic_load_uint64_relaxed(&m->gen) != _PyIO_nibbler_fork_gen
+    if (_Py_atomic_load_uint64_acquire(&m->gen) != _PyIO_nibbler_fork_gen
         || !PyMutex_LockFast(&m->mutex))
     {
         return 0;
@@ -143,6 +151,13 @@ nibbler_mutex_trylock(nibbler_mutex *m)
 static inline void
 nibbler_mutex_unlock(nibbler_mutex *m)
 {
+    if (_Py_atomic_load_uint64_acquire(&m->gen) != _PyIO_nibbler_fork_gen) {
+        /* The forking thread releasing in the child what it held at the
+           fork: the check of the first lock first (it finds this thread
+           holding m), or a lock meanwhile could take m, holder 0 below, for
+           one left locked by a thread gone in the fork. */
+        (void)nibbler_mutex_after_fork(m, _PyIO_nibbler_fork_gen);
+    }
     _Py_atomic_store_uint64_relaxed(&m->holder, 0);
     PyMutex_Unlock(&m->mutex);
 }

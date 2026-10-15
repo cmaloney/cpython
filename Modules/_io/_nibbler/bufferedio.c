@@ -235,9 +235,13 @@ typedef struct {
     morsel_list list;
     Py_ssize_t inflight;
     /* The raw position, kept for an exact FileIO of a regular file (not
-       in append mode) as _io's abs_pos is; negative when unknown. */
+       in append mode) as _io's abs_pos is, and also used by tell() (which
+       in _io always asks the raw stream); negative when unknown. */
     Py_off_t raw_pos;
-    uint8_t raw_fileio;         /* raw is exactly a FileIO */
+    /* raw is exactly a FileIO: called through its C functions (instance
+       attributes overriding readinto, write or readall are not called,
+       see InternalDocs/io_nibbler.md). */
+    uint8_t raw_fileio;
     uint8_t raw_vectored;       /* raw has a _writev() of its own */
     uint8_t raw_appending;
     uint8_t raw_regular;
@@ -1004,7 +1008,8 @@ buffered_raw_move(buffered *self, Py_off_t delta)
 
 /* Write out the bytes BufferedRandom wrote over the read-ahead in place
    (back where they start), then move the raw stream after the block
-   (keep), or to the logical position. */
+   (keep, and when the write fails: the rest is written from there next
+   time), or to the logical position. */
 static int
 buffered_flush_dirty(buffered *self, int keep)
 {
@@ -1015,21 +1020,25 @@ buffered_flush_dirty(buffered *self, int keep)
     _PyIO_Span span = {PyBytes_AS_STRING(self->block) + self->dlo, len};
     PyObject *obj = self->block;
     Py_ssize_t written = 0;
-    int st = buffered_raw_move(self, -(self->end - self->dlo
-                                       + self->list.nbytes));
-    if (st == 0) {
-        st = buffered_write_spans(self, &span, &obj, 1, len, 0, &written);
-        self->dlo += written;
+    if (buffered_raw_move(self, -(self->end - self->dlo
+                                  + self->list.nbytes)) < 0)
+    {
+        return -1;
     }
+    int st = buffered_write_spans(self, &span, &obj, 1, len, 0, &written);
+    self->dlo += written;
     if (st == WOULD_BLOCK) {
         buffered_set_blocking_error(written);
     }
     if (st == 0) {
         self->dlo = self->dhi = 0;
-        st = buffered_raw_move(self, keep ? self->end - dhi + self->list.nbytes
-                                          : self->pos - dhi);
     }
-    return st == 0 ? 0 : -1;
+    PyObject *exc = PyErr_GetRaisedException();
+    int r = buffered_raw_move(self, (keep || st != 0
+                                     ? self->end + self->list.nbytes
+                                     : self->pos) - (dhi - len + written));
+    _PyErr_ChainExceptions1(exc);
+    return st == 0 && r == 0 ? 0 : -1;
 }
 
 /* Hand the read-ahead and the stash back to the raw stream, so that its
@@ -2007,48 +2016,21 @@ static PyType_Spec record_spec = {
  * Writing
  */
 
-/* Make the raised OSError or MemoryError say that n bytes of write()'s
-   data were accepted (written, or kept pending). */
+/* Make the raised exception, whatever its type (KeyboardInterrupt from a
+   signal handler too), say that n bytes of write()'s data were accepted
+   (written, or kept pending): writing the rest again duplicates nothing. */
 Py_NO_INLINE static void
 buffered_set_written(Py_ssize_t n)
 {
     PyObject *exc = PyErr_GetRaisedException();
-    if (PyErr_GivenExceptionMatches(exc, PyExc_OSError)
-        || PyErr_GivenExceptionMatches(exc, PyExc_MemoryError))
+    PyObject *v = PyLong_FromSsize_t(n);
+    if (v == NULL
+        || PyObject_SetAttrString(exc, "characters_written", v) < 0)
     {
-        PyObject *v = PyLong_FromSsize_t(n);
-        if (v == NULL
-            || PyObject_SetAttrString(exc, "characters_written", v) < 0)
-        {
-            PyErr_Clear();
-        }
-        Py_XDECREF(v);
+        PyErr_Clear();
     }
+    Py_XDECREF(v);
     PyErr_SetRaisedException(exc);
-}
-
-/* write() raised after `done` bytes of its data were written: keep as
-   much of the rest as fits pending, and say how much was accepted, so
-   that the caller knows what to write again.  Returns -1. */
-static int
-buffered_write_failed(buffered *self, PyObject *obj, const char *data,
-                      Py_ssize_t len, Py_ssize_t done)
-{
-    if (done == 0) {
-        return -1;
-    }
-    PyObject *exc = PyErr_GetRaisedException();
-    Py_ssize_t keep = Py_MIN(len - done, Py_MAX(0, self->threshold
-                                                   - self->list.nbytes));
-    if (buffered_append(self, obj, data + done, keep) < 0) {
-        _PyErr_ChainExceptions1(exc);
-        keep = 0;
-    }
-    else {
-        PyErr_SetRaisedException(exc);
-    }
-    buffered_set_written(done + keep);
-    return -1;
 }
 
 /* BufferedRandom: write data over the read-ahead in place when it lies
@@ -2114,7 +2096,9 @@ buffered_write_slow(buffered *self, PyObject *obj, const char *data,
     }
     for (;;) {
         Py_ssize_t rest = len - done, th = self->threshold;
-        if (rest == 0 || (rest < th && self->list.nbytes + rest <= th)) {
+        /* Done when the rest fits; also pending writes past the threshold
+           go out (what a signal handler queued, see IO_MINE). */
+        if ((rest == 0 || rest < th) && self->list.nbytes + rest <= th) {
             r = buffered_append(self, obj, data + done, rest);
             if (r < 0 && done > 0) {
                 buffered_set_written(done);
@@ -2141,30 +2125,40 @@ buffered_write_slow(buffered *self, PyObject *obj, const char *data,
                                        rest >= th || vectored ? rest : 0, 1,
                                        &st);
         }
-        if (st == 0 && done == len) {
+        if (st == 0) {
+            if (done < len || self->list.nbytes > th) {
+                continue;
+            }
             r = 0;
             break;
         }
-        if (st == 0) {
-            continue;
-        }
-        if (st == -1) {
-            r = buffered_write_failed(self, obj, data, len, done);
+        if (st == -1 && done == 0) {
             break;
         }
-        /* Would block: keep what fits, and say how much that is. */
+        /* Keep what fits of the rest and say how much was taken; nothing
+           when other threads queued data after the part written. */
         int errnum = errno;
         rest = len - done;
-        Py_ssize_t keep = Py_MIN(rest, Py_MAX(0, th - self->list.nbytes));
-        r = buffered_append(self, obj, data + done, keep);
-        if (r == 0 && keep < rest) {
+        Py_ssize_t keep = (done > 0 && self->list.nbytes > 0 ? 0
+                           : Py_MIN(rest, Py_MAX(0, th - self->list.nbytes)));
+        PyObject *exc = PyErr_GetRaisedException();
+        if (buffered_append(self, obj, data + done, keep) < 0) {
+            _PyErr_ChainExceptions1(exc);
+            keep = 0;
+        }
+        else if (exc != NULL) {
+            PyErr_SetRaisedException(exc);
+        }
+        else if (keep == rest) {
+            r = 0;
+            break;
+        }
+        else {
             errno = errnum;
             buffered_set_blocking_error(done + keep);
-            r = -1;
+            break;
         }
-        else if (r < 0 && done > 0) {
-            buffered_set_written(done);
-        }
+        buffered_set_written(done + keep);
         break;
     }
 end:
@@ -2219,7 +2213,8 @@ buffered_write(buffered *self, PyObject *obj, const char *data,
  */
 
 /* Take up to n bytes of the read-ahead: the block itself when that is all
-   of it, else a copy. */
+   of it (without the hash it may have cached when it was handed out with
+   other contents, before it was reused), else a copy. */
 static PyObject *
 buffered_take(buffered *self, Py_ssize_t n)
 {
@@ -2227,25 +2222,47 @@ buffered_take(buffered *self, Py_ssize_t n)
     if (k == 0) {
         return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     }
-    const char *p = PyBytes_AS_STRING(self->block) + self->pos;
-    self->pos += k;
+    PyObject *res;
     if (k == PyBytes_GET_SIZE(self->block)) {
-        return Py_NewRef(self->block);
+        res = Py_NewRef(self->block);
+_Py_COMP_DIAG_PUSH
+_Py_COMP_DIAG_IGNORE_DEPR_DECLS
+        FT_ATOMIC_STORE_SSIZE_RELAXED(((PyBytesObject *)res)->ob_shash, -1);
+_Py_COMP_DIAG_POP
     }
-    return PyBytes_FromStringAndSize(p, k);
+    else {
+        res = PyBytes_FromStringAndSize(PyBytes_AS_STRING(self->block)
+                                        + self->pos, k);
+    }
+    if (res != NULL) {
+        self->pos += k;
+    }
+    return res;
 }
 
 /* Make data[0:len] the read-ahead again, in front of what is unread
-   (bytes a failed read took, gh-51571).  Keeps the raised exception. */
+   (bytes a failed read took, gh-51571): when they are still in the block
+   in front of it, by moving back (the bytes BufferedRandom wrote over the
+   block stay where they are), else in a new block (they are written out
+   first).  Keeps the raised exception. */
 static int
 buffered_push_back(buffered *self, const char *data, Py_ssize_t len)
 {
     if (len == 0) {
         return 0;
     }
+    if (self->reading && self->pos >= len
+        && memcmp(PyBytes_AS_STRING(self->block) + self->pos - len, data,
+                  len) == 0)
+    {
+        self->pos -= len;
+        self->noline = 0;
+        return 0;
+    }
     PyObject *exc = PyErr_GetRaisedException();
     Py_ssize_t unread = self->end - self->pos;
-    PyObject *block = PyBytes_FromStringAndSize(NULL, len + unread);
+    PyObject *block = (buffered_flush_dirty(self, 1) < 0 ? NULL
+                       : PyBytes_FromStringAndSize(NULL, len + unread));
     if (block != NULL) {
         memcpy(PyBytes_AS_STRING(block), data, len);
         if (unread > 0) {
@@ -2610,8 +2627,9 @@ enum { ENTER_READ = 1, ENTER_LEAVE_GATHERED = 2 };
    that raw is open (but reading what is buffered needs no open raw
    stream), move what the context's _gather() block gathered (but with
    ENTER_LEAVE_GATHERED), and with ENTER_READ, write out pending writes.
-   Release with buffered_unlock_io(). */
-static int
+   Release with buffered_unlock_io().  (Inlined: the read and tell paths
+   would otherwise pay a call.) */
+static inline Py_ALWAYS_INLINE int
 buffered_enter(buffered *self, const char *closed_msg, int flags)
 {
     if (buffered_lock_io(self) < 0) {
@@ -2665,6 +2683,7 @@ buffered_clear(PyObject *op)
     buffered *self = buffered_cast(op);
     Py_XDECREF(buffered_swap_raw(self, NULL));
     Py_CLEAR(self->dict);
+    morsels_clear(&self->list);
     return 0;
 }
 
@@ -2703,6 +2722,10 @@ buffered_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(Py_TYPE(self));
     Py_VISIT(self->raw);
     Py_VISIT(self->dict);
+    /* The stash (or pending writes). */
+    for (Py_ssize_t i = self->list.head; i < self->list.count; i++) {
+        Py_VISIT(self->list.items[i].obj);
+    }
     return 0;
 }
 
@@ -3333,14 +3356,13 @@ end:
 
 /*[clinic input]
 _io._Buffered.truncate
-    cls: defining_class
     pos: object = None
     /
 [clinic start generated code]*/
 
 static PyObject *
-_io__Buffered_truncate_impl(buffered *self, PyTypeObject *cls, PyObject *pos)
-/*[clinic end generated code: output=fe3882fbffe79f1a input=f5b737d97d76303f]*/
+_io__Buffered_truncate_impl(buffered *self, PyObject *pos)
+/*[clinic end generated code: output=667ca03c60c270de input=8a1be34d57cca2d3]*/
 {
     if (buffered_enter(self, "truncate of closed file", 0) < 0) {
         return NULL;
@@ -3458,6 +3480,12 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
         PyErr_SetString(PyExc_ValueError, "buffer size must not be negative");
         err = -1;
     }
+    else if (err == 0 && buffer_size > PY_SSIZE_T_MAX / 2) {
+        /* No such block can be allocated (_io finds that at once), and the
+           sizes computed from it could overflow. */
+        PyErr_NoMemory();
+        err = -1;
+    }
     PyObject *exc = err < 0 ? PyErr_GetRaisedException() : NULL;
     if (buffered_lock_io(self) < 0) {
         _PyErr_ChainExceptions1(exc);
@@ -3505,8 +3533,10 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
                                && PyObject_TypeCheck(raw, state->PyFileIO_Type)
                                && _PyFileIO_appending(raw));
         /* Not for pipes and character devices, whose position doesn't
-           follow what was read (GH-95782), nor in append mode. */
+           follow what was read (GH-95782), nor in append mode, nor over a
+           file descriptor FileIO didn't open (it may have O_APPEND). */
         self->raw_regular = (fileio && !self->raw_appending
+                             && !_PyFileIO_foreign_fd(raw)
                              && _PyFileIO_regular(raw));
     }
     PyObject *old = buffered_swap_raw(self, err ? NULL : Py_NewRef(raw));
@@ -4136,7 +4166,7 @@ static PyObject *
 buffered_raw_get(PyObject *op, void *Py_UNUSED(closure))
 {
     PyObject *raw = buffered_ref_raw(buffered_cast(op));
-    return raw != NULL ? raw : Py_None;
+    return raw != NULL ? raw : Py_NewRef(Py_None);
 }
 
 static PyGetSetDef buffered_getset[] = {

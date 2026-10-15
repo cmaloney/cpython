@@ -1215,6 +1215,30 @@ class SlowDeviceTest:
         f.flush()
         self.assertEqual(bytes(raw.received), b"x" * 40)
 
+    @unittest.skipUnless(hasattr(signal, 'SIGUSR1'), 'needs SIGUSR1')
+    def test_size_zero_signal_handler_write_goes_out(self):
+        # Unbuffered, what a signal handler writes during a raw write of
+        # the same object is written out before write() returns.
+        if not self.is_nibbler:
+            self.skipTest("buffer_size=0 not supported")
+        sent = []
+        class Raw(self.RawIOBase):
+            out = b''
+            def writable(self):
+                return True
+            def write(self, b):
+                if not sent:
+                    sent.append(1)
+                    signal.raise_signal(signal.SIGUSR1)
+                self.out += bytes(b)
+                return len(b)
+        raw = Raw()
+        f = self.BufferedWriter(raw, 0)
+        old = signal.signal(signal.SIGUSR1, lambda *a: f.write(b'<h>'))
+        self.addCleanup(signal.signal, signal.SIGUSR1, old)
+        f.write(b'main')
+        self.assertEqual(raw.out, b'main<h>')
+
     def test_size_zero_write_error_reports_written(self):
         if not self.is_nibbler:
             self.skipTest("buffer_size=0 not supported")
@@ -2431,8 +2455,12 @@ class LockReleaseTest:
             def holder():
                 {daemon_op}
 
+            # Not through f: on free-threaded builds a waiter handed its
+            # critical section at exit hangs holding it.
+            buffer = f.buffer
+
             def waiter():
-                f.buffer.flush()
+                buffer.flush()
 
             @atexit.register
             def block_at_exit():
@@ -2915,6 +2943,62 @@ class ConcurrentAccessTest:
                 writer.join(0.05)
                 release.set()
         self.assertEqual(raw.out, b"text")
+
+    @threading_helper.requires_working_threading()
+    def test_partly_written_record_stays_whole(self):
+        # A write going out by itself writes part of it, then the raw
+        # stream would block or fails, after another thread wrote
+        # meanwhile (_io._nibbler doesn't hold the lock in raw calls): what
+        # is kept of the rest is not put after the other thread's data.
+        import io
+        nibbler = self.is_nibbler
+        for error in (None, OSError(errno.EIO, "EIO")):
+            in_write = threading.Event()
+            other_done = threading.Event()
+
+            class Raw(io.RawIOBase):
+                out = b""
+                plan = [75, error]
+                def writable(self):
+                    return True
+                def write(self, b):
+                    step = self.plan.pop(0) if self.plan else len(b)
+                    if step == 75:
+                        in_write.set()
+                        if nibbler:
+                            other_done.wait(support.SHORT_TIMEOUT)
+                    if isinstance(step, BaseException):
+                        raise step
+                    if step is None:
+                        return None
+                    self.out += bytes(b[:step])
+                    return step
+
+            raw = Raw()
+            f = self.BufferedWriter(raw, 100)
+
+            def other():
+                in_write.wait(support.SHORT_TIMEOUT)
+                f.write(b"BBBB")
+                other_done.set()
+
+            accepted = 150
+            with threading_helper.start_threads(
+                    [threading.Thread(target=other)]):
+                try:
+                    f.write(b"X" * 150)
+                except OSError as e:
+                    accepted = getattr(e, "characters_written", None)
+            if raw.plan:
+                # _io meets the error only writing out its buffer.
+                self.assertRaises(OSError, f.flush)
+            f.flush()
+            with self.subTest(error=error):
+                xs = raw.out.replace(b"BBBB", b"", 1)
+                self.assertEqual(xs, b"X" * len(xs))
+                self.assertIn(raw.out, (xs + b"BBBB", b"BBBB" + xs))
+                if accepted is not None:
+                    self.assertEqual(len(xs), accepted)
 
     def test_small_writes_racing_other_calls(self):
         # Small writes stay whole and in order per thread while other

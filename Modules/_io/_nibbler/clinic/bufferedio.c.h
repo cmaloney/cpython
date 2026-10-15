@@ -410,20 +410,17 @@ PyDoc_STRVAR(_io__Buffered_truncate__doc__,
 "\n");
 
 #define _IO__BUFFERED_TRUNCATE_METHODDEF    \
-    {"truncate", _PyCFunction_CAST(_io__Buffered_truncate), METH_METHOD|METH_FASTCALL|METH_KEYWORDS, _io__Buffered_truncate__doc__},
+    {"truncate", _PyCFunction_CAST(_io__Buffered_truncate), METH_FASTCALL, _io__Buffered_truncate__doc__},
 
 static PyObject *
-_io__Buffered_truncate_impl(buffered *self, PyTypeObject *cls, PyObject *pos);
+_io__Buffered_truncate_impl(buffered *self, PyObject *pos);
 
 static PyObject *
-_io__Buffered_truncate(PyObject *self, PyTypeObject *cls, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
+_io__Buffered_truncate(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
 {
     PyObject *return_value = NULL;
     PyObject *pos = Py_None;
 
-    if (!_PyArg_NoKwnames("truncate", kwnames)) {
-        goto exit;
-    }
     if (!_PyArg_CheckPositional("truncate", nargs, 0, 1)) {
         goto exit;
     }
@@ -432,7 +429,7 @@ _io__Buffered_truncate(PyObject *self, PyTypeObject *cls, PyObject *const *args,
     }
     pos = args[0];
 skip_optional:
-    return_value = _io__Buffered_truncate_impl((buffered *)self, cls, pos);
+    return_value = _io__Buffered_truncate_impl((buffered *)self, pos);
 
 exit:
     return return_value;
@@ -874,4 +871,4 @@ skip_optional:
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=33c81fa17d9ccba0 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=8f06a47c493e7768 input=a9049054013a1b77]*/

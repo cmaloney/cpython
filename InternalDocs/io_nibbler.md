@@ -52,10 +52,11 @@ Data structures
 - **threshold**: pending bytes past which writes are written out
   (`capacity`, or `PY_SSIZE_T_MAX` for buffer size None).
 - **raw position** (`raw_pos`, negative when unknown): kept only when
-  `raw_regular` (an exact FileIO of a regular file, not in append mode),
-  so that `tell()` and `seek()` inside the read-ahead make no `lseek`, like
-  `_io`'s `abs_pos`.  Pipes and character devices are left out because
-  their position doesn't follow reads (GH-95782).
+  `raw_regular` (an exact FileIO of a regular file it opened itself, not
+  in append mode), so that `tell()` and `seek()` inside the read-ahead
+  make no `lseek`, like `_io`'s `abs_pos`.  Pipes and character devices
+  are left out because their position doesn't follow reads (GH-95782), a
+  file descriptor FileIO was given because it may have `O_APPEND`.
 
 
 Invariants
@@ -249,6 +250,20 @@ And one of the nibbler: after a raw stream other than an exact FileIO is
 closed by itself, small writes (and the usual text writes) are queued
 without an error until the block is full or an operation takes the lock
 (see "Closing the raw stream alone"); `_io` asks `closed` on every write.
+
+Two more, kept for speed:
+
+- With data buffered, `tell()` uses the raw position kept (see "raw
+  position") where `_io` asks the raw stream each time: it doesn't see the
+  file descriptor moved behind its back (`os.lseek()`, `os.write()`,
+  `raw.seek()`, another object over the same FileIO, the other side of a
+  fork, the FileIO reopened by its `__init__()`): the answer means
+  little then either way, and asking costs an `lseek` per `tell()`.
+- The raw calls to an exact FileIO go to its C functions: an instance
+  attribute overriding `readinto`, `write` or `readall` (as
+  `mock.patch.object(f.raw, "write")` makes) is not called; overrides of
+  `flush` and `close` are (patch the class, or use a subclass): a lookup
+  per raw call would cost more than an unbuffered write's other work.
 
 When the nibbler classes replace `_io`'s, the C fast paths keyed on
 `_io`'s exact types (stock `TextIOWrapper`'s `read1()` shortcut, pickle's

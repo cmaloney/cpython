@@ -12,7 +12,8 @@ import weakref
 from collections import deque, UserList
 from itertools import cycle, count
 from test import support
-from test.support import check_sanitizer, os_helper, threading_helper
+from test.support import (check_sanitizer, import_helper, os_helper,
+                          threading_helper)
 from .utils import byteslike, CTestCase, PyTestCase, NibblerMixin
 
 
@@ -238,6 +239,16 @@ class SizeofTest:
         size = sys.getsizeof(bufio) - bufsize
         bufio.close()
         self.assertEqual(sys.getsizeof(bufio), size)
+
+    @unittest.skipIf(check_sanitizer(thread=True),
+                     'ThreadSanitizer aborts on huge allocations (exit code 66).')
+    def test_huge_buffer_size(self):
+        # A buffer no allocation can give is a MemoryError, not sizes
+        # overflowing as they are computed from it.
+        for size in (sys.maxsize, sys.maxsize - 32, sys.maxsize // 2 + 10):
+            with self.subTest(size=size):
+                self.assertRaises(MemoryError, self.tp,
+                                  self.MockRawIO([b'abc\n']), size)
 
     @support.cpython_only
     def test_sizeof_buffer_size_zero(self):
@@ -725,6 +736,26 @@ class BufferedReaderTest(CommonBufferedTests):
 
 class CBufferedReaderTest(BufferedReaderTest, SizeofTest, CTestCase):
     tp = io.BufferedReader
+
+    def test_read_memory_error_loses_nothing(self):
+        # A read failing to allocate its result leaves the data for the
+        # next read.
+        _testcapi = import_helper.import_module('_testcapi')
+        data = b'01234\n6789\n'
+        for meth in ('read', 'read1', 'readline', 'peek'):
+            with self.subTest(meth=meth):
+                bufio = self.tp(self.MockRawIO([data]), 16)
+                self.assertEqual(bufio.read(1), b'0')
+                _testcapi.set_nomemory(0, 1)
+                try:
+                    res = getattr(bufio, meth)(3)
+                except MemoryError:
+                    res = b''
+                finally:
+                    _testcapi.remove_mem_hooks()
+                if meth == 'peek':
+                    res = b''
+                self.assertEqual(res + bufio.read(), data[1:])
 
     @threading_helper.requires_working_threading()
     def test_concurrent_reads_keep_records_whole(self):
@@ -1300,7 +1331,7 @@ class BufferedWriterTest(CommonBufferedTests):
 
     def test_write_interrupted_keeps_rest(self):
         # The same for an exception that isn't an OSError (such as one a
-        # signal handler raises), which has no characters_written.
+        # signal handler raises): it gets characters_written too.
         class Interrupt(Exception):
             pass
         data = bytes(range(100))
@@ -1309,7 +1340,22 @@ class BufferedWriterTest(CommonBufferedTests):
         self.addCleanup(bufio.close)
         with self.assertRaises(Interrupt) as cm:
             bufio.write(data)
-        self.assertNotHasAttr(cm.exception, "characters_written")
+        self.assertEqual(cm.exception.characters_written, 100)
+        bufio.flush()
+        self.assertEqual(b"".join(raw._write_stack), data)
+
+    def test_write_interrupted_says_what_was_taken(self):
+        # When the rest doesn't fit, a KeyboardInterrupt says how much of
+        # the data was taken: writing the rest again duplicates nothing.
+        data = bytes(range(100))
+        raw = self.scripted_raw([30, KeyboardInterrupt()])
+        bufio = self.tp(raw, 64)
+        self.addCleanup(bufio.close)
+        with self.assertRaises(KeyboardInterrupt) as cm:
+            bufio.write(data)
+        n = cm.exception.characters_written
+        self.assertEqual(n, 30 + 64)
+        bufio.write(data[n:])
         bufio.flush()
         self.assertEqual(b"".join(raw._write_stack), data)
 
@@ -2283,6 +2329,68 @@ class BufferedRandomTest(BufferedReaderTest, BufferedWriterTest):
                 self.assertEqual(f.read(20), bytes(20))
                 self.assertGreaterEqual(f.tell(), 0)
 
+    def test_read_failing_to_write_out_keeps_written_data(self):
+        # A read that fails writing out data written over the read-ahead,
+        # after taking some of the read-ahead, keeps that data (and puts
+        # the bytes taken back).
+        class Raw(self.BytesIO):
+            fail = False
+            def write(self, b):
+                if self.fail:
+                    self.fail = False
+                    raise OSError(errno.EIO, 'EIO')
+                return super().write(b)
+        raw = Raw(bytes(range(97, 123)) * 4)
+        f = self.tp(raw, 16)
+        self.assertEqual(f.read(2), b'ab')
+        f.write(b'XYZ')
+        raw.fail = True
+        self.assertRaises(OSError, f.read, 40)
+        f.flush()
+        self.assertEqual(raw.getvalue()[:8], b'abXYZfgh')
+        if not self.is_stock_C:
+            # (_io drops what a failed read took.)
+            self.assertEqual(f.read(3), b'fgh')
+
+    @unittest.skipUnless(hasattr(os, 'O_APPEND'), 'needs os.O_APPEND')
+    def test_tell_over_append_mode_fd(self):
+        # Writes to a file descriptor opened with O_APPEND go to the end of
+        # the file, whatever mode the FileIO over it was given.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with self.open(os_helper.TESTFN, 'wb') as f:
+            f.write(b'0123456789')
+        fd = os.open(os_helper.TESTFN, os.O_RDWR | os.O_APPEND)
+        with self.tp(self.FileIO(fd, 'r+b')) as f:
+            f.seek(0)
+            f.write(b'AAAA')
+            f.flush()
+            f.write(b'B')
+            self.assertEqual(f.tell(), 15)
+            f.seek(0)
+            self.assertEqual(f.read(), b'0123456789AAAAB')
+
+    def test_flush_after_partly_failed_write_over_read_ahead(self):
+        # A write-out of data written over the read-ahead that fails after
+        # writing part of it leaves the rest where it belongs.
+        class Raw(self.BytesIO):
+            plan = []
+            def write(self, b):
+                step = self.plan.pop(0) if self.plan else None
+                if isinstance(step, BaseException):
+                    raise step
+                with memoryview(b) as view:
+                    return super().write(view[:step])
+        raw = Raw(b'a' * 100)
+        f = self.tp(raw, 16)
+        self.assertEqual(f.read(1), b'a')
+        f.write(b'X' * 10)
+        Raw.plan = [4, OSError(errno.EFBIG, 'too big')]
+        self.assertRaises(OSError, f.flush)
+        f.flush()
+        self.assertEqual(f.tell(), 11)
+        self.assertEqual(f.read(2), b'aa')
+        self.assertEqual(raw.getvalue(), b'a' + b'X' * 10 + b'a' * 89)
+
     # You can't construct a BufferedRandom over a non-seekable stream.
     test_unseekable = None
 
@@ -2331,6 +2439,64 @@ class NibblerBufferedReaderTest(NibblerMixin, CBufferedReaderTest):
             self.assertRaises(MemoryError, t.readline)
         with self.open(os_helper.TESTFN, encoding="ascii") as t:
             self.assertEqual(len(t.read(sys.maxsize)), 1000)
+
+    def test_returned_bytes_hash(self):
+        # Bytes returned are hashed by their contents, also when they are
+        # the block, which was returned before with other contents.
+        class Raw(self.RawIOBase):
+            chunks = [b'a' * 500, OSError('boom'), b'b' * 16,
+                      b'c' * 484 + b'\n']
+            def readable(self):
+                return True
+            def readinto(self, b):
+                c = self.chunks.pop(0)
+                if isinstance(c, BaseException):
+                    raise c
+                b[:len(c)] = c
+                return len(c)
+        bufio = self.tp(Raw(), 16)
+        self.assertRaises(OSError, bufio.read, 1000)
+        hash(bufio.read(500))
+        self.assertEqual(bufio.read(1), b'b')
+        line = bufio.readline()
+        self.assertEqual(line, b'b' * 15 + b'c' * 484 + b'\n')
+        self.assertEqual(hash(line), hash(bytes(bytearray(line))))
+
+    def test_stash_in_reference_cycle(self):
+        # Data kept after a raw read failed is seen by the garbage
+        # collector: a cycle through it is collected.
+        import gc
+        class Chunk(bytes):
+            pass
+        class Raw(self.RawIOBase):
+            def readable(self):
+                return True
+            def read(self, size=-1):
+                if hasattr(self, 'done'):
+                    raise OSError('boom')
+                self.done = chunk = Chunk(b'data')
+                chunk.bufio = bufio
+                return chunk
+        bufio = self.tp(Raw())
+        self.assertRaises(OSError, bufio.read)
+        ref = weakref.ref(bufio)
+        bufio.raw.done = None
+        del bufio
+        gc.collect()
+        self.assertIsNone(ref())
+
+    def test_reentrant_call_with_failing_repr(self):
+        # A reentrant call raises RuntimeError also when the object's
+        # repr() (in the message) raises.
+        class Raw(self.MockRawIO):
+            @property
+            def name(self):
+                raise KeyError('name')
+            def readinto(self, b):
+                return bufio.read(1)
+        bufio = self.tp(Raw())
+        with self.assertRaisesRegex(RuntimeError, 'reentrant call'):
+            bufio.read(1)
 
     def test_keeps_read_on_error_marker(self):
         # The reading classes say that they keep data read before a raw
@@ -2513,6 +2679,45 @@ class NibblerBufferedRandomTest(NibblerMixin, CBufferedRandomTest):
                 finally:
                     os._exit(code)
             support.wait_process(pid, exitcode=0)
+
+    @support.requires_fork()
+    @threading_helper.requires_working_threading()
+    def test_fork_destructor_uses_object_of_gone_thread(self):
+        # In the child of a fork, the objects of the threads gone in it are
+        # freed before any Python code runs: a destructor using a buffered
+        # object such a thread was reading from doesn't wait for it.
+        from test.support.script_helper import assert_python_ok
+        code = """if 1:
+            import io, os, threading, warnings, _io
+            from test import support
+            warnings.simplefilter('ignore', DeprecationWarning)
+            entered = threading.Event()
+            class Raw(io.RawIOBase):
+                def readable(self):
+                    return True
+                def readinto(self, b):
+                    entered.set()
+                    threading.Event().wait()
+            f = _io._nibbler.BufferedReader(Raw())
+            class D:
+                def __del__(self):
+                    try:
+                        f.tell()
+                    except Exception:
+                        pass
+            local = threading.local()
+            def reader():
+                local.d = D()
+                f.read(1)
+            threading.Thread(target=reader, daemon=True).start()
+            entered.wait()
+            pid = os.fork()
+            if pid == 0:
+                os._exit(0)
+            support.wait_process(pid, exitcode=0,
+                                 timeout=support.SHORT_TIMEOUT)
+            """
+        assert_python_ok('-c', code)
 
 
 # Simple test to ensure that optimizations in the IO library deliver the
