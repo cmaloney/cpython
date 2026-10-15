@@ -262,6 +262,7 @@ _PyStaticObjects_CheckAll(PyInterpreterState *interp) {
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(_find_and_load_lazy_submodule), "_find_and_load_lazy_submodule", 29);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(_fix_up_module), "_fix_up_module", 14);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(_flags_), "_flags_", 7);
+    _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(_gather), "_gather", 7);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(_get_sourcefile), "_get_sourcefile", 15);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(_handle_fromlist), "_handle_fromlist", 16);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(_initializing), "_initializing", 13);

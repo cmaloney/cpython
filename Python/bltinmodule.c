@@ -2335,37 +2335,59 @@ builtin_print_impl(PyObject *module, PyObject * const *objects,
         return NULL;
     }
 
-    /* Write everything with one write() call: a file whose write() is
-       atomic, such as io.TextIOWrapper, then gets it in one piece. */
-    PyUnicodeWriter *writer = PyUnicodeWriter_Create(0);
-    if (writer == NULL) {
+    /* Write in a _gather() block if the file has one: the pieces then
+       reach it together. */
+    PyObject *block;
+    if (PyObject_GetOptionalAttr(file, &_Py_ID(_gather), &block) < 0) {
         Py_DECREF(file);
         return NULL;
     }
-    for (i = 0; i < objects_length; i++) {
+    if (block != NULL) {
+        Py_SETREF(block, PyObject_CallNoArgs(block));
+        PyObject *res = block ? PyObject_CallMethodNoArgs(
+            block, &_Py_ID(__enter__)) : NULL;
+        if (res == NULL) {
+            Py_XDECREF(block);
+            Py_DECREF(file);
+            return NULL;
+        }
+        Py_DECREF(res);
+    }
+
+    err = 0;
+    for (i = 0; i < objects_length && !err; i++) {
         if (i > 0) {
-            err = (sep == NULL ? PyUnicodeWriter_WriteChar(writer, ' ')
-                               : PyUnicodeWriter_WriteStr(writer, sep));
-            if (err) {
-                goto error;
+            if (sep == NULL) {
+                err = PyFile_WriteString(" ", file);
+            }
+            else {
+                err = PyFile_WriteObject(sep, file, Py_PRINT_RAW);
             }
         }
-        if (PyUnicodeWriter_WriteStr(writer, objects[i]) < 0) {
-            goto error;
+        if (!err) {
+            err = PyFile_WriteObject(objects[i], file, Py_PRINT_RAW);
         }
     }
-    err = (end == NULL ? PyUnicodeWriter_WriteChar(writer, '\n')
-                       : PyUnicodeWriter_WriteStr(writer, end));
-    if (err) {
-        goto error;
+    if (!err) {
+        if (end == NULL) {
+            err = PyFile_WriteString("\n", file);
+        }
+        else {
+            err = PyFile_WriteObject(end, file, Py_PRINT_RAW);
+        }
     }
-    PyObject *text = PyUnicodeWriter_Finish(writer);
-    if (text == NULL) {
-        Py_DECREF(file);
-        return NULL;
+
+    if (block != NULL) {
+        PyObject *exc = PyErr_GetRaisedException();
+        PyObject *res = PyObject_CallMethodObjArgs(
+            block, &_Py_ID(__exit__), Py_None, Py_None, Py_None, NULL);
+        Py_DECREF(block);
+        _PyErr_ChainExceptions1(exc);
+        if (res == NULL) {
+            err = -1;
+        }
+        Py_XDECREF(res);
     }
-    err = PyFile_WriteObject(text, file, Py_PRINT_RAW);
-    Py_DECREF(text);
     if (err) {
         Py_DECREF(file);
         return NULL;
@@ -2380,11 +2402,6 @@ builtin_print_impl(PyObject *module, PyObject * const *objects,
     Py_DECREF(file);
 
     Py_RETURN_NONE;
-
-error:
-    PyUnicodeWriter_Discard(writer);
-    Py_DECREF(file);
-    return NULL;
 }
 
 

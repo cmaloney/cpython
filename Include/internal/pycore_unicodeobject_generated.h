@@ -226,6 +226,7 @@ _PyUnicode_InitStaticStrings(PyInterpreterState *interp) {
         offsetof(struct _Py_global_strings, identifiers._py__find_and_load_lazy_submodule._ascii.ob_base),
         offsetof(struct _Py_global_strings, identifiers._py__fix_up_module._ascii.ob_base),
         offsetof(struct _Py_global_strings, identifiers._py__flags_._ascii.ob_base),
+        offsetof(struct _Py_global_strings, identifiers._py__gather._ascii.ob_base),
         offsetof(struct _Py_global_strings, identifiers._py__get_sourcefile._ascii.ob_base),
         offsetof(struct _Py_global_strings, identifiers._py__handle_fromlist._ascii.ob_base),
         offsetof(struct _Py_global_strings, identifiers._py__initializing._ascii.ob_base),
