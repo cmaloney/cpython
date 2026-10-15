@@ -2606,6 +2606,45 @@ class NibblerBufferedRandomTest(NibblerMixin, CBufferedRandomTest):
                     os._exit(code)
             support.wait_process(pid, exitcode=0)
 
+    @support.requires_fork()
+    @threading_helper.requires_working_threading()
+    def test_fork_destructor_uses_object_of_gone_thread(self):
+        # In the child of a fork, the objects of the threads gone in it are
+        # freed before any Python code runs: a destructor using a buffered
+        # object such a thread was reading from doesn't wait for it.
+        from test.support.script_helper import assert_python_ok
+        code = """if 1:
+            import io, os, threading, warnings, _io
+            from test import support
+            warnings.simplefilter('ignore', DeprecationWarning)
+            entered = threading.Event()
+            class Raw(io.RawIOBase):
+                def readable(self):
+                    return True
+                def readinto(self, b):
+                    entered.set()
+                    threading.Event().wait()
+            f = _io._nibbler.BufferedReader(Raw())
+            class D:
+                def __del__(self):
+                    try:
+                        f.tell()
+                    except Exception:
+                        pass
+            local = threading.local()
+            def reader():
+                local.d = D()
+                f.read(1)
+            threading.Thread(target=reader, daemon=True).start()
+            entered.wait()
+            pid = os.fork()
+            if pid == 0:
+                os._exit(0)
+            support.wait_process(pid, exitcode=0,
+                                 timeout=support.SHORT_TIMEOUT)
+            """
+        assert_python_ok('-c', code)
+
 
 # Simple test to ensure that optimizations in the IO library deliver the
 # expected results.  For best testing, run this under a debug-build Python too
