@@ -1076,7 +1076,7 @@ class BufferedWriterTest(CommonBufferedTests):
 
     def test_write_interrupted_keeps_rest(self):
         # The same for an exception that isn't an OSError (such as one a
-        # signal handler raises), which has no characters_written.
+        # signal handler raises): it gets characters_written too.
         class Interrupt(Exception):
             pass
         data = bytes(range(100))
@@ -1085,7 +1085,22 @@ class BufferedWriterTest(CommonBufferedTests):
         self.addCleanup(bufio.close)
         with self.assertRaises(Interrupt) as cm:
             bufio.write(data)
-        self.assertNotHasAttr(cm.exception, "characters_written")
+        self.assertEqual(cm.exception.characters_written, 100)
+        bufio.flush()
+        self.assertEqual(b"".join(raw._write_stack), data)
+
+    def test_write_interrupted_says_what_was_taken(self):
+        # When the rest doesn't fit, a KeyboardInterrupt says how much of
+        # the data was taken: writing the rest again duplicates nothing.
+        data = bytes(range(100))
+        raw = self.scripted_raw([30, KeyboardInterrupt()])
+        bufio = self.tp(raw, 64)
+        self.addCleanup(bufio.close)
+        with self.assertRaises(KeyboardInterrupt) as cm:
+            bufio.write(data)
+        n = cm.exception.characters_written
+        self.assertEqual(n, 30 + 64)
+        bufio.write(data[n:])
         bufio.flush()
         self.assertEqual(b"".join(raw._write_stack), data)
 
