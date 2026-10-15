@@ -1079,7 +1079,6 @@ _io_FileIO_write_impl(fileio *self, PyTypeObject *cls, Py_buffer *b)
 
 /* Raise like the methods do unless the file is open for the access.
    Return the file descriptor to use, or -1 with an exception set. */
-
 static int
 fileio_check_io(fileio *self, int writing)
 {

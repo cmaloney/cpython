@@ -1,0 +1,8 @@
+:meth:`!tell` of :class:`io.BufferedWriter` and :class:`io.BufferedRandom`
+over a file opened in append mode now returns the end of the file after a
+write, where the data went, instead of the position before the write plus
+the pending data. To find that position, :meth:`!tell` now writes out the
+pending data first in append mode. :meth:`io.BufferedRandom.write` in append
+mode now also drops the read buffer, so that data read before the write
+reads back as it is in the file (:gh:`64281`). Both the C and Python
+implementations are fixed.

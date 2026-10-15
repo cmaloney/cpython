@@ -1,4 +1,5 @@
 import array
+import errno
 import os
 import pickle
 import random
@@ -337,6 +338,16 @@ class BufferedReaderTest(CommonBufferedTests):
         self.assertEqual(b, b"ab")
         self.assertEqual(bufio.readinto(b), 1)
         self.assertEqual(b, b"cb")
+
+    def test_readinto_several_refills(self):
+        # A readinto() that needs more than one refill of the buffer, the
+        # last one returning more than is left of b, fills b exactly.
+        rawio = self.MockRawIO((b"abc", b"defgh"))
+        bufio = self.tp(rawio, 8)
+        b = bytearray(6)
+        self.assertEqual(bufio.readinto(b), 6)
+        self.assertEqual(b, b"abcdef")
+        self.assertEqual(bufio.read(), b"gh")
 
     def test_readinto1(self):
         buffer_size = 10
@@ -735,9 +746,8 @@ class CBufferedReaderTest(BufferedReaderTest, SizeofTest, CTestCase):
         for read_record in (readline, readinto):
             with self.subTest(read=read_record.__name__):
                 got = []
-                with self.open(os_helper.TESTFN, "rb", buffering=0) as raw:
-                    bufio = self.tp(raw, 24)
-
+                raw = self.FileIO(os_helper.TESTFN, "rb")
+                with self.tp(raw, 24) as bufio:
                     def reader():
                         while record := read_record(bufio):
                             got.append(record)
@@ -1190,6 +1200,27 @@ class BufferedWriterTest(CommonBufferedTests):
             self.assertEqual(bufio.tell(), nwriters * nrecords * len(record))
             bufio.close()
 
+    def test_append_mode_tell_after_write(self):
+        # gh-80592: a write to a raw file in append mode goes to the end of
+        # the file, so tell() is the end of the file after it.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with self.open(os_helper.TESTFN, "wb") as f:
+            f.write(b"abc")
+        with self.tp(self.FileIO(os_helper.TESTFN,
+                                 self.write_mode.replace("w", "a"))) as f:
+            self.assertEqual(f.tell(), 3)
+            f.write(b"def")
+            self.assertEqual(f.tell(), 6)
+            self.assertEqual(f.seek(0), 0)
+            self.assertEqual(f.tell(), 0)
+            f.write(b"ghi")
+            self.assertEqual(f.tell(), 9)
+            f.write(b"jkl")
+            self.assertEqual(f.tell(), 12)
+            self.assertEqual(f.seek(0, 1), 12)
+        with self.open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(), b"abcdefghijkl")
+
     def test_misbehaved_io(self):
         rawio = self.MisbehavedRawIO()
         bufio = self.tp(rawio, 5)
@@ -1203,6 +1234,84 @@ class BufferedWriterTest(CommonBufferedTests):
     def test_max_buffer_size_removal(self):
         with self.assertRaises(TypeError):
             self.tp(self.MockRawIO(), 8, 12)
+
+    def scripted_raw(self, plan):
+        # A raw stream whose write() follows plan, one step per call: an int
+        # n writes at most n bytes; an exception instance is raised.  Once
+        # plan is used up, writes are whole.
+        class ScriptedRawIO(self.MockRawIO):
+            def write(self, b):
+                step = plan.pop(0) if plan else None
+                if isinstance(step, BaseException):
+                    raise step
+                with memoryview(b) as view:
+                    n = len(view) if step is None else min(step, len(view))
+                    self._write_stack.append(bytes(view[:n]))
+                return n
+        return ScriptedRawIO()
+
+    def test_write_error_keeps_rest_that_fits(self):
+        # An error (other than BlockingIOError) after part of write()'s
+        # data was written keeps the rest pending when it fits in the
+        # buffer: write() raises, and flush() writes the rest.
+        data = bytes(range(100))
+        raw = self.scripted_raw([36, OSError(errno.EIO, "EIO")])
+        bufio = self.tp(raw, 64)
+        self.addCleanup(bufio.close)
+        with self.assertRaises(OSError) as cm:
+            bufio.write(data)
+        self.assertNotIsInstance(cm.exception, BlockingIOError)
+        self.assertEqual(cm.exception.errno, errno.EIO)
+        self.assertEqual(cm.exception.characters_written, 100)
+        self.assertEqual(b"".join(raw._write_stack), data[:36])
+        bufio.flush()
+        self.assertEqual(b"".join(raw._write_stack), data)
+
+    def test_write_error_keeps_what_fits(self):
+        # When the rest doesn't fit, as much of it as fits is kept, and
+        # characters_written says how much of the data was accepted
+        # (written or kept): the caller writes the rest again.
+        data = bytes(range(200))
+        raw = self.scripted_raw([30, TimeoutError("timed out")])
+        bufio = self.tp(raw, 64)
+        self.addCleanup(bufio.close)
+        with self.assertRaises(TimeoutError) as cm:
+            bufio.write(data)
+        n = cm.exception.characters_written
+        self.assertEqual(n, 30 + 64)
+        bufio.write(data[n:])
+        bufio.flush()
+        self.assertEqual(b"".join(raw._write_stack), data)
+
+    def test_write_error_before_data_takes_none(self):
+        # An error while writing the data pending before write()'s data
+        # takes none of it: write() raises without characters_written,
+        # and only the earlier data stays pending.
+        raw = self.scripted_raw([2, OSError(errno.EIO, "EIO")])
+        bufio = self.tp(raw, 64)
+        self.addCleanup(bufio.close)
+        bufio.write(b"abc")
+        with self.assertRaises(OSError) as cm:
+            bufio.write(b"x" * 100)
+        self.assertEqual(cm.exception.errno, errno.EIO)
+        self.assertNotHasAttr(cm.exception, "characters_written")
+        bufio.flush()
+        self.assertEqual(b"".join(raw._write_stack), b"abc")
+
+    def test_write_interrupted_keeps_rest(self):
+        # The same for an exception that isn't an OSError (such as one a
+        # signal handler raises), which has no characters_written.
+        class Interrupt(Exception):
+            pass
+        data = bytes(range(100))
+        raw = self.scripted_raw([36, Interrupt()])
+        bufio = self.tp(raw, 64)
+        self.addCleanup(bufio.close)
+        with self.assertRaises(Interrupt) as cm:
+            bufio.write(data)
+        self.assertNotHasAttr(cm.exception, "characters_written")
+        bufio.flush()
+        self.assertEqual(b"".join(raw._write_stack), data)
 
     def test_raw_write_no_progress(self):
         # gh-158414: retrying a raw write() that returns 0 could loop
@@ -1315,6 +1424,33 @@ class CBufferedWriterTest(BufferedWriterTest, SizeofTest, CTestCase):
         # Issue #17275
         with self.assertRaisesRegex(TypeError, "BufferedWriter"):
             self.tp(self.BytesIO(), 1024, 1024, 1024)
+
+    @threading_helper.requires_working_threading()
+    def test_write_detach_race(self):
+        # write() waiting for the buffered lock while detach() ran used to
+        # use the cleared raw stream: a segfault.  Waiting for the lock
+        # releases the GIL, so this crashed GIL builds too.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        for _ in range(50):
+            bufio = self.tp(self.FileIO(os_helper.TESTFN, "w"), 64)
+            go = threading.Event()
+
+            def writer():
+                go.wait()
+                for i in range(500):
+                    try:
+                        bufio.write(b"x" * (i % 100))
+                    except ValueError:  # detached
+                        return
+
+            def detacher():
+                go.wait()
+                bufio.detach().close()
+
+            threads = [threading.Thread(target=func)
+                       for func in [writer] * 3 + [detacher]]
+            with threading_helper.start_threads(threads):
+                go.set()
 
     def test_non_boolean_closed_attr(self):
         # gh-140650: check TypeError is raised
@@ -1873,6 +2009,44 @@ class BufferedRandomTest(BufferedReaderTest, BufferedWriterTest):
                 self.assertEqual(f.readline(), b'\n')
                 f.flush()
                 self.assertEqual(raw.getvalue(), b'1b\n2def\n3\n')
+
+    def test_append_mode_write_after_read(self):
+        # gh-64281: a raw stream in append mode writes at the end of the
+        # file whatever the position, so data read before a write must
+        # still read back as it is in the file.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with self.open(os_helper.TESTFN, "wb") as f:
+            f.write(b"testest")
+        with self.tp(self.FileIO(os_helper.TESTFN, "a+")) as f:
+            f.write(b"A")
+            f.seek(0)
+            self.assertEqual(f.read(), b"testestA")
+            f.seek(0)
+            self.assertEqual(f.read(1), b"t")
+            f.write(b"B")
+            f.seek(0)
+            self.assertEqual(f.read(), b"testestAB")
+        with self.open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(), b"testestAB")
+
+    def test_append_mode_seek_in_buffer_after_write(self):
+        # A write to a raw file in append mode lands at the end of the
+        # file, not at the position the buffered object last knew: seek()
+        # within the read buffer afterwards must not count from there.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with self.open(os_helper.TESTFN, "wb") as f:
+            f.write(b"0123456789")
+        with self.tp(self.FileIO(os_helper.TESTFN, "a+"), 8) as f:
+            f.seek(0)
+            f.write(b"X" * 20)
+            with self.open(os_helper.TESTFN, "ab") as g:
+                g.write(b"abcdef")
+            self.assertEqual(f.read(1), b"a")
+            self.assertEqual(f.seek(1, 1), 32)
+            self.assertEqual(f.read(1), b"c")
+            self.assertEqual(f.seek(-3, 1), 30)
+            self.assertEqual(f.read(2), b"ab")
+            self.assertEqual(f.tell(), 32)
 
     def make_seek_file(self, size=300000):
         data = bytes((i * 7 + i // 251) % 256 for i in range(size))

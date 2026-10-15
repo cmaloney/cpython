@@ -1,0 +1,7 @@
+The buffered writers of :mod:`io` now raise :exc:`OSError` when the raw
+stream's :meth:`~io.RawIOBase.write` returns ``0`` for a non-empty write,
+instead of retrying forever in :meth:`~io.BufferedWriter.write`,
+:meth:`~io.BufferedWriter.flush` and :meth:`!close`. This is a safety net in
+the buffered layer for any raw stream that makes no progress, such as the
+Windows console given an incomplete UTF-8 sequence; the raw streams
+themselves are unchanged. The data is kept buffered, as for other errors.
