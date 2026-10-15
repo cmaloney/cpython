@@ -2870,6 +2870,41 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                   lambda: setattr(S, "armed", True),
                   lambda t: t.seek(1 << 128))
 
+    def test_nested_detach_in_close(self):
+        # close() doesn't close a buffer that a nested detach() (from the
+        # encoder's final encode() or the buffer's flush()) handed out.
+        got = []
+        class Enc(codecs.IncrementalEncoder):
+            def encode(self, s, final=False):
+                if final and not got:
+                    got.append(t.detach())
+                return s.encode("ascii")
+        def search(name):
+            if name == "detach_on_final_test":
+                return codecs.CodecInfo(
+                    name=name, encode=None, decode=None,
+                    incrementalencoder=Enc)
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        class W(self.BufferedWriter):
+            def flush(self):
+                if not got:
+                    got.append(None)
+                    got[0] = t.detach()
+                return super().flush()
+        for enc, cls in (("detach_on_final_test", self.BufferedWriter),
+                         ("ascii", W)):
+            with self.subTest(enc=enc):
+                got.clear()
+                raw = self.BytesIO()
+                t = self.TextIOWrapper(cls(raw), encoding=enc)
+                t.write("abc")
+                with self.assertRaisesRegex(ValueError, "detached"):
+                    t.close()
+                self.assertFalse(got[0].closed)
+                got[0].flush()
+                self.assertEqual(raw.getvalue(), b"abc")
+
     @threading_helper.requires_working_threading()
     def test_threads_write_stateful_encoder(self):
         # The codec's encoder may hold state (an iso2022 shift state, the

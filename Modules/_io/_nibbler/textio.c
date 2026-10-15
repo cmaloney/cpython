@@ -2782,10 +2782,13 @@ _io_TextIOWrapper_close_impl(textio *self)
         /* A write failed: close completely, without the buffer's close()
            writing the data again. */
         exc = PyErr_GetRaisedException();
-        exc = r == -2 ? text_discard_writes(buffer, exc) : exc;
+        exc = (r == -2 && self->conf->buffer == buffer
+               ? text_discard_writes(buffer, exc) : exc);
     }
     textio_drop_reads(self);
-    res = PyObject_CallMethodNoArgs(buffer, &_Py_ID(close));
+    /* (Not one a nested detach() handed out meanwhile.) */
+    res = (textio_attached(self) < 0 ? NULL
+           : PyObject_CallMethodNoArgs(buffer, &_Py_ID(close)));
     if (exc != NULL) {
         _PyErr_ChainExceptions1(exc);
         Py_CLEAR(res);
