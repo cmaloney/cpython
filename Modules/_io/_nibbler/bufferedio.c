@@ -1125,6 +1125,7 @@ typedef struct record {
     Py_ssize_t tail;            /* at least the bytes after the last \n */
     char flush;                 /* flush() was called inside the block */
     char direct, line;          /* the block's mode (see above) */
+    char behind;                /* direct, but some of it is pending */
     char fileio;                /* raw is an exact FileIO */
     uint8_t state;              /* stored atomically */
 } record;
@@ -1281,6 +1282,11 @@ gather_move(buffered *self, record *rec, Py_ssize_t n)
         Py_CLEAR(rec->block);
         rec->used = 0;
     }
+    else {
+        return 0;
+    }
+    /* A direct block's write-outs no longer pass the pending writes. */
+    rec->behind = rec->direct;
     return 0;
 }
 
@@ -1571,10 +1577,12 @@ gather_direct(buffered *self, record *rec, Py_ssize_t n)
         return -1;
     }
     morsel_list *l = &rec->list;
+    Py_ssize_t pending = FT_ATOMIC_LOAD_SSIZE_RELAXED(self->list.nbytes);
+    rec->behind &= pending > 0;
     /* (raw stays while direct is set and rec is locked.) */
     if (rec->state != REC_ACTIVE || !FT_ATOMIC_LOAD_UINT8(self->direct)
         || l->nbytes > GATHER_DIRECT_MAX
-        || (!rec->direct && FT_ATOMIC_LOAD_SSIZE_RELAXED(self->list.nbytes))
+        || ((!rec->direct || rec->behind) && pending)
         || _PyFileIO_closed(FT_ATOMIC_LOAD_PTR_RELAXED(self->raw)))
     {
         rec_unlock(rec);
@@ -1712,6 +1720,7 @@ rec_start(record *rec, gather *g)
     rec->limit = g->limit;
     rec->flush = 0;
     rec->direct = g->direct;
+    rec->behind = 0;
     rec->line = g->line;
     rec_set_state(rec, REC_ACTIVE);
 }

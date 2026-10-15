@@ -1293,6 +1293,27 @@ class GatherTest(unittest.TestCase):
             self.assertEqual(self.read(), b'AB')
         self.assertGreater(failed, 0)
 
+    @requires_writev
+    @unittest.skipUnless(hasattr(signal, 'SIGXFSZ'), 'needs SIGXFSZ')
+    def test_direct_mode_data_pending(self):
+        # Once some of a direct block's data is pending (moved by seek(),
+        # whose write-out failed), its write-outs no longer pass it.
+        resource = import_helper.import_module('resource')
+        old = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+        self.addCleanup(signal.signal, signal.SIGXFSZ, old)
+        soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+        with open(self.path, 'wb', buffering=4) as f:
+            with f._gather(direct=True):
+                f.write(b'A')
+                resource.setrlimit(resource.RLIMIT_FSIZE, (0, hard))
+                try:
+                    self.assertRaises(OSError, f.seek, 0, 1)
+                finally:
+                    resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+                f.write(b'BCDE')
+                self.assertEqual(self.read(), b'ABCDE')
+        self.assertEqual(self.read(), b'ABCDE')
+
     @threading_helper.requires_working_threading()
     def test_threads_whole_life(self):
         # Threads in one direct block each for their whole life, with
