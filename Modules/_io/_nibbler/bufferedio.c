@@ -3146,7 +3146,7 @@ static struct PyModuleDef _PyIO_nibbler_Module = {
 /* A type from spec with base, named prefix + its class name, in mod.  The
    class attribute _is_nibbler tells tests these classes from _io's, also
    when they replace them; with keeps_read, _keeps_read_on_error says that
-   data read before a raw read raised is kept for the next read
+   data (or text) read before a raw read raised is kept for the next read
    (socket.makefile() looks at it). */
 static PyTypeObject *
 nibbler_add_type(PyObject *mod, const PyType_Spec *spec, PyTypeObject *base,
@@ -3199,7 +3199,7 @@ _PyIO_create_nibbler_submodule(PyObject *io_module, int as_io)
              mod, &nibbler_bufferedrandom_spec, base, prefix, 1)) == NULL
         || (state->PyTextIOWrapper_Type = nibbler_add_type(
              mod, &_PyIONibbler_textiowrapper_spec,
-             io_state->PyTextIOBase_Type, prefix, 0)) == NULL
+             io_state->PyTextIOBase_Type, prefix, 1)) == NULL
         || _PyImport_SetModuleString("_io._nibbler", mod) < 0
         || PyModule_AddObjectRef(io_module, "_nibbler", mod) < 0)
     {

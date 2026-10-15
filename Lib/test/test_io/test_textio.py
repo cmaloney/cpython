@@ -2768,6 +2768,12 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                     t.buffer.x = 1
                     self.assertEqual(a + t.read(7) + t.read(), data)
 
+    def test_keeps_read_on_error_marker(self):
+        # A read that fails keeps the text it took for the next read (see
+        # test_failed_read_keeps_text): the class says so, for
+        # socket.makefile() (gh-51571).
+        self.assertIs(self.TextIOWrapper._keeps_read_on_error, True)
+
     def test_read_after_buffer_detached(self):
         # The buffer was detached behind the text's back: reads raise
         # ValueError, and release nothing they don't hold.

@@ -352,17 +352,20 @@ class socket(_socket.socket):
         else:
             assert writing
             buffer = io.BufferedWriter(raw, buffering)
-        if reading and getattr(type(buffer), "_keeps_read_on_error", False):
-            # This buffered class keeps the data it read before a timeout
-            # for the next read, and TextIOWrapper keeps the part of a line
-            # it had decoded, so reading may go on (gh-51571).
-            raw._timeout_retryable = True
+        # Reading may go on after a timeout when the buffered class (and in
+        # text mode, the text class) keeps what it read before an error
+        # for the next read (gh-51571).
+        keeps = reading and getattr(type(buffer), "_keeps_read_on_error",
+                                    False)
         if binary:
+            raw._timeout_retryable = keeps
             return buffer
         encoding = io.text_encoding(encoding)
         text = io.TextIOWrapper(
             buffer, encoding, errors, newline, line_buffering)
         text.mode = mode
+        raw._timeout_retryable = keeps and getattr(
+            type(text), "_keeps_read_on_error", False)
         return text
 
     def _sendfile_zerocopy(self, zerocopy_func, giveup_exc_type, file,
