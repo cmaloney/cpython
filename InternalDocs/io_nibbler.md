@@ -211,8 +211,7 @@ added in one piece at its end: moved to the pending writes when the
 stream's lock can be taken without waiting; when it is busy, by one
 `writev()` of its own (up to 1 GiB) for a `BufferedWriter` of a regular
 file with nothing pending, which the kernel orders against other writes
-(POSIX);
-else moved to the pending writes once the lock is free (also at
+(POSIX); else moved to the pending writes once the lock is free (also at
 `limit`, before an operation of that context needs the position, and by
 `close()`/`detach()`/`__init__()`).  While a stream has records
 (`ngather`), the fast paths that take the lock alone go the way that takes
