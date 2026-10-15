@@ -15,6 +15,7 @@ is_nibbler, is_C and is_stock_C (see utils.py).
 import array
 import errno
 import glob
+import itertools
 import os
 import random
 import select
@@ -404,6 +405,127 @@ class SlowDeviceTest:
                 break
             out += chunk
         self.assertEqual(out, data)
+
+    def test_text_readline_error_keeps_long_line(self):
+        # gh-51571 with a line longer than the text layer's chunk, through
+        # a codec's decoder (UTF-16): the nibbler takes its text in pieces
+        # as they are decoded, and a raw error loses none of them.  tell(),
+        # seek() and detach() then work from the start of the line.
+        if not self.is_nibbler:
+            self.skipTest("a long line read before a raw error is lost")
+        line = "".join(chr(0x61 + i % 26) for i in range(40_000)) + "\n"
+        data = (line + "tail").encode("utf-16-le")
+
+        class Raw(make_scripted_reader(self.RawIOBase)):
+            def seekable(self):
+                return True
+            def tell(self):
+                return self.pos
+            def seek(self, pos, whence=0):
+                self.pos = pos + (0, self.pos, len(self.data))[whence]
+                return self.pos
+
+        for exc in (TimeoutError("timed out"), KeyboardInterrupt()):
+            with self.subTest(exc=type(exc)):
+                raw = Raw(data, [30_000, 30_000, exc])
+                f = self.TextIOWrapper(self.BufferedReader(raw, 4096),
+                                       encoding="utf-16-le")
+                self.assertRaises(type(exc), f.readline)
+                pos = f.tell()
+                self.assertEqual(f.readline(), line)
+                self.assertEqual(f.read(), "tail")
+                f.seek(pos)
+                self.assertEqual(f.readline(), line)
+                # Again, then detach(): the buffer goes back to where the
+                # text is.
+                raw = Raw(data, [30_000, 30_000, exc])
+                f = self.TextIOWrapper(self.BufferedReader(raw, 4096),
+                                       encoding="utf-16-le")
+                self.assertEqual(f.read(3), line[:3])
+                self.assertRaises(type(exc), f.readline)
+                self.assertEqual(f.detach().read(), data[6:])
+
+    def test_text_read_error_keeps_text_as_decoded(self):
+        # A read() through the decoder that fails gives back the text it
+        # took in pieces as it was decoded, not as returned ("\r\n" made
+        # "\n"), so that tell() and seek() count the characters right.
+        if not self.is_nibbler:
+            self.skipTest("a long read before a raw error is lost")
+        text = "".join(f"{i}\r\n" for i in range(10_000))
+        data = text.encode("utf-16-le")
+
+        class Raw(make_scripted_reader(self.RawIOBase)):
+            def seekable(self):
+                return True
+            def tell(self):
+                return self.pos
+            def seek(self, pos, whence=0):
+                self.pos = pos + (0, self.pos, len(self.data))[whence]
+                return self.pos
+
+        raw = Raw(data, [4096] * 8 + [TimeoutError("timed out")])
+        f = self.TextIOWrapper(self.BufferedReader(raw, 4096),
+                               encoding="utf-16-le")
+        self.assertEqual(f.read(2), "0\n")
+        self.assertRaises(TimeoutError, f.read)
+        self.assertEqual(f.read(4), "1\n2\n")
+        pos = f.tell()
+        self.assertEqual(f.read(4), "3\n4\n")
+        f.seek(pos)
+        self.assertEqual(f.read(4), "3\n4\n")
+
+    def test_text_write_after_failed_read(self):
+        # A write after reads that failed before they returned anything
+        # goes to the text position (gh-82891), as after one that
+        # returned text, also through the codec's decoder (UTF-16), which
+        # had decoded the bytes already.
+        if not self.is_nibbler:
+            self.skipTest("_io writes after the bytes read ahead")
+
+        class Raw(make_scripted_reader(self.RawIOBase)):
+            def seekable(self):
+                return True
+            def writable(self):
+                return True
+            def tell(self):
+                return self.pos
+            def seek(self, pos, whence=0):
+                self.pos = pos + (0, self.pos, len(self.data))[whence]
+                return self.pos
+            def write(self, b):
+                self.data = (self.data[:self.pos] + bytes(b)
+                             + self.data[self.pos + len(b):])
+                self.pos += len(b)
+                return len(b)
+
+        for encoding, size in itertools.product(("utf-8", "utf-16-le"),
+                                                (5, 100_000)):
+            with self.subTest(encoding=encoding, size=size):
+                data = ("ab" * 10_000).encode(encoding)
+                raw = Raw(data, [4096, TimeoutError("timed out")])
+                f = self.TextIOWrapper(self.BufferedRandom(raw, 4096),
+                                       encoding=encoding)
+                if size == 5:
+                    self.assertEqual(f.read(3), "aba")
+                self.assertRaises(TimeoutError, f.read, 100_000)
+                f.write("Z")
+                f.flush()
+                text = raw.data.decode(encoding)
+                self.assertEqual(text[:5], "abaZa" if size == 5 else "Zbaba")
+
+        # After seek() to where a long line that failed started: tell()
+        # gives where its text was decoded from and the characters to skip,
+        # which seek() decodes again.
+        data = ("ab" * 30_000).encode("utf-16-le")
+        raw = Raw(data, [4096] * 8 + [TimeoutError("timed out")])
+        f = self.TextIOWrapper(self.BufferedRandom(raw, 4096),
+                               encoding="utf-16-le")
+        self.assertEqual(f.read(3), "aba")
+        self.assertRaises(TimeoutError, f.readline)
+        f.seek(f.tell())
+        f.write("Z")
+        f.flush()
+        self.assertEqual(raw.data.decode("utf-16-le")[:5], "abaZa")
 
     def test_read_all_error_keeps_data(self):
         # read() of a raw stream with only RawIOBase.readall() keeps what
@@ -1373,6 +1495,64 @@ class PySlowDeviceTest(SlowDeviceTest, PyTestCase):
 
 
 class NibblerSlowDeviceTest(NibblerMixin, SlowDeviceTest, CTestCase):
+    pass
+
+
+# --- Text over a buffered object ------------------------------------------------
+
+class TextTest:
+    """TextIOWrapper over a buffered object."""
+
+    def setUp(self):
+        super().setUp()
+        if not self.is_nibbler:
+            self.skipTest("text keeps bytes of its own")
+
+    def test_text_and_buffer_writes_keep_order(self):
+        # gh-52203: sys.stdout.write() then sys.stdout.buffer.write() come
+        # out in that order.
+        for enc in ("utf-8", "latin-1"):
+            with self.subTest(encoding=enc):
+                raw = self.BytesIO()
+                t = self.TextIOWrapper(self.BufferedWriter(raw), encoding=enc)
+                t.write("unicode ")
+                t.buffer.write(b"bytes ")
+                t.write("\xe9 ")
+                t.buffer.write(b"more")
+                t.flush()
+                self.assertEqual(raw.getvalue(),
+                                 b"unicode bytes " + "\xe9".encode(enc)
+                                 + b" more")
+
+    def test_text_reads_use_buffer_size(self):
+        # gh-153656: text reads make raw reads of the buffer size, not of
+        # TextIOWrapper's chunk size (8192).
+        Reader = make_scripted_reader(self.RawIOBase)
+        class RecordingReader(Reader):
+            def readinto(self, b):
+                self.sizes.append(len(b))
+                return super().readinto(b)
+        data = b"line\n" * 50_000
+        for encoding in ("utf-8", "latin-1"):
+            with self.subTest(encoding=encoding):
+                raw = RecordingReader(data)
+                raw.sizes = []
+                t = self.TextIOWrapper(self.BufferedReader(raw, 100_000),
+                                       encoding=encoding)
+                for _ in range(1000):
+                    self.assertEqual(t.readline(), "line\n")
+                self.assertEqual(raw.sizes, [100_000])
+
+
+class CTextTest(TextTest, CTestCase):
+    pass
+
+
+class PyTextTest(TextTest, PyTestCase):
+    pass
+
+
+class NibblerTextTest(NibblerMixin, TextTest, CTestCase):
     pass
 
 

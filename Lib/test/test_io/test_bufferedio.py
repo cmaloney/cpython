@@ -2437,6 +2437,8 @@ class NibblerBufferedReaderTest(NibblerMixin, CBufferedReaderTest):
         b = self.tp(self.FileIO(os_helper.TESTFN), 2**58)
         with self.TextIOWrapper(b, encoding="ascii") as t:
             self.assertRaises(MemoryError, t.readline)
+        with self.open(os_helper.TESTFN, encoding="ascii") as t:
+            self.assertEqual(len(t.read(sys.maxsize)), 1000)
 
     def test_returned_bytes_hash(self):
         # Bytes returned are hashed by their contents, also when they are
