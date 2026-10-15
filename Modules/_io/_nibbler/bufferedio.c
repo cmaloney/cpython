@@ -1128,9 +1128,9 @@ typedef struct record {
     char flush;                 /* flush() was called inside the block */
     char direct, line;          /* the block's mode (see above) */
     char behind;                /* direct, but some of it is pending */
-    uint64_t tid, gen;          /* the block's thread, fork generation */
     char fileio;                /* raw is an exact FileIO */
     uint8_t state;              /* stored atomically */
+    uint64_t tid, gen;          /* the block's thread, fork generation */
 } record;
 
 /* Listed but for REC_FREE; changed from or to it with both locks. */
