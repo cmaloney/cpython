@@ -1081,20 +1081,15 @@ _io_FileIO_write_impl(fileio *self, PyTypeObject *cls, Py_buffer *b)
    variants return the byte count, -2 when a non-blocking file descriptor
    would block, or -1 with an exception set. */
 
-/* Raise like the methods do unless the file is open for the access.
-   Return the file descriptor to use, or -1 with an exception set. */
+/* The file descriptor, or -1 with an exception set.  The access mode is
+   checked when the buffered object is created: its bit field shares a word
+   that seekable() writes. */
 static int
-fileio_check_io(fileio *self, int writing)
+fileio_check_io(fileio *self)
 {
     int fd = FT_ATOMIC_LOAD_INT_RELAXED(self->fd);
     if (fd < 0) {
         err_closed();
-        return -1;
-    }
-    if (writing ? !self->writable : !self->readable) {
-        _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
-        err_mode(state, writing ? "writing" : "reading");
-        return -1;
     }
     return fd;
 }
@@ -1115,7 +1110,7 @@ fileio_io_result(Py_ssize_t n)
 Py_ssize_t
 _PyFileIO_readinto(PyObject *op, char *buf, Py_ssize_t len)
 {
-    int fd = fileio_check_io(PyFileIO_CAST(op), 0);
+    int fd = fileio_check_io(PyFileIO_CAST(op));
     if (fd < 0) {
         return -1;
     }
@@ -1125,7 +1120,7 @@ _PyFileIO_readinto(PyObject *op, char *buf, Py_ssize_t len)
 Py_ssize_t
 _PyFileIO_writev(PyObject *op, const _PyIO_Span *spans, Py_ssize_t cnt)
 {
-    int fd = fileio_check_io(PyFileIO_CAST(op), 1);
+    int fd = fileio_check_io(PyFileIO_CAST(op));
     if (fd < 0) {
         return -1;
     }
@@ -1305,8 +1300,11 @@ static PyObject *
 _io_FileIO__writev_impl(fileio *self, PyObject *buffers)
 /*[clinic end generated code: output=7473168dfb1a9f6a input=9fde7a6149feba4b]*/
 {
-    if (fileio_check_io(self, 1) < 0) {
+    if (fileio_check_io(self) < 0) {
         return NULL;
+    }
+    if (!self->writable) {
+        return err_mode(find_io_state_by_def(Py_TYPE(self)), "writing");
     }
     /* A tuple snapshot: getting a buffer can run code that changes a list. */
     PyObject *seq = PySequence_Tuple(buffers);
