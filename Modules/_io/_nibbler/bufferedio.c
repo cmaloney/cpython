@@ -9,6 +9,7 @@
 */
 
 #include "Python.h"
+#include "pycore_abstract.h"            // _PyNumber_Index()
 #include "pycore_fileutils.h"           // _PyFile_Flush()
 #include "pycore_import.h"              // _PyImport_SetModuleString()
 #include "pycore_modsupport.h"          // _PyArg_CheckPositional()
@@ -196,7 +197,7 @@ typedef struct {
     PyObject *raw;              /* NULL while uninitialized or detached */
     nibbler_mutex lock;
     nibbler_mutex io;
-    Py_ssize_t capacity;        /* block size */
+    Py_ssize_t capacity;        /* block size; 0: unbuffered */
     Py_ssize_t threshold;       /* pending bytes past which writes go out */
     Py_ssize_t ref_min;         /* exact bytes kept by reference from this */
     PyObject *block;
@@ -1043,12 +1044,13 @@ buffered_set_written(Py_ssize_t n)
 
 /* BufferedRandom: write data over the read-ahead in place when it lies
    inside it and nothing else references the block, to be written out
-   before the next raw call (as _io does).  Returns 1 if done. */
+   before the next raw call (as _io does).  Not with buffer size None,
+   whose pending writes reads write out.  Returns 1 if done. */
 static int
 buffered_write_in_place(buffered *self, const char *data, Py_ssize_t len)
 {
     if (len > self->end - self->pos || self->list.nbytes > 0
-        || self->raw_appending
+        || self->raw_appending || self->threshold == PY_SSIZE_T_MAX
         || !_PyObject_IsUniquelyReferenced(self->block))
     {
         return 0;
@@ -1114,7 +1116,7 @@ buffered_write_slow(buffered *self, PyObject *obj, const char *data,
         }
         int st;
         if (self->list.nbytes == 0) {
-            /* Nothing pending: the data alone. */
+            /* Nothing pending (as unbuffered): the data alone. */
             _PyIO_Span span = {data + done, rest};
             Py_ssize_t written;
             st = buffered_write_spans(self, &span, &obj, 1, rest, 1,
@@ -1285,22 +1287,23 @@ buffered_push_back(buffered *self, const char *data, Py_ssize_t len)
    when it has room for half a block, else moved to the start of a block,
    a bigger one when they take more than half a block (half as big again,
    and a block more, up to grow_max or a block more), so that a line of
-   any length is copied a bounded number of times.  Returns the count (0
-   at EOF), WOULD_BLOCK or -1. */
+   any length is copied a bounded number of times.  Unbuffered, `size`
+   bytes more.  Returns the count (0 at EOF), WOULD_BLOCK or -1. */
 static Py_ssize_t
-buffered_fill(buffered *self, Py_ssize_t grow_max)
+buffered_fill(buffered *self, Py_ssize_t size, Py_ssize_t grow_max)
 {
     if (buffered_flush_dirty(self, 1) < 0) {
         return -1;
     }
     Py_ssize_t cap = self->capacity, unread = self->end - self->pos;
     PyObject *block = self->block;
-    if (unread == 0
+    if (unread == 0 || cap == 0
         || Py_MIN(self->stop, PyBytes_GET_SIZE(block)) - self->end
            < Py_MAX(cap / 2, 1)
         || !_PyObject_IsUniquelyReferenced(block))
     {
-        Py_ssize_t size_new = (unread == 0 ? cap + PAD
+        Py_ssize_t size_new = (cap == 0 ? unread + size
+                               : unread == 0 ? cap + PAD
                                : unread <= cap / 2 ? cap
                                : Py_MIN(unread + Py_MAX(unread / 2, cap),
                                         Py_MAX(grow_max, unread + cap)));
@@ -1325,7 +1328,7 @@ buffered_fill(buffered *self, Py_ssize_t grow_max)
         self->pos = 0;
         self->end = unread;
         self->stop = PY_SSIZE_T_MAX;
-        if (unread == 0) {
+        if (unread == 0 && cap > 0) {
             /* A fresh fill of a block of the buffer's size reads cap bytes
                to the address congruent to the raw position mod PAD (where
                the kernel copies fastest), 64-aligned if unknown. */
@@ -1404,7 +1407,7 @@ buffered_read_into(buffered *self, char *dst, Py_ssize_t len, int read1,
             break;
         }
         else {
-            n = buffered_fill(self, PY_SSIZE_T_MAX);
+            n = buffered_fill(self, rest, PY_SSIZE_T_MAX);
         }
         if (n == 0 || (n == WOULD_BLOCK && written > 0)) {
             break;
@@ -1426,7 +1429,7 @@ buffered_read_bytes(buffered *self, Py_ssize_t n, int read1)
     if (read1 && self->end == self->pos && n > 0 && n < self->capacity) {
         /* One raw read into the read-ahead, which may then be handed out
            whole. */
-        Py_ssize_t r = buffered_fill(self, PY_SSIZE_T_MAX);
+        Py_ssize_t r = buffered_fill(self, n, PY_SSIZE_T_MAX);
         if (r <= 0) {
             return (r == 0 ? Py_GetConstant(Py_CONSTANT_EMPTY_BYTES)
                     : r == WOULD_BLOCK ? Py_NewRef(Py_None) : NULL);
@@ -1602,7 +1605,7 @@ buffered_readline(buffered *self, Py_ssize_t limit)
         if (k >= 0) {
             return buffered_take(self, k);
         }
-        Py_ssize_t r = buffered_fill(self, PY_SSIZE_T_MAX);
+        Py_ssize_t r = buffered_fill(self, 0, PY_SSIZE_T_MAX);
         if (r == 0 || (r == WOULD_BLOCK && unread > self->capacity)) {
             /* EOF, or a partial line longer than the buffer size (the
                bound of every implementation) that would block. */
@@ -1977,8 +1980,12 @@ _io__Buffered_peek_impl(buffered *self, Py_ssize_t size)
     }
     PyObject *res = NULL;
     Py_ssize_t r = 1;
-    if (self->end > self->pos
-        || (r = buffered_fill(self, PY_SSIZE_T_MAX)) >= 0)
+    if (self->capacity == 0 && self->end == self->pos) {
+        /* Unbuffered: it can't look ahead without taking the bytes. */
+        buffered_unsupported(self, "peek() needs a buffer (buffer_size is 0)");
+    }
+    else if (self->end > self->pos
+             || (r = buffered_fill(self, 0, PY_SSIZE_T_MAX)) >= 0)
     {
         res = buffered_peek_held(self);
     }
@@ -2067,7 +2074,7 @@ _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
         return res;
     }
     if (n < 0) {
-        n = self->capacity;
+        n = self->capacity > 0 ? self->capacity : DEFAULT_BUFFER_SIZE;
     }
     buffered_unlock(self);
     return buffered_read_locked(self, n, 1);
@@ -2143,7 +2150,10 @@ _io__Buffered_readline_impl(buffered *self, Py_ssize_t size)
     {
         return NULL;
     }
-    PyObject *res = buffered_readline(self, size);
+    PyObject *res = (self->capacity == 0
+                     ? buffered_unsupported(self, "readline() needs a buffer "
+                                                  "(buffer_size is 0)")
+                     : buffered_readline(self, size));
     buffered_unlock_io(self);
     return res;
 }
@@ -2378,13 +2388,14 @@ buffered_repr(PyObject *op)
     return res;
 }
 
-/* Check raw supports what the class needs (BufferedRandom: seeking
-   too). */
+/* Check raw supports what the class needs (BufferedRandom: seeking too,
+   but unbuffered, which never seeks to switch direction, so that it
+   works over a terminal or socket as FileIO does). */
 static int
 buffered_check_raw(_PyIO_State *state, PyObject *raw, int raw_fileio,
-                   int readable, int writable)
+                   int readable, int writable, Py_ssize_t buffer_size)
 {
-    if (readable && writable
+    if (readable && writable && buffer_size != 0
         && _PyIOBase_check_seekable(state, raw, Py_True) == NULL)
     {
         return -1;
@@ -2412,10 +2423,10 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
 {
     _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
     int fileio = Py_IS_TYPE(raw, state->PyFileIO_Type);
-    int err = buffered_check_raw(state, raw, fileio, readable, writable);
-    if (err == 0 && buffer_size <= 0) {
-        PyErr_SetString(PyExc_ValueError,
-                        "buffer size must be strictly positive");
+    int err = buffered_check_raw(state, raw, fileio, readable, writable,
+                                 buffer_size);
+    if (err == 0 && buffer_size < 0) {
+        PyErr_SetString(PyExc_ValueError, "buffer size must not be negative");
         err = -1;
     }
     else if (err == 0 && buffer_size > PY_SSIZE_T_MAX / 2) {
@@ -2507,44 +2518,71 @@ _io_BufferedReader___init___impl(buffered *self, PyObject *raw,
     return buffered_init(self, raw, buffer_size, buffer_size, 1, 0);
 }
 
+/* BufferedWriter and BufferedRandom: buffer_size is an int (or NULL for
+   the default), or None to buffer writes without limit. */
+static int
+buffered_init_writer(buffered *self, PyObject *raw, PyObject *buffer_size,
+                     int readable)
+{
+    Py_ssize_t size = DEFAULT_BUFFER_SIZE;
+    if (buffer_size != NULL && buffer_size != Py_None) {
+        PyObject *index = _PyNumber_Index(buffer_size);
+        if (index == NULL) {
+            return -1;
+        }
+        size = PyLong_AsSsize_t(index);
+        Py_DECREF(index);
+        if (size == -1 && PyErr_Occurred()) {
+            return -1;
+        }
+    }
+    return buffered_init(self, raw, size, buffer_size == Py_None
+                         ? PY_SSIZE_T_MAX : size, readable, 1);
+}
+
 /*[clinic input]
 _io.BufferedWriter.__init__
     raw: object
-    buffer_size: Py_ssize_t(c_default="DEFAULT_BUFFER_SIZE") = DEFAULT_BUFFER_SIZE
+    buffer_size: object(c_default="NULL") = DEFAULT_BUFFER_SIZE
 
 A buffer for a writeable sequential RawIO object.
 
 The constructor creates a BufferedWriter for the given writeable raw
 stream. If the buffer_size is not given, it defaults to
-DEFAULT_BUFFER_SIZE.
+DEFAULT_BUFFER_SIZE.  With buffer_size None, writes are buffered
+without limit: they reach the raw stream only through flush(), and
+operations that need it, such as close(), seek() and detach().
 [clinic start generated code]*/
 
 static int
 _io_BufferedWriter___init___impl(buffered *self, PyObject *raw,
-                                 Py_ssize_t buffer_size)
-/*[clinic end generated code: output=c8942a020c0dee64 input=914be9b95e16007b]*/
+                                 PyObject *buffer_size)
+/*[clinic end generated code: output=8d9fb8a003624cb5 input=8c1ff83965bd109e]*/
 {
-    return buffered_init(self, raw, buffer_size, buffer_size, 0, 1);
+    return buffered_init_writer(self, raw, buffer_size, 0);
 }
 
 /*[clinic input]
 _io.BufferedRandom.__init__
     raw: object
-    buffer_size: Py_ssize_t(c_default="DEFAULT_BUFFER_SIZE") = DEFAULT_BUFFER_SIZE
+    buffer_size: object(c_default="NULL") = DEFAULT_BUFFER_SIZE
 
 A buffered interface to random access streams.
 
 The constructor creates a reader and writer for a seekable stream,
 raw, given in the first argument. If the buffer_size is omitted it
-defaults to DEFAULT_BUFFER_SIZE.
+defaults to DEFAULT_BUFFER_SIZE.  With buffer_size None, writes are
+buffered without limit: they reach the raw stream only through flush(),
+and operations that need it, such as close(), seek(), reads and
+detach(); reads still fill blocks of DEFAULT_BUFFER_SIZE.
 [clinic start generated code]*/
 
 static int
 _io_BufferedRandom___init___impl(buffered *self, PyObject *raw,
-                                 Py_ssize_t buffer_size)
-/*[clinic end generated code: output=d3d64eb0f64e64a3 input=a4e818fb86d0e50c]*/
+                                 PyObject *buffer_size)
+/*[clinic end generated code: output=294b8035a5222c1c input=df212a8fc78925b5]*/
 {
-    return buffered_init(self, raw, buffer_size, buffer_size, 1, 1);
+    return buffered_init_writer(self, raw, buffer_size, 1);
 }
 
 /*[clinic input]

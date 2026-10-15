@@ -119,7 +119,7 @@ module _io
 _io.open
     file: object
     mode: str = "r"
-    buffering: int = -1
+    buffering as buffering_obj: object(c_default="NULL") = -1
     encoding: str(accept={str, NoneType}) = None
     errors: str(accept={str, NoneType}) = None
     newline: str(accept={str, NoneType}) = None
@@ -244,11 +244,27 @@ opened in a binary mode.
 
 static PyObject *
 _io_open_impl(PyObject *module, PyObject *file, const char *mode,
-              int buffering, const char *encoding, const char *errors,
-              const char *newline, int closefd, PyObject *opener)
-/*[clinic end generated code: output=aefafc4ce2b46dc0 input=b3cefa70bef404b3]*/
+              PyObject *buffering_obj, const char *encoding,
+              const char *errors, const char *newline, int closefd,
+              PyObject *opener)
+/*[clinic end generated code: output=7a5ec03cf5c02f7e input=911c8b986ebcf4fc]*/
 {
     size_t i;
+
+    /* buffering=None: buffer writes without limit, which only the
+       _io._nibbler classes do (with _io._set_open_impl("_nibbler")).  Like
+       a fixed size, it means no line buffering. */
+    int buffering = -1;
+    int unlimited = buffering_obj == Py_None;
+    if (unlimited) {
+        buffering = DEFAULT_BUFFER_SIZE;
+    }
+    else if (buffering_obj != NULL) {
+        buffering = PyLong_AsInt(buffering_obj);
+        if (buffering == -1 && PyErr_Occurred()) {
+            return NULL;
+        }
+    }
 
     int creating = 0, reading = 0, writing = 0, appending = 0, updating = 0;
     int text = 0, binary = 0;
@@ -257,6 +273,8 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
     int line_buffering, is_number, isatty = 0;
 
     PyObject *raw, *modeobj = NULL, *buffer, *wrapper, *result = NULL, *path_or_fd = NULL;
+    /* With buffering=None, the buffered class (see below). */
+    PyObject *unlimited_class = NULL;
 
     is_number = PyNumber_Check(file);
 
@@ -363,8 +381,32 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
         }
     }
 
-    /* Create the Raw file stream */
     _PyIO_State *state = get_io_state(module);
+    if (unlimited) {
+        /* Check before the file is opened (and maybe truncated), and use
+           the class checked: _io._set_open_impl() may replace it
+           meanwhile. */
+        int writable = creating || writing || appending || updating;
+        unlimited_class = iomodule_get_open_type(
+            updating ? &state->open_random_type : &state->open_writer_type);
+        if (unlimited_class == NULL
+            || !_PyIO_is_nibbler_buffered_type(
+                (PyTypeObject *)unlimited_class))
+        {
+            PyErr_SetString(PyExc_TypeError,
+                            "buffering=None (unlimited write buffering) "
+                            "needs open() to use _io._nibbler");
+            goto error;
+        }
+        if (!writable) {
+            PyErr_SetString(PyExc_ValueError,
+                            "buffering=None (unlimited write buffering) "
+                            "needs a writable mode");
+            goto error;
+        }
+    }
+
+    /* Create the Raw file stream */
     {
         PyObject *RawIO_class = (PyObject *)state->PyFileIO_Type;
 #ifdef HAVE_WINDOWS_CONSOLE_IO
@@ -460,14 +502,18 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
             goto error;
         }
 
-        PyObject *Buffered_class = iomodule_get_open_type(slot);
+        PyObject *Buffered_class = (unlimited_class != NULL
+                                    ? Py_NewRef(unlimited_class)
+                                    : iomodule_get_open_type(slot));
+        Py_CLEAR(unlimited_class);
         if (Buffered_class == NULL) {
             /* Only after the module was cleared. */
             PyErr_SetString(PyExc_RuntimeError,
                             "open() is not available any more");
             goto error;
         }
-        PyObject *bufsize = PyLong_FromLong(buffering);
+        PyObject *bufsize = (unlimited ? Py_NewRef(Py_None)
+                                       : PyLong_FromLong(buffering));
         if (bufsize == NULL) {
             Py_DECREF(Buffered_class);
             goto error;
@@ -525,6 +571,7 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
     }
     Py_XDECREF(path_or_fd);
     Py_XDECREF(modeobj);
+    Py_XDECREF(unlimited_class);
     return NULL;
 }
 

@@ -519,11 +519,13 @@ PyDoc_STRVAR(_io_BufferedWriter___init____doc__,
 "\n"
 "The constructor creates a BufferedWriter for the given writeable raw\n"
 "stream. If the buffer_size is not given, it defaults to\n"
-"DEFAULT_BUFFER_SIZE.");
+"DEFAULT_BUFFER_SIZE.  With buffer_size None, writes are buffered\n"
+"without limit: they reach the raw stream only through flush(), and\n"
+"operations that need it, such as close(), seek() and detach().");
 
 static int
 _io_BufferedWriter___init___impl(buffered *self, PyObject *raw,
-                                 Py_ssize_t buffer_size);
+                                 PyObject *buffer_size);
 
 static int
 _io_BufferedWriter___init__(PyObject *self, PyObject *args, PyObject *kwargs)
@@ -561,7 +563,7 @@ _io_BufferedWriter___init__(PyObject *self, PyObject *args, PyObject *kwargs)
     Py_ssize_t nargs = PyTuple_GET_SIZE(args);
     Py_ssize_t noptargs = nargs + (kwargs ? PyDict_GET_SIZE(kwargs) : 0) - 1;
     PyObject *raw;
-    Py_ssize_t buffer_size = DEFAULT_BUFFER_SIZE;
+    PyObject *buffer_size = NULL;
 
     fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser,
             /*minpos*/ 1, /*maxpos*/ 2, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
@@ -572,18 +574,7 @@ _io_BufferedWriter___init__(PyObject *self, PyObject *args, PyObject *kwargs)
     if (!noptargs) {
         goto skip_optional_pos;
     }
-    {
-        Py_ssize_t ival = -1;
-        PyObject *iobj = _PyNumber_Index(fastargs[1]);
-        if (iobj != NULL) {
-            ival = PyLong_AsSsize_t(iobj);
-            Py_DECREF(iobj);
-        }
-        if (ival == -1 && PyErr_Occurred()) {
-            goto exit;
-        }
-        buffer_size = ival;
-    }
+    buffer_size = fastargs[1];
 skip_optional_pos:
     return_value = _io_BufferedWriter___init___impl((buffered *)self, raw, buffer_size);
 
@@ -599,11 +590,14 @@ PyDoc_STRVAR(_io_BufferedRandom___init____doc__,
 "\n"
 "The constructor creates a reader and writer for a seekable stream,\n"
 "raw, given in the first argument. If the buffer_size is omitted it\n"
-"defaults to DEFAULT_BUFFER_SIZE.");
+"defaults to DEFAULT_BUFFER_SIZE.  With buffer_size None, writes are\n"
+"buffered without limit: they reach the raw stream only through flush(),\n"
+"and operations that need it, such as close(), seek(), reads and\n"
+"detach(); reads still fill blocks of DEFAULT_BUFFER_SIZE.");
 
 static int
 _io_BufferedRandom___init___impl(buffered *self, PyObject *raw,
-                                 Py_ssize_t buffer_size);
+                                 PyObject *buffer_size);
 
 static int
 _io_BufferedRandom___init__(PyObject *self, PyObject *args, PyObject *kwargs)
@@ -641,7 +635,7 @@ _io_BufferedRandom___init__(PyObject *self, PyObject *args, PyObject *kwargs)
     Py_ssize_t nargs = PyTuple_GET_SIZE(args);
     Py_ssize_t noptargs = nargs + (kwargs ? PyDict_GET_SIZE(kwargs) : 0) - 1;
     PyObject *raw;
-    Py_ssize_t buffer_size = DEFAULT_BUFFER_SIZE;
+    PyObject *buffer_size = NULL;
 
     fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser,
             /*minpos*/ 1, /*maxpos*/ 2, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
@@ -652,18 +646,7 @@ _io_BufferedRandom___init__(PyObject *self, PyObject *args, PyObject *kwargs)
     if (!noptargs) {
         goto skip_optional_pos;
     }
-    {
-        Py_ssize_t ival = -1;
-        PyObject *iobj = _PyNumber_Index(fastargs[1]);
-        if (iobj != NULL) {
-            ival = PyLong_AsSsize_t(iobj);
-            Py_DECREF(iobj);
-        }
-        if (ival == -1 && PyErr_Occurred()) {
-            goto exit;
-        }
-        buffer_size = ival;
-    }
+    buffer_size = fastargs[1];
 skip_optional_pos:
     return_value = _io_BufferedRandom___init___impl((buffered *)self, raw, buffer_size);
 
@@ -768,4 +751,4 @@ skip_optional:
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=591a7e130e43b6ea input=a9049054013a1b77]*/
+/*[clinic end generated code: output=32934a42b30c9823 input=a9049054013a1b77]*/
