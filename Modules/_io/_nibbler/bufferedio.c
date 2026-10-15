@@ -1025,23 +1025,20 @@ buffered_sync(buffered *self, int unlocked)
  * Writing
  */
 
-/* Make the raised OSError or MemoryError say that n bytes of write()'s
-   data were accepted (written, or kept pending). */
+/* Make the raised exception, whatever its type (KeyboardInterrupt from a
+   signal handler too), say that n bytes of write()'s data were accepted
+   (written, or kept pending): writing the rest again duplicates nothing. */
 Py_NO_INLINE static void
 buffered_set_written(Py_ssize_t n)
 {
     PyObject *exc = PyErr_GetRaisedException();
-    if (PyErr_GivenExceptionMatches(exc, PyExc_OSError)
-        || PyErr_GivenExceptionMatches(exc, PyExc_MemoryError))
+    PyObject *v = PyLong_FromSsize_t(n);
+    if (v == NULL
+        || PyObject_SetAttrString(exc, "characters_written", v) < 0)
     {
-        PyObject *v = PyLong_FromSsize_t(n);
-        if (v == NULL
-            || PyObject_SetAttrString(exc, "characters_written", v) < 0)
-        {
-            PyErr_Clear();
-        }
-        Py_XDECREF(v);
+        PyErr_Clear();
     }
+    Py_XDECREF(v);
     PyErr_SetRaisedException(exc);
 }
 
