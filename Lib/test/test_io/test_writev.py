@@ -1,13 +1,15 @@
-"""Tests for the private vectored write of raw streams,
-RawIOBase._writev()."""
+"""Tests for the private vectored write of raw streams, RawIOBase._writev(),
+and its use by the _io._nibbler buffered classes."""
 import errno
 import io
 import socket
+import threading
 import unittest
 
 import _pyio as pyio
+from _io import _nibbler
 
-from test.support import os_helper
+from test.support import os_helper, threading_helper
 from test.support.script_helper import assert_python_ok
 
 
@@ -171,6 +173,134 @@ class SocketIOWritevTest(unittest.TestCase):
     def test_not_writable(self):
         f = socket.SocketIO(self.a, "r")
         self.assertRaises(io.UnsupportedOperation, f._writev, [b"x"])
+
+    @threading_helper.requires_working_threading()
+    def test_buffered_large_writes(self):
+        # Through _io._nibbler.BufferedWriter, whose pieces go to one
+        # sendmsg(): partial sends of a blocking socket with a small buffer
+        # lose and reorder nothing.
+        self.a.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        received = bytearray()
+
+        def reader():
+            while chunk := self.b.recv(1 << 16):
+                received.extend(chunk)
+
+        t = threading.Thread(target=reader)
+        t.start()
+        try:
+            f = _nibbler.BufferedWriter(socket.SocketIO(self.a, "w"), 8192)
+            expected = bytearray()
+            for i in range(200):
+                data = bytes([i % 251]) * (17 + 997 * (i % 7))
+                f.write(data)
+                expected += data
+            f.flush()
+            self.a.shutdown(socket.SHUT_WR)
+        finally:
+            t.join()
+        self.assertEqual(bytes(received), bytes(expected))
+
+
+class Recorder(io.RawIOBase):
+    """Records the write() and _writev() calls; _writev() takes at most
+    the next step's bytes, then may raise."""
+
+    def __init__(self, steps=()):
+        self.out = bytearray()
+        self.writes = 0
+        self.writevs = []
+        self.steps = list(steps)
+
+    def writable(self):
+        return True
+
+    def _take(self, data):
+        step = self.steps.pop(0) if self.steps else len(data)
+        if isinstance(step, BaseException):
+            raise step
+        n = min(step, len(data))
+        self.out += data[:n]
+        return n
+
+    def write(self, b):
+        self.writes += 1
+        return self._take(bytes(b))
+
+    def _writev(self, buffers):
+        buffers = [bytes(b) for b in buffers]
+        self.writevs.append([len(b) for b in buffers])
+        return self._take(b"".join(buffers))
+
+
+class NibblerWritevTest(unittest.TestCase):
+
+    def test_one_call_per_batch(self):
+        # Large writes kept by reference go out together in one _writev().
+        raw = Recorder()
+        f = _nibbler.BufferedWriter(raw, 8192)
+        parts = [bytes([i]) * 3000 for i in range(3)]
+        for p in parts:
+            f.write(p)
+        # The third didn't fit: the two pending and it, in one call.
+        self.assertEqual(raw.writevs, [[3000, 3000, 3000]])
+        self.assertEqual(raw.writes, 0)
+        self.assertEqual(raw.out, b"".join(parts))
+
+    def test_partial_writev_retried(self):
+        # A partial _writev(), also inside a piece, is retried from there.
+        raw = Recorder([1000, 2500, 1])
+        f = _nibbler.BufferedWriter(raw, 8192)
+        parts = [bytes([i]) * 3000 for i in range(3)]
+        for p in parts:
+            f.write(p)
+        f.flush()
+        self.assertEqual(raw.out, b"".join(parts))
+        self.assertEqual(raw.writevs[0], [3000, 3000, 3000])
+        self.assertEqual(raw.writevs[1], [2000, 3000, 3000])
+        self.assertEqual(raw.writevs[2], [2500, 3000])
+        self.assertEqual(raw.writevs[3], [2499, 3000])
+
+    def test_partial_writev_then_error(self):
+        # write() raising after a partial _writev() of its data: the rest
+        # is kept as far as it fits, and characters_written counts the
+        # data written or kept.
+        raw = Recorder([3500, OSError(errno.EIO, "EIO")])
+        f = _nibbler.BufferedWriter(raw, 8192)
+        a = b"a" * 3000
+        b = b"b" * 6000
+        f.write(a)
+        with self.assertRaises(OSError) as cm:
+            f.write(b)
+        # 500 bytes of b were written; 8192 more fit in the buffer.
+        self.assertEqual(cm.exception.characters_written, 500 + 5500)
+        self.assertEqual(raw.out, a + b[:500])
+        f.flush()
+        self.assertEqual(raw.out, a + b)
+
+    def test_default_writev_not_used(self):
+        # A raw stream with only RawIOBase's _writev() (a loop of write())
+        # gets small and large writes joined in blocks instead.
+        class WriteOnly(io.RawIOBase):
+            def __init__(self):
+                self.calls = 0
+                self.out = bytearray()
+            def writable(self):
+                return True
+            def write(self, b):
+                self.calls += 1
+                self.out += b
+                return len(b)
+        raw = WriteOnly()
+        f = _nibbler.BufferedWriter(raw, 8192)
+        expected = bytearray()
+        for i in range(100):
+            data = b"s" * 16 if i % 2 else bytes([i]) * 600
+            f.write(data)
+            expected += data
+        f.flush()
+        self.assertEqual(raw.out, expected)
+        self.assertLessEqual(raw.calls, len(expected) // 8192 + 2)
 
 
 if __name__ == "__main__":

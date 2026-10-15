@@ -13,6 +13,9 @@
     <Filter Include="Modules\_io">
       <UniqueIdentifier>{8787c5bb-bab6-4586-a42e-4a27c7b3ffb6}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Modules\_io\_nibbler">
+      <UniqueIdentifier>{729c4d89-6611-4628-bc26-a73ca31837ae}</UniqueIdentifier>
+    </Filter>
     <Filter Include="Modules\zlib">
       <UniqueIdentifier>{5d6d2d6c-9e61-4a1d-b0b2-5cc2f446d69e}</UniqueIdentifier>
     </Filter>
@@ -269,6 +272,9 @@
     </ClInclude>
     <ClInclude Include="..\Modules\_io\_iomodule.h">
       <Filter>Modules\_io</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Modules\_io\_nibbler\nibbler.h">
+      <Filter>Modules\_io\_nibbler</Filter>
     </ClInclude>
     <ClInclude Include="..\Modules\cjkcodecs\alg_jisx0201.h">
       <Filter>Modules\cjkcodecs</Filter>
@@ -1177,6 +1183,9 @@
     </ClCompile>
     <ClCompile Include="..\Modules\_io\bufferedio.c">
       <Filter>Modules\_io</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Modules\_io\_nibbler\bufferedio.c">
+      <Filter>Modules\_io\_nibbler</Filter>
     </ClCompile>
     <ClCompile Include="..\Modules\_io\iobase.c">
       <Filter>Modules\_io</Filter>

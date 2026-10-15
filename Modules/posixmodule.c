@@ -796,6 +796,9 @@ PyOS_AfterFork_Child(void)
     // may call destructors.
     PyThreadState *list = _PyThreadState_RemoveExcept(tstate);
     _PyEval_StartTheWorldAll(&_PyRuntime);
+    // Before any Python code (destructors of the dead threads' objects
+    // too), which may use the buffered objects those threads held.
+    _PyIO_AfterForkChild();
     _PyThreadState_DeleteList(list, /*is_after_fork=*/1);
 
     _PyImport_ReInitLock(tstate->interp);
