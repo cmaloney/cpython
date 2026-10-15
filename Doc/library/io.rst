@@ -1329,11 +1329,11 @@ Errors other than "would block" (such as a timeout or :data:`errno.EIO`)
 are raised.  When the :meth:`~BufferedIOBase.write` of a buffered stream
 raises one after part of the data was written, as much of the rest as fits
 in the buffer stays buffered, for :meth:`~BufferedWriter.flush` to write.
-If the error is an :exc:`OSError`, its
-:attr:`~BlockingIOError.characters_written` attribute is then set to the
+The exception, whatever its type (:exc:`KeyboardInterrupt` included), then
+gets a :attr:`~BlockingIOError.characters_written` attribute set to the
 number of bytes taken from the data (written or buffered): the rest was not
-taken and should be written again.  When the error has no such attribute
-because none of the data was written, none of it was taken.
+taken and should be written again.  When none of the data was written, none
+of it was taken, and :meth:`!write` sets no attribute.
 
 .. versionchanged:: next
    Buffered :meth:`~BufferedIOBase.read1` and :meth:`~BufferedReader.peek`

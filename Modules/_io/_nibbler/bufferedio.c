@@ -234,9 +234,10 @@ typedef struct {
     Py_ssize_t stop;
     morsel_list list;
     Py_ssize_t inflight;
-    /* The raw position, kept for an exact FileIO of a regular file (not
-       in append mode) as _io's abs_pos is, and also used by tell() (which
-       in _io always asks the raw stream); negative when unknown. */
+    /* The raw position, kept for an exact FileIO of a regular file that
+       it opened itself (not in append mode) as _io's abs_pos is, and also
+       used by tell() (which in _io always asks the raw stream); negative
+       when unknown. */
     Py_off_t raw_pos;
     /* raw is exactly a FileIO: called through its C functions (instance
        attributes overriding readinto, write or readall are not called,

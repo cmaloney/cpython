@@ -55,8 +55,8 @@ nibbler_mutex_is_mine(nibbler_mutex *m)
 
 /* The first lock of m in the child of a fork: release it from a holder
    gone in the fork.  (The generation is loaded with acquire, so that a
-   thread finding it current also sees the mutex reinitialized.)  Returns 1 if this thread did that check (the first
-   in the child). */
+   thread finding it current also sees the mutex reinitialized.)  Returns 1
+   if this thread did that check (the first in the child). */
 Py_NO_INLINE static int
 nibbler_mutex_after_fork(nibbler_mutex *m, uint64_t gen)
 {

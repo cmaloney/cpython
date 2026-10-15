@@ -1732,7 +1732,11 @@ decoder_more(textio *self, tstore *st, int *stop, int taken,
     }
     bytes = chars ? PyBytes_FromStringAndSize(p, used) : NULL;
     int r = -1;
-    if ((bytes != NULL || exc != NULL) && store_begin(st, 1) == 0) {
+    /* (The decoder may have detached the text: the buffer handed out gets
+       no more calls.) */
+    if ((bytes != NULL || exc != NULL) && textio_attached(self) == 0
+        && store_begin(st, 1) == 0)
+    {
         r = 0;
         if (st->block != block || st->p != p) {
             /* Others took bytes meanwhile: none taken, the decoder back. */
@@ -2111,7 +2115,8 @@ decoder_reread(textio *self, Py_off_t p)
     }
     if (b != NULL) {
         Py_DECREF(b);
-        PyErr_SetString(PyExc_OSError, "could not read the text's bytes again");
+        PyErr_SetString(PyExc_OSError,
+                        "could not read the text's bytes again");
     }
     PyObject *exc = PyErr_GetRaisedException();
     res = _PyObject_CallMethod(self->conf->buffer, &_Py_ID(seek), "(O&)",

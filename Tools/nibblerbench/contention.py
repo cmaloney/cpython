@@ -153,7 +153,8 @@ def main():
             print(f"{args.impl} {args.op} {args.mode}{label} threads={n:3d}  "
                   f"{med * 1000:9.1f} ms  "
                   f"{n * per_thread / med / 1e6:6.2f} Mlines/s  "
-                  f"(min {min(times) * 1000:.1f}, max {max(times) * 1000:.1f})")
+                  f"(min {min(times) * 1000:.1f}, "
+                  f"max {max(times) * 1000:.1f})")
     finally:
         os.unlink(path)
 

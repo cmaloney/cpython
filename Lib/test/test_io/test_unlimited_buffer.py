@@ -73,8 +73,9 @@ class UnlimitedTest(unittest.TestCase):
         """An unlimited BufferedWriter (BufferedRandom with '+') on
         self.path."""
         raw = _io.FileIO(self.path, mode)
-        cls = _nibbler.BufferedRandom if '+' in mode else _nibbler.BufferedWriter
-        return cls(raw, buffer_size=None)
+        if '+' in mode:
+            return _nibbler.BufferedRandom(raw, buffer_size=None)
+        return _nibbler.BufferedWriter(raw, buffer_size=None)
 
     def fill(self, f, nbytes):
         """Write nbytes in writes of mixed sizes; returns what was
@@ -243,7 +244,8 @@ class UnlimitedTest(unittest.TestCase):
     def test_trigger_read_random(self):
         for read in (lambda f: f.read(), lambda f: f.read(1),
                      lambda f: f.read1(), lambda f: f.peek(),
-                     lambda f: f.readline(), lambda f: f.readinto(bytearray(5))):
+                     lambda f: f.readline(),
+                     lambda f: f.readinto(bytearray(5))):
             with self.subTest(read=read):
                 self.check_trigger(read, 'w+b')
 

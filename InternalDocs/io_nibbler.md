@@ -92,7 +92,7 @@ I/O releases it, takes the role, takes the lock again and looks again.
 | other `write()`, `flush()` | yes | yes | the lock is released around the raw write (`buffered_write_spans()`) |
 | `read(n)`, `read1()`, `readline()`, `peek()` hitting the read-ahead | – | yes | |
 | other reads, `readinto()`, `peek()` that fills | yes | yes | raw reads are made with both held |
-| `seek()` / `tell()` inside the read-ahead (known raw position) | – | yes | |
+| `seek()` inside the read-ahead (known raw position) | – | yes | |
 | other `seek()`, `tell()`, `truncate()` | yes | yes | raw calls with both held |
 | `close()`, `detach()`, `__init__()` | yes | yes | flush with both held |
 | `fileno()`, `isatty()`, `seekable()`, `name`, `mode`, `closed`, `raw` | – | – | a reference to raw, taken atomically |

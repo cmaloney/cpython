@@ -139,7 +139,8 @@ def main():
             mib = args.mib * args.threads
             print(f"{args.impl} {op:8s} threads={args.threads:2d}  "
                   f"{med * 1000:8.1f} ms  {mib / med:8.1f} MiB/s  "
-                  f"(min {min(times) * 1000:.1f}, max {max(times) * 1000:.1f})")
+                  f"(min {min(times) * 1000:.1f}, "
+                  f"max {max(times) * 1000:.1f})")
     finally:
         for p in paths:
             if os.path.exists(p):

@@ -2859,6 +2859,30 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
             check(B("hello\n".encode("utf-16")), "seek",
                   lambda t: t.seek(1 << 128), "utf-16")
 
+    def test_nested_detach_in_decoder(self):
+        # A Python decoder detaches the text: the read raises ValueError,
+        # and the bytes it didn't take stay in the buffer handed out.  (Not
+        # seekable: else the read refuses the detach().)
+        got = []
+        class Dec(codecs.getincrementaldecoder("utf-8")):
+            def decode(self, b, final=False):
+                if not got:
+                    got.append(t.detach())
+                return super().decode(b, final)
+        def search(name):
+            if name == "detach_in_decode_test":
+                return codecs.CodecInfo(name=name, encode=None, decode=None,
+                                        incrementaldecoder=Dec)
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        class R(self.BytesIO):
+            def seekable(self):
+                return False
+        t = self.TextIOWrapper(self.BufferedReader(R(b"line1\nline2\n")),
+                               encoding="detach_in_decode_test")
+        self.assertRaisesRegex(ValueError, "detached", t.readline)
+        self.assertEqual(got[0].read(), b"line1\nline2\n")
+
     def test_nested_detach_in_close(self):
         # close() doesn't close a buffer that a nested detach() (from the
         # encoder's final encode() or the buffer's flush()) handed out.
@@ -3059,7 +3083,8 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
         codecs.register(search)
         self.addCleanup(codecs.unregister, search)
         raw = self.BytesIO()
-        t = self.TextIOWrapper(self.BufferedWriter(raw), encoding="numbering_test")
+        t = self.TextIOWrapper(self.BufferedWriter(raw),
+                               encoding="numbering_test")
         def write(s):
             for _ in range(200):
                 t.write(s)
