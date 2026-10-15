@@ -2916,6 +2916,62 @@ class ConcurrentAccessTest:
                 release.set()
         self.assertEqual(raw.out, b"text")
 
+    @threading_helper.requires_working_threading()
+    def test_partly_written_record_stays_whole(self):
+        # A write going out by itself writes part of it, then the raw
+        # stream would block or fails, after another thread wrote
+        # meanwhile (_io._nibbler doesn't hold the lock in raw calls): what
+        # is kept of the rest is not put after the other thread's data.
+        import io
+        nibbler = self.is_nibbler
+        for error in (None, OSError(errno.EIO, "EIO")):
+            in_write = threading.Event()
+            other_done = threading.Event()
+
+            class Raw(io.RawIOBase):
+                out = b""
+                plan = [75, error]
+                def writable(self):
+                    return True
+                def write(self, b):
+                    step = self.plan.pop(0) if self.plan else len(b)
+                    if step == 75:
+                        in_write.set()
+                        if nibbler:
+                            other_done.wait(support.SHORT_TIMEOUT)
+                    if isinstance(step, BaseException):
+                        raise step
+                    if step is None:
+                        return None
+                    self.out += bytes(b[:step])
+                    return step
+
+            raw = Raw()
+            f = self.BufferedWriter(raw, 100)
+
+            def other():
+                in_write.wait(support.SHORT_TIMEOUT)
+                f.write(b"BBBB")
+                other_done.set()
+
+            accepted = 150
+            with threading_helper.start_threads(
+                    [threading.Thread(target=other)]):
+                try:
+                    f.write(b"X" * 150)
+                except OSError as e:
+                    accepted = getattr(e, "characters_written", None)
+            if raw.plan:
+                # _io meets the error only writing out its buffer.
+                self.assertRaises(OSError, f.flush)
+            f.flush()
+            with self.subTest(error=error):
+                xs = raw.out.replace(b"BBBB", b"", 1)
+                self.assertEqual(xs, b"X" * len(xs))
+                self.assertIn(raw.out, (xs + b"BBBB", b"BBBB" + xs))
+                if accepted is not None:
+                    self.assertEqual(len(xs), accepted)
+
     def test_small_writes_racing_other_calls(self):
         # Small writes stay whole and in order per thread while other
         # threads flush(), tell(), seek(), read() and close(); none that
