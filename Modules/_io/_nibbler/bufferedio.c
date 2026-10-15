@@ -1684,6 +1684,7 @@ buffered_clear(PyObject *op)
     buffered *self = buffered_cast(op);
     Py_XDECREF(buffered_swap_raw(self, NULL));
     Py_CLEAR(self->dict);
+    morsels_clear(&self->list);
     return 0;
 }
 
@@ -1711,6 +1712,10 @@ buffered_traverse(PyObject *op, visitproc visit, void *arg)
     Py_VISIT(Py_TYPE(self));
     Py_VISIT(self->raw);
     Py_VISIT(self->dict);
+    /* The stash (or pending writes). */
+    for (Py_ssize_t i = self->list.head; i < self->list.count; i++) {
+        Py_VISIT(self->list.items[i].obj);
+    }
     return 0;
 }
 

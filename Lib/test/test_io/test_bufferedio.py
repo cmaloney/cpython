@@ -2447,6 +2447,29 @@ class NibblerBufferedReaderTest(NibblerMixin, CBufferedReaderTest):
         self.assertEqual(line, b'b' * 15 + b'c' * 484 + b'\n')
         self.assertEqual(hash(line), hash(bytes(bytearray(line))))
 
+    def test_stash_in_reference_cycle(self):
+        # Data kept after a raw read failed is seen by the garbage
+        # collector: a cycle through it is collected.
+        import gc
+        class Chunk(bytes):
+            pass
+        class Raw(self.RawIOBase):
+            def readable(self):
+                return True
+            def read(self, size=-1):
+                if hasattr(self, 'done'):
+                    raise OSError('boom')
+                self.done = chunk = Chunk(b'data')
+                chunk.bufio = bufio
+                return chunk
+        bufio = self.tp(Raw())
+        self.assertRaises(OSError, bufio.read)
+        ref = weakref.ref(bufio)
+        bufio.raw.done = None
+        del bufio
+        gc.collect()
+        self.assertIsNone(ref())
+
     def test_reentrant_call_with_failing_repr(self):
         # A reentrant call raises RuntimeError also when the object's
         # repr() (in the message) raises.
