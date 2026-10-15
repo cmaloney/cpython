@@ -1720,6 +1720,7 @@ extern "C" {
     INIT_ID(digest_size), \
     INIT_ID(digestmod), \
     INIT_ID(dir_fd), \
+    INIT_ID(direct), \
     INIT_ID(discard), \
     INIT_ID(dispatch_table), \
     INIT_ID(displayhook), \
@@ -1900,6 +1901,7 @@ extern "C" {
     INIT_ID(limit), \
     INIT_ID(line), \
     INIT_ID(line_buffering), \
+    INIT_ID(line_flush), \
     INIT_ID(lineno), \
     INIT_ID(little), \
     INIT_ID(lo), \
