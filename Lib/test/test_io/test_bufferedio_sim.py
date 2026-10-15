@@ -1498,7 +1498,7 @@ class NibblerSlowDeviceTest(NibblerMixin, SlowDeviceTest, CTestCase):
     pass
 
 
-# --- Text over a buffered object ------------------------------------------------
+# --- Text over a buffered object ---------------------------------------------
 
 class TextTest:
     """TextIOWrapper over a buffered object."""

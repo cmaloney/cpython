@@ -2111,7 +2111,8 @@ decoder_reread(textio *self, Py_off_t p)
     }
     if (b != NULL) {
         Py_DECREF(b);
-        PyErr_SetString(PyExc_OSError, "could not read the text's bytes again");
+        PyErr_SetString(PyExc_OSError,
+                        "could not read the text's bytes again");
     }
     PyObject *exc = PyErr_GetRaisedException();
     res = _PyObject_CallMethod(self->conf->buffer, &_Py_ID(seek), "(O&)",

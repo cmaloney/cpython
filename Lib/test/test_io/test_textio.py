@@ -3059,7 +3059,8 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
         codecs.register(search)
         self.addCleanup(codecs.unregister, search)
         raw = self.BytesIO()
-        t = self.TextIOWrapper(self.BufferedWriter(raw), encoding="numbering_test")
+        t = self.TextIOWrapper(self.BufferedWriter(raw),
+                               encoding="numbering_test")
         def write(s):
             for _ in range(200):
                 t.write(s)
