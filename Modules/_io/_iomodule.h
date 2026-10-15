@@ -141,6 +141,8 @@ extern int _PyIONibbler_write(PyObject *buffered, PyObject *obj,
                               const char *data, Py_ssize_t len);
 /* Is the raw stream closed?  1, 0, or -1. */
 extern int _PyIONibbler_closed(PyObject *buffered);
+/* Is the current context in a _gather() block of buffered?  1 or 0. */
+extern int _PyIONibbler_gathering(PyObject *buffered);
 
 /* Shortcut to the core of the IncrementalNewlineDecoder.decode method */
 extern PyObject *_PyIncrementalNewlineDecoder_decode(
