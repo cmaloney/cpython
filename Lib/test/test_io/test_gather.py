@@ -1057,6 +1057,7 @@ class GatherTest(unittest.TestCase):
     # flush() and end, without waiting for other contexts' pending writes.
 
     @threading_helper.requires_working_threading()
+    @requires_writev
     def test_direct_mode_entry(self):
         with open(self.path, 'wb') as f:
             f.write(b'p')
@@ -1079,6 +1080,7 @@ class GatherTest(unittest.TestCase):
             self.assertEqual(self.read(), b'pBCD')
         self.assertEqual(self.read(), b'pBCDo')
 
+    @requires_writev
     def test_direct_mode_limit(self):
         with open(self.path, 'wb', buffering=10) as f:
             with f._gather(direct=True):
@@ -1103,6 +1105,7 @@ class GatherTest(unittest.TestCase):
         self.assertEqual(self.read(), b'0123456789' + b'x' * 25 + b'abcdef'
                          + b'g' * 100)
 
+    @requires_writev
     def test_line_flush(self):
         for direct in (False, True):
             with open(self.path, 'wb') as f:
@@ -1129,6 +1132,7 @@ class GatherTest(unittest.TestCase):
                              + b'0123456789' * 10 + b'z\ntail')
 
     @threading_helper.requires_working_threading()
+    @requires_writev
     def test_line_flush_pending(self):
         # Without direct, lines go after the pending writes, waiting for
         # the lock; with it, before them.
