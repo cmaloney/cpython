@@ -3605,13 +3605,15 @@ takes effect at its end.  Reads, seek() and truncate() in the
 context add what it gathered first; close(), detach() and
 __init__(), from any context, what every block gathered.  A block
 on the same stream nested in one gathers into it, with the outer
-block's limit.
+block's limit and mode (direct, line_flush).
 
 A direct block is for the life of a thread or task: it writes out
 the buffered data when it starts, then, at its limit (by default
 the buffer size), flush() and its end, writes what it gathered
 directly to a regular file (of a BufferedWriter of a FileIO) without
-waiting for what other contexts buffered meanwhile.  With
+waiting for what other contexts buffered meanwhile: their writes,
+even ones known to come first by other means, may land after it.
+tell() inside it doesn't say where its data will land.  With
 line_flush, complete lines are written out after each write
 containing a newline: that way in a direct block, else after what
 is buffered.
@@ -3625,7 +3627,7 @@ the stream is closed, with a ResourceWarning.  Experimental.
 static PyObject *
 _io__Buffered__gather_impl(buffered *self, PyObject *limit_obj, int direct,
                            int line_flush)
-/*[clinic end generated code: output=cc170613f177a7e5 input=b1397ad5bb9eb98b]*/
+/*[clinic end generated code: output=cc170613f177a7e5 input=2fd2114c41ce0e9f]*/
 {
     Py_ssize_t limit = (!direct ? GATHER_LIMIT : Py_MAX(1,
                         FT_ATOMIC_LOAD_SSIZE_RELAXED(self->capacity)));

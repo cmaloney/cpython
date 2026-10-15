@@ -677,13 +677,15 @@ PyDoc_STRVAR(_io__Buffered__gather__doc__,
 "context add what it gathered first; close(), detach() and\n"
 "__init__(), from any context, what every block gathered.  A block\n"
 "on the same stream nested in one gathers into it, with the outer\n"
-"block\'s limit.\n"
+"block\'s limit and mode (direct, line_flush).\n"
 "\n"
 "A direct block is for the life of a thread or task: it writes out\n"
 "the buffered data when it starts, then, at its limit (by default\n"
 "the buffer size), flush() and its end, writes what it gathered\n"
 "directly to a regular file (of a BufferedWriter of a FileIO) without\n"
-"waiting for what other contexts buffered meanwhile.  With\n"
+"waiting for what other contexts buffered meanwhile: their writes,\n"
+"even ones known to come first by other means, may land after it.\n"
+"tell() inside it doesn\'t say where its data will land.  With\n"
 "line_flush, complete lines are written out after each write\n"
 "containing a newline: that way in a direct block, else after what\n"
 "is buffered.\n"
@@ -872,4 +874,4 @@ skip_optional:
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=cd1364b8c6feaf4c input=a9049054013a1b77]*/
+/*[clinic end generated code: output=33c81fa17d9ccba0 input=a9049054013a1b77]*/

@@ -219,7 +219,9 @@ else moved to the pending writes once the lock is free (also at
 the I/O role, where records are moved.  A direct block (for a thread's
 or task's life) writes out the pending writes at its start, then writes
 itself out directly at its limit (the buffer size by default), `flush()`
-and end without regard to pending writes, which are other contexts'; a
+and end without regard to pending writes, which are other contexts'
+(until some of its own data gets there, see `behind`), so another
+context's writes may land after it even when known to come first; a
 line block (`line_flush`) writes its complete lines out after each write
 with a newline, keeping the partial line.
 
