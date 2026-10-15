@@ -1042,44 +1042,6 @@ buffered_set_written(Py_ssize_t n)
     PyErr_SetRaisedException(exc);
 }
 
-/* write() stopped after `done` bytes of its data were written, the raw
-   stream would block (st WOULD_BLOCK) or raised: keep as much of the rest
-   as fits pending, and say how much was accepted, so that the caller knows
-   what to write again.  Nothing is kept when other threads queued data
-   after the part written: the rest would follow theirs.  Returns 0 when
-   all was kept, else -1. */
-static int
-buffered_write_stopped(buffered *self, PyObject *obj, const char *data,
-                       Py_ssize_t len, Py_ssize_t done, int st)
-{
-    if (st == -1 && done == 0) {
-        return -1;
-    }
-    int errnum = errno;
-    Py_ssize_t rest = len - done;
-    Py_ssize_t keep = (done > 0 && self->list.nbytes > 0 ? 0
-                       : Py_MIN(rest, Py_MAX(0, self->threshold
-                                                - self->list.nbytes)));
-    PyObject *exc = PyErr_GetRaisedException();
-    if (buffered_append(self, obj, data + done, keep) < 0) {
-        _PyErr_ChainExceptions1(exc);
-        keep = 0;
-    }
-    else if (exc != NULL) {
-        PyErr_SetRaisedException(exc);
-    }
-    else if (keep == rest) {
-        return 0;
-    }
-    else {
-        errno = errnum;
-        buffered_set_blocking_error(done + keep);
-        return -1;
-    }
-    buffered_set_written(done + keep);
-    return -1;
-}
-
 /* BufferedRandom: write data over the read-ahead in place when it lies
    inside it and nothing else references the block, to be written out
    before the next raw call (as _io does).  Not with buffer size None,
@@ -1172,11 +1134,40 @@ buffered_write_slow(buffered *self, PyObject *obj, const char *data,
                                        rest >= th || vectored ? rest : 0, 1,
                                        &st);
         }
-        if (st == 0 && (done < len || self->list.nbytes > th)) {
-            continue;
+        if (st == 0) {
+            if (done < len || self->list.nbytes > th) {
+                continue;
+            }
+            r = 0;
+            break;
         }
-        r = st == 0 ? 0 : buffered_write_stopped(self, obj, data, len, done,
-                                                 st);
+        if (st == -1 && done == 0) {
+            break;
+        }
+        /* Keep what fits of the rest and say how much was taken; nothing
+           when other threads queued data after the part written. */
+        int errnum = errno;
+        rest = len - done;
+        Py_ssize_t keep = (done > 0 && self->list.nbytes > 0 ? 0
+                           : Py_MIN(rest, Py_MAX(0, th - self->list.nbytes)));
+        PyObject *exc = PyErr_GetRaisedException();
+        if (buffered_append(self, obj, data + done, keep) < 0) {
+            _PyErr_ChainExceptions1(exc);
+            keep = 0;
+        }
+        else if (exc != NULL) {
+            PyErr_SetRaisedException(exc);
+        }
+        else if (keep == rest) {
+            r = 0;
+            break;
+        }
+        else {
+            errno = errnum;
+            buffered_set_blocking_error(done + keep);
+            break;
+        }
+        buffered_set_written(done + keep);
         break;
     }
 end:
