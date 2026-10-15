@@ -1313,8 +1313,13 @@ class BufferedWriter(_BufferedIOMixin):
                     if unwritten < written:
                         keep = min(unwritten, self.buffer_size)
                         del self._write_buf[keep:]
-                        if isinstance(e, OSError):
+                        # (Any exception: KeyboardInterrupt too.  One
+                        # that refuses the attribute is raised as is, as
+                        # in C.)
+                        try:
                             e.characters_written = written - unwritten + keep
+                        except Exception:
+                            pass
                     else:
                         # The error came before any of b was written: take
                         # none of it, as C does (a caller retrying would

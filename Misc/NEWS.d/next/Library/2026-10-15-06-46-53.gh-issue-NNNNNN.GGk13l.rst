@@ -1,0 +1,4 @@
+When :meth:`io.BufferedWriter.write` raises after part of the data was
+written, the exception, whatever its type (:exc:`KeyboardInterrupt`
+included), now has a ``characters_written`` attribute saying how much of the
+data was taken, so that writing the rest again duplicates nothing.
