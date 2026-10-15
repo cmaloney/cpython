@@ -2784,6 +2784,92 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                 self.assertRaises(ValueError, getattr(t, meth), *args)
                 self.assertRaises(ValueError, getattr(t, meth), *args)
 
+    def test_nested_detach_in_reads(self):
+        # Python code a read, tell() or seek() runs before it uses the
+        # buffer (its closed, a Python raw's closed or readinto(), the
+        # buffer's seek()) detaches the text: the call raises ValueError,
+        # as _io's, and the buffer handed out gets no more calls from it.
+        t = None
+        got = []
+        def detach():
+            got.append(type(t.detach()))   # (Not kept.)
+        class B(self.BytesIO):
+            armed = False
+            @property
+            def closed(self):
+                if B.armed:
+                    B.armed = False
+                    detach()
+                return super().closed
+        class Raw(self.RawIOBase):
+            armed = False
+            def __init__(self, data, seekable=True):
+                self.b = self.BytesIO(data)
+                self.can_seek = seekable
+            def readable(self):
+                return True
+            def seekable(self):
+                return self.can_seek
+            def readinto(self, m):
+                if Raw.armed == "readinto":
+                    Raw.armed = False
+                    detach()
+                return self.b.readinto(m)
+            def seek(self, *a):
+                return self.b.seek(*a)
+            def tell(self):
+                return self.b.tell()
+            @property
+            def closed(self):
+                if Raw.armed == "closed":
+                    Raw.armed = False
+                    detach()
+                return False
+        Raw.BytesIO = self.BytesIO
+        def check(make, arm, call):
+            nonlocal t
+            got.clear()
+            t = make()
+            arm()
+            with self.assertRaisesRegex(ValueError, "detached"):
+                call(t)
+            self.assertEqual(len(got), 1)
+        calls = [lambda t: t.read(), lambda t: t.readline(),
+                 lambda t: t.read(3), lambda t: t.tell(),
+                 lambda t: t.seek(0)]
+        for enc, call in itertools.product(("utf-8", "utf-16"), calls):
+            data = "hello\nworld\n".encode(enc)
+            with self.subTest(enc=enc, call=call, buffer="closed"):
+                check(lambda: self.TextIOWrapper(B(data), encoding=enc),
+                      lambda: setattr(B, "armed", True), call)
+            if enc == "utf-16" or call in calls[3:]:
+                # (The others take the raw's closed in the read, which
+                # refuses the detach().)
+                with self.subTest(enc=enc, call=call, buffer="raw closed"):
+                    check(lambda: self.TextIOWrapper(
+                              self.BufferedReader(Raw(data)), encoding=enc),
+                          lambda: setattr(Raw, "armed", "closed"), call)
+        with self.subTest("read() of invalid bytes"):
+            # The buffer's read() detaches, then the bytes don't decode: they
+            # go back to the buffer handed out.
+            check(lambda: self.TextIOWrapper(
+                      self.BufferedReader(Raw(b"abc\xff\xfedef\n", False)),
+                      encoding="utf-8"),
+                  lambda: setattr(Raw, "armed", "readinto"),
+                  lambda t: t.read())
+        with self.subTest("seek() with characters to skip"):
+            class S(self.BytesIO):
+                armed = False
+                def seek(self, *a):
+                    if S.armed:
+                        S.armed = False
+                        detach()
+                    return super().seek(*a)
+            check(lambda: self.TextIOWrapper(
+                      S("hello\n".encode("utf-16")), encoding="utf-16"),
+                  lambda: setattr(S, "armed", True),
+                  lambda t: t.seek(1 << 128))
+
     @threading_helper.requires_working_threading()
     def test_threads_write_stateful_encoder(self):
         # The codec's encoder may hold state (an iso2022 shift state, the

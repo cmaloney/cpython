@@ -64,9 +64,10 @@ enum { SEEN_CR = 1, SEEN_LF = 2, SEEN_CRLF = 4 };
 /* The settings, made whole by __init__(), reconfigure() and detach() and
    never changed once published in self->conf (but nib), which only calls
    holding rlock do.  Those use self->conf as it is, looking again after
-   running other code (a nested detach() replaces it); other calls take a
-   reference with conf_get(), so that what they use of them agrees and
-   lives while they run. */
+   running other code (a nested detach() replaces it: the buffer it hands
+   out gets no more calls from them, see textio_buffer()); other calls
+   take a reference with conf_get(), so that what they use of them agrees
+   and lives while they run. */
 typedef struct {
     Py_ssize_t refs;            /* self->conf's, and calls' */
     /* The buffer is an exact nibbler one, whose bytes are used in place:
@@ -292,6 +293,20 @@ textio_conf(textio *self)
     return cf;
 }
 
+/* With rlock, after running other code: a new reference to the buffer,
+   else NULL with ValueError (a nested detach() took it; nested __init__()
+   is refused, so there are settings). */
+static PyObject *
+textio_buffer(textio *self)
+{
+    PyObject *buffer = self->conf->buffer;
+    if (buffer == NULL) {
+        (void)conf_attached(self->conf);
+        return NULL;
+    }
+    return Py_NewRef(buffer);
+}
+
 static inline int
 textio_exact(textio *self)
 {
@@ -311,10 +326,14 @@ textio_check_closed(textio *self, tconf *cf)
     int r;
     PyObject *buffer = cf->buffer;
     if (FT_ATOMIC_LOAD_UINT8_RELAXED(cf->nib)) {
+        /* (Which doesn't use it after its raw stream's closed.) */
         r = _PyIONibbler_closed(buffer);
     }
     else {
+        /* (Held: a nested detach() may drop it meanwhile.) */
+        Py_INCREF(buffer);
         PyObject *res = PyObject_GetAttr(buffer, &_Py_ID(closed));
+        Py_DECREF(buffer);
         r = res == NULL ? -1 : PyObject_IsTrue(res);
         Py_XDECREF(res);
     }
@@ -710,8 +729,8 @@ static int
 store_begin(tstore *st, int io)
 {
     textio *self = st->self;
-    if (st->buffer == NULL) {
-        st->buffer = Py_NewRef(self->conf->buffer);
+    if (st->buffer == NULL && (st->buffer = textio_buffer(self)) == NULL) {
+        return -1;
     }
     st->nib = FT_ATOMIC_LOAD_UINT8_RELAXED(self->conf->nib);
     st->io = io;
@@ -759,6 +778,10 @@ store_fill(tstore *st)
     textio *self = st->self;
     Py_ssize_t chunk = FT_ATOMIC_LOAD_SSIZE_RELAXED(self->chunk_size);
     Py_ssize_t n;
+    if (conf_attached(self->conf) < 0) {
+        /* A nested detach() took it: no more calls on it. */
+        return -1;
+    }
     if (st->nib) {
         n = _PyIONibbler_fill(st->buffer, chunk);
     }
@@ -1550,7 +1573,10 @@ translate_all(textio *self, PyObject *chars)
 Py_NO_INLINE static PyObject *
 text_read_all(textio *self)
 {
-    PyObject *buffer = Py_NewRef(self->conf->buffer);
+    PyObject *buffer = textio_buffer(self);
+    if (buffer == NULL) {
+        return NULL;
+    }
     PyObject *b = PyObject_CallMethodNoArgs(buffer, &_Py_ID(read));
     PyObject *res = NULL;
     if (b == Py_None) {
@@ -2000,8 +2026,10 @@ textiowrapper_iternext(PyObject *op)
 static PyObject *
 store_tell(textio *self)
 {
-    PyObject *pos = PyObject_CallMethodNoArgs(self->conf->buffer,
-                                              &_Py_ID(tell));
+    PyObject *buffer = textio_buffer(self);
+    PyObject *pos = buffer ? PyObject_CallMethodNoArgs(buffer, &_Py_ID(tell))
+                           : NULL;
+    Py_XDECREF(buffer);
     Py_ssize_t unread = self->rbuf ? PyBytes_GET_SIZE(self->rbuf) - self->rpos
                                    : 0;
     if (pos != NULL && unread > 0) {
@@ -2652,12 +2680,12 @@ _io_TextIOWrapper_truncate_impl(textio *self, PyObject *pos)
         return NULL;
     }
     /* At the text position (gh-70346): pos is a byte count. */
-    PyObject *res = NULL;
+    PyObject *res = NULL, *buffer;
     if (text_sync(self) == 0 && _PyFile_Flush((PyObject *)self) == 0
-        && textio_attached(self) == 0)
+        && (buffer = textio_buffer(self)) != NULL)
     {
-        res = PyObject_CallMethodOneArg(self->conf->buffer,
-                                        &_Py_ID(truncate), pos);
+        res = PyObject_CallMethodOneArg(buffer, &_Py_ID(truncate), pos);
+        Py_DECREF(buffer);
     }
     textio_leave(self);
     return res;
