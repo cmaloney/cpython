@@ -61,6 +61,11 @@ Python/parking_lot.c	-	buckets	-
 ## shared empty sentinel for the per-type method cache
 Python/typecache.c	-	empty_cache	-
 
+## fork generation of the _io._nibbler mutexes (set in the child of a fork,
+## while it has one thread)
+Modules/_io/_nibbler/bufferedio.c	-	_PyIO_nibbler_fork_gen	-
+Modules/_io/_nibbler/bufferedio.c	-	_PyIO_nibbler_fork_holder	-
+
 ## data needed for introspecting asyncio state from debuggers and profilers
 Modules/_asynciomodule.c	-	_Py_AsyncioDebug	-
 
