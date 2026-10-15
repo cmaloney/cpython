@@ -1171,9 +1171,23 @@ enum { GATHER_NEW, GATHER_ACTIVE, GATHER_DONE };
 #  define GATHER_DIRECT_MAX 0
 #endif
 
-#define rec_state(rec) FT_ATOMIC_LOAD_UINT8_RELAXED((rec)->state)
-#define rec_set_state(rec, s) FT_ATOMIC_STORE_UINT8_RELAXED((rec)->state, (s))
-#define rec_unlock(rec) nibbler_mutex_unlock(&(rec)->lock)
+static inline uint8_t
+rec_state(record *rec)
+{
+    return FT_ATOMIC_LOAD_UINT8_RELAXED(rec->state);
+}
+
+static inline void
+rec_set_state(record *rec, uint8_t state)
+{
+    FT_ATOMIC_STORE_UINT8_RELAXED(rec->state, state);
+}
+
+static inline void
+rec_unlock(record *rec)
+{
+    nibbler_mutex_unlock(&rec->lock);
+}
 
 /* Take rec's lock (not interrupted).  Taken over from a holder gone while
    writing it out (in a fork, or hung while finalizing), which may have
