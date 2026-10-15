@@ -240,6 +240,16 @@ class SizeofTest:
         bufio.close()
         self.assertEqual(sys.getsizeof(bufio), size)
 
+    @unittest.skipIf(check_sanitizer(thread=True),
+                     'ThreadSanitizer aborts on huge allocations (exit code 66).')
+    def test_huge_buffer_size(self):
+        # A buffer no allocation can give is a MemoryError, not sizes
+        # overflowing as they are computed from it.
+        for size in (sys.maxsize, sys.maxsize - 32, sys.maxsize // 2 + 10):
+            with self.subTest(size=size):
+                self.assertRaises(MemoryError, self.tp,
+                                  self.MockRawIO([b'abc\n']), size)
+
     @support.cpython_only
     def test_sizeof_buffer_size_zero(self):
         if not self.is_nibbler:

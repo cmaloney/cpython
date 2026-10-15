@@ -2406,6 +2406,12 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
         PyErr_SetString(PyExc_ValueError, "buffer size must not be negative");
         err = -1;
     }
+    else if (err == 0 && buffer_size > PY_SSIZE_T_MAX / 2) {
+        /* No such block can be allocated (_io finds that at once), and the
+           sizes computed from it could overflow. */
+        PyErr_NoMemory();
+        err = -1;
+    }
     PyObject *exc = err < 0 ? PyErr_GetRaisedException() : NULL;
     if (buffered_lock_io(self) < 0) {
         _PyErr_ChainExceptions1(exc);
