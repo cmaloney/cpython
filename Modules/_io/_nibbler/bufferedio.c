@@ -856,8 +856,9 @@ buffered_write_spans(buffered *self, _PyIO_Span *spans, PyObject **objs,
         spans->len -= r;
         /* A partial write may come from a signal: run its handlers before
            blocking again.  Without the lock, a handler writing to this
-           object queues its data (gh-118143). */
-        if (PyErr_CheckSignals() < 0) {
+           object queues its data (gh-118143).  (A _gather() block's
+           write-out, with its record's lock, runs them after.) */
+        if (unlocked >= 0 && PyErr_CheckSignals() < 0) {
             st = -1;
             break;
         }
@@ -1124,6 +1125,7 @@ typedef struct record {
     Py_ssize_t tail;            /* at least the bytes after the last \n */
     char flush;                 /* flush() was called inside the block */
     char direct, line;          /* the block's mode (see above) */
+    char fileio;                /* raw is an exact FileIO */
     uint8_t state;              /* stored atomically */
 } record;
 
@@ -1373,28 +1375,41 @@ gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
     /* (A signal handler run while its block writes it out writes as
        usual.) */
     if (rec == NULL || rec_state(rec) != REC_ACTIVE
-        || nibbler_mutex_is_mine(&rec->lock) || rec_lock(rec) < 0)
+        || nibbler_mutex_is_mine(&rec->lock))
     {
         return 1;
     }
-    int r = 1;
+    /* The block's raw stream is alive while it is active and rec locked:
+       no reference is needed while it is the stream's.  Other than an
+       exact FileIO, it is asked whether it is closed first, without rec's
+       lock: Python code may wait for this stream's lock, held by close(),
+       detach() or __init__() waiting for rec's. */
+    PyObject *raw = FT_ATOMIC_LOAD_PTR_RELAXED(self->raw);
+    int r = 0;
+    if (raw != rec->raw || !rec->fileio) {
+        raw = buffered_get_raw(self);
+        r = raw ? buffered_ref_closed(raw) : -1;
+        Py_XDECREF(raw);
+        raw = NULL;
+    }
+    if (r > 0) {
+        PyErr_SetString(PyExc_ValueError, closed_msg);
+    }
+    if (r != 0 || rec_lock(rec) < 0) {
+        return -1;
+    }
+    r = 1;
     Py_ssize_t out = 0;
-    if (rec->state == REC_ACTIVE) {
-        /* The block's raw stream is alive while it is active: no
-           reference is needed while it is the stream's. */
-        PyObject *raw = FT_ATOMIC_LOAD_PTR_RELAXED(self->raw);
-        r = (raw == rec->raw ? buffered_ref_closed(raw) : -2);
-        if (r == -2) {
-            raw = buffered_get_raw(self);
-            r = raw ? buffered_ref_closed(raw) : -1;
-            Py_XDECREF(raw);
-        }
-        if (r > 0) {
+    if (rec->state == REC_ACTIVE
+        && (raw == NULL || raw == FT_ATOMIC_LOAD_PTR_RELAXED(self->raw)))
+    {
+        r = raw != NULL && _PyFileIO_closed(raw);
+        if (r) {
             PyErr_SetString(PyExc_ValueError, closed_msg);
         }
         Py_ssize_t size = Py_MIN(GATHER_BLOCK_MAX,
                                  Py_MAX(GATHER_BLOCK_MIN, rec->list.nbytes));
-        r = (r != 0 ? -1
+        r = (r ? -1
              : buffered_append_to(self, &rec->list, &rec->block, &rec->used,
                                   size, obj, data, len));
         if (r == 0 && (rec->direct | rec->line)) {
@@ -1573,6 +1588,10 @@ gather_direct(buffered *self, record *rec, Py_ssize_t n)
     }
     rec_set_state(rec, st == 0 && end ? REC_IDLE : REC_ACTIVE);
     rec_unlock(rec);
+    /* Without rec's lock: a handler may use this stream. */
+    if (st != -1 && n > 0 && PyErr_CheckSignals() < 0) {
+        st = -1;
+    }
     return st == 0 ? 0 : st == WOULD_BLOCK ? 1 : -1;
 }
 
@@ -1659,6 +1678,7 @@ static void
 rec_start(record *rec, gather *g)
 {
     rec->raw = g->raw;
+    rec->fileio = _PyFileIO_CheckExact(g->raw);
     rec->limit = g->limit;
     rec->flush = 0;
     rec->direct = g->direct;

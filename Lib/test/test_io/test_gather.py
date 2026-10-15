@@ -8,6 +8,9 @@ import gc
 import io
 import os
 import signal
+import subprocess
+import sys
+import textwrap
 import threading
 import unittest
 import warnings
@@ -538,6 +541,47 @@ class GatherTest(unittest.TestCase):
             gc.collect()
         self.assertEqual(b''.join(out), b'ab')
         self.assertTrue(raw.closed)
+
+    @threading_helper.requires_working_threading()
+    def test_closed_asked_without_record_lock(self):
+        # A raw stream's closed, asked by a write in a block, uses the
+        # stream while detach() in another thread holds its lock and waits
+        # for the block's record: no deadlock.  (In a child process: a
+        # deadlock can't be undone.)
+        code = textwrap.dedent('''
+            import io, threading, time
+            from _io import _nibbler
+            class Raw(io.RawIOBase):
+                hook = None
+                def writable(self):
+                    return True
+                def write(self, b):
+                    return len(b)
+                @property
+                def closed(self):
+                    hook, Raw.hook = Raw.hook, None
+                    if hook:
+                        hook()
+                    return super().closed
+            f = _nibbler.BufferedWriter(Raw())
+            t = threading.Thread(target=f.detach)
+            def hook():
+                t.start()
+                time.sleep(0.5)
+                try:
+                    f.write(b'x')
+                except ValueError:
+                    pass
+            try:
+                with f._gather():
+                    Raw.hook = hook
+                    f.write(b'a')
+            except ValueError:
+                pass
+            t.join()
+        ''')
+        subprocess.run([sys.executable, '-c', code], check=True,
+                       timeout=support.SHORT_TIMEOUT)
 
     def test_dropped_in_raw_call(self):
         # A block dropped from Python code a raw call runs (here from the
