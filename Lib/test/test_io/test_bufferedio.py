@@ -2283,6 +2283,28 @@ class BufferedRandomTest(BufferedReaderTest, BufferedWriterTest):
                 self.assertEqual(f.read(20), bytes(20))
                 self.assertGreaterEqual(f.tell(), 0)
 
+    def test_flush_after_partly_failed_write_over_read_ahead(self):
+        # A write-out of data written over the read-ahead that fails after
+        # writing part of it leaves the rest where it belongs.
+        class Raw(self.BytesIO):
+            plan = []
+            def write(self, b):
+                step = self.plan.pop(0) if self.plan else None
+                if isinstance(step, BaseException):
+                    raise step
+                with memoryview(b) as view:
+                    return super().write(view[:step])
+        raw = Raw(b'a' * 100)
+        f = self.tp(raw, 16)
+        self.assertEqual(f.read(1), b'a')
+        f.write(b'X' * 10)
+        Raw.plan = [4, OSError(errno.EFBIG, 'too big')]
+        self.assertRaises(OSError, f.flush)
+        f.flush()
+        self.assertEqual(f.tell(), 11)
+        self.assertEqual(f.read(2), b'aa')
+        self.assertEqual(raw.getvalue(), b'a' + b'X' * 10 + b'a' * 89)
+
     # You can't construct a BufferedRandom over a non-seekable stream.
     test_unseekable = None
 

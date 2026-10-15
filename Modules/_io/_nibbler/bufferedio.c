@@ -961,7 +961,8 @@ buffered_raw_move(buffered *self, Py_off_t delta)
 
 /* Write out the bytes BufferedRandom wrote over the read-ahead in place
    (back where they start), then move the raw stream after the block
-   (keep), or to the logical position. */
+   (keep, and when the write fails: the rest is written from there next
+   time), or to the logical position. */
 static int
 buffered_flush_dirty(buffered *self, int keep)
 {
@@ -972,21 +973,25 @@ buffered_flush_dirty(buffered *self, int keep)
     _PyIO_Span span = {PyBytes_AS_STRING(self->block) + self->dlo, len};
     PyObject *obj = self->block;
     Py_ssize_t written = 0;
-    int st = buffered_raw_move(self, -(self->end - self->dlo
-                                       + self->list.nbytes));
-    if (st == 0) {
-        st = buffered_write_spans(self, &span, &obj, 1, len, 0, &written);
-        self->dlo += written;
+    if (buffered_raw_move(self, -(self->end - self->dlo
+                                  + self->list.nbytes)) < 0)
+    {
+        return -1;
     }
+    int st = buffered_write_spans(self, &span, &obj, 1, len, 0, &written);
+    self->dlo += written;
     if (st == WOULD_BLOCK) {
         buffered_set_blocking_error(written);
     }
     if (st == 0) {
         self->dlo = self->dhi = 0;
-        st = buffered_raw_move(self, keep ? self->end - dhi + self->list.nbytes
-                                          : self->pos - dhi);
     }
-    return st == 0 ? 0 : -1;
+    PyObject *exc = PyErr_GetRaisedException();
+    int r = buffered_raw_move(self, (keep || st != 0
+                                     ? self->end + self->list.nbytes
+                                     : self->pos) - (dhi - len + written));
+    _PyErr_ChainExceptions1(exc);
+    return st == 0 && r == 0 ? 0 : -1;
 }
 
 /* Hand the read-ahead and the stash back to the raw stream, so that its
