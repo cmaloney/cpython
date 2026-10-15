@@ -1990,28 +1990,38 @@ class GeneralModuleTests(unittest.TestCase):
 
     def test_makefile_timeout_retryable(self):
         # makefile() lets reading go on after a timeout only when the
-        # buffered class says that it keeps what it read before an error
-        # (gh-51571).
+        # buffered class (and in text mode, the text class) says that it
+        # keeps what it read before an error (gh-51571).
         class Keeps(io.BufferedReader):
             _keeps_read_on_error = True
         class KeepsPair(io.BufferedRWPair):
             _keeps_read_on_error = True
+        class KeepsText(io.TextIOWrapper):
+            _keeps_read_on_error = True
+        class LosesText(io.TextIOWrapper):
+            _keeps_read_on_error = False
         default = getattr(io.BufferedReader, "_keeps_read_on_error", False)
+        T = io.TextIOWrapper
         cases = [
-            ('rb', 'BufferedReader', io.BufferedReader, default),
-            ('rb', 'BufferedReader', Keeps, True),
-            ('r', 'BufferedReader', Keeps, True),
-            ('rwb', 'BufferedRWPair', KeepsPair, True),
-            ('wb', 'BufferedWriter', io.BufferedWriter, False),
+            ('rb', 'BufferedReader', io.BufferedReader, T, default),
+            ('rb', 'BufferedReader', Keeps, T, True),
+            ('rb', 'BufferedReader', Keeps, LosesText, True),
+            ('r', 'BufferedReader', Keeps, KeepsText, True),
+            ('r', 'BufferedReader', Keeps, LosesText, False),
+            ('r', 'BufferedReader', io.BufferedReader, KeepsText, default),
+            ('rwb', 'BufferedRWPair', KeepsPair, T, True),
+            ('wb', 'BufferedWriter', io.BufferedWriter, T, False),
         ]
-        for mode, name, cls, expected in cases:
-            with self.subTest(mode=mode, cls=cls.__name__):
+        for mode, name, cls, text_cls, expected in cases:
+            with self.subTest(mode=mode, cls=cls.__name__,
+                              text_cls=text_cls.__name__):
                 raws = []
                 real_socketio = socket.SocketIO
                 def socketio(*args):
                     raws.append(real_socketio(*args))
                     return raws[-1]
                 with (mock.patch.object(io, name, cls),
+                      mock.patch.object(io, 'TextIOWrapper', text_cls),
                       mock.patch.object(socket, 'SocketIO', socketio),
                       socket.socket() as sock):
                     encoding = None if "b" in mode else "utf-8"
@@ -5773,12 +5783,15 @@ class FileObjectClassTestCase(SocketConnectedTest):
         SocketConnectedTest.clientTearDown(self)
 
     def _keeps_data_on_timeout(self):
-        # Does the buffered reader keep what it read before a timeout for
-        # the next read?  (gh-51571)  In text mode, TextIOWrapper keeps the
-        # part of a line it had decoded too.  As in makefile(), which then
-        # lets reading go on.  Also called from the client thread.
+        # Does the buffered reader (and in text mode, the TextIOWrapper)
+        # keep what it read before a timeout for the next read?  (gh-51571)
+        # As in makefile(), which then lets reading go on.  Also called
+        # from the client thread.
         return (self.bufsize != 0
-                and getattr(io.BufferedReader, "_keeps_read_on_error", False))
+                and getattr(io.BufferedReader, "_keeps_read_on_error", False)
+                and ('b' in self.read_mode
+                     or getattr(io.TextIOWrapper, "_keeps_read_on_error",
+                                False)))
 
     def testReadAfterTimeout(self):
         # Issue #7322: A file object must disallow further reads

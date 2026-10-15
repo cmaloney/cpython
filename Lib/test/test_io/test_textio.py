@@ -2768,6 +2768,27 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                     t.buffer.x = 1
                     self.assertEqual(a + t.read(7) + t.read(), data)
 
+    def test_seek_forgets_encoder_used(self):
+        # seek() resets the encoder: close() gives final=True only to an
+        # encoder that encoded text since (a fresh UTF-16 encoder's final
+        # encode() is a BOM), as _io's.
+        class R(self.BytesIO):
+            def close(self):
+                R.value = self.getvalue()
+                super().close()
+        t = self.TextIOWrapper(self.BufferedRandom(R()), encoding="utf-16")
+        t.write("abc")
+        t.seek(0)
+        t.truncate()
+        t.close()
+        self.assertEqual(R.value, b"")
+
+    def test_keeps_read_on_error_marker(self):
+        # A read that fails keeps the text it took for the next read (see
+        # test_failed_read_keeps_text): the class says so, for
+        # socket.makefile() (gh-51571).
+        self.assertIs(self.TextIOWrapper._keeps_read_on_error, True)
+
     def test_read_after_buffer_detached(self):
         # The buffer was detached behind the text's back: reads raise
         # ValueError, and release nothing they don't hold.
@@ -2783,6 +2804,269 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                 t.buffer.detach()
                 self.assertRaises(ValueError, getattr(t, meth), *args)
                 self.assertRaises(ValueError, getattr(t, meth), *args)
+
+    def test_nested_detach_in_reads(self):
+        # Python code a read, tell() or seek() runs before it uses the
+        # buffer (its closed, a Python raw's closed or readinto(), the
+        # buffer's seek()) detaches the text: the call raises ValueError,
+        # as _io's, and the buffer handed out gets no more calls from it.
+        t = None
+        got = []
+        def detach():
+            got.append(type(t.detach()))   # (Not kept.)
+        class B(self.BytesIO):
+            armed = False
+            @property
+            def closed(self):
+                if B.armed:
+                    B.armed = False
+                    detach()
+                return super().closed
+        class Raw(self.RawIOBase):
+            armed = False
+            def __init__(self, data, seekable=True):
+                self.b = self.BytesIO(data)
+                self.can_seek = seekable
+            def readable(self):
+                return True
+            def seekable(self):
+                return self.can_seek
+            def readinto(self, m):
+                if Raw.armed == "readinto":
+                    Raw.armed = False
+                    detach()
+                return self.b.readinto(m)
+            def seek(self, *a):
+                return self.b.seek(*a)
+            def tell(self):
+                return self.b.tell()
+            @property
+            def closed(self):
+                if Raw.armed == "closed":
+                    Raw.armed = False
+                    detach()
+                return False
+        Raw.BytesIO = self.BytesIO
+        def check(make, arm, call):
+            nonlocal t
+            got.clear()
+            t = make()
+            arm()
+            with self.assertRaisesRegex(ValueError, "detached"):
+                call(t)
+            self.assertEqual(len(got), 1)
+        calls = [lambda t: t.read(), lambda t: t.readline(),
+                 lambda t: t.read(3), lambda t: t.tell(),
+                 lambda t: t.seek(0)]
+        for enc, call in itertools.product(("utf-8", "utf-16"), calls):
+            data = "hello\nworld\n".encode(enc)
+            with self.subTest(enc=enc, call=call, buffer="closed"):
+                check(lambda: self.TextIOWrapper(B(data), encoding=enc),
+                      lambda: setattr(B, "armed", True), call)
+            if enc == "utf-16" or call in calls[3:]:
+                # (The others take the raw's closed in the read, which
+                # refuses the detach().)
+                with self.subTest(enc=enc, call=call, buffer="raw closed"):
+                    check(lambda: self.TextIOWrapper(
+                              self.BufferedReader(Raw(data)), encoding=enc),
+                          lambda: setattr(Raw, "armed", "closed"), call)
+        with self.subTest("read() of invalid bytes"):
+            # The buffer's read() detaches, then the bytes don't decode: they
+            # go back to the buffer handed out.
+            check(lambda: self.TextIOWrapper(
+                      self.BufferedReader(Raw(b"abc\xff\xfedef\n", False)),
+                      encoding="utf-8"),
+                  lambda: setattr(Raw, "armed", "readinto"),
+                  lambda t: t.read())
+        with self.subTest("seek() with characters to skip"):
+            class S(self.BytesIO):
+                armed = False
+                def seek(self, *a):
+                    if S.armed:
+                        S.armed = False
+                        detach()
+                    return super().seek(*a)
+            check(lambda: self.TextIOWrapper(
+                      S("hello\n".encode("utf-16")), encoding="utf-16"),
+                  lambda: setattr(S, "armed", True),
+                  lambda t: t.seek(1 << 128))
+
+    def test_nested_detach_in_close(self):
+        # close() doesn't close a buffer that a nested detach() (from the
+        # encoder's final encode() or the buffer's flush()) handed out.
+        got = []
+        class Enc(codecs.IncrementalEncoder):
+            def encode(self, s, final=False):
+                if final and not got:
+                    got.append(t.detach())
+                return s.encode("ascii")
+        def search(name):
+            if name == "detach_on_final_test":
+                return codecs.CodecInfo(
+                    name=name, encode=None, decode=None,
+                    incrementalencoder=Enc)
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        class W(self.BufferedWriter):
+            def flush(self):
+                if not got:
+                    got.append(None)
+                    got[0] = t.detach()
+                return super().flush()
+        for enc, cls in (("detach_on_final_test", self.BufferedWriter),
+                         ("ascii", W)):
+            with self.subTest(enc=enc):
+                got.clear()
+                raw = self.BytesIO()
+                t = self.TextIOWrapper(cls(raw), encoding=enc)
+                t.write("abc")
+                with self.assertRaisesRegex(ValueError, "detached"):
+                    t.close()
+                self.assertFalse(got[0].closed)
+                got[0].flush()
+                self.assertEqual(raw.getvalue(), b"abc")
+
+    @threading_helper.requires_working_threading()
+    def test_decoder_runs_without_buffer_locks(self):
+        # The codec's decoder runs without the buffer's locks: it (and
+        # other threads meanwhile) can use the buffer.  Bytes others take
+        # meanwhile aren't taken again: the text goes on after them.
+        calls = []
+        class Dec(codecs.getincrementaldecoder("utf-8")):
+            def decode(self, b, final=False):
+                if not calls:
+                    calls.append(t.buffer.tell())
+                    th = threading.Thread(
+                        target=lambda: calls.append(t.buffer.read(2)))
+                    th.start()
+                    th.join(support.SHORT_TIMEOUT)
+                    calls.append(th.is_alive())
+                return super().decode(b, final)
+        def search(name):
+            if name == "unlocked_decoder_test":
+                return codecs.CodecInfo(
+                    name=name, encode=None, decode=None,
+                    incrementalencoder=codecs.getincrementalencoder("utf-8"),
+                    incrementaldecoder=Dec)
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        for cls in (self.BufferedReader, self.BufferedRandom):
+            with self.subTest(cls=cls):
+                calls.clear()
+                t = self.TextIOWrapper(cls(self.BytesIO(b"line1\nline2\n")),
+                                       encoding="unlocked_decoder_test")
+                self.assertEqual(t.readline(), "ne1\n")
+                self.assertEqual(calls, [0, b"li", False])
+                self.assertEqual(t.read(), "line2\n")
+
+    def test_nested_detach_or_init_in_write(self):
+        # Python code a write runs before it stores (the buffer's closed,
+        # the codec's encoder) detaches the text: the write raises
+        # ValueError, and stores nothing in the buffer handed out.  If it
+        # sets the text up again instead, the text goes to the new buffer.
+        got = []
+        class B(self.BytesIO):
+            armed = None
+            @property
+            def closed(self):
+                if B.armed == "closed":
+                    B.armed = None
+                    got.append(t.detach())
+                elif B.armed == "init":
+                    B.armed = None
+                    got.append(self)
+                    t.__init__(B(), encoding="ascii")
+                return super().closed
+        class Enc(codecs.IncrementalEncoder):
+            def encode(self, s, final=False):
+                if B.armed == "encode":
+                    B.armed = None
+                    got.append(t.detach())
+                return s.encode("ascii")
+        def search(name):
+            if name == "detach_on_encode_test":
+                return codecs.CodecInfo(
+                    name=name, encode=None, decode=None,
+                    incrementalencoder=Enc,
+                    incrementaldecoder=codecs.getincrementaldecoder("ascii"))
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        for where, enc in (("closed", "ascii"), ("closed", "utf-16"),
+                           ("encode", "detach_on_encode_test")):
+            with self.subTest(where=where, enc=enc):
+                got.clear()
+                # (Translated: not the write that stores at once.)
+                t = self.TextIOWrapper(B(), encoding=enc, newline="\r\n")
+                B.armed = where
+                with self.assertRaisesRegex(ValueError, "detached"):
+                    t.write("x\n")
+                self.assertEqual(got[0].getvalue(), b"")
+        with self.subTest(where="init"):
+            got.clear()
+            t = self.TextIOWrapper(B(), encoding="ascii", newline="\r\n")
+            B.armed = "init"
+            self.assertEqual(t.write("x\n"), 2)
+            t.flush()
+            self.assertEqual(got[0].getvalue(), b"")
+            self.assertEqual(t.buffer.getvalue(), b"x\n")
+
+    def test_init_from_encoder_refused(self):
+        # __init__() from the codec's encoder, in a write (which holds the
+        # lock __init__() publishes under), raises RuntimeError before it
+        # changes anything: the text keeps its settings.
+        armed = []
+        class Enc(codecs.IncrementalEncoder):
+            def encode(self, s, final=False):
+                if armed:
+                    armed.clear()
+                    t.__init__(self.BytesIO(), encoding="ascii")
+                return s.encode("ascii")
+        Enc.BytesIO = self.BytesIO
+        def search(name):
+            if name == "init_on_encode_test":
+                return codecs.CodecInfo(
+                    name=name, encode=None, decode=None,
+                    incrementalencoder=Enc,
+                    incrementaldecoder=codecs.getincrementaldecoder("ascii"))
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        b = self.BytesIO()
+        t = self.TextIOWrapper(b, encoding="init_on_encode_test")
+        armed.append(1)
+        with self.assertRaisesRegex(RuntimeError, "reentrant call"):
+            t.write("x")
+        self.assertIs(t.buffer, b)
+        self.assertEqual(t.encoding, "init_on_encode_test")
+        t.write("y")
+        t.flush()
+        self.assertEqual(b.getvalue(), b"y")
+
+    def test_nested_detach_in_reconfigure(self):
+        # reconfigure() doesn't attach again a buffer that a nested
+        # detach() (from the buffer's writable() or tell()) handed out.
+        got = []
+        class B(self.BytesIO):
+            armed = None
+            def writable(self):
+                if B.armed == "writable":
+                    B.armed = None
+                    got.append(t.detach())
+                return True
+            def tell(self):
+                if B.armed == "tell":
+                    B.armed = None
+                    got.append(t.detach())
+                return super().tell()
+        for where in ("writable", "tell"):
+            with self.subTest(where=where):
+                got.clear()
+                t = self.TextIOWrapper(B(), encoding="utf-8")
+                B.armed = where
+                with self.assertRaisesRegex(ValueError, "detached"):
+                    t.reconfigure(encoding="latin-1")
+                self.assertEqual(len(got), 1)
+                self.assertRaisesRegex(ValueError, "detached", t.write, "x")
+                self.assertEqual(got[0].getvalue(), b"")
 
     @threading_helper.requires_working_threading()
     def test_threads_write_stateful_encoder(self):
@@ -2954,9 +3238,9 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
     def test_init_while_writing(self):
         # __init__() between a write's look at the settings and its store
         # (here from the buffer's closed property; on free threading, from
-        # another thread): the write goes on to the buffer it started
-        # with, through its methods, as it wasn't a buffered object of
-        # _io._nibbler.
+        # another thread): the write starts again with the new settings,
+        # as _io's goes to the new buffer, and never takes the old one
+        # for a buffered object of _io._nibbler.
         self.addCleanup(os_helper.unlink, os_helper.TESTFN)
         text = None
         class Slotted:
@@ -2986,9 +3270,9 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
         text.write("first")
         text.write("second")
         text.close()
-        self.assertEqual(old.data, b"-first")
+        self.assertEqual(old.data, b"-")
         with self.open(os_helper.TESTFN, "rb") as f:
-            self.assertEqual(f.read(), b"second")
+            self.assertEqual(f.read(), b"firstsecond")
 
     def test_init_drops_decoded_str_subclass(self):
         # __init__() drops the characters decoded and not returned: a str

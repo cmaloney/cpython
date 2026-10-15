@@ -305,7 +305,10 @@ there.
 
 Other codecs go through the codec's incremental decoder, as `_io` does:
 characters decoded ahead (`dchars`) with a snapshot (flags, bytes) for
-`tell()`.  Their state is kept as flags (an `unsigned long long`, as
+`tell()`.  The decoder (maybe Python code, which may use the buffer)
+runs without the buffer's locks, on the unread bytes (their block held);
+they are taken after if they are still the unread ones, else decoded
+again from where the buffer is now.  Their state is kept as flags (an `unsigned long long`, as
 iso2022_kr's go past 32 bits; only `tell()`, whose cookie holds 32 bits,
 raises `OverflowError`).
 
@@ -341,6 +344,11 @@ to skip, and a write or `detach()` reads the bytes again first.
   the outer call uses the read state across Python code (`rbusy`: reads,
   going back to the text position, skipping characters after a seek)
   for `seek()`, `tell()`, `close()` and going back to the text position.
+  A nested `detach()` is allowed otherwise (as `_io`'s): the outer call
+  holds a reference to the buffer it uses, and raises `ValueError` at its
+  next use of it, so the buffer handed out gets no more calls from it
+  (`textio_buffer()`; `close()`, `reconfigure()` and a write's store look
+  again too).
   The quick read takes it with a trylock; when anyone holds it the read
   goes the locked way.
 - **No settings lock**: the settings (buffer, codec objects, newline
@@ -361,10 +369,19 @@ to skip, and a write or `detach()` reads the bytes again first.
   store of its bytes, so that the encoder's state (an iso2022 shift
   state, the BOM) matches where its bytes land; `seek()` and `__init__()`
   take it to reset the encoder (from the encoder itself, they raise
-  `RuntimeError`).  A read past the start of the stream only
+  `RuntimeError`).  The encoder's flags (it may write a BOM, it needs
+  `final=True`) are the published encoder's: `__init__()` and
+  `reconfigure(encoding=...)` publish a new encoder with elock held and
+  set them, and a write that holds elock with an encoder replaced
+  meanwhile starts again with the settings published.  A read past the
+  start of the stream only
   tries it (with the buffer's locks held, it must not wait for a write
   that waits for them).  Order: rlock, elock, the buffer's I/O role, the
-  buffer's lock.  (Critical sections were tried: daemon threads stopped
+  buffer's lock.  Python code runs with elock held (the encoder, a Python
+  buffer's or raw stream's `write()`): if it calls `seek()`, `close()`,
+  `detach()` or `reconfigure()` of the same text while another thread
+  holding rlock waits for elock, the two wait for each other (from the
+  same thread, they raise `RuntimeError`).  (Critical sections were tried: daemon threads stopped
   at exit inside one hung the main thread's writes.)
 
 ### Differences from `_io.TextIOWrapper`
@@ -381,3 +398,8 @@ to skip, and a write or `detach()` reads the bytes again first.
 - A read that raises keeps the text it took for the next read.
 - `reconfigure(encoding=...)`, `close()` and `detach()` give the old
   encoder `final=True` (gh-79792).
+- A write is not ordered against a `detach()`, `__init__()` or `close()`
+  running meanwhile in another thread: it may complete into the buffer
+  `detach()` returned, or the one `__init__()` replaced (`_io` orders
+  them with its critical section on free-threaded builds, but not while
+  the write waits in the raw stream, nor on GIL builds).

@@ -676,6 +676,56 @@ class NibblerTextIOWrapperTest(TestCase):
                     count += 1
             self.assertEqual(count, sum(written))
 
+    def test_stateful_encoder_replaced_while_writing(self):
+        # Writes with a codec's encoder (which may hold state, and is given
+        # final=True at its end) racing reconfigure(encoding=...), which
+        # finishes it and sets up a new one: once a new encoder encoded
+        # text, the old one encodes nothing more, and final=True goes only
+        # to an encoder that encoded text.
+        log = []
+        made = [0]
+
+        class Enc(codecs.IncrementalEncoder):
+            def __init__(self, errors="strict"):
+                super().__init__(errors)
+                self.n = made[0] = made[0] + 1
+                self.used = False
+
+            def encode(self, s, final=False):
+                log.append((self.n, final, self.used))
+                self.used |= bool(s)
+                return s.encode("ascii")
+
+        def search(name):
+            if name == "replaced_encoder_test":
+                return codecs.CodecInfo(name=name, encode=None, decode=None,
+                                        incrementalencoder=Enc)
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        stop = threading.Event()
+        with self.open("w", "replaced_encoder_test") as f:
+            def writer():
+                for _ in range(5000):
+                    f.write("ab")
+
+            def reconfigure():
+                while not stop.is_set():
+                    f.reconfigure(encoding="replaced_encoder_test")
+                    f.reconfigure(encoding="replaced_encoder_test")
+
+            with threading_helper.start_threads(
+                    [threading.Thread(target=reconfigure)]):
+                try:
+                    run_concurrently([writer] * 4)
+                finally:
+                    stop.set()
+        last = 0
+        for n, final, used in log:
+            self.assertGreaterEqual(n, last, "an old encoder encoded")
+            last = n
+            if final:
+                self.assertTrue(used, "final=True to an unused encoder")
+
     def test_write_after_raw_close(self):
         # Small non-ASCII writes (into room reserved without the lock) racing
         # raw.close(): none succeeds once close() has returned, as with the
