@@ -1222,7 +1222,8 @@ buffered_write(buffered *self, PyObject *obj, const char *data,
  */
 
 /* Take up to n bytes of the read-ahead: the block itself when that is all
-   of it, else a copy. */
+   of it (without the hash it may have cached when it was handed out with
+   other contents, before it was reused), else a copy. */
 static PyObject *
 buffered_take(buffered *self, Py_ssize_t n)
 {
@@ -1230,10 +1231,18 @@ buffered_take(buffered *self, Py_ssize_t n)
     if (k == 0) {
         return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     }
-    PyObject *res = (k == PyBytes_GET_SIZE(self->block)
-                     ? Py_NewRef(self->block)
-                     : PyBytes_FromStringAndSize(
-                         PyBytes_AS_STRING(self->block) + self->pos, k));
+    PyObject *res;
+    if (k == PyBytes_GET_SIZE(self->block)) {
+        res = Py_NewRef(self->block);
+_Py_COMP_DIAG_PUSH
+_Py_COMP_DIAG_IGNORE_DEPR_DECLS
+        FT_ATOMIC_STORE_SSIZE_RELAXED(((PyBytesObject *)res)->ob_shash, -1);
+_Py_COMP_DIAG_POP
+    }
+    else {
+        res = PyBytes_FromStringAndSize(PyBytes_AS_STRING(self->block)
+                                        + self->pos, k);
+    }
     if (res != NULL) {
         self->pos += k;
     }

@@ -2385,6 +2385,28 @@ class NibblerBufferedReaderTest(NibblerMixin, CBufferedReaderTest):
         with self.open(os_helper.TESTFN, encoding="ascii") as t:
             self.assertEqual(len(t.read(sys.maxsize)), 1000)
 
+    def test_returned_bytes_hash(self):
+        # Bytes returned are hashed by their contents, also when they are
+        # the block, which was returned before with other contents.
+        class Raw(self.RawIOBase):
+            chunks = [b'a' * 500, OSError('boom'), b'b' * 16,
+                      b'c' * 484 + b'\n']
+            def readable(self):
+                return True
+            def readinto(self, b):
+                c = self.chunks.pop(0)
+                if isinstance(c, BaseException):
+                    raise c
+                b[:len(c)] = c
+                return len(c)
+        bufio = self.tp(Raw(), 16)
+        self.assertRaises(OSError, bufio.read, 1000)
+        hash(bufio.read(500))
+        self.assertEqual(bufio.read(1), b'b')
+        line = bufio.readline()
+        self.assertEqual(line, b'b' * 15 + b'c' * 484 + b'\n')
+        self.assertEqual(hash(line), hash(bytes(bytearray(line))))
+
     def test_keeps_read_on_error_marker(self):
         # The reading classes say that they keep data read before a raw
         # read raised (socket.makefile() looks at it).
