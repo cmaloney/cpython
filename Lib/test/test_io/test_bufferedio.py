@@ -12,7 +12,8 @@ import weakref
 from collections import deque, UserList
 from itertools import cycle, count
 from test import support
-from test.support import check_sanitizer, os_helper, threading_helper
+from test.support import (check_sanitizer, import_helper, os_helper,
+                          threading_helper)
 from .utils import byteslike, CTestCase, PyTestCase, NibblerMixin
 
 
@@ -725,6 +726,26 @@ class BufferedReaderTest(CommonBufferedTests):
 
 class CBufferedReaderTest(BufferedReaderTest, SizeofTest, CTestCase):
     tp = io.BufferedReader
+
+    def test_read_memory_error_loses_nothing(self):
+        # A read failing to allocate its result leaves the data for the
+        # next read.
+        _testcapi = import_helper.import_module('_testcapi')
+        data = b'01234\n6789\n'
+        for meth in ('read', 'read1', 'readline', 'peek'):
+            with self.subTest(meth=meth):
+                bufio = self.tp(self.MockRawIO([data]), 16)
+                self.assertEqual(bufio.read(1), b'0')
+                _testcapi.set_nomemory(0, 1)
+                try:
+                    res = getattr(bufio, meth)(3)
+                except MemoryError:
+                    res = b''
+                finally:
+                    _testcapi.remove_mem_hooks()
+                if meth == 'peek':
+                    res = b''
+                self.assertEqual(res + bufio.read(), data[1:])
 
     @threading_helper.requires_working_threading()
     def test_concurrent_reads_keep_records_whole(self):

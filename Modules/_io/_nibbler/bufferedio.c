@@ -1230,12 +1230,14 @@ buffered_take(buffered *self, Py_ssize_t n)
     if (k == 0) {
         return Py_GetConstant(Py_CONSTANT_EMPTY_BYTES);
     }
-    const char *p = PyBytes_AS_STRING(self->block) + self->pos;
-    self->pos += k;
-    if (k == PyBytes_GET_SIZE(self->block)) {
-        return Py_NewRef(self->block);
+    PyObject *res = (k == PyBytes_GET_SIZE(self->block)
+                     ? Py_NewRef(self->block)
+                     : PyBytes_FromStringAndSize(
+                         PyBytes_AS_STRING(self->block) + self->pos, k));
+    if (res != NULL) {
+        self->pos += k;
     }
-    return PyBytes_FromStringAndSize(p, k);
+    return res;
 }
 
 /* Make data[0:len] the read-ahead again, in front of what is unread
