@@ -290,7 +290,7 @@ class CTestCase(unittest.TestCase):
     # rather than on per-feature flags:
     #   is_C: a C implementation (_io's stock buffered classes or
     #       _io._nibbler's).
-    #   is_nibbler: the buffered layer is _io._nibbler. CTestCase's
+    #   is_nibbler: the buffered and text layers are _io._nibbler. CTestCase's
     #       classes are _io._nibbler's with _PYTHON_IO_DEFAULT_IMPL=_nibbler
     #       (and with NibblerMixin); they have the class attribute
     #       _is_nibbler.
@@ -350,11 +350,13 @@ _NIBBLER_BUFFERED = {
     "BufferedWriter": _nibbler.BufferedWriter,
     "BufferedRWPair": _nibbler.BufferedRWPair,
     "BufferedRandom": _nibbler.BufferedRandom,
+    "TextIOWrapper": _nibbler.TextIOWrapper,
 }
 
 
 class NibblerMixin:
-    """Route the buffered layer (self.* types and open()) to _io._nibbler.
+    """Route the buffered and text layers (self.* types and open()) to
+    _io._nibbler.
 
     CTestCase's is_nibbler and is_stock_C follow."""
 

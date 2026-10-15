@@ -15,7 +15,7 @@ from collections import UserList
 from test import support
 from test.support import os_helper, threading_helper
 from test.support.script_helper import assert_python_ok
-from .utils import CTestCase, PyTestCase
+from .utils import CTestCase, PyTestCase, NibblerMixin
 
 import io  # C implementation of io
 import _pyio as pyio # Python implementation of io
@@ -364,10 +364,16 @@ class TextIOWrapperTest:
         # (1) default
         b = self.BytesIO(b"abc\n\xff\n")
         t = self.TextIOWrapper(b, encoding="ascii")
+        if self.is_nibbler:
+            # The text before invalid bytes first, as at the end of the
+            # stream; the next read raises.
+            self.assertEqual(t.read(), "abc\n")
         self.assertRaises(UnicodeError, t.read)
         # (2) explicit strict
         b = self.BytesIO(b"abc\n\xff\n")
         t = self.TextIOWrapper(b, encoding="ascii", errors="strict")
+        if self.is_nibbler:
+            self.assertEqual(t.read(), "abc\n")
         self.assertRaises(UnicodeError, t.read)
         # (3) ignore
         b = self.BytesIO(b"abc\n\xff\n")
@@ -443,6 +449,41 @@ class TextIOWrapperTest:
                         for got_line, exp_line in zip(got_lines, exp_lines):
                             self.assertEqual(got_line, exp_line)
                         self.assertEqual(len(got_lines), len(exp_lines))
+
+    def test_crlf_newline_split_by_small_buffer(self):
+        # A line longer than the buffer, with newline="\r\n" and a "\r"
+        # right before it: the "\r\n" ending it must still be found.
+        data = "\U0001f600\u0436\r\U0001f600a\xe9\U0001f600\xe9\r\r\na"
+        for bufsize in (8, 16, 64):
+            with self.subTest(bufsize=bufsize):
+                b = self.BufferedReader(self.BytesIO(data.encode()), bufsize)
+                t = self.TextIOWrapper(b, encoding="utf-8", newline="\r\n")
+                self.assertEqual(t.readline(12), data[:11])
+                self.assertEqual(t.read(), "a")
+
+    def test_read_translates_after_partial_read(self):
+        # A read() after one that stopped before a "\r\n" translates it.
+        for data, first in (("abc\r\nd", 1), ("xyz\u0436\xe9\r\na", 3)):
+            with self.subTest(data=data):
+                b = self.BufferedReader(self.BytesIO(data.encode()), 1000)
+                t = self.TextIOWrapper(b, encoding="utf-8")
+                self.assertEqual(t.read(first), data[:first])
+                self.assertEqual(t.read(5), data[first:].replace("\r\n", "\n"))
+
+    def test_read_translates_after_readline(self):
+        # Reads of n characters after a readline() translate every "\r"
+        # and "\r\n", wherever they cut the text, and note all three.
+        data = "aa\r" + "\u0436\xe9b\r\r\r\nb\r\na\r\n\u0436b\n" * 3
+        expected = data.replace("\r\n", "\n").replace("\r", "\n")
+        for size in range(1, 12):
+            with self.subTest(size=size):
+                b = self.BufferedReader(self.BytesIO(data.encode()), 64)
+                t = self.TextIOWrapper(b, encoding="utf-8")
+                got = [t.readline()]
+                while s := t.read(size):
+                    got.append(s)
+                self.assertEqual("".join(got), expected)
+                self.assertEqual(t.newlines, ("\r", "\n", "\r\n"))
 
     def test_newlines_input(self):
         testdata = b"AAA\nBB\x00B\nCCC\rDDD\rEEE\r\nFFF\r\nGGG"
@@ -591,14 +632,128 @@ class TextIOWrapperTest:
             f.truncate()
         with self.open(os_helper.TESTFN, "rb") as f:
             self.assertEqual(f.read(), b"line 00000\n")
-        # While iterating, next() disables tell(): truncate() raises like
-        # it, instead of cutting at the wrong place.
+        # While iterating: where tell() works (_io._nibbler with UTF-8),
+        # truncate() cuts there; where next() disabled tell(), truncate()
+        # raises like it.
         with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
             f.write(big)
         with self.open(os_helper.TESTFN, "r+", encoding="utf-8") as f:
             self.assertEqual(next(f), "line 00000\n")
-            self.assertRaises(OSError, f.tell)
-            self.assertRaises(OSError, f.truncate)
+            if not self.is_nibbler:
+                self.assertRaises(OSError, f.tell)
+                self.assertRaises(OSError, f.truncate)
+            else:
+                pos = f.tell()
+                f.truncate()
+                self.assertEqual(f.tell(), pos)
+                self.assertEqual(f.read(), "")
+                with self.open(os_helper.TESTFN, "rb") as g:
+                    self.assertEqual(g.read(), b"line 00000\n")
+
+    def test_write_after_read(self):
+        # gh-82891: where TextIOWrapper takes from its buffer only the bytes
+        # of the text it returns, the buffer's position is the text
+        # position, so a write (or truncate()) after a read acts there, as
+        # after seek(tell()).  (Elsewhere a write after a read goes where the
+        # buffer read up to.)
+        if not self.is_nibbler:
+            self.skipTest("text reads ahead of its position")
+        big = "".join(f"line {i:05}\n" for i in range(3000))
+        def check(enc, newline, text, read, written, after, rest):
+            with self.subTest(encoding=enc, newline=newline, text=text[:12]):
+                with self.open(os_helper.TESTFN, "w", encoding=enc,
+                               newline="") as f:
+                    f.write(text)
+                with self.open(os_helper.TESTFN, "r+", encoding=enc,
+                               newline=newline) as f:
+                    read(f)
+                    # The buffer's position (with decoder flags past it:
+                    # a "\r\n" seen, between "\r" and "\n").
+                    pos = f.tell() & ((1 << 64) - 1)
+                    self.assertEqual(f.buffer.tell(), pos)
+                    f.write("XY")
+                    self.assertEqual(f.tell(), pos + len("XY".encode(enc)))
+                    self.assertEqual(f.read(len(rest)), rest)
+                with self.open(os_helper.TESTFN, "r", encoding=enc,
+                               newline="") as f:
+                    self.assertEqual(f.read(), after)
+        for enc in ("utf-8", "latin-1", "ascii", "cp1252"):
+            # A file larger than the chunks text was decoded in.
+            check(enc, None, big, lambda f: f.readline(),
+                  "line 00000\n", "line 00000\nXYne 00001\n" + big[22:],
+                  "ne 00001\n")
+            check(enc, None, big, lambda f: next(f),
+                  "line 00000\n", "line 00000\nXYne 00001\n" + big[22:],
+                  "ne 00001\n")
+            check(enc, None, big, lambda f: f.read(15),
+                  "", big[:15] + "XY" + big[17:], big[17:30])
+        # Characters of several bytes.
+        check("utf-8", None, "\xe9\u20ac\U0001f600abc\n", lambda f: f.read(3),
+              "", "\xe9\u20ac\U0001f600XYc\n", "c\n")
+        check("latin-1", None, "\xe9\xe8abc\n", lambda f: f.read(2),
+              "", "\xe9\xe8XYc\n", "c\n")
+        check("cp1252", None, "\u20ac\u2019abc\n", lambda f: f.read(2),
+              "", "\u20ac\u2019XYc\n", "c\n")
+        # Translated, "\r\n" is one character; not translated, the write
+        # can go between "\r" and "\n".
+        check("utf-8", None, "ab\r\ncd\r\nef", lambda f: f.read(3),
+              "", "ab\r\nXY\r\nef", "\nef")
+        check("utf-8", "", "ab\r\ncd\r\nef", lambda f: f.read(3),
+              "", "ab\rXYd\r\nef", "d\r\nef")
+        check("utf-8", None, "ab\rcd", lambda f: f.readline(),
+              "", "ab\rXY", "")
+        # truncate() after a read cuts there.
+        with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.write(big)
+        with self.open(os_helper.TESTFN, "r+", encoding="utf-8") as f:
+            self.assertEqual(f.read(15), big[:15])
+            self.assertEqual(f.truncate(), 15)
+            self.assertEqual(f.read(), "")
+        with self.open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(), big[:15].encode())
+
+    def test_read_invalid_with_error_handler(self):
+        # Reads of a file give what reads of the same bytes in a BytesIO
+        # give, also where error handlers drop or replace invalid bytes
+        # (_io._nibbler counts characters in the bytes it reads from).
+        data = b"ab\xffcd\n\xc3(\x80x\r\n\xe2\x82\x81\ny\rz\r" * 20
+        with self.open(os_helper.TESTFN, "wb") as f:
+            f.write(data)
+        ops = [("readline", 1), ("readline", 5), ("read", 3), ("readline", -1),
+               ("read", 7), ("readline", 2), ("read", 1)] * 10
+        for enc, errors, newline in itertools.product(
+                ("utf-8", "cp1252"),
+                ("replace", "ignore", "surrogateescape", "backslashreplace"),
+                (None, "", "\r\n")):
+            with self.subTest(encoding=enc, errors=errors, newline=newline):
+                expected = self.TextIOWrapper(
+                    self.BytesIO(data), encoding=enc, errors=errors,
+                    newline=newline)
+                with self.open(os_helper.TESTFN, encoding=enc,
+                               errors=errors, newline=newline) as f:
+                    for name, n in ops:
+                        self.assertEqual(getattr(f, name)(n),
+                                         getattr(expected, name)(n))
+                    self.assertEqual(f.read(), expected.read())
+                    if newline != "\r\n":
+                        self.assertEqual(f.newlines, expected.newlines)
+
+    def test_newlines_crlf_split_by_reads(self):
+        # newline="": a "\r\n" is one newline in newlines, also when a
+        # read stops between its "\r" and "\n".
+        for enc in ("utf-8", "latin-1"):
+            with self.subTest(encoding=enc):
+                with self.open(os_helper.TESTFN, "w", encoding=enc,
+                               newline="") as f:
+                    f.write("ab\r\ncd\r\nef")
+                for rest in (lambda f: f.read(), lambda f: f.read(4),
+                             lambda f: f.readline()):
+                    with self.open(os_helper.TESTFN, encoding=enc,
+                                   newline="") as f:
+                        self.assertEqual(f.read(3), "ab\r")
+                        rest(f)
+                        f.read()
+                        self.assertEqual(f.newlines, "\r\n")
 
     def test_truncate_below_position(self):
         # As for binary files, the position is not changed: reads return
@@ -675,11 +830,35 @@ class TextIOWrapperTest:
         self.assertEqual(f.readline(), "\xff\n")
         self.assertEqual(f.tell(), p2)
         f.seek(0)
-        for line in f:
+        for i, line in enumerate(f):
             self.assertEqual(line, "\xff\n")
-            self.assertRaises(OSError, f.tell)
+            if self.is_nibbler:
+                # gh-81217
+                self.assertEqual(f.tell(), (p1, p2)[i])
+            else:
+                self.assertRaises(OSError, f.tell)
         self.assertEqual(f.tell(), p2)
         f.close()
+
+    def test_tell_after_flush(self):
+        # flush() after a read doesn't keep tell() from working (it dropped
+        # the read-ahead that tell() looks back at with _io._nibbler).
+        with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.write("a\xe9\nline2\nline3\n")
+        with self.open(os_helper.TESTFN, "r+", encoding="utf-8") as f:
+            self.assertEqual(f.readline(), "a\xe9\n")
+            f.flush()
+            self.assertEqual(f.tell(), 4)
+            self.assertEqual(f.readline(), "line2\n")
+            f.flush()
+            f.flush()
+            self.assertEqual(f.tell(), 10)
+            f.seek(4)
+            self.assertEqual(f.readline(), "line2\n")
+            self.assertEqual(f.read(2), "li")
+            f.flush()
+            self.assertEqual(f.tell(), 12)
+            self.assertEqual(f.read(), "ne3\n")
 
     def test_tell_after_next_and_flush(self):
         # flush() while iterating doesn't make tell() use a snapshot that
@@ -690,7 +869,11 @@ class TextIOWrapperTest:
         with self.open(os_helper.TESTFN, "r+", encoding="utf-8") as f:
             self.assertEqual(next(f), "a\n")
             f.flush()
-            self.assertRaisesRegex(OSError, "disabled by next", f.tell)
+            if self.is_nibbler:
+                self.assertEqual(f.tell(), 2)
+            else:
+                self.assertRaisesRegex(OSError, "disabled by next",
+                                       f.tell)
             self.assertEqual(next(f), "bc\n")
             self.assertEqual(next(f), "d\n")
             # All the text read was returned: the position is known.
@@ -698,6 +881,23 @@ class TextIOWrapperTest:
             self.assertEqual(f.tell(), 7)
             f.seek(2)
             self.assertEqual(f.readline(), "bc\n")
+
+    def test_tell_while_iterating(self):
+        if not self.is_nibbler:
+            self.skipTest("next() disables tell()")
+        # gh-81217: tell() inside a for loop gives positions that seek()
+        # goes back to.
+        lines = ["a\n", "b\xe9\n", "\u20ac" * 3000 + "\n", "d\n"]
+        with self.open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        with self.open(os_helper.TESTFN, encoding="utf-8") as f:
+            positions = []
+            for line in f:
+                positions.append(f.tell())
+            self.assertEqual(positions[-1], f.tell())
+            for i, pos in enumerate(positions[:-1]):
+                f.seek(pos)
+                self.assertEqual(f.readline(), lines[i + 1])
 
     def test_seeking(self):
         chunk_size = _default_chunk_size()
@@ -945,6 +1145,9 @@ class TextIOWrapperTest:
     def test_read_all_would_block_partial_char_tell(self):
         # After read() without a size kept a partial character, tell()
         # is the position before it.
+        if self.is_nibbler:
+            self.skipTest("the nibbler TextIOWrapper reads on after this "
+                          "mock's two would-blocks")
         class BlockTwice(self.RawIOBase):
             # Would block twice at position at: once for the first read of
             # the buffer, once more for the read after the partial char.
@@ -1098,14 +1301,22 @@ class TextIOWrapperTest:
         # The tell() snapshot of where a line spanning chunks started (so
         # that it can be kept if the stream would block) stops growing
         # once the line is too long to keep: a long line over a seekable
-        # buffer costs no extra copy of its bytes.
+        # buffer costs no extra copy of its bytes.  The nibbler keeps the
+        # line's bytes in the buffer until it is read whole, and decodes
+        # them once, into its text (the blocks it outgrows are freed at
+        # once, also with free threading); with the codec's decoder (as
+        # for UTF-16), it takes the text in pieces as they are decoded.  A
+        # line longer than 64 buffers (64 KiB here) is taken in pieces
+        # too, keeping their bytes, not copies, to give back.
         import tracemalloc
         n = 4 * 1024 * 1024
-        for encoding in ("ascii", "utf-16-le"):
-            with self.subTest(encoding=encoding):
+        for encoding, size in (("ascii", io.DEFAULT_BUFFER_SIZE),
+                               ("utf-16-le", io.DEFAULT_BUFFER_SIZE),
+                               ("ascii", 64 * 1024)):
+            with self.subTest(encoding=encoding, buffer_size=size):
                 data = ("x" * n + "\n").encode(encoding)
                 t = self.TextIOWrapper(
-                    self.BufferedReader(self.BytesIO(data)),
+                    self.BufferedReader(self.BytesIO(data), size),
                     encoding=encoding)
                 tracemalloc.start()
                 try:
@@ -1116,7 +1327,9 @@ class TextIOWrapperTest:
                 self.assertEqual(len(line), n + 1)
                 del line, t
                 # The decoded chunks and the joined line: 2x (3x with the
-                # copy).
+                # copy).  The nibbler: the line's bytes, in a block not
+                # much bigger, and its text; with the decoder, the pieces
+                # kept to give back if a read fails, and the text.
                 self.assertLess(peak, 2.5 * n)
 
     def test_readline_long_line_linear(self):
@@ -1146,7 +1359,8 @@ class TextIOWrapperTest:
     def test_readline_long_lines(self):
         # Lines longer than a chunk and than the buffer, with each kind of
         # newline; the character after a "\r" takes two bytes (in UTF-8,
-        # and UTF-16, through the codec's decoder).
+        # a native codec of the nibbler's, and UTF-16, with the codec's
+        # decoder).
         n = 20000
         a, b, c, d = "a" * n, "\xe9" + "b" * n, "c" * n, "d" * n
         text = a + "\r" + b + "\r\n" + c + "\n" + d
@@ -1235,6 +1449,10 @@ class TextIOWrapperTest:
         # A decode error while reading the rest of a line loses the part
         # read before it, with the chunk that failed: keeping it would
         # join it to the next line, which never existed.
+        if self.is_nibbler:
+            self.skipTest("the nibbler TextIOWrapper reports a decode error "
+                          "per byte and keeps reading: 'ab', the error, "
+                          "then '\\n' and 'cd\\n'; tell() keeps working")
         raw = self.MockRawIO((b"ab", b"\xff\n", b"cd\n"))
         t = self.TextIOWrapper(self.BufferedReader(raw), encoding="utf-8")
         self.assertRaises(UnicodeDecodeError, t.readline)
@@ -1487,6 +1705,67 @@ class TextIOWrapperTest:
             content = f.read()
             for n in range(20):
                 self.assertEqual(content.count("Thread%03d\n" % n), 1)
+
+    @threading_helper.requires_working_threading()
+    def test_write_while_reading_other_end(self):
+        # Over a stream that isn't seekable (a pipe or socket pair, as
+        # socket.makefile("rw") makes), reads and writes are separate
+        # streams: write() must not wait for a read blocked on the other
+        # end, which waits for that write (request/response).
+        import socket
+        def pipes():
+            in_r, in_w = os.pipe()
+            out_r, out_w = os.pipe()
+            fds = [in_r, in_w, out_r, out_w]
+            pair = self.BufferedRWPair(self.FileIO(in_r, "r"),
+                                       self.FileIO(out_w, "w"))
+            def peer_send(b):
+                os.write(in_w, b)
+            def peer_recv(timeout):
+                import select
+                if not select.select([out_r], [], [], timeout)[0]:
+                    raise TimeoutError
+                return os.read(out_r, 100)
+            def close():
+                for fd in fds[1:3]:
+                    os.close(fd)
+            return pair, peer_send, peer_recv, close
+        def sockets():
+            a, b = socket.socketpair()
+            raw = socket.SocketIO(a, "rw")
+            pair = self.BufferedRWPair(raw, raw)
+            def peer_recv(timeout):
+                b.settimeout(timeout)
+                return b.recv(100)
+            def close():
+                a.close()
+                b.close()
+            return pair, b.sendall, peer_recv, close
+        for make in (pipes, sockets):
+            with self.subTest(make.__name__):
+                pair, peer_send, peer_recv, close = make()
+                self.addCleanup(close)
+                t = self.TextIOWrapper(pair, encoding="utf-8", newline="")
+                self.addCleanup(t.close)
+                peer_send(b"hello\n")
+                self.assertEqual(t.readline(), "hello\n")
+                got = []
+                def reader():
+                    got.append(t.readline())
+                def peer():
+                    try:
+                        request = peer_recv(5)
+                    except TimeoutError:
+                        request = b"timeout"
+                    peer_send(b"pong\n" if request == b"ping\n"
+                              else b"no ping\n")
+                threads = [threading.Thread(target=reader),
+                           threading.Thread(target=peer)]
+                with threading_helper.start_threads(threads):
+                    time.sleep(0.1)
+                    t.write("ping\n")
+                    t.flush()
+                self.assertEqual(got, ["pong\n"])
 
     def test_flush_error_on_close(self):
         # Test that text file is closed despite failed flush
@@ -2280,6 +2559,8 @@ class CTextIOWrapperTest(TextIOWrapperTest, CTestCase):
             del t._CHUNK_SIZE
 
     def test_internal_buffer_size(self):
+        if self.is_nibbler:
+            self.skipTest("text keeps no bytes of its own")
         # bpo-43260: TextIOWrapper's internal buffer should not store
         # data larger than chunk size.
         chunk_size = 8192  # default chunk size, updated later
@@ -2307,6 +2588,8 @@ class CTextIOWrapperTest(TextIOWrapperTest, CTestCase):
         self.assertEqual([b"abcdef", b"ghi", b"x"*chunk_size], buf._write_stack)
 
     def test_issue119506(self):
+        if self.is_nibbler:
+            self.skipTest("text keeps no bytes of its own")
         chunk_size = 8192
 
         class MockIO(self.MockRawIO):
@@ -2388,8 +2671,11 @@ class CTextIOWrapperTest(TextIOWrapperTest, CTestCase):
                 make_text(DetachOnFlush(self.MockRawIO()))
                 self.assertRaisesRegex(ValueError, "detached", method)
 
-        # Should not crash.
+        # Should not crash.  (Where text goes to the buffer at once, the
+        # write detaches.)
         with self.subTest('read via writeflush'):
+            if self.is_nibbler:
+                return
             make_text(DetachOnWrite(self.MockRawIO()))
             wrapper.write('x')
             self.assertRaisesRegex(ValueError, "detached", wrapper.read)
@@ -2466,6 +2752,1015 @@ class CTextIOWrapperTest(TextIOWrapperTest, CTestCase):
         # must release next_input; exercise it too (leak-checked under -R).
         wrapper.seek(0)
         self.assertIsInstance(wrapper.tell(), int)
+
+
+class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
+
+    def open_nibbler(self, cls, mode, buffer_size, **kwargs):
+        f = self.TextIOWrapper(cls(self.FileIO(os_helper.TESTFN, mode),
+                                   buffer_size), **kwargs)
+        self.addCleanup(f.close)
+        return f
+
+    def test_buffer_dict_mid_read(self):
+        # An attribute set on the buffer between reads makes the text layer
+        # use its methods from then on, without losing the characters it
+        # had decoded and taken the bytes of.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        data = "0123456789\nABCDEFGHIJKLMNOP\nqrstuvwxyz\n"
+        with open(os_helper.TESTFN, "w", encoding="ascii") as f:
+            f.write(data)
+        for cls in (self.BufferedReader, self.BufferedRandom):
+            for bs, chunk, first in itertools.product(
+                    (16, 8192), (3, 8192), (("readline",), ("read", 4))):
+                with self.subTest(cls=cls, bs=bs, chunk=chunk, first=first):
+                    t = self.open_nibbler(cls, "r+", bs, encoding="utf-8")
+                    t._CHUNK_SIZE = chunk
+                    a = getattr(t, first[0])(*first[1:])
+                    t.buffer.x = 1
+                    self.assertEqual(a + t.read(7) + t.read(), data)
+
+    def test_seek_forgets_encoder_used(self):
+        # seek() resets the encoder: close() gives final=True only to an
+        # encoder that encoded text since (a fresh UTF-16 encoder's final
+        # encode() is a BOM), as _io's.
+        class R(self.BytesIO):
+            def close(self):
+                R.value = self.getvalue()
+                super().close()
+        t = self.TextIOWrapper(self.BufferedRandom(R()), encoding="utf-16")
+        t.write("abc")
+        t.seek(0)
+        t.truncate()
+        t.close()
+        self.assertEqual(R.value, b"")
+
+    def test_read_after_buffer_detached(self):
+        # The buffer was detached behind the text's back: reads raise
+        # ValueError, and release nothing they don't hold.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(b"hello\nworld\n")
+        for meth, args in (("read", (3,)), ("readline", ()), ("read", ())):
+            with self.subTest(meth=meth, args=args):
+                raw = self.FileIO(os_helper.TESTFN, "r")
+                self.addCleanup(raw.close)
+                t = self.TextIOWrapper(self.BufferedReader(raw),
+                                       encoding="utf-8")
+                t.buffer.detach()
+                self.assertRaises(ValueError, getattr(t, meth), *args)
+                self.assertRaises(ValueError, getattr(t, meth), *args)
+
+    def test_nested_detach_in_reads(self):
+        # Python code a read, tell() or seek() runs before it uses the
+        # buffer (its closed, a Python raw's closed or read(), the
+        # buffer's seek()) detaches the text: the call raises ValueError,
+        # as _io's, and the buffer handed out gets no more calls from it.
+        got = []
+        class B(self.BytesIO):
+            armed = None
+            def arm(self, where):
+                if B.armed == where:
+                    B.armed = None
+                    got.append(type(t.detach()))   # (Not kept.)
+            @property
+            def closed(self):
+                self.arm("closed")
+                return super().closed
+            def read(self, *a):
+                self.arm("read")
+                return super().read(*a)
+            def seek(self, *a):
+                self.arm("seek")
+                return super().seek(*a)
+        def check(buffer, armed, call, enc="utf-8"):
+            nonlocal t
+            got.clear()
+            t = self.TextIOWrapper(buffer, encoding=enc)
+            B.armed = armed
+            with self.assertRaisesRegex(ValueError, "detached"):
+                call(t)
+            self.assertEqual(len(got), 1)
+        t = None
+        calls = [lambda t: t.read(), lambda t: t.readline(),
+                 lambda t: t.read(3), lambda t: t.tell(),
+                 lambda t: t.seek(0)]
+        for enc, call in itertools.product(("utf-8", "utf-16"), calls):
+            data = "hello\nworld\n".encode(enc)
+            with self.subTest(enc=enc, call=call, buffer="closed"):
+                check(B(data), "closed", call, enc)
+            if enc == "utf-16" or call in calls[3:]:
+                # (The others take the raw's closed in the read, which
+                # refuses the detach().)
+                with self.subTest(enc=enc, call=call, buffer="raw closed"):
+                    check(self.BufferedReader(B(data)), "closed", call, enc)
+        with self.subTest("read() of invalid bytes"):
+            # The buffer's read() detaches, then the bytes don't decode: they
+            # go back to the buffer handed out.  (Not seekable: else the
+            # read refuses the detach().)
+            raw = B(b"abc\xff\xfedef\n")
+            raw.seekable = lambda: False
+            check(self.BufferedReader(raw), "read", lambda t: t.read())
+        with self.subTest("seek() with characters to skip"):
+            check(B("hello\n".encode("utf-16")), "seek",
+                  lambda t: t.seek(1 << 128), "utf-16")
+
+    def test_nested_detach_in_decoder(self):
+        # A Python decoder detaches the text: the read raises ValueError,
+        # and the bytes it didn't take stay in the buffer handed out.  (Not
+        # seekable: else the read refuses the detach().)
+        got = []
+        class Dec(codecs.getincrementaldecoder("utf-8")):
+            def decode(self, b, final=False):
+                if not got:
+                    got.append(t.detach())
+                return super().decode(b, final)
+        def search(name):
+            if name == "detach_in_decode_test":
+                return codecs.CodecInfo(name=name, encode=None, decode=None,
+                                        incrementaldecoder=Dec)
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        class R(self.BytesIO):
+            def seekable(self):
+                return False
+        t = self.TextIOWrapper(self.BufferedReader(R(b"line1\nline2\n")),
+                               encoding="detach_in_decode_test")
+        self.assertRaisesRegex(ValueError, "detached", t.readline)
+        self.assertEqual(got[0].read(), b"line1\nline2\n")
+
+    def test_nested_detach_in_close(self):
+        # close() doesn't close a buffer that a nested detach() (from the
+        # encoder's final encode() or the buffer's flush()) handed out.
+        got = []
+        class Enc(codecs.IncrementalEncoder):
+            def encode(self, s, final=False):
+                if final and not got:
+                    got.append(t.detach())
+                return s.encode("ascii")
+        def search(name):
+            if name == "detach_on_final_test":
+                return codecs.CodecInfo(
+                    name=name, encode=None, decode=None,
+                    incrementalencoder=Enc)
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        class W(self.BufferedWriter):
+            def flush(self):
+                if not got:
+                    got.append(None)
+                    got[0] = t.detach()
+                return super().flush()
+        for enc, cls in (("detach_on_final_test", self.BufferedWriter),
+                         ("ascii", W)):
+            with self.subTest(enc=enc):
+                got.clear()
+                raw = self.BytesIO()
+                t = self.TextIOWrapper(cls(raw), encoding=enc)
+                t.write("abc")
+                with self.assertRaisesRegex(ValueError, "detached"):
+                    t.close()
+                self.assertFalse(got[0].closed)
+                got[0].flush()
+                self.assertEqual(raw.getvalue(), b"abc")
+
+    @threading_helper.requires_working_threading()
+    def test_decoder_runs_without_buffer_locks(self):
+        # The codec's decoder runs without the buffer's locks: it (and
+        # other threads meanwhile) can use the buffer.  Bytes others take
+        # meanwhile aren't taken again: the text goes on after them.
+        calls = []
+        class Dec(codecs.getincrementaldecoder("utf-8")):
+            def decode(self, b, final=False):
+                if not calls:
+                    calls.append(t.buffer.tell())
+                    th = threading.Thread(
+                        target=lambda: calls.append(t.buffer.read(2)))
+                    th.start()
+                    th.join(support.SHORT_TIMEOUT)
+                    calls.append(th.is_alive())
+                return super().decode(b, final)
+        def search(name):
+            if name == "unlocked_decoder_test":
+                return codecs.CodecInfo(
+                    name=name, encode=None, decode=None,
+                    incrementalencoder=codecs.getincrementalencoder("utf-8"),
+                    incrementaldecoder=Dec)
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        for cls in (self.BufferedReader, self.BufferedRandom):
+            with self.subTest(cls=cls):
+                calls.clear()
+                t = self.TextIOWrapper(cls(self.BytesIO(b"line1\nline2\n")),
+                                       encoding="unlocked_decoder_test")
+                self.assertEqual(t.readline(), "ne1\n")
+                self.assertEqual(calls, [0, b"li", False])
+                self.assertEqual(t.read(), "line2\n")
+
+    def test_nested_detach_or_init_in_write(self):
+        # Python code a write runs before it stores (the buffer's closed,
+        # the codec's encoder) detaches the text: the write raises
+        # ValueError, and stores nothing in the buffer handed out.  If it
+        # sets the text up again instead, the text goes to the new buffer.
+        got = []
+        class B(self.BytesIO):
+            armed = None
+            @property
+            def closed(self):
+                if B.armed == "closed":
+                    B.armed = None
+                    got.append(t.detach())
+                elif B.armed == "init":
+                    B.armed = None
+                    got.append(self)
+                    t.__init__(B(), encoding="ascii")
+                return super().closed
+        class Enc(codecs.IncrementalEncoder):
+            def encode(self, s, final=False):
+                if B.armed == "encode":
+                    B.armed = None
+                    got.append(t.detach())
+                return s.encode("ascii")
+        def search(name):
+            if name == "detach_on_encode_test":
+                return codecs.CodecInfo(
+                    name=name, encode=None, decode=None,
+                    incrementalencoder=Enc,
+                    incrementaldecoder=codecs.getincrementaldecoder("ascii"))
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        for where, enc in (("closed", "ascii"), ("closed", "utf-16"),
+                           ("encode", "detach_on_encode_test")):
+            with self.subTest(where=where, enc=enc):
+                got.clear()
+                # (Translated: not the write that stores at once.)
+                t = self.TextIOWrapper(B(), encoding=enc, newline="\r\n")
+                B.armed = where
+                with self.assertRaisesRegex(ValueError, "detached"):
+                    t.write("x\n")
+                self.assertEqual(got[0].getvalue(), b"")
+        with self.subTest(where="init"):
+            got.clear()
+            t = self.TextIOWrapper(B(), encoding="ascii", newline="\r\n")
+            B.armed = "init"
+            self.assertEqual(t.write("x\n"), 2)
+            t.flush()
+            self.assertEqual(got[0].getvalue(), b"")
+            self.assertEqual(t.buffer.getvalue(), b"x\n")
+
+    def test_init_from_encoder_refused(self):
+        # __init__() from the codec's encoder, in a write (which holds the
+        # lock __init__() publishes under), raises RuntimeError before it
+        # changes anything: the text keeps its settings.
+        armed = []
+        class Enc(codecs.IncrementalEncoder):
+            def encode(self, s, final=False):
+                if armed:
+                    armed.clear()
+                    t.__init__(self.BytesIO(), encoding="ascii")
+                return s.encode("ascii")
+        Enc.BytesIO = self.BytesIO
+        def search(name):
+            if name == "init_on_encode_test":
+                return codecs.CodecInfo(
+                    name=name, encode=None, decode=None,
+                    incrementalencoder=Enc,
+                    incrementaldecoder=codecs.getincrementaldecoder("ascii"))
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        b = self.BytesIO()
+        t = self.TextIOWrapper(b, encoding="init_on_encode_test")
+        armed.append(1)
+        with self.assertRaisesRegex(RuntimeError, "reentrant call"):
+            t.write("x")
+        self.assertIs(t.buffer, b)
+        self.assertEqual(t.encoding, "init_on_encode_test")
+        t.write("y")
+        t.flush()
+        self.assertEqual(b.getvalue(), b"y")
+
+    def test_nested_detach_in_reconfigure(self):
+        # reconfigure() doesn't attach again a buffer that a nested
+        # detach() (from the buffer's writable() or tell()) handed out.
+        got = []
+        class B(self.BytesIO):
+            armed = None
+            def writable(self):
+                if B.armed == "writable":
+                    B.armed = None
+                    got.append(t.detach())
+                return True
+            def tell(self):
+                if B.armed == "tell":
+                    B.armed = None
+                    got.append(t.detach())
+                return super().tell()
+        for where in ("writable", "tell"):
+            with self.subTest(where=where):
+                got.clear()
+                t = self.TextIOWrapper(B(), encoding="utf-8")
+                B.armed = where
+                with self.assertRaisesRegex(ValueError, "detached"):
+                    t.reconfigure(encoding="latin-1")
+                self.assertEqual(len(got), 1)
+                self.assertRaisesRegex(ValueError, "detached", t.write, "x")
+                self.assertEqual(got[0].getvalue(), b"")
+
+    @threading_helper.requires_working_threading()
+    def test_threads_write_stateful_encoder(self):
+        # The codec's encoder may hold state (an iso2022 shift state, the
+        # BOM): concurrent writes use it one at a time, and their bytes
+        # reach the buffer in the order it encoded them.  This encoder
+        # numbers its pieces, and lets other threads run meanwhile.
+        class NumberingEncoder(codecs.IncrementalEncoder):
+            n = 0
+            def encode(self, s, final=False):
+                if not s:
+                    return b""
+                n = self.n
+                time.sleep(0)
+                self.n = n + 1
+                return b"%d:%s;" % (n, s.encode("ascii"))
+        def search(name):
+            if name == "numbering_test":
+                return codecs.CodecInfo(
+                    name=name, encode=None, decode=None,
+                    incrementalencoder=NumberingEncoder)
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        raw = self.BytesIO()
+        t = self.TextIOWrapper(self.BufferedWriter(raw),
+                               encoding="numbering_test")
+        def write(s):
+            for _ in range(200):
+                t.write(s)
+        threads = [threading.Thread(target=write, args=(s,))
+                   for s in ("a", "bb", "ccc")]
+        with threading_helper.start_threads(threads):
+            pass
+        t.flush()
+        pieces = raw.getvalue().split(b";")[:-1]
+        self.assertEqual([int(p.split(b":")[0]) for p in pieces],
+                         list(range(600)))
+        t.close()
+        os_helper.unlink(os_helper.TESTFN)
+        # A codec of the codecs module, from many threads (on free
+        # threading, they run at once).
+        for encoding in ("iso2022_jp", "utf-16"):
+            with self.subTest(encoding=encoding):
+                with self.open(os_helper.TESTFN, "w", encoding=encoding) as f:
+                    def write(s):
+                        for _ in range(2000):
+                            f.write(s)
+                    threads = [threading.Thread(target=write, args=(s,))
+                               for s in ("日本", "ab", "語x")]
+                    with threading_helper.start_threads(threads):
+                        pass
+                with self.open(os_helper.TESTFN, encoding=encoding) as f:
+                    data = f.read()
+                self.assertEqual(len(data), 6 * 2000)
+                for s in ("日本", "ab", "語x"):
+                    self.assertEqual(data.count(s), 2000)
+                os_helper.unlink(os_helper.TESTFN)
+
+    def test_reentrant_calls_refused(self):
+        # Python code a read runs (a Python buffer's read1(), a decoder)
+        # can't read, seek, tell, close, __init__() or reconfigure() the
+        # same text: they would change or free the read state and the
+        # settings the read is using.  The read itself goes on.
+        text = None
+        errors = []
+        def nested(*calls):
+            for call in calls:
+                try:
+                    call()
+                except RuntimeError as e:
+                    errors.append(str(e))
+        class B(self.BufferedIOBase):
+            chunks = [b"ab", b"cd\n", b"ef\n", b""]
+            def readable(self):
+                return True
+            def read1(self, n=-1):
+                if len(self.chunks) == 3:
+                    nested(text.readline, lambda: text.read(1), text.close,
+                           lambda: text.__init__(self.__class__()))
+                return self.chunks.pop(0) if self.chunks else b""
+            read = read1
+        text = self.TextIOWrapper(B(), encoding="latin-1")
+        self.assertEqual(list(text), ["abcd\n", "ef\n"])
+        self.assertEqual(len(errors), 4)
+        self.assertIn("reentrant call", errors[0])
+
+        class Dec(codecs.IncrementalDecoder):
+            calls = 0
+            def decode(self, data, final=False):
+                Dec.calls += 1
+                if Dec.calls == 1:
+                    nested(lambda: text.read(2), text.tell,
+                           lambda: text.seek(0),
+                           lambda: text.reconfigure(encoding="latin-1"),
+                           lambda: text.__init__(BytesIO(b"zz"),
+                                                 encoding="latin-1"))
+                return bytes(data).decode("latin-1")
+            def getstate(self):
+                return (b"", 0)
+            def setstate(self, state):
+                pass
+        def search(name):
+            if name == "reentrant_decoder_test":
+                return codecs.CodecInfo(
+                    name=name, encode=None, decode=None,
+                    incrementalencoder=codecs.lookup("latin-1")
+                                       .incrementalencoder,
+                    incrementaldecoder=Dec)
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        errors.clear()
+        BytesIO = self.BytesIO
+        for buffer in (self.BytesIO(b"abcdefgh" * 3),
+                       self.BufferedReader(self.BytesIO(b"abcdefgh" * 3))):
+            with self.subTest(buffer=type(buffer)):
+                Dec.calls = 0
+                text = self.TextIOWrapper(buffer,
+                                          encoding="reentrant_decoder_test")
+                text._CHUNK_SIZE = 4
+                self.assertEqual(text.read(6), "abcdef")
+                self.assertEqual(len(errors), 5)
+                errors.clear()
+                self.assertEqual(text.read(), "gh" + "abcdefgh" * 2)
+
+    @support.requires_fork()
+    @threading_helper.requires_working_threading()
+    @support.skip_if_sanitizer("TSan doesn't start threads after a "
+                               "multi-threaded fork", thread=True)
+    def test_fork_while_nested_call(self):
+        # A thread in a call nested in another (tell() from a Python
+        # buffer's flush() that tell() calls) when the process forks: in
+        # the child, rlock is free for every thread.
+        text = None
+        started = threading.Event()
+        class B(self.BufferedIOBase):
+            depth = 0
+            def readable(self):
+                return True
+            def seekable(self):
+                return True
+            def tell(self):
+                return 0
+            def read1(self, n=-1):
+                return b"line\n"
+            read = read1
+            def flush(self):
+                self.depth += 1
+                if self.depth == 1:
+                    text.tell()
+                elif self.depth == 2:
+                    started.set()
+                    time.sleep(1)
+        text = self.TextIOWrapper(B(), encoding="ascii")
+        t = threading.Thread(target=text.tell)
+        t.start()
+        self.addCleanup(t.join)
+        started.wait()
+        with warnings.catch_warnings():
+            # (This test is about forking a multi-threaded process.)
+            warnings.simplefilter("ignore", DeprecationWarning)
+            pid = os.fork()
+        if pid == 0:
+            ok = text.readline() == "line\n"
+            child = threading.Thread(target=text.readline)
+            child.start()
+            child.join(support.SHORT_TIMEOUT)
+            os._exit(0 if ok and not child.is_alive() else 1)
+        support.wait_process(pid, exitcode=0)
+
+    def test_init_while_writing(self):
+        # __init__() between a write's look at the settings and its store
+        # (here from the buffer's closed property; on free threading, from
+        # another thread): the write starts again with the new settings,
+        # as _io's goes to the new buffer, and never takes the old one
+        # for a buffered object of _io._nibbler.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        text = None
+        class Slotted:
+            # Nothing where a buffered object has its fields.
+            __slots__ = tuple("s%d" % i for i in range(40)) + ("data",)
+            def readable(self):
+                return False
+            def writable(self):
+                return True
+            def seekable(self):
+                return False
+            @property
+            def closed(self):
+                if self.data == b"":
+                    self.data = b"-"
+                    text.__init__(self.new, encoding="latin-1")
+                return False
+            def write(self, b):
+                self.data += b
+                return len(b)
+            def flush(self):
+                pass
+        old = Slotted()
+        old.data = b""
+        Slotted.new = self.open(os_helper.TESTFN, "wb")
+        text = self.TextIOWrapper(old, encoding="latin-1")
+        text.write("first")
+        text.write("second")
+        text.close()
+        self.assertEqual(old.data, b"-")
+        with self.open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(), b"firstsecond")
+
+    def test_init_drops_decoded_str_subclass(self):
+        # __init__() drops the characters decoded and not returned: a str
+        # subclass a Python decoder returned, whose __del__ writes to the
+        # text (and finds it uninitialized), while no lock writes take is
+        # held.
+        text = None
+        errors = []
+        class S(str):
+            def __del__(self):
+                try:
+                    text.write("x")
+                except ValueError as e:
+                    errors.append(e)
+        class Dec(codecs.IncrementalDecoder):
+            def decode(self, data, final=False):
+                return S(bytes(data).decode("latin-1"))
+            def getstate(self):
+                return (b"", 0)
+            def setstate(self, state):
+                pass
+        def search(name):
+            if name == "str_subclass_test":
+                return codecs.CodecInfo(
+                    name=name, encode=None, decode=None,
+                    incrementalencoder=codecs.lookup("latin-1")
+                                       .incrementalencoder,
+                    incrementaldecoder=Dec)
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        text = self.TextIOWrapper(self.BytesIO(b"abcdefgh"),
+                                  encoding="str_subclass_test")
+        self.assertEqual(text.read(1), "a")
+        text.__init__(self.BytesIO(b"zz"), encoding="latin-1")
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(text.read(), "zz")
+
+    def test_invalid_bytes_after_no_text(self):
+        # Through the codec's decoder: invalid bytes after bytes that
+        # decode to no text (an iso2022 escape sequence alone) raise
+        # before read() returns "", which would say the stream ended.
+        cases = [("iso2022_jp", b"ab\x1b$B\x30", "ab"),
+                 ("iso2022_jp", b"ab\x1b$B\x30\x21\x30", "ab\u4e9c"),
+                 ("shift_jis", b"ab\x82", "ab"),
+                 ("utf-16-le", b"a\x00b\x00c", "ab"),
+                 ("gb18030", b"ab\x81", "ab")]
+        for (encoding, data, text), bs, n in itertools.product(
+                cases, (1, 2, 4, 64), (1, 2, 3)):
+            with self.subTest(encoding=encoding, data=data, bs=bs, n=n):
+                t = self.TextIOWrapper(self.BufferedReader(
+                    self.BytesIO(data), bs), encoding=encoding)
+                out = []
+                for _ in range(8):
+                    try:
+                        s = t.read(n)
+                    except UnicodeDecodeError:
+                        out.append(None)
+                        continue
+                    out.append(s)
+                    if s == "":
+                        break
+                self.assertIn(None, out)
+                self.assertEqual("".join(s for s in out if s), text)
+
+    def test_write_after_raw_closed(self):
+        # After the raw stream alone is closed, the usual text writes are
+        # the buffer's small writes: queued without asking the raw stream
+        # (which costs a Python call), never written to it; flush() raises.
+        # Others ask, and raise at once (io_nibbler.md).
+        class Raw(self.RawIOBase):
+            data = b""
+            def writable(self):
+                return True
+            def write(self, b):
+                self.data += bytes(b)
+                return len(b)
+        raw = Raw()
+        t = self.TextIOWrapper(self.BufferedWriter(raw), encoding="utf-8")
+        t.write("a")
+        t.flush()
+        raw.close()
+        t.write("x")
+        t.write("\u20ac")
+        self.assertRaises(ValueError, t.write, "\ud800")
+        self.assertRaises(ValueError, t.flush)
+        self.assertEqual(raw.data, b"a")
+        t.buffer._discard_writes()
+        t.close()
+
+    def test_invalid_bytes_strict(self):
+        # Invalid bytes end the text before them, and the next read raises
+        # (once): they don't look like the end of the stream.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        cases = [
+            ("utf-8", b"one\ntwo\xff\nthree\n",
+             ["one\n", "two", None, "\n", "three\n", ""]),
+            ("utf-8", b"ab\xc3", ["ab", None, ""]),
+            ("ascii", b"x\x80y\n", ["x", None, "y\n", ""]),
+            ("cp1252", b"x\x81y\n", ["x", None, "y\n", ""]),
+        ]
+        for encoding, data, expected in cases:
+            with self.subTest(encoding=encoding, data=data):
+                with open(os_helper.TESTFN, "wb") as f:
+                    f.write(data)
+                t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                                      encoding=encoding)
+                for want in expected:
+                    if want is None:
+                        self.assertRaises(UnicodeDecodeError, t.readline)
+                    else:
+                        self.assertEqual(t.readline(), want)
+                t.seek(0)
+                with self.assertRaises(UnicodeDecodeError):
+                    list(t)
+
+    def test_newlines_across_tell_seek(self):
+        # readline(3) stops between "\r" and "\n": the "\n" that follows
+        # still ends that "\r\n", also after seek(tell()).
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(b"ab\r\ncd\r\n")
+        for chunk in (8192, 1):
+            with self.subTest(chunk=chunk):
+                t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                                      encoding="utf-8", newline="")
+                t._CHUNK_SIZE = chunk
+                self.assertEqual(t.readline(3), "ab\r")
+                t.seek(t.tell())
+                self.assertEqual(t.readline(), "\n")
+                self.assertEqual(t.readline(), "cd\r\n")
+                self.assertEqual(t.newlines, "\r\n")
+
+    def test_seek_invalid_cookie_native_codec(self):
+        # gh-91112: a cookie tell() can't have returned with a native codec
+        # (decoder flags but the "\r\n" one, characters to skip) is an
+        # error, not another position.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(b"abc\n")
+        t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                              encoding="utf-8")
+        for cookie in (2 << 64, 1 << 128):
+            with self.subTest(cookie=cookie):
+                self.assertRaises(OSError, t.seek, cookie)
+
+    def test_reconfigure_encoding_finishes_encoder(self):
+        # The old encoder is given the end of its text (gh-79792): the
+        # ISO-2022-JP text ends back in ASCII before the new encoding's.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        t = self.open_nibbler(self.BufferedWriter, "w", 8192,
+                              encoding="iso2022_jp")
+        t.write("日本")
+        t.reconfigure(encoding="ascii")
+        t.write("x")
+        t.close()
+        with open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(),
+                             "日本".encode("iso2022_jp") + b"x")
+
+    def test_read_ahead_after_raw_close(self):
+        # After the raw stream alone is closed, what the buffer read ahead
+        # can still be read as text, as bytes: also once a binary read
+        # that needed the raw stream raised.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(b"abcdefghij" * 10)
+        raw = self.FileIO(os_helper.TESTFN, "r")
+        b = self.BufferedReader(raw, 64)
+        t = self.TextIOWrapper(b, encoding="utf-8")
+        self.addCleanup(t.close)
+        self.assertEqual(t.read(2), "ab")
+        raw.close()
+        self.assertEqual(t.read(2), "cd")
+        self.assertRaises(ValueError, b.readline)
+        self.assertEqual(t.read(2), "ef")
+        self.assertEqual(b.read(2), b"gh")
+
+    class FailingRaw(io.RawIOBase):
+        # Serves data, but raises exc once, when asked for more at `at`.
+        def __init__(self, data, at, exc):
+            self.data, self.at, self.exc, self.pos = data, at, exc, 0
+            self.lock = threading.Lock()
+
+        def readable(self):
+            return True
+
+        def readinto(self, b):
+            with self.lock:
+                if self.pos == self.at and self.exc is not None:
+                    exc, self.exc = self.exc, None
+                    raise exc
+                end = self.at if self.exc is not None else len(self.data)
+                n = min(len(b), end - self.pos)
+                b[:n] = self.data[self.pos:self.pos + n]
+                self.pos += n
+                return n
+
+    def check_failed_read_keeps_text(self, exc, encodings, ops):
+        # A read that fails after it took text (the raw stream raises when
+        # asked for more) gives it back, as the buffer gives back bytes:
+        # the failed call returns nothing, and the next one all of it.
+        class Sub(self.BufferedReader):
+            pass
+        for encoding, (op, *args), newline, cls in itertools.product(
+                encodings, ops, (None, ""), (self.BufferedReader, Sub)):
+            if encoding == "latin-1":
+                text = "".join("%05d:%s\r\n" % (i, "\xe9" * (i % 50))
+                               for i in range(400))
+            else:
+                text = "".join("%05d:%s\r\n" % (i, "\u20ac" * (i % 50))
+                               for i in range(400))
+            if op == "readline":
+                # One line too long for the buffer to gather (more than 64
+                # blocks): taken in parts.
+                text = text.replace("\r\n", "\t") * 60 + "\n"
+            data = text.encode(encoding)
+            expected = io.TextIOWrapper(io.BytesIO(data), encoding=encoding,
+                                        newline=newline).read()
+            for at in (len(data) // 3, len(data) * 2 // 3):
+                at -= at % 4
+                with self.subTest(encoding=encoding, op=op, newline=newline,
+                                  cls=cls.__name__, at=at):
+                    raw = self.FailingRaw(data, at, exc)
+                    t = self.TextIOWrapper(cls(raw, 64), encoding=encoding,
+                                           newline=newline)
+                    first = t.read(3)
+                    self.assertRaises(type(exc), getattr(t, op), *args)
+                    self.assertEqual(first + t.read(), expected)
+
+    def test_failed_read_keeps_text(self):
+        self.check_failed_read_keeps_text(
+            OSError("boom"), ("utf-8", "latin-1", "cp1252", "utf-16-le"),
+            [("read", 30000), ("read",), ("readline",)])
+
+    def test_failed_read_keeps_text_interrupted(self):
+        self.check_failed_read_keeps_text(
+            KeyboardInterrupt(), ("utf-8", "utf-16-le"),
+            [("read", 30000), ("read",), ("readline",)])
+
+    def test_failed_read_keeps_text_would_block(self):
+        # A raw stream that raises BlockingIOError (instead of returning
+        # None) is an error like any other: the text is kept, as the
+        # buffer keeps the bytes.
+        self.check_failed_read_keeps_text(
+            BlockingIOError(errno.EAGAIN, "would block"),
+            ("utf-8", "utf-16-le"), [("read", 30000), ("readline",)])
+        # Returning None: read(n) returns what there is, readline() keeps
+        # the partial line.
+        raw = self.MockRawIO((b"a" * 100, None, b"b\n"))
+        t = self.TextIOWrapper(self.BufferedReader(raw, 64),
+                               encoding="utf-8")
+        self.assertEqual(t.read(200), "a" * 100)
+        self.assertEqual(t.read(), "b\n")
+
+    def test_failed_read_keeps_text_raw_closed(self):
+        # The raw stream closed after the buffer read ahead: a read that
+        # takes what was read ahead and then needs more raises, and gives
+        # it back, as the buffer's read() does.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        text = "abcdefghij" * 30 + "\n"
+        with open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.write(text)
+        for op, *args in [("read", 70), ("read",), ("readline",),
+                          ("readline", 70)]:
+            with self.subTest(op=op, args=args):
+                raw = self.FileIO(os_helper.TESTFN, "r")
+                b = self.BufferedReader(raw, 64)
+                t = self.TextIOWrapper(b, encoding="utf-8")
+                self.addCleanup(t.close)
+                self.assertEqual(t.read(2), "ab")
+                raw.close()
+                self.assertRaises(ValueError, getattr(t, op), *args)
+                self.assertEqual(t.read(62), text[2:64])
+                self.assertRaises(ValueError, t.read, 1)
+
+    def test_read_text_before_invalid_bytes(self):
+        # Invalid bytes after text a read took end it, as the end of the
+        # stream would; the next read raises (see
+        # test_invalid_bytes_strict).
+        for encoding, bad in (("utf-8", b"\xff"), ("ascii", b"\x80"),
+                              ("utf-16-le", b"\x00\xd8a\x00")):
+            good = ("x" * 100 + "\n") * 3
+            data = good.encode(encoding) + bad + "yz\n".encode(encoding)
+            for op, *args in [("read", 1000), ("read",), ("readline", 1000)]:
+                with self.subTest(encoding=encoding, op=op):
+                    t = self.TextIOWrapper(
+                        self.BufferedReader(self.BytesIO(data), 64),
+                        encoding=encoding, newline="")
+                    if op == "readline":
+                        got = "".join(t.readline() for _ in range(3))
+                    else:
+                        got = getattr(t, op)(*args)
+                    self.assertEqual(got, good)
+                    self.assertRaises(UnicodeDecodeError, getattr(t, op),
+                                      *args)
+                    self.assertTrue(t.read().endswith("yz\n"))
+
+    @threading_helper.requires_working_threading()
+    @support.requires_resource("cpu")
+    def test_threads_failed_reads_keep_text(self):
+        # Threads read while the raw stream raises now and then: the text
+        # failed reads took is given back, and read once, by some thread
+        # (in another order, maybe, where threads read between the
+        # pieces).
+        text = "".join("%05d:%s\n" % (i, "\u20ac" * (i % 40))
+                       for i in range(3000))
+        data = text.encode("utf-8")
+
+        class Flaky(io.RawIOBase):
+            def __init__(self):
+                self.pos = self.calls = 0
+                self.lock = threading.Lock()
+
+            def readable(self):
+                return True
+
+            def readinto(self, b):
+                with self.lock:
+                    self.calls += 1
+                    if self.calls % 3 == 0:
+                        raise OSError("flaky")
+                    n = min(len(b), len(data) - self.pos)
+                    b[:n] = data[self.pos:self.pos + n]
+                    self.pos += n
+                    return n
+
+        self.addCleanup(sys.setswitchinterval, sys.getswitchinterval())
+        sys.setswitchinterval(1e-6)
+        for size in (100, 1000, None):
+            with self.subTest(size=size):
+                t = self.TextIOWrapper(self.BufferedReader(Flaky(), 64),
+                                       encoding="utf-8")
+                got = [[] for _ in range(4)]
+
+                def reader(k):
+                    while True:
+                        try:
+                            s = (t.readline() if size is None
+                                 else t.read(size + k))
+                        except OSError:
+                            continue
+                        if not s:
+                            break
+                        got[k].append(s)
+
+                with threading_helper.start_threads(
+                        threading.Thread(target=reader, args=(k,))
+                        for k in range(4)):
+                    pass
+                pieces = sum(got, [])
+                self.assertEqual(sum(map(len, pieces)), len(text))
+                self.assertEqual(sorted("".join(pieces)), sorted(text))
+
+    def test_decoder_flags_past_32_bits(self):
+        # iso2022_kr's decoder state goes past 32 bits: reads work, and
+        # only tell(), whose cookie can't hold it, raises.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        text = "abc\n\ud55c\uad6d\ud55c\uad6d\nx\n" * 3
+        with open(os_helper.TESTFN, "w", encoding="iso2022_kr") as f:
+            f.write(text)
+        t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                              encoding="iso2022_kr")
+        t._CHUNK_SIZE = 4
+        lines = text.splitlines(keepends=True)
+        self.assertEqual(t.readline(), lines[0])
+        self.assertEqual(t.readline(), lines[1])
+        self.assertEqual(t.readline(), lines[2])
+        self.assertEqual(t.readline(), lines[3])
+        self.assertEqual(t.read(1), "\ud55c")
+        with self.assertRaises(OverflowError):
+            t.tell()
+        self.assertEqual(t.read(), text[len("".join(lines[:4])) + 1:])
+        # Flags within 32 bits still go through tell() and seek().
+        with open(os_helper.TESTFN, "w", encoding="iso2022_jp") as f:
+            f.write("abc\n日本\nx\n")
+        t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                              encoding="iso2022_jp")
+        self.assertEqual(t.readline(), "abc\n")
+        self.assertEqual(t.read(1), "日")
+        pos = t.tell()
+        self.assertEqual(t.read(), "本\nx\n")
+        t.seek(pos)
+        self.assertEqual(t.read(), "本\nx\n")
+
+    def test_invalid_bytes_codec_decoder(self):
+        # The same through the codec's incremental decoder: the bad bytes
+        # are taken, so that reading goes on past them.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        cases = [
+            ("utf-16-le", b"a\x00\x00\xd8b\x00c\x00\n\x00d\x00",
+             ["a", None, "bc\n", "d", ""]),
+            ("utf-32-le", "a\n".encode("utf-32-le") + b"\x00\x00\x11\x00"
+             + "b\n".encode("utf-32-le"), ["a\n", None, "b\n", ""]),
+        ]
+        for encoding, data, expected in cases:
+            with self.subTest(encoding=encoding):
+                with open(os_helper.TESTFN, "wb") as f:
+                    f.write(data)
+                t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                                      encoding=encoding)
+                for want in expected:
+                    if want is None:
+                        self.assertRaises(UnicodeDecodeError, t.readline)
+                    else:
+                        self.assertEqual(t.readline(), want)
+
+    @threading_helper.requires_working_threading()
+    @support.requires_resource("cpu")
+    def test_buffer_dict_while_threads_read(self):
+        # The same while threads iterate (with the GIL, they switch where
+        # they wait for the buffer): each line is read once, whole.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        lines = ["%06d \xe9€ %s\n" % (i, "x" * (i % 30))
+                 for i in range(5000)]
+        with open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        self.addCleanup(sys.setswitchinterval, sys.getswitchinterval())
+        sys.setswitchinterval(1e-6)
+        for i in range(20):
+            t = self.open_nibbler(self.BufferedReader, "r", 64,
+                                  encoding="utf-8")
+            got = [[] for _ in range(6)]
+
+            def reader(k):
+                got[k].extend(t)
+
+            threads = [threading.Thread(target=reader, args=(k,))
+                       for k in range(6)]
+            with threading_helper.start_threads(threads):
+                time.sleep(0.0002 * i)
+                t.buffer.foo = 1
+            self.assertEqual(sorted(sum(got, [])), lines)
+
+    @threading_helper.requires_working_threading()
+    @support.requires_resource("cpu")
+    def test_threads_readline_long_lines(self):
+        # Lines longer than the buffer's block are read whole, each by one
+        # thread, also where they switch while waiting for the buffer.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        lines = ["%06d:%s\n" % (i, "x" * (3000 * (i % 7)))
+                 for i in range(1500)]
+        with open(os_helper.TESTFN, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        t = self.open_nibbler(self.BufferedReader, "r", 8192,
+                              encoding="utf-8")
+        got = [[] for _ in range(8)]
+
+        def reader(k):
+            got[k].extend(t)
+
+        with threading_helper.start_threads(
+                threading.Thread(target=reader, args=(k,)) for k in range(8)):
+            pass
+        self.assertEqual(sorted(sum(got, [])), lines)
+
+    @threading_helper.requires_working_threading()
+    def test_reconfigure_newline_while_threads_write(self):
+        # reconfigure(newline=...) keeps the codec: writes racing it never
+        # find the stream unwritable.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        self.addCleanup(sys.setswitchinterval, sys.getswitchinterval())
+        sys.setswitchinterval(1e-6)
+        t = self.open_nibbler(self.BufferedWriter, "w", 1 << 16,
+                              encoding="utf-8")
+        stop = threading.Event()
+        errors = []
+
+        def writer():
+            try:
+                for _ in range(20000):
+                    t.write("ab\n")
+            except Exception as e:
+                errors.append(e)
+
+        def reconfigure():
+            i = 0
+            while not stop.is_set():
+                t.reconfigure(newline=("\r\n", "\n", "\r", "")[i % 4])
+                i += 1
+
+        r = threading.Thread(target=reconfigure)
+        with threading_helper.start_threads([r]):
+            try:
+                with threading_helper.start_threads(
+                        threading.Thread(target=writer) for _ in range(4)):
+                    pass
+            finally:
+                stop.set()
+        self.assertEqual(errors, [])
 
 
 class PyTextIOWrapperTest(TextIOWrapperTest, PyTestCase):
