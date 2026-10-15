@@ -1420,9 +1420,23 @@ gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
     int full = r == 0 && rec->list.nbytes >= rec->limit;
     rec_unlock(rec);
     if (out > 0) {
-        /* (Kept on error: written out at the next one or the end.) */
-        (void)gather_end(self, rec, out, NULL);
-        PyErr_Clear();
+        /* (Kept on error: written out at the next one, or by the end,
+           which raises an OSError; anything else is raised now, saying
+           all of data was accepted.  From code of this thread holding the
+           stream's locks, as a signal handler in a write-out, left for
+           the next one.) */
+        int e = (nibbler_mutex_is_mine(&self->io)
+                 || nibbler_mutex_is_mine(&self->lock)
+                 ? 0 : gather_end(self, rec, out, NULL));
+        if (e < 0 && PyErr_Occurred()
+            && !PyErr_ExceptionMatches(PyExc_OSError))
+        {
+            buffered_set_written(len);
+            r = -1;
+        }
+        else {
+            PyErr_Clear();
+        }
     }
     else if (full && !nibbler_mutex_is_mine(&self->lock)) {
         /* (Kept on error, which says all of data was accepted: moved at

@@ -1136,6 +1136,35 @@ class GatherTest(unittest.TestCase):
                         self.assertEqual(self.read(), expected[:-1 - direct])
             self.assertEqual(self.read(), expected)
 
+    def test_line_flush_errors(self):
+        # A failed write-out of lines keeps them for the next one, quietly
+        # for an OSError, else raising (all of the data was accepted).
+        out = []
+        class Raw(io.RawIOBase):
+            fail = None
+            def writable(self):
+                return True
+            def write(self, b):
+                if self.fail:
+                    e, self.fail = self.fail, None
+                    raise e
+                out.append(bytes(b))
+                return len(b)
+        raw = Raw()
+        f = _nibbler.BufferedWriter(raw)
+        with f._gather(line_flush=True):
+            raw.fail = KeyboardInterrupt()
+            self.assertRaises(KeyboardInterrupt, f.write, b'a\n')
+            raw.fail = MemoryError()
+            with self.assertRaises(MemoryError) as cm:
+                f.write(b'b\n')
+            self.assertEqual(cm.exception.characters_written, 2)
+            raw.fail = OSError()
+            f.write(b'c\n')
+        self.assertEqual(out, [])
+        f.flush()
+        self.assertEqual(b''.join(out), b'a\nb\nc\n')
+
     def test_line_flush_text(self):
         with open(self.path, 'w', encoding='utf-8') as f:
             with f.buffer._gather(line_flush=True, direct=True):
