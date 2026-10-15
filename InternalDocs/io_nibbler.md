@@ -219,6 +219,20 @@ closed by itself, small writes (and the usual text writes) are queued
 without an error until the block is full or an operation takes the lock
 (see "Closing the raw stream alone"); `_io` asks `closed` on every write.
 
+Two more, kept for speed:
+
+- With data buffered, `tell()` uses the raw position kept (see "raw
+  position") where `_io` asks the raw stream each time: it doesn't see the
+  file descriptor moved behind its back (`os.lseek()`, `os.write()`,
+  `raw.seek()`, another object over the same FileIO, the other side of a
+  fork, the FileIO reopened by its `__init__()`): the answer means
+  little then either way, and asking costs an `lseek` per `tell()`.
+- The raw calls to an exact FileIO go to its C functions: an instance
+  attribute overriding `readinto`, `write` or `readall` (as
+  `mock.patch.object(f.raw, "write")` makes) is not called; overrides of
+  `flush` and `close` are (patch the class, or use a subclass): a lookup
+  per raw call would cost more than an unbuffered write's other work.
+
 When the nibbler classes replace `_io`'s, the C fast paths keyed on
 `_io`'s exact types (stock `TextIOWrapper`'s `read1()` shortcut, pickle's
 `peek()`) don't apply to them.

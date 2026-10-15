@@ -214,9 +214,13 @@ typedef struct {
     morsel_list list;
     Py_ssize_t inflight;
     /* The raw position, kept for an exact FileIO of a regular file (not
-       in append mode) as _io's abs_pos is; negative when unknown. */
+       in append mode) as _io's abs_pos is, and also used by tell() (which
+       in _io always asks the raw stream); negative when unknown. */
     Py_off_t raw_pos;
-    uint8_t raw_fileio;         /* raw is exactly a FileIO */
+    /* raw is exactly a FileIO: called through its C functions (instance
+       attributes overriding readinto, write or readall are not called,
+       see InternalDocs/io_nibbler.md). */
+    uint8_t raw_fileio;
     uint8_t raw_vectored;       /* raw has a _writev() of its own */
     uint8_t raw_appending;
     uint8_t raw_regular;
