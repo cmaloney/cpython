@@ -24,8 +24,8 @@ Reading order
    `buffered_write_slow()` → `buffered_write_out()`), then "Reading"
    (`buffered_fill()`, `buffered_readline()`, `buffered_seek()`).
 3. `__init__()` (`buffered_init()`), `close()`, `detach()`, dealloc.
-4. The `_iomodule.c` glue: `open()`, `_set_open_impl()` and
-   `iomodule_exec()`.
+4. The `_iomodule.c` glue: `open()` (`buffering=None`),
+   `_set_open_impl()` and `iomodule_exec()`.
 
 
 Data structures
@@ -46,7 +46,7 @@ Data structures
   unknown), where the kernel copies fastest; `stop` records where it ends,
   and so where its data starts, below which seek() doesn't move back.
 - **threshold**: pending bytes past which writes are written out
-  (`capacity`).
+  (`capacity`, or `PY_SSIZE_T_MAX` for buffer size None).
 - **raw position** (`raw_pos`, negative when unknown): kept only when
   `raw_regular` (an exact FileIO of a regular file it opened itself, not
   in append mode), so that `tell()` and `seek()` inside the read-ahead
@@ -172,6 +172,19 @@ A holder that can never release a mutex is not waited for (see
   holder of the role.
 
 
+Buffer size 0 and None
+----------------------
+
+Buffer size 0 is unbuffered (gh-148773): writes go straight to the raw
+stream, retrying partial writes; reads never ask for more than the caller
+wants; `peek()` and `readline()` raise `UnsupportedOperation`.  Buffer
+size None (writers only) buffers writes without limit: the threshold is
+`PY_SSIZE_T_MAX` and only `flush()` and operations needing the position
+write out.  `open(buffering=None)` gives that, and is only accepted when
+`open()` uses the nibbler classes (it raises before opening the file
+otherwise).
+
+
 Differences from `_io`
 ----------------------
 
@@ -190,6 +203,7 @@ Each of these is a bug of `_io`'s classes, which the tests skip for them:
 - `_io`'s `readline()` copies a long partial line on each call; here it is
   kept in the read-ahead (up to the buffer size when the raw stream would
   block, then returned as it is).
+- Buffer size 0 and None are only supported here.
 
 And one of the nibbler: after a raw stream other than an exact FileIO is
 closed by itself, small writes are queued

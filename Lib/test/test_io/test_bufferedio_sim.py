@@ -1004,29 +1004,34 @@ class SlowDeviceTest:
         # closing it directly closes the buffered object, and close() after
         # that or twice is a no-op.
         self.addCleanup(os_helper.unlink, os_helper.TESTFN)
-        raw = self.FileIO(os_helper.TESTFN, "w+b")
-        f = self.BufferedRandom(raw, 16)
-        f.write(b"abc")
-        f.close()
-        self.assertTrue(f.closed)
-        self.assertIs(f.raw, raw)
-        self.assertEqual(f.name, os_helper.TESTFN)
-        self.assertEqual(f.mode, "wb+")
-        f.close()
-        with self.assertRaises(ValueError):
-            f.write(b"x")
-        with self.assertRaises(ValueError):
-            f.read(1)
+        for unbuffered in (False, True):
+            if unbuffered and not self.is_nibbler:
+                continue
+            size = 0 if unbuffered else 16
+            with self.subTest(buffer_size=size):
+                raw = self.FileIO(os_helper.TESTFN, "w+b")
+                f = self.BufferedRandom(raw, size)
+                f.write(b"abc")
+                f.close()
+                self.assertTrue(f.closed)
+                self.assertIs(f.raw, raw)
+                self.assertEqual(f.name, os_helper.TESTFN)
+                self.assertEqual(f.mode, "wb+")
+                f.close()
+                with self.assertRaises(ValueError):
+                    f.write(b"x")
+                with self.assertRaises(ValueError):
+                    f.read(1)
 
-        raw = self.FileIO(os_helper.TESTFN, "r+b")
-        f = self.BufferedRandom(raw, 16)
-        self.assertEqual(f.read(1), b"a")
-        raw.close()
-        self.assertTrue(f.closed)
-        with self.assertRaises(ValueError):
-            f.write(b"x")
-        f.close()
-        self.assertTrue(f.closed)
+                raw = self.FileIO(os_helper.TESTFN, "r+b")
+                f = self.BufferedRandom(raw, size)
+                self.assertEqual(f.read(1), b"a")
+                raw.close()
+                self.assertTrue(f.closed)
+                with self.assertRaises(ValueError):
+                    f.write(b"x")
+                f.close()
+                self.assertTrue(f.closed)
 
     def test_fileio_subclass_write_is_used(self):
         # Vectored writes must not bypass a write() override.
@@ -1087,6 +1092,42 @@ class SlowDeviceTest:
             f.flush()
         f.flush()
         self.assertEqual(bytes(raw.received), b"x" * 40)
+
+    @unittest.skipUnless(hasattr(signal, 'SIGUSR1'), 'needs SIGUSR1')
+    def test_size_zero_signal_handler_write_goes_out(self):
+        # Unbuffered, what a signal handler writes during a raw write of
+        # the same object is written out before write() returns.
+        if not self.is_nibbler:
+            self.skipTest("buffer_size=0 not supported")
+        sent = []
+        class Raw(self.RawIOBase):
+            out = b''
+            def writable(self):
+                return True
+            def write(self, b):
+                if not sent:
+                    sent.append(1)
+                    signal.raise_signal(signal.SIGUSR1)
+                self.out += bytes(b)
+                return len(b)
+        raw = Raw()
+        f = self.BufferedWriter(raw, 0)
+        old = signal.signal(signal.SIGUSR1, lambda *a: f.write(b'<h>'))
+        self.addCleanup(signal.signal, signal.SIGUSR1, old)
+        f.write(b'main')
+        self.assertEqual(raw.out, b'main<h>')
+
+    def test_size_zero_write_error_reports_written(self):
+        if not self.is_nibbler:
+            self.skipTest("buffer_size=0 not supported")
+        data = sample_data(100)
+        raw = self.scripted_writer([30, OSError(errno.EIO, "EIO")])
+        f = self.BufferedWriter(raw, 0)
+        with self.assertRaises(OSError) as cm:
+            f.write(data)
+        self.assertEqual(cm.exception.characters_written, 30)
+        f.flush()
+        self.assertEqual(bytes(raw.received), data[:30])
 
     # Real file descriptors
 
@@ -1152,6 +1193,175 @@ class SlowDeviceTest:
                     except BlockingIOError:
                         select.select([], [w], [], support.SHORT_TIMEOUT)
         self.assertEqual(bytes(received), data)
+
+    # buffer_size=0: no internal buffer, but partial transfers are retried.
+
+    def check_buffer_size_zero(self):
+        if not self.is_nibbler:
+            self.skipTest("buffer_size=0 not supported")
+
+    def test_size_zero_write_retries(self):
+        self.check_buffer_size_zero()
+        raw = self.scripted_writer(self.trickle_plan(12, 10_000, 7))
+        f = self.BufferedWriter(raw, 0)
+        data = sample_data(3_000)
+        for i in range(0, len(data), 100):
+            self.assertEqual(f.write(data[i:i + 100]), 100)
+            # Nothing is held back: the device already has every byte.
+            self.assertEqual(bytes(raw.received), data[:i + 100])
+
+    def test_size_zero_read_is_exact(self):
+        self.check_buffer_size_zero()
+        data = sample_data(3_000)
+        raw = self.scripted_reader(data, self.trickle_plan(13, 10_000, 7))
+        f = self.BufferedReader(raw, 0)
+        self.assertEqual(f.read(100), data[:100])
+        buf = bytearray(100)
+        self.assertEqual(f.readinto(buf), 100)
+        self.assertEqual(buf, data[100:200])
+        self.assertEqual(f.read(), data[200:])
+        # Nothing read ahead: the device position matches the logical one.
+        self.assertEqual(raw.pos, len(data))
+
+    def test_size_zero_readline_unsupported(self):
+        self.check_buffer_size_zero()
+        data = sample_data(100)
+        raw = self.scripted_reader(data)
+        f = self.BufferedReader(raw, 0)
+        # Finding the end of the line would mean reading past it.
+        self.assertRaises(self.UnsupportedOperation, f.readline)
+        self.assertRaises(self.UnsupportedOperation, f.readline, 10)
+        self.assertRaises(self.UnsupportedOperation, next, f)
+        with self.assertRaises(self.UnsupportedOperation):
+            for line in f:
+                pass
+        self.assertRaises(self.UnsupportedOperation, f.readlines)
+        self.assertEqual(raw.calls, 0)
+        self.assertEqual(f.read(), data)
+
+    def test_size_zero_read1(self):
+        self.check_buffer_size_zero()
+        data = sample_data(1_000)
+        raw = self.scripted_reader(data, [5, 3])
+        f = self.BufferedReader(raw, 0)
+        # One raw read each, of no more than asked for.
+        self.assertEqual(f.read1(10), data[:5])
+        self.assertEqual(f.read1(2), data[5:7])
+        buf = bytearray(4)
+        self.assertEqual(f.readinto1(buf), 4)
+        self.assertEqual(buf, data[7:11])
+        self.assertEqual(raw.calls, 3)
+        self.assertEqual(raw.pos, 11)
+        # Without a size: one raw read of some bytes.
+        self.assertEqual(f.read1(), data[11:])
+        self.assertEqual(f.read1(), b"")
+
+    def test_size_zero_peek_unsupported(self):
+        self.check_buffer_size_zero()
+        data = sample_data(100)
+        raw = self.scripted_reader(data)
+        f = self.BufferedReader(raw, 0)
+        self.assertRaises(self.UnsupportedOperation, f.peek)
+        self.assertRaises(self.UnsupportedOperation, f.peek, 10)
+        self.assertEqual(raw.calls, 0)
+        self.assertEqual(f.read(), data)
+
+    def test_size_zero_write_would_block(self):
+        self.check_buffer_size_zero()
+        raw = self.scripted_writer([4, 3, None])
+        f = self.BufferedWriter(raw, 0)
+        with self.assertRaises(BlockingIOError) as cm:
+            f.write(b"0123456789")
+        self.assertEqual(cm.exception.characters_written, 7)
+        self.assertEqual(bytes(raw.received), b"0123456")
+        # Nothing was kept to write later.
+        f.flush()
+        self.assertEqual(raw.calls, 3)
+        self.assertEqual(f.write(b"789"), 3)
+        self.assertEqual(bytes(raw.received), b"0123456789")
+
+    def test_size_zero_empty_write(self):
+        # gh-148773: an empty write makes no raw call (a tty may take a
+        # write of 0 bytes as a hangup).
+        self.check_buffer_size_zero()
+        raw = self.scripted_writer()
+        f = self.BufferedWriter(raw, 0)
+        self.assertEqual(f.write(b""), 0)
+        self.assertEqual(f.write(bytearray()), 0)
+        f.flush()
+        self.assertEqual(raw.calls, 0)
+        self.assertEqual(f.write(b"x"), 1)
+        self.assertEqual(raw.calls, 1)
+
+    def test_size_zero_write_no_progress(self):
+        # gh-158414: a raw write() returning 0 is not retried forever.
+        self.check_buffer_size_zero()
+        raw = self.scripted_writer([3, 0, 0])
+        f = self.BufferedWriter(raw, 0)
+        self.assertRaises(OSError, f.write, b"0123456789")
+        self.assertEqual(raw.calls, 2)
+        self.assertEqual(bytes(raw.received), b"012")
+
+    def test_size_zero_random_unseekable(self):
+        # Unbuffered, BufferedRandom needs no seeking: it works over a
+        # read-write stream that can't seek, such as a terminal or socket,
+        # like the FileIO that open(fd, "r+b", buffering=0) used to return.
+        self.check_buffer_size_zero()
+        Reader = make_scripted_reader(self.RawIOBase)
+        class Duplex(Reader):
+            def writable(self):
+                return True
+            def seekable(self):
+                return False
+            def write(self, b):
+                self.received += b
+                return len(b)
+        raw = Duplex(b"hello world")
+        raw.received = bytearray()
+        f = self.BufferedRandom(raw, 0)
+        self.assertEqual(f.read(5), b"hello")
+        self.assertEqual(f.write(b"abc"), 3)
+        self.assertEqual(f.read(), b" world")
+        self.assertEqual(f.write(b"de"), 2)
+        self.assertEqual(bytes(raw.received), b"abcde")
+        self.assertRaises(self.UnsupportedOperation, f.seek, 0)
+
+    @unittest.skipUnless(hasattr(os, "openpty"), "requires openpty")
+    def test_size_zero_random_pty(self):
+        self.check_buffer_size_zero()
+        master, slave = os.openpty()
+        with self.FileIO(master, "r+b") as m_raw, \
+             self.FileIO(slave, "r+b") as s_raw:
+            m = self.BufferedRandom(m_raw, 0)
+            s = self.BufferedRandom(s_raw, 0)
+            self.assertEqual(s.write(b"ping\n"), 5)
+            self.assertEqual(m.read(5), b"ping\r\n"[:5])
+
+    def test_size_zero_seek_tell(self):
+        self.check_buffer_size_zero()
+        data = sample_data(500)
+        raw = make_memory_raw(self.RawIOBase)(data, random.Random(15), 7)
+        f = self.BufferedRandom(raw, 0)
+        expected = bytearray(data)
+        self.assertEqual(f.read(10), data[:10])
+        self.assertEqual((f.tell(), raw.pos), (10, 10))
+        self.assertEqual(f.write(b"X" * 20), 20)
+        expected[10:30] = b"X" * 20
+        self.assertEqual((f.tell(), raw.pos), (30, 30))
+        self.assertEqual(f.seek(5), 5)
+        self.assertEqual(f.read(30), bytes(expected[5:35]))
+        self.assertEqual(f.seek(-3, 1), 32)
+        self.assertRaises(self.UnsupportedOperation, f.readline)
+        self.assertEqual(f.read(10), bytes(expected[32:42]))
+        self.assertEqual(f.tell(), raw.pos)
+        self.assertEqual(f.seek(-5, 2), 495)
+        self.assertEqual(f.write(b"YYYYYYY"), 7)
+        expected[495:] = b"YYYYYYY"
+        self.assertEqual(f.tell(), 502)
+        self.assertEqual(f.read(), b"")
+        self.assertEqual(f.seek(0), 0)
+        self.assertEqual(f.read(), bytes(expected))
+        self.assertEqual(bytes(raw.buf), bytes(expected))
 
 
 class CSlowDeviceTest(SlowDeviceTest, CTestCase):
