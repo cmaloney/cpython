@@ -1252,16 +1252,28 @@ _Py_COMP_DIAG_POP
 }
 
 /* Make data[0:len] the read-ahead again, in front of what is unread
-   (bytes a failed read took, gh-51571).  Keeps the raised exception. */
+   (bytes a failed read took, gh-51571): when they are still in the block
+   in front of it, by moving back (the bytes BufferedRandom wrote over the
+   block stay where they are), else in a new block (they are written out
+   first).  Keeps the raised exception. */
 static int
 buffered_push_back(buffered *self, const char *data, Py_ssize_t len)
 {
     if (len == 0) {
         return 0;
     }
+    if (self->reading && self->pos >= len
+        && memcmp(PyBytes_AS_STRING(self->block) + self->pos - len, data,
+                  len) == 0)
+    {
+        self->pos -= len;
+        self->noline = 0;
+        return 0;
+    }
     PyObject *exc = PyErr_GetRaisedException();
     Py_ssize_t unread = self->end - self->pos;
-    PyObject *block = PyBytes_FromStringAndSize(NULL, len + unread);
+    PyObject *block = (buffered_flush_dirty(self, 1) < 0 ? NULL
+                       : PyBytes_FromStringAndSize(NULL, len + unread));
     if (block != NULL) {
         memcpy(PyBytes_AS_STRING(block), data, len);
         if (unread > 0) {

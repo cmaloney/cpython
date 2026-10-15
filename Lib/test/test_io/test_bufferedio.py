@@ -2314,6 +2314,29 @@ class BufferedRandomTest(BufferedReaderTest, BufferedWriterTest):
                 self.assertEqual(f.read(20), bytes(20))
                 self.assertGreaterEqual(f.tell(), 0)
 
+    def test_read_failing_to_write_out_keeps_written_data(self):
+        # A read that fails writing out data written over the read-ahead,
+        # after taking some of the read-ahead, keeps that data (and puts
+        # the bytes taken back).
+        class Raw(self.BytesIO):
+            fail = False
+            def write(self, b):
+                if self.fail:
+                    self.fail = False
+                    raise OSError(errno.EIO, 'EIO')
+                return super().write(b)
+        raw = Raw(bytes(range(97, 123)) * 4)
+        f = self.tp(raw, 16)
+        self.assertEqual(f.read(2), b'ab')
+        f.write(b'XYZ')
+        raw.fail = True
+        self.assertRaises(OSError, f.read, 40)
+        f.flush()
+        self.assertEqual(raw.getvalue()[:8], b'abXYZfgh')
+        if not self.is_stock_C:
+            # (_io drops what a failed read took.)
+            self.assertEqual(f.read(3), b'fgh')
+
     @unittest.skipUnless(hasattr(os, 'O_APPEND'), 'needs os.O_APPEND')
     def test_tell_over_append_mode_fd(self):
         # Writes to a file descriptor opened with O_APPEND go to the end of
