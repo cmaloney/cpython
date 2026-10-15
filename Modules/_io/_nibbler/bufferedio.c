@@ -3035,7 +3035,7 @@ static PyObject *
 buffered_raw_get(PyObject *op, void *Py_UNUSED(closure))
 {
     PyObject *raw = buffered_ref_raw(buffered_cast(op));
-    return raw != NULL ? raw : Py_None;
+    return raw != NULL ? raw : Py_NewRef(Py_None);
 }
 
 static PyGetSetDef buffered_getset[] = {
