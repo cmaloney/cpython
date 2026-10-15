@@ -331,7 +331,12 @@ to skip, and a write or `detach()` reads the bytes again first.
   store of its bytes, so that the encoder's state (an iso2022 shift
   state, the BOM) matches where its bytes land; `seek()` and `__init__()`
   take it to reset the encoder (from the encoder itself, they raise
-  `RuntimeError`).  A read past the start of the stream only
+  `RuntimeError`).  The encoder's flags (it may write a BOM, it needs
+  `final=True`) are the published encoder's: `__init__()` and
+  `reconfigure(encoding=...)` publish a new encoder with elock held and
+  set them, and a write that holds elock with an encoder replaced
+  meanwhile starts again with the settings published.  A read past the
+  start of the stream only
   tries it (with the buffer's locks held, it must not wait for a write
   that waits for them).  Order: rlock, elock, the buffer's I/O role, the
   buffer's lock.  (Critical sections were tried: daemon threads stopped
@@ -351,3 +356,8 @@ to skip, and a write or `detach()` reads the bytes again first.
 - A read that raises keeps the text it took for the next read.
 - `reconfigure(encoding=...)`, `close()` and `detach()` give the old
   encoder `final=True` (gh-79792).
+- A write is not ordered against a `detach()`, `__init__()` or `close()`
+  running meanwhile in another thread: it may complete into the buffer
+  `detach()` returned, or the one `__init__()` replaced (`_io` orders
+  them with its critical section on free-threaded builds, but not while
+  the write waits in the raw stream, nor on GIL builds).
