@@ -1637,8 +1637,9 @@ enum { ENTER_READ = 1 };
    check that the object is initialized and, unless closed_msg is NULL,
    that raw is open (but reading what is buffered needs no open raw
    stream), and with ENTER_READ, write out pending writes.
-   Release with buffered_unlock_io(). */
-static int
+   Release with buffered_unlock_io().  (Inlined: the read and tell paths
+   would otherwise pay a call.) */
+static inline Py_ALWAYS_INLINE int
 buffered_enter(buffered *self, const char *closed_msg, int flags)
 {
     if (buffered_lock_io(self) < 0) {
