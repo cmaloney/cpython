@@ -10,7 +10,9 @@ appending meanwhile.
 
 It is opt-in and private: `_PYTHON_IO_DEFAULT_IMPL=_nibbler` makes the
 nibbler classes `_io`'s (so `open()`, `io.*` and the standard streams use
-them), and `_io._set_open_impl()` switches at run time (for tests).
+them), `_PYTHON_IO_UNBUFFERED_IMPL=_nibbler` makes `open(buffering=0)` wrap
+the raw file in them with buffer size 0, and `_io._set_open_impl()` /
+`_io._set_unbuffered_impl()` switch at run time (for tests).
 
 This document is a map; the details are in the comments it points to.
 
@@ -24,8 +26,8 @@ Reading order
    `buffered_write_slow()` → `buffered_write_out()`), then "Reading"
    (`buffered_fill()`, `buffered_readline()`, `buffered_seek()`).
 3. `__init__()` (`buffered_init()`), `close()`, `detach()`, dealloc.
-4. The `_iomodule.c` glue: `open()` (`buffering=None`),
-   `_set_open_impl()` and `iomodule_exec()`.
+4. The `_iomodule.c` glue: `open()` (`buffering=None`), the
+   `_set_*_impl()` functions and `iomodule_exec()`.
 
 
 Data structures
