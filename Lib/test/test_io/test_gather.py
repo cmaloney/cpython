@@ -606,6 +606,37 @@ class GatherTest(unittest.TestCase):
             self.assertRaises(RuntimeError, f._gather().__exit__,
                               None, None, None)
 
+    def gather_vars(self):
+        # The streams' private context variables, which Python code can
+        # reach by iterating a context.
+        return [k for k in contextvars.copy_context() if k.name == '_gather']
+
+    def test_private_variable(self):
+        # Setting a stream's variable doesn't make its writes go to
+        # another stream's record, or read something else as one.
+        other = self.path + '2'
+        self.addCleanup(os_helper.unlink, other)
+        def run(f, g):
+            with f._gather():
+                f.write(b'F0')
+            [vf] = self.gather_vars()
+            with g._gather():
+                [vg] = set(self.gather_vars()) - {vf}
+                vf.set(vg.get())
+                f.write(b'F1')
+                def bad():
+                    vf.set(b'\x02' * 200)
+                    f.write(b'F2')
+                contextvars.copy_context().run(bad)
+                with f._gather():
+                    f.write(b'F3')
+                g.write(b'G')
+        with open(self.path, 'wb') as f, open(other, 'wb') as g:
+            contextvars.Context().run(run, f, g)
+        self.assertEqual(self.read(), b'F0F1F2F3')
+        with open(other, 'rb') as r:
+            self.assertEqual(r.read(), b'G')
+
     def test_not_nibbler(self):
         # _io's buffered classes can't gather.
         if not getattr(_io.BufferedWriter, '_is_nibbler', False):

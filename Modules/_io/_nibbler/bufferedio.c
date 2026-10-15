@@ -1112,7 +1112,7 @@ buffered_sync(buffered *self, int unlocked)
 typedef struct record {
     PyObject_HEAD
     nibbler_mutex lock;         /* for the fields below, but next */
-    buffered *stream;           /* borrowed: records are found through it */
+    buffered *stream;           /* borrowed; NULL once it is freed */
     PyObject *ctx;              /* borrowed: the context it is for */
     PyObject *raw;              /* borrowed: the block's raw stream */
     struct record *next;        /* in the stream's list (with its lock) */
@@ -1193,9 +1193,13 @@ gather_remember(PyThreadState *ts, PyObject *var, record *rec)
     gather_last.rec = rec;
 }
 
-/* gather_current() without the last one found: look the variable up. */
+static void record_dealloc(PyObject *);
+
+/* gather_current() without the last one found: look the variable up.
+   Python code can reach it (iterating a context) and set it to anything:
+   only a record of this stream and context counts. */
 Py_NO_INLINE static record *
-gather_lookup(PyThreadState *ts, PyObject *var)
+gather_lookup(buffered *self, PyThreadState *ts, PyObject *var)
 {
     PyObject *rec = NULL;
     if (var == NULL) {
@@ -1206,7 +1210,10 @@ gather_lookup(PyThreadState *ts, PyObject *var)
     }
     /* (The context keeps it.) */
     Py_XDECREF(rec);
-    if (rec != NULL && ((record *)rec)->ctx != ts->context) {
+    if (rec != NULL && (Py_TYPE(rec)->tp_dealloc != record_dealloc
+                        || ((record *)rec)->stream != self
+                        || ((record *)rec)->ctx != ts->context))
+    {
         rec = NULL;
     }
     if (ts->context != NULL) {
@@ -1227,7 +1234,7 @@ gather_current(buffered *self)
     {
         return gather_last.rec;
     }
-    return gather_lookup(ts, var);
+    return gather_lookup(self, ts, var);
 }
 
 /* With both locks and no read-ahead: move what rec gathered to the
@@ -2577,6 +2584,7 @@ buffered_dealloc(PyObject *op)
         record *rec = self->recs;
         self->recs = rec->next;
         rec->next = NULL;
+        rec->stream = NULL;
         rec_set_state(rec, REC_FREE);
         Py_DECREF(rec);
     }
