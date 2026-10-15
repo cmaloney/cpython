@@ -668,13 +668,16 @@ PyDoc_STRVAR(_io__Buffered__gather__doc__,
 "the buffer size, and added to the buffered data in one piece when\n"
 "the block ends (also when it raises), so that no other output gets\n"
 "in between; while another thread uses the buffer, a BufferedWriter\n"
-"of a regular file with nothing buffered writes it to the file then.\n"
+"of a regular file with nothing buffered writes it to the file then,\n"
+"in one system call (which only an error, such as a full disk, cuts\n"
+"short).\n"
 "Once the block gathered limit bytes, they are added, and gathering\n"
 "goes on; with limit None, only at the end.  flush() inside the block\n"
 "takes effect at its end.  Reads, seek() and truncate() in the\n"
 "context add what it gathered first; close(), detach() and\n"
 "__init__(), from any context, what every block gathered.  A block\n"
-"on the same stream nested in one gathers into it.\n"
+"on the same stream nested in one gathers into it, with the outer\n"
+"block\'s limit.\n"
 "\n"
 "A direct block is for the life of a thread or task: it writes out\n"
 "the buffered data when it starts, then, at its limit (by default\n"
@@ -869,4 +872,4 @@ skip_optional:
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=29523462059051ab input=a9049054013a1b77]*/
+/*[clinic end generated code: output=cd1364b8c6feaf4c input=a9049054013a1b77]*/

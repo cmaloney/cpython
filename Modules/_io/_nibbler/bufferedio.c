@@ -3596,13 +3596,16 @@ context (thread, or asyncio task) writes is kept apart, also past
 the buffer size, and added to the buffered data in one piece when
 the block ends (also when it raises), so that no other output gets
 in between; while another thread uses the buffer, a BufferedWriter
-of a regular file with nothing buffered writes it to the file then.
+of a regular file with nothing buffered writes it to the file then,
+in one system call (which only an error, such as a full disk, cuts
+short).
 Once the block gathered limit bytes, they are added, and gathering
 goes on; with limit None, only at the end.  flush() inside the block
 takes effect at its end.  Reads, seek() and truncate() in the
 context add what it gathered first; close(), detach() and
 __init__(), from any context, what every block gathered.  A block
-on the same stream nested in one gathers into it.
+on the same stream nested in one gathers into it, with the outer
+block's limit.
 
 A direct block is for the life of a thread or task: it writes out
 the buffered data when it starts, then, at its limit (by default
@@ -3622,7 +3625,7 @@ the stream is closed, with a ResourceWarning.  Experimental.
 static PyObject *
 _io__Buffered__gather_impl(buffered *self, PyObject *limit_obj, int direct,
                            int line_flush)
-/*[clinic end generated code: output=cc170613f177a7e5 input=969068e3f3cccfd9]*/
+/*[clinic end generated code: output=cc170613f177a7e5 input=b1397ad5bb9eb98b]*/
 {
     Py_ssize_t limit = (!direct ? GATHER_LIMIT : Py_MAX(1,
                         FT_ATOMIC_LOAD_SSIZE_RELAXED(self->capacity)));
