@@ -223,10 +223,11 @@ and end without regard to pending writes, which are other contexts'
 (until some of its own data gets there, see `behind`), so another
 context's writes may land after it even when known to come first; a
 line block (`line_flush`) writes its complete lines out after each write
-with a newline, keeping the partial line.  Text written in a block needs
-an encoder that keeps no state (one of `textio.c`'s own codecs): a stateful
-one raises `UnsupportedOperation`, as its state would follow the writes and
-not where their bytes land.
+with a newline, keeping the partial line.  Text written in a block must
+leave the codec's encoder's state (`getstate()`) as it found it, or raises
+`UnsupportedOperation` (a BOM still to come, a shift to another character
+set): the state would follow the writes, not where their bytes land.
+Stateless encoders always pass.
 
 
 Differences from `_io`

@@ -2222,15 +2222,11 @@ static int
 text_encoder_store(textio *self, tconf *cf, PyObject *text, int final)
 {
     int stateful = cf->enc == CODEC_DECODER, r = 0;
-    /* A block's bytes land at its end, after other contexts' writes that
-       the encoder's state already followed. */
-    if (stateful && !final && FT_ATOMIC_LOAD_UINT8_RELAXED(cf->nib)
-        && _PyIONibbler_gathering(cf->buffer))
-    {
-        textio_unsupported(self, "_gather() needs an encoding whose "
-                           "encoder keeps no state");
-        return -1;
-    }
+    /* A _gather() block's bytes land at its end, after other contexts'
+       writes: its text must leave the encoder's state as it found it (as a
+       stateless encoder always does). */
+    int gather = (stateful && !final && FT_ATOMIC_LOAD_UINT8_RELAXED(cf->nib)
+                  && _PyIONibbler_gathering(cf->buffer));
     if (stateful
         && nibbler_mutex_lock(&self->elock, (PyObject *)self, 1) < 0)
     {
@@ -2245,14 +2241,37 @@ text_encoder_store(textio *self, tconf *cf, PyObject *text, int final)
         r = FT_ATOMIC_LOAD_CHAR_RELAXED(self->encoder_used) ? 0 : 1;
         FT_ATOMIC_STORE_CHAR_RELAXED(self->encoder_used, 0);
     }
-    PyObject *b = r ? NULL : PyObject_CallMethodObjArgs(
-        cf->encoder, &_Py_ID(encode), text, final ? Py_True : Py_False, NULL);
+    PyObject *st = gather ? PyObject_CallMethodNoArgs(
+        cf->encoder, &_Py_ID(getstate)) : NULL;
+    PyObject *b = r || (gather && st == NULL) ? NULL
+        : PyObject_CallMethodObjArgs(cf->encoder, &_Py_ID(encode), text,
+                                     final ? Py_True : Py_False, NULL);
     if (b != NULL && !PyBytes_Check(b)) {
         PyErr_Format(PyExc_TypeError,
                      "encoder should return a bytes object, not '%.200s'",
                      Py_TYPE(b)->tp_name);
         Py_CLEAR(b);
     }
+    if (b != NULL && gather) {
+        PyObject *after = PyObject_CallMethodNoArgs(cf->encoder,
+                                                    &_Py_ID(getstate));
+        int same = after ? PyObject_RichCompareBool(after, st, Py_EQ) : -1;
+        Py_XDECREF(after);
+        if (same <= 0) {
+            Py_CLEAR(b);
+        }
+        if (same == 0) {
+            /* Nothing of text stored: back to the state it was in. */
+            PyObject *res = PyObject_CallMethodOneArg(
+                cf->encoder, &_Py_ID(setstate), st);
+            if (res != NULL) {
+                Py_DECREF(res);
+                textio_unsupported(self, "_gather() needs text that leaves "
+                                   "the encoder's state as it was");
+            }
+        }
+    }
+    Py_XDECREF(st);
     if (b != NULL) {
         if (stateful && !final) {
             FT_ATOMIC_STORE_CHAR_RELAXED(self->encoding_start_of_stream, 0);

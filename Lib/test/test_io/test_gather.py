@@ -70,13 +70,24 @@ class GatherTest(unittest.TestCase):
             self.assertEqual(f.read(), 'ab' + '\xe9' * 10000 + 'cd')
 
     def test_text_stateful_encoder(self):
-        # Its state would follow the writes, not where their bytes land.
+        # Its state would follow the writes, not where their bytes land:
+        # text in a block must leave the encoder in its initial state.
         with open(self.path, 'w', encoding='utf-16') as f:
             with f.buffer._gather():
+                # The BOM is still to come.
                 self.assertRaises(io.UnsupportedOperation, f.write, 'a')
-            f.write('b')
+            f.write('a')
+            with f.buffer._gather():
+                f.write('日')
         with open(self.path, encoding='utf-16') as f:
-            self.assertEqual(f.read(), 'b')
+            self.assertEqual(f.read(), 'a日')
+        with open(self.path, 'w', encoding='iso2022_jp') as f:
+            with f.buffer._gather():
+                f.write('a')
+                self.assertRaises(io.UnsupportedOperation, f.write, '日')
+            f.write('日')
+        with open(self.path, encoding='iso2022_jp') as f:
+            self.assertEqual(f.read(), 'a日')
 
     def test_unbuffered(self):
         with open(self.path, 'wb', buffering=0) as f:
