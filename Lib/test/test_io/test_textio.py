@@ -2905,6 +2905,39 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                 got[0].flush()
                 self.assertEqual(raw.getvalue(), b"abc")
 
+    @threading_helper.requires_working_threading()
+    def test_decoder_runs_without_buffer_locks(self):
+        # The codec's decoder runs without the buffer's locks: it (and
+        # other threads meanwhile) can use the buffer.  Bytes others take
+        # meanwhile aren't taken again: the text goes on after them.
+        calls = []
+        class Dec(codecs.getincrementaldecoder("utf-8")):
+            def decode(self, b, final=False):
+                if not calls:
+                    calls.append(t.buffer.tell())
+                    th = threading.Thread(
+                        target=lambda: calls.append(t.buffer.read(2)))
+                    th.start()
+                    th.join(support.SHORT_TIMEOUT)
+                    calls.append(th.is_alive())
+                return super().decode(b, final)
+        def search(name):
+            if name == "unlocked_decoder_test":
+                return codecs.CodecInfo(
+                    name=name, encode=None, decode=None,
+                    incrementalencoder=codecs.getincrementalencoder("utf-8"),
+                    incrementaldecoder=Dec)
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        for cls in (self.BufferedReader, self.BufferedRandom):
+            with self.subTest(cls=cls):
+                calls.clear()
+                t = self.TextIOWrapper(cls(self.BytesIO(b"line1\nline2\n")),
+                                       encoding="unlocked_decoder_test")
+                self.assertEqual(t.readline(), "ne1\n")
+                self.assertEqual(calls, [0, b"li", False])
+                self.assertEqual(t.read(), "line2\n")
+
     def test_nested_detach_in_reconfigure(self):
         # reconfigure() doesn't attach again a buffer that a nested
         # detach() (from the buffer's writable() or tell()) handed out.

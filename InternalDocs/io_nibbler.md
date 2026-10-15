@@ -275,7 +275,10 @@ there.
 
 Other codecs go through the codec's incremental decoder, as `_io` does:
 characters decoded ahead (`dchars`) with a snapshot (flags, bytes) for
-`tell()`.  Their state is kept as flags (an `unsigned long long`, as
+`tell()`.  The decoder (maybe Python code, which may use the buffer)
+runs without the buffer's locks, on the unread bytes (their block held);
+they are taken after if they are still the unread ones, else decoded
+again from where the buffer is now.  Their state is kept as flags (an `unsigned long long`, as
 iso2022_kr's go past 32 bits; only `tell()`, whose cookie holds 32 bits,
 raises `OverflowError`).
 

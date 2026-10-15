@@ -1682,55 +1682,76 @@ encoder_reset_locked(textio *self, PyObject *encoder, int start)
 }
 
 /* Decode the store's unread bytes with the codec's decoder, after dchars,
-   and take them (but what the decoder holds, which stays).  Returns 1, 0
-   if no more characters can come for now, or -1 (*stop: invalid bytes
-   follow the characters; raised unless characters come first, or the call
-   took text already, taken). */
+   and take them (but what the decoder holds, which stays): *took bytes.
+   Returns 1, 0 if no more characters can come for now, or -1 (*stop:
+   invalid bytes follow the characters; raised unless characters come
+   first, or the call took text already, taken). */
 static int
-decoder_more(textio *self, tstore *st, int *stop, int taken)
+decoder_more(textio *self, tstore *st, int *stop, int taken,
+             Py_ssize_t *took)
 {
-    if (self->fresh && decoder_getflags(self->conf->decoder, &self->flags,
-                                        NULL) < 0)
-    {
-        return -1;
-    }
-    self->fresh = 0;
+    /* The decoder may be Python code, which may use the buffer: it runs
+       with the store ended, on its bytes (held, they don't change), taken
+       after if they are still the unread ones. */
+    PyObject *dec = self->conf->decoder, *block = Py_XNewRef(st->block);
+    PyObject *chars = NULL, *bytes = NULL, *exc = NULL;
+    const char *p = st->p;
+    Py_ssize_t used = 0, start, end, span = st->avail;
     unsigned long long flags = self->flags;
-    Py_ssize_t used, start, end, span = st->avail;
-    int final = st->eof;
-    PyObject *chars = decoder_decode(self->conf->decoder, st->p, span, final,
-                                     &used, &flags);
+    store_end(st, 0);
+    if (!self->fresh || decoder_getflags(dec, &self->flags, NULL) == 0) {
+        self->fresh = 0;
+        flags = self->flags;
+        chars = decoder_decode(dec, p, span, st->eof, &used, &flags);
+    }
     if (chars == NULL && decode_error(&start, &end) == 0) {
         /* As native reads: valid text first, then the bytes and the error,
            once. */
         int more = taken || (self->dchars != NULL && self->dpos
                              < PyUnicode_GET_LENGTH(self->dchars));
         if (start == 0 && !more) {
-            PyObject *exc = PyErr_GetRaisedException();
-            store_skip(st, Py_MIN(Py_MAX(end, 1), st->avail));
-            if (decoder_setstate(self->conf->decoder, self->flags, 0) < 0) {
+            /* Taken, and raised. */
+            used = Py_MIN(Py_MAX(end, 1), span);
+            exc = PyErr_GetRaisedException();
+            if (decoder_setstate(dec, self->flags, 0) < 0) {
                 _PyErr_ChainExceptions1(exc);
-                return -1;
+                exc = PyErr_GetRaisedException();
             }
-            PyErr_SetRaisedException(exc);
-            return -1;
         }
-        PyErr_Clear();
-        *stop = 1;
-        flags = self->flags;
-        chars = (start == 0 ? PyUnicode_New(0, 0)
-                 : decoder_setstate(self->conf->decoder, flags, 0) < 0 ? NULL
-                 : decoder_decode(self->conf->decoder, st->p, start, 0, &used,
-                                  &flags));
-        used = start > 0 ? used : 0;
+        else {
+            PyErr_Clear();
+            *stop = 1;
+            flags = self->flags;
+            chars = (start == 0 ? PyUnicode_New(0, 0)
+                     : decoder_setstate(dec, flags, 0) < 0 ? NULL
+                     : decoder_decode(dec, p, start, 0, &used, &flags));
+            used = start > 0 ? used : 0;
+        }
     }
-    if (chars == NULL) {
+    bytes = chars ? PyBytes_FromStringAndSize(p, used) : NULL;
+    int r = -1;
+    if ((bytes != NULL || exc != NULL) && store_begin(st, 1) == 0) {
+        r = 0;
+        if (st->block != block || st->p != p) {
+            /* Others took bytes meanwhile: none taken, the decoder back. */
+            r = decoder_setstate(dec, self->flags, 0) < 0 ? -1 : 1;
+            *stop = 0;
+            Py_CLEAR(exc);
+        }
+    }
+    Py_XDECREF(block);
+    if (exc != NULL) {
+        if (r == 0) {
+            store_skip(st, used);
+            *took = used;
+        }
+        _PyErr_ChainExceptions1(exc);
         return -1;
     }
-    PyObject *bytes = PyBytes_FromStringAndSize(st->p, used);
-    if (bytes == NULL) {
-        Py_DECREF(chars);
-        return -1;
+    if (r != 0) {
+        Py_XDECREF(chars);
+        Py_XDECREF(bytes);
+        return r;
     }
     if (self->dchars == NULL
         || self->dpos == PyUnicode_GET_LENGTH(self->dchars))
@@ -1751,6 +1772,7 @@ decoder_more(textio *self, tstore *st, int *stop, int taken)
         }
     }
     store_skip(st, used);
+    *took = used;
     self->flags = flags;
     if (used > 0 && FT_ATOMIC_LOAD_CHAR_RELAXED(self->encoding_start_of_stream)
         && self->conf->encoder != NULL && nibbler_mutex_trylock(&self->elock))
@@ -1860,9 +1882,9 @@ text_read_decoder(textio *self, Py_ssize_t want, int line)
             continue;
         }
         rounds++;
-        Py_ssize_t old = have, avail = st.avail;
-        int r = decoder_more(self, &st, &stop, pieces != NULL);
-        klost += avail - st.avail;
+        Py_ssize_t old = have, took = 0;
+        int r = decoder_more(self, &st, &stop, pieces != NULL, &took);
+        klost += took;
         if (r < 0 || (r == 0 && !st.eof && !stop && store_fill(&st) < 0)) {
             goto fail;
         }
@@ -2551,6 +2573,7 @@ text_skip(textio *self, Py_ssize_t n)
         return -1;
     }
     int stop = 0, r = 0, final = 0;
+    Py_ssize_t took;
     self->rbusy = 1;
     while (self->dchars == NULL || PyUnicode_GET_LENGTH(self->dchars) < n) {
         if (stop || final) {
@@ -2565,7 +2588,7 @@ text_skip(textio *self, Py_ssize_t n)
             continue;
         }
         final = st.eof;
-        r = decoder_more(self, &st, &stop, 0);
+        r = decoder_more(self, &st, &stop, 0, &took);
         if (r < 0 || (r == 0 && store_fill(&st) < 0)) {
             r = -1;
             break;
