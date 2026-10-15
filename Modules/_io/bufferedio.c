@@ -2464,6 +2464,18 @@ write_failed:
             /* What setting characters_written does; this can't fail. */
             ((PyOSErrorObject *)exc)->written = written + keep;
         }
+        else {
+            /* Any other exception (a KeyboardInterrupt from a signal
+               handler) says it too, so that writing the rest again
+               duplicates nothing. */
+            PyObject *n = PyLong_FromSsize_t(written + keep);
+            if (n == NULL
+                || PyObject_SetAttrString(exc, "characters_written", n) < 0)
+            {
+                PyErr_Clear();
+            }
+            Py_XDECREF(n);
+        }
         PyErr_SetRaisedException(exc);
     }
     goto error;
