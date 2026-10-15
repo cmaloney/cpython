@@ -1052,6 +1052,39 @@ class GatherTest(unittest.TestCase):
         lines = set(self.read().splitlines())
         self.assertLessEqual(lines, {b'0123456789' * 10, b'child'})
 
+    @support.requires_fork()
+    @threading_helper.requires_working_threading()
+    @support.skip_if_sanitizer("TSan doesn't start threads after a "
+                               "multi-threaded fork", thread=True)
+    def test_fork_in_block_of_other_thread(self):
+        # In the child, a block of a thread gone in the fork is dropped
+        # (the parent writes its data) when the child first moves records.
+        f = open(self.path, 'wb')
+        ready, done = threading.Event(), threading.Event()
+        def worker():
+            with f._gather():
+                f.write(b'thread\n')
+                ready.set()
+                done.wait()
+        t = threading.Thread(target=worker)
+        with threading_helper.start_threads([t], done.set):
+            ready.wait()
+            with warnings.catch_warnings():
+                # (This test is about forking a multi-threaded process.)
+                warnings.simplefilter("ignore", DeprecationWarning)
+                pid = os.fork()
+            if pid == 0:
+                try:
+                    with f._gather():
+                        f.write(b'child\n')
+                    f.close()
+                finally:
+                    os._exit(0)
+            support.wait_process(pid, exitcode=0)
+        f.close()
+        self.assertEqual(sorted(self.read().splitlines()),
+                         [b'child', b'thread'])
+
     # Direct blocks (direct=True), meant to last a thread's life: written
     # out at their start, then written out themselves at their limit,
     # flush() and end, without waiting for other contexts' pending writes.

@@ -1109,6 +1109,8 @@ buffered_sync(buffered *self, int unlocked)
  * I/O role drops it.  A block dropped before it ends (a thread or
  * generator gone inside it) ends then, with a ResourceWarning (its data is
  * dropped when the stream is closed, or this thread is busy with it).
+ * In the child of a fork, the active records of the threads gone in it
+ * are dropped as they are walked: the parent writes their data.
  */
 
 typedef struct record {
@@ -1126,6 +1128,7 @@ typedef struct record {
     char flush;                 /* flush() was called inside the block */
     char direct, line;          /* the block's mode (see above) */
     char behind;                /* direct, but some of it is pending */
+    uint64_t tid, gen;          /* the block's thread, fork generation */
     char fileio;                /* raw is an exact FileIO */
     uint8_t state;              /* stored atomically */
 } record;
@@ -1321,6 +1324,14 @@ gather_move_records(buffered *self, int all)
         record *r = *p;
         if (rec_lock(r) < 0) {
             return -1;
+        }
+        if (r->state == REC_ACTIVE && r->gen != _PyIO_nibbler_fork_gen
+            && r->tid != _PyIO_nibbler_fork_holder)
+        {
+            /* Its block's thread is gone in a fork: the parent writes
+               its data. */
+            morsels_clear(&r->list);
+            rec_set_state(r, REC_IDLE);
         }
         int err = MOVED(r) ? gather_move(self, r, PY_SSIZE_T_MAX) : 0;
         if (err == 0 && MOVED(r)) {
@@ -1715,6 +1726,8 @@ gather_end(buffered *self, record *rec, Py_ssize_t n, Py_ssize_t *dropped)
 static void
 rec_start(record *rec, gather *g)
 {
+    rec->tid = _PyThreadState_GET()->id;
+    rec->gen = _PyIO_nibbler_fork_gen;
     rec->raw = g->raw;
     rec->fileio = _PyFileIO_CheckExact(g->raw);
     rec->limit = g->limit;
