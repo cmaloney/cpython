@@ -2945,11 +2945,12 @@ class ConcurrentAccessTest:
         self.assertEqual(raw.out, b"text")
 
     @threading_helper.requires_working_threading()
-    def test_partly_written_record_stays_whole(self):
+    def test_partly_written_record_split_is_reported(self):
         # A write going out by itself writes part of it, then the raw
         # stream would block or fails, after another thread wrote
         # meanwhile (_io._nibbler doesn't hold the lock in raw calls): what
-        # is kept of the rest is not put after the other thread's data.
+        # is kept of the rest is not put after the other thread's data,
+        # and what write() says it took is what reaches the file.
         import io
         nibbler = self.is_nibbler
         for error in (None, OSError(errno.EIO, "EIO")):
