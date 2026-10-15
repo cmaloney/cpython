@@ -1213,8 +1213,6 @@ class TextIOWrapperTest:
             if w is not None:
                 os.close(w)
 
-    # read in amounts equal to TextIOWrapper._CHUNK_SIZE which is 128.
-
     def test_read_would_block_raises(self):
         # gh-57531: when the stream would block before any character is
         # available, read(n), readline() and iteration raise
@@ -1460,6 +1458,34 @@ class TextIOWrapperTest:
         self.assertRaises(UnicodeDecodeError, t.readline)
         self.assertEqual(t.readline(), "cd\n")
 
+    def test_text_readline_error_keeps_partial_line(self):
+        # gh-51571: a raw read that raises (such as a socket timeout) in the
+        # middle of a line loses nothing: the next readline() returns the
+        # whole line.
+        class Raw(self.RawIOBase):
+            def __init__(self, chunks):
+                self.chunks = list(chunks)
+            def readable(self):
+                return True
+            def readinto(self, b):
+                chunk = self.chunks.pop(0) if self.chunks else b""
+                if isinstance(chunk, BaseException):
+                    raise chunk
+                b[:len(chunk)] = chunk
+                return len(chunk)
+        data = "ab\xe9cd\nef".encode()
+        raw = Raw([data[:4], TimeoutError("timed out"), data[4:]])
+        t = self.TextIOWrapper(self.BufferedReader(raw, 16), encoding="utf-8")
+        self.assertRaises(TimeoutError, t.readline)
+        self.assertEqual(t.readline(), "ab\xe9cd\n")
+        self.assertEqual(t.readline(), "ef")
+        # The same after a KeyboardInterrupt.
+        raw = Raw([data[:4], KeyboardInterrupt(), data[4:]])
+        t = self.TextIOWrapper(self.BufferedReader(raw, 16), encoding="utf-8")
+        self.assertRaises(KeyboardInterrupt, t.readline)
+        self.assertEqual(t.readline(), "ab\xe9cd\n")
+        self.assertEqual(t.readline(), "ef")
+
     def test_tell_after_next_would_block(self):
         # A BlockingIOError from next() doesn't leave tell() disabled as
         # during iteration: it reports the position after the last line,
@@ -1502,6 +1528,7 @@ class TextIOWrapperTest:
                         t.seek(pos)
                     self.assertEqual("ab\n" + t.read(), text)
 
+    # read in amounts equal to TextIOWrapper._CHUNK_SIZE which is 128.
     def test_read_by_chunk(self):
         # make sure "\r\n" straddles 128 char boundary.
         txt = self.TextIOWrapper(self.BytesIO(b"A" * 127 + b"\r\nB"), encoding="utf-8")
@@ -2316,6 +2343,84 @@ class TextIOWrapperTest:
             t.close()
         self.assertTrue(b.closed)
         self.assertEqual(b.final, b"abc.")
+
+    def _close_test_raw(self, *errors):
+        # A raw writer whose write() raises errors in turn, then writes
+        # everything; it counts its calls and keeps what it received.
+        class Raw(self.RawIOBase):
+            def __init__(self):
+                self.errors = list(errors)
+                self.calls = 0
+                self.received = bytearray()
+            def writable(self):
+                return True
+            def write(self, b):
+                self.calls += 1
+                if self.errors:
+                    raise self.errors.pop(0)
+                self.received += b
+                return len(b)
+        return Raw()
+
+    def test_text_close_flush_error_no_retry(self):
+        # gh-83973, gh-55589: when close()'s flush fails, TextIOWrapper
+        # doesn't write the data again through the close() of its buffer:
+        # the data is discarded with a ResourceWarning.
+        raw = self._close_test_raw(BrokenPipeError(errno.EPIPE, "EPIPE"))
+        t = self.TextIOWrapper(self.BufferedWriter(raw, 64), encoding="ascii")
+        t.write("abc")
+        with self.assertWarnsRegex(ResourceWarning,
+                                   "discarded 3 buffered bytes"):
+            with self.assertRaises(BrokenPipeError):
+                t.close()
+        self.assertTrue(t.closed)
+        self.assertEqual(raw.calls, 1)
+        self.assertEqual(raw.received, b"")
+
+    def test_text_close_finish_encoder_error_no_retry(self):
+        # The same when the write of what the encoder held to the end
+        # (gh-79792) fails: the idna encoder holds the last label, which
+        # doesn't fit the buffer, and the write out of the buffer fails.
+        raw = self._close_test_raw(BrokenPipeError(errno.EPIPE, "EPIPE"))
+        t = self.TextIOWrapper(self.BufferedWriter(raw, 64), encoding="idna")
+        t.write("x" * 60 + ".abcd")
+        with self.assertWarnsRegex(ResourceWarning,
+                                   "discarded 61 buffered bytes"):
+            with self.assertRaises(BrokenPipeError):
+                t.close()
+        self.assertTrue(t.closed)
+        self.assertEqual(raw.calls, 1)
+        self.assertEqual(raw.received, b"")
+        # When the encoder raises, nothing was written: the close() of the
+        # buffer writes what it holds.
+        raw = self._close_test_raw()
+        t = self.TextIOWrapper(self.BufferedWriter(raw, 64), encoding="idna")
+        t.write("abc." + "x" * 70)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ResourceWarning)
+            with self.assertRaises(UnicodeError):
+                t.close()
+        self.assertTrue(t.closed)
+        self.assertEqual(raw.received, b"abc.")
+
+    def test_text_close_flush_error_no_retry_rwpair(self):
+        # The same over a BufferedRWPair, as socket.makefile("rw") makes
+        # in text mode: the pair discards its writer's pending data.
+        raw = self._close_test_raw(BrokenPipeError(errno.EPIPE, "EPIPE"))
+        pair = self.BufferedRWPair(self.BytesIO(b""), raw, 64)
+        t = self.TextIOWrapper(pair, encoding="ascii")
+        t.write("abc")
+        with self.assertWarnsRegex(ResourceWarning,
+                                   "discarded 3 buffered bytes"):
+            with self.assertRaises(BrokenPipeError):
+                t.close()
+        self.assertTrue(t.closed)
+        self.assertEqual(raw.calls, 1)
+        self.assertEqual(raw.received, b"")
+        # A reader has nothing to discard.
+        r = self.BufferedReader(self.BytesIO(b"ab"))
+        self.assertEqual(r._discard_writes(), 0)
+        self.assertEqual(r.read(), b"ab")
 
     def test_close_without_writes_writes_no_bom(self):
         # close() gives final=True only to an encoder that encoded text

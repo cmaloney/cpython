@@ -2046,7 +2046,6 @@ _Py_read_noraise(int fd, void *buf, size_t count)
    (the syscall is not retried).
 
    Release the GIL to call read(). The caller must hold the GIL. */
-
 Py_ssize_t
 _Py_read(int fd, void *buf, size_t count)
 {

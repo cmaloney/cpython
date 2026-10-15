@@ -137,8 +137,6 @@ extern "C" {
     _Py_atomic_load_ullong_relaxed(&value)
 #define FT_ATOMIC_ADD_SSIZE(value, new_value) \
     (void)_Py_atomic_add_ssize(&value, new_value)
-#define FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(value, expected, desired) \
-    _Py_atomic_compare_exchange_ssize(&value, expected, desired)
 #define FT_MUTEX_LOCK(lock) PyMutex_Lock(lock)
 #define FT_MUTEX_LOCK_FLAGS(lock, flags) PyMutex_LockFlags(lock, flags)
 #define FT_MUTEX_UNLOCK(lock) PyMutex_Unlock(lock)
@@ -203,9 +201,6 @@ extern "C" {
 #define FT_ATOMIC_LOAD_ULLONG_RELAXED(value) value
 #define FT_ATOMIC_STORE_ULLONG_RELAXED(value, new_value) value = new_value
 #define FT_ATOMIC_ADD_SSIZE(value, new_value) (void)(value += new_value)
-#define FT_ATOMIC_COMPARE_EXCHANGE_SSIZE(value, expected, desired) \
-    ((value) == *(expected) ? ((value) = (desired), 1) \
-                            : (*(expected) = (value), 0))
 #define FT_MUTEX_LOCK(lock) do {} while (0)
 #define FT_MUTEX_LOCK_FLAGS(lock, flags) do {} while (0)
 #define FT_MUTEX_UNLOCK(lock) do {} while (0)

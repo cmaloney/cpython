@@ -1,0 +1,9 @@
+On a non-blocking stream, :meth:`!readline` of :class:`io.BufferedReader`,
+:class:`io.BufferedRandom` and :class:`io.BufferedRWPair` now returns
+``None`` when the stream would block before the end of the line, and keeps
+the partial line for the next call, unless it is longer than the buffer
+size: then it is returned as it is. :meth:`io.IOBase.readline` returns
+``None`` when nothing arrived instead of raising :exc:`OSError`. Iteration
+raises :exc:`BlockingIOError` instead of stopping, and
+:meth:`~io.IOBase.readlines` returns the complete lines read so far, or
+``None`` if there are none.
