@@ -571,12 +571,8 @@ class GatherTest(unittest.TestCase):
         code = textwrap.dedent('''
             import io, threading, time
             from _io import _nibbler
-            class Raw(io.RawIOBase):
+            class Raw(io.BytesIO):
                 hook = None
-                def writable(self):
-                    return True
-                def write(self, b):
-                    return len(b)
                 @property
                 def closed(self):
                     hook, Raw.hook = Raw.hook, None
@@ -767,16 +763,8 @@ class GatherTest(unittest.TestCase):
         # closed) setting the variable and making the stream drop the
         # record: it stays alive meanwhile.  (Checked under valgrind or
         # ASan, which see the use after free it was.)
-        class Raw(io.RawIOBase):
+        class Raw(io.BytesIO):
             hook = None
-            def writable(self):
-                return True
-            def write(self, b):
-                return len(b)
-            def seekable(self):
-                return True
-            def seek(self, *args):
-                return 0
             @property
             def closed(self):
                 hook, Raw.hook = Raw.hook, None
