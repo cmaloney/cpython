@@ -2768,6 +2768,21 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                     t.buffer.x = 1
                     self.assertEqual(a + t.read(7) + t.read(), data)
 
+    def test_seek_forgets_encoder_used(self):
+        # seek() resets the encoder: close() gives final=True only to an
+        # encoder that encoded text since (a fresh UTF-16 encoder's final
+        # encode() is a BOM), as _io's.
+        class R(self.BytesIO):
+            def close(self):
+                R.value = self.getvalue()
+                super().close()
+        t = self.TextIOWrapper(self.BufferedRandom(R()), encoding="utf-16")
+        t.write("abc")
+        t.seek(0)
+        t.truncate()
+        t.close()
+        self.assertEqual(R.value, b"")
+
     def test_keeps_read_on_error_marker(self):
         # A read that fails keeps the text it took for the next read (see
         # test_failed_read_keeps_text): the class says so, for

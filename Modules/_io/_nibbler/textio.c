@@ -1673,11 +1673,13 @@ encoder_reset(PyObject *encoder, int start)
     return res == NULL ? -1 : 0;
 }
 
-/* With elock: reset the published encoder (if any), as encoder_reset(). */
+/* With elock: reset the published encoder (if any), as encoder_reset():
+   it needs no final=True until it encodes again. */
 static int
 encoder_reset_locked(textio *self, PyObject *encoder, int start)
 {
     FT_ATOMIC_STORE_CHAR_RELAXED(self->encoding_start_of_stream, start);
+    FT_ATOMIC_STORE_CHAR_RELAXED(self->encoder_used, 0);
     return encoder == NULL ? 0 : encoder_reset(encoder, start);
 }
 
