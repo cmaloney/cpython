@@ -1453,6 +1453,7 @@ gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
            all of data was accepted.  From code of this thread holding the
            stream's locks, as a signal handler in a write-out, left for
            the next one.) */
+        hold = hold ? hold : Py_NewRef(rec);
         int e = (nibbler_mutex_is_mine(&self->io)
                  || nibbler_mutex_is_mine(&self->lock)
                  ? 0 : gather_end(self, rec, out, NULL));
@@ -2940,7 +2941,11 @@ _io__Buffered_flush_impl(buffered *self)
     if (rec != NULL && rec_state(rec) == REC_ACTIVE && rec->direct
         && !nibbler_mutex_is_mine(&rec->lock))
     {
-        if (gather_end(self, rec, PY_SSIZE_T_MAX, NULL) < 0) {
+        /* (Referenced across the Python code it may run.) */
+        Py_INCREF(rec);
+        int r = gather_end(self, rec, PY_SSIZE_T_MAX, NULL);
+        Py_DECREF(rec);
+        if (r < 0) {
             return (PyErr_Occurred() ? NULL
                     : PyErr_Format(PyExc_ValueError, "flush of closed file"));
         }
