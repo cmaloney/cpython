@@ -1354,6 +1354,7 @@ gather_move_records(buffered *self, int all)
    there is no such record. */
 static int gather_end(buffered *, record *, Py_ssize_t, Py_ssize_t *);
 static void buffered_set_written(Py_ssize_t);
+static int buffered_enter(buffered *, const char *, int);
 
 /* What a direct or line block writes out after data[0:len] was added to
    rec: all of it at the limit of a direct block, else for a line block
@@ -1741,16 +1742,19 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
         r = -1;
     }
     Py_XSETREF(g->raw, raw);
-    /* Its context's earlier writes first (see above). */
-    if (r == 0 && g->direct && (r = buffered_lock_io(self)) == 0) {
-        r = self->raw == NULL ? buffered_not_ready() : buffered_sync(self, 1);
-        buffered_unlock_io(self);
-    }
     /* The context's record: this block is in it if active; else made
        active, without the lock while still listed. */
     record *rec = r == 0 ? gather_current(self) : NULL;
+    /* Its context's earlier writes first (see above), also what its
+       records could not move. */
+    if (r == 0 && g->direct && !(rec && rec_state(rec) == REC_ACTIVE)
+        && (r = buffered_enter(self, "gather on closed file", 0)) == 0)
+    {
+        r = buffered_sync(self, 1);
+        buffered_unlock_io(self);
+    }
     int state = REC_FREE;
-    if (rec != NULL) {
+    if (r == 0 && rec != NULL) {
         if (rec_lock(rec) < 0) {
             return NULL;
         }

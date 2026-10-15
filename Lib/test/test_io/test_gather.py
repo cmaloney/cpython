@@ -1272,6 +1272,27 @@ class GatherTest(unittest.TestCase):
             self.assertEqual(cm.exception.errno, errno.EFBIG)
         self.assertEqual(self.read(), b''.join(data))
 
+    @requires_writev
+    def test_direct_mode_entry_pending_record(self):
+        # A direct block's entry writes out first what its context's
+        # earlier block could not move (here for lack of memory).
+        _testcapi = import_helper.import_module('_testcapi')
+        failed = 0
+        for start in range(20):
+            with open(self.path, 'wb') as f:
+                g = f._gather()
+                g.__enter__()
+                f.write(b'A')
+                try:
+                    _testcapi.call_with_nomemory(start, start + 1, g.__exit__,
+                                                 None, None, None)
+                except MemoryError:
+                    failed += 1
+                with f._gather(direct=True):
+                    f.write(b'B')
+            self.assertEqual(self.read(), b'AB')
+        self.assertGreater(failed, 0)
+
     @threading_helper.requires_working_threading()
     def test_threads_whole_life(self):
         # Threads in one direct block each for their whole life, with
