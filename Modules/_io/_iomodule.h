@@ -51,6 +51,28 @@ extern int _PyIOBase_finalize(PyObject *self);
 /* Returns true if the given FileIO object is closed.
    Doesn't check the argument type, so be careful! */
 extern int _PyFileIO_closed(PyObject *self);
+
+/* Most buffers passed to one vectored write, with arrays on the stack;
+   _PyIO_WRITEV_LONG (IOV_MAX), with arrays on the heap, for callers with
+   more. */
+enum { _PyIO_WRITEV_MAX = 64 };
+#if defined(IOV_MAX) && IOV_MAX > 64
+#  define _PyIO_WRITEV_LONG IOV_MAX
+#else
+#  define _PyIO_WRITEV_LONG _PyIO_WRITEV_MAX
+#endif
+
+/* A run of bytes for a vectored write. */
+typedef struct {
+    const char *ptr;
+    Py_ssize_t len;
+} _PyIO_Span;
+/* Write spans[0:cnt] to an exact FileIO open for writing with one
+   writev() (or, without it, write() the first span); fewer bytes may be
+   written.  Returns the byte count, -2 if a non-blocking file would
+   block, or -1 with an exception set. */
+extern Py_ssize_t _PyFileIO_writev(PyObject *self, const _PyIO_Span *spans,
+                                   Py_ssize_t cnt);
 /* Was the FileIO (or subclass) opened in append mode? */
 extern int _PyFileIO_appending(PyObject *self);
 /* Was the FileIO (or subclass) opened on a regular file, which reads never

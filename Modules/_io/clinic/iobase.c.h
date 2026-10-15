@@ -571,6 +571,25 @@ PyDoc_STRVAR(_io__RawIOBase_write__doc__,
 
 #define _IO__RAWIOBASE_WRITE_METHODDEF    \
     {"write", (PyCFunction)_io__RawIOBase_write, METH_O, _io__RawIOBase_write__doc__},
+
+PyDoc_STRVAR(_io__RawIOBase__writev__doc__,
+"_writev($self, buffers, /)\n"
+"--\n"
+"\n"
+"Write a sequence of buffers, in order.\n"
+"\n"
+"Like write(): returns the number of bytes written, which may be\n"
+"fewer than all of them (stopping anywhere, also inside a buffer),\n"
+"or None if the stream would block before writing anything.  This\n"
+"default calls write() on each buffer, stopping at the first that\n"
+"writes less than all of it; raw streams that can write several\n"
+"buffers in one call override it.\n"
+"\n"
+"Private: used by buffered I/O to write several pieces without\n"
+"joining them first.");
+
+#define _IO__RAWIOBASE__WRITEV_METHODDEF    \
+    {"_writev", (PyCFunction)_io__RawIOBase__writev, METH_O, _io__RawIOBase__writev__doc__},
 #define _IO__IOBASE_CLOSED_GETSETDEF {"closed", (getter)_io__IOBase_closed_get, (setter)NULL, _io__IOBase_closed__doc__},
 
-/*[clinic end generated code: output=fd729b0ef2ad52b8 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=7f549fc4948b678e input=a9049054013a1b77]*/
