@@ -1344,6 +1344,14 @@ class BufferedWriterTest(CommonBufferedTests):
         bufio.flush()
         self.assertEqual(b"".join(raw._write_stack), data)
 
+    def test_write_interrupted_refusing_attribute(self):
+        class Interrupt(Exception):
+            characters_written = property()
+        raw = self.scripted_raw([30, Interrupt()])
+        bufio = self.tp(raw, 64)
+        self.addCleanup(bufio.close)
+        self.assertRaises(Interrupt, bufio.write, bytes(range(100)))
+
     def test_write_interrupted_says_what_was_taken(self):
         # When the rest doesn't fit, a KeyboardInterrupt says how much of
         # the data was taken: writing the rest again duplicates nothing.
