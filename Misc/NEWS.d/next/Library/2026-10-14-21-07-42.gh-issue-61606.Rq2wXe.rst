@@ -1,7 +1,0 @@
-With the private unbuffered switch (``_PYTHON_IO_UNBUFFERED_IMPL=_nibbler``
-or ``_io._set_unbuffered_impl("_nibbler")``), :func:`open` with
-``buffering=0`` opens a text file for writing (modes ``'w'``, ``'a'`` and
-``'x'``) instead of raising :exc:`ValueError`: the
-:class:`~io.TextIOWrapper` writes through to an :mod:`!_io._nibbler`
-buffered writer of buffer size 0, so each write reaches the file at once.
-Unbuffered text that can be read still raises :exc:`ValueError`.
