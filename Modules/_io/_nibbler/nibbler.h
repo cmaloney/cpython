@@ -143,6 +143,13 @@ nibbler_mutex_trylock(nibbler_mutex *m)
 static inline void
 nibbler_mutex_unlock(nibbler_mutex *m)
 {
+    if (_Py_atomic_load_uint64_relaxed(&m->gen) != _PyIO_nibbler_fork_gen) {
+        /* The forking thread releasing in the child what it held at the
+           fork: the check of the first lock first (it finds this thread
+           holding m), or a lock meanwhile could take m, holder 0 below, for
+           one left locked by a thread gone in the fork. */
+        (void)nibbler_mutex_after_fork(m, _PyIO_nibbler_fork_gen);
+    }
     _Py_atomic_store_uint64_relaxed(&m->holder, 0);
     PyMutex_Unlock(&m->mutex);
 }
