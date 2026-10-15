@@ -314,6 +314,11 @@ to skip, and a write or `detach()` reads the bytes again first.
   the outer call uses the read state across Python code (`rbusy`: reads,
   going back to the text position, skipping characters after a seek)
   for `seek()`, `tell()`, `close()` and going back to the text position.
+  A nested `detach()` is allowed otherwise (as `_io`'s): the outer call
+  holds a reference to the buffer it uses, and raises `ValueError` at its
+  next use of it, so the buffer handed out gets no more calls from it
+  (`textio_buffer()`; `close()`, `reconfigure()` and a write's store look
+  again too).
   The quick read takes it with a trylock; when anyone holds it the read
   goes the locked way.
 - **No settings lock**: the settings (buffer, codec objects, newline
@@ -342,7 +347,11 @@ to skip, and a write or `detach()` reads the bytes again first.
   start of the stream only
   tries it (with the buffer's locks held, it must not wait for a write
   that waits for them).  Order: rlock, elock, the buffer's I/O role, the
-  buffer's lock.  (Critical sections were tried: daemon threads stopped
+  buffer's lock.  Python code runs with elock held (the encoder, a Python
+  buffer's or raw stream's `write()`): if it calls `seek()`, `close()`,
+  `detach()` or `reconfigure()` of the same text while another thread
+  holding rlock waits for elock, the two wait for each other (from the
+  same thread, they raise `RuntimeError`).  (Critical sections were tried: daemon threads stopped
   at exit inside one hung the main thread's writes.)
 
 ### Differences from `_io.TextIOWrapper`
