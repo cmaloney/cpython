@@ -2466,8 +2466,10 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
                                && PyObject_TypeCheck(raw, state->PyFileIO_Type)
                                && _PyFileIO_appending(raw));
         /* Not for pipes and character devices, whose position doesn't
-           follow what was read (GH-95782), nor in append mode. */
+           follow what was read (GH-95782), nor in append mode, nor over a
+           file descriptor FileIO didn't open (it may have O_APPEND). */
         self->raw_regular = (fileio && !self->raw_appending
+                             && !_PyFileIO_foreign_fd(raw)
                              && _PyFileIO_regular(raw));
     }
     PyObject *old = buffered_swap_raw(self, err ? NULL : Py_NewRef(raw));

@@ -77,6 +77,9 @@ typedef struct {
     signed int seekable : 2; /* -1 means unknown */
     unsigned int truncate : 1;
     unsigned int closefd : 1;
+    /* The file descriptor was given, or came from an opener: its flags
+       (O_APPEND) are unknown. */
+    unsigned int foreign_fd : 1;
     char finalizing;
     /* Stat result which was grabbed at file open, useful for optimizing common
        File I/O patterns to be more efficient. This is only guidance / an
@@ -483,6 +486,7 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
         PyErr_NoMemory();
         goto error;
     }
+    self->foreign_fd = fd >= 0 || opener != Py_None;
     if (fd >= 0) {
         FT_ATOMIC_STORE_INT_RELAXED(self->fd, fd);
         self->closefd = closefd;
@@ -1217,6 +1221,12 @@ int
 _PyFileIO_appending(PyObject *op)
 {
     return PyFileIO_CAST(op)->appending;
+}
+
+int
+_PyFileIO_foreign_fd(PyObject *op)
+{
+    return PyFileIO_CAST(op)->foreign_fd;
 }
 
 int

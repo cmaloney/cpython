@@ -95,6 +95,8 @@ extern PyObject *_PyFileIO_close(PyObject *self);
 /* Raise like _PyIOBase_check_readable()/_writable() unless the FileIO is
    open and allows the requested access. */
 extern int _PyFileIO_check_access(PyObject *self, int reading, int writing);
+/* Was the file descriptor given, or from an opener (its flags unknown)? */
+extern int _PyFileIO_foreign_fd(PyObject *self);
 /* Was the FileIO (or subclass) opened in append mode? */
 extern int _PyFileIO_appending(PyObject *self);
 /* Was the FileIO (or subclass) opened on a regular file, which reads never

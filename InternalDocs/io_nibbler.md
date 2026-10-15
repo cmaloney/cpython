@@ -51,10 +51,11 @@ Data structures
 - **threshold**: pending bytes past which writes are written out
   (`capacity`, or `PY_SSIZE_T_MAX` for buffer size None).
 - **raw position** (`raw_pos`, negative when unknown): kept only when
-  `raw_regular` (an exact FileIO of a regular file, not in append mode),
-  so that `tell()` and `seek()` inside the read-ahead make no `lseek`, like
-  `_io`'s `abs_pos`.  Pipes and character devices are left out because
-  their position doesn't follow reads (GH-95782).
+  `raw_regular` (an exact FileIO of a regular file it opened itself, not
+  in append mode), so that `tell()` and `seek()` inside the read-ahead
+  make no `lseek`, like `_io`'s `abs_pos`.  Pipes and character devices
+  are left out because their position doesn't follow reads (GH-95782), a
+  file descriptor FileIO was given because it may have `O_APPEND`.
 
 
 Invariants

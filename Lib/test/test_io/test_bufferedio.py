@@ -2314,6 +2314,23 @@ class BufferedRandomTest(BufferedReaderTest, BufferedWriterTest):
                 self.assertEqual(f.read(20), bytes(20))
                 self.assertGreaterEqual(f.tell(), 0)
 
+    @unittest.skipUnless(hasattr(os, 'O_APPEND'), 'needs os.O_APPEND')
+    def test_tell_over_append_mode_fd(self):
+        # Writes to a file descriptor opened with O_APPEND go to the end of
+        # the file, whatever mode the FileIO over it was given.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with self.open(os_helper.TESTFN, 'wb') as f:
+            f.write(b'0123456789')
+        fd = os.open(os_helper.TESTFN, os.O_RDWR | os.O_APPEND)
+        with self.tp(self.FileIO(fd, 'r+b')) as f:
+            f.seek(0)
+            f.write(b'AAAA')
+            f.flush()
+            f.write(b'B')
+            self.assertEqual(f.tell(), 15)
+            f.seek(0)
+            self.assertEqual(f.read(), b'0123456789AAAAB')
+
     def test_flush_after_partly_failed_write_over_read_ahead(self):
         # A write-out of data written over the read-ahead that fails after
         # writing part of it leaves the rest where it belongs.
