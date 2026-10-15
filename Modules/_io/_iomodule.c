@@ -67,8 +67,9 @@ PyDoc_STRVAR(module_doc,
     );
 
 
-/* The buffered classes open() uses, which _io._set_open_impl() may
-   replace while open() runs in other threads: open() takes a new reference (or NULL) with
+/* The buffered classes open() uses, which _io._set_open_impl() and
+   _io._set_unbuffered_impl() may replace while open() runs in other
+   threads: open() takes a new reference (or NULL) with
    iomodule_get_open_type().  With the GIL, plain loads and stores do. */
 #ifdef Py_GIL_DISABLED
 static PyObject *
@@ -473,28 +474,28 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
         goto error;
     }
 
-    /* if not buffering, returns the raw file object */
-    if (buffering == 0) {
-        if (!binary) {
-            PyErr_SetString(PyExc_ValueError,
-                            "can't have unbuffered text I/O");
-            goto error;
-        }
-
-        return result;
+    if (buffering == 0 && !binary) {
+        PyErr_SetString(PyExc_ValueError,
+                        "can't have unbuffered text I/O");
+        goto error;
     }
 
-    /* wraps into a buffered file */
+    /* wraps into a buffered file; if not buffering, returns the raw file
+       object, or with _io._set_unbuffered_impl("_nibbler"), wraps it with
+       buffer size 0 */
     {
         PyTypeObject **slot;
         if (updating) {
-            slot = &state->open_random_type;
+            slot = (buffering ? &state->open_random_type
+                              : &state->open_unbuffered_random_type);
         }
         else if (creating || writing || appending) {
-            slot = &state->open_writer_type;
+            slot = (buffering ? &state->open_writer_type
+                              : &state->open_unbuffered_writer_type);
         }
         else if (reading) {
-            slot = &state->open_reader_type;
+            slot = (buffering ? &state->open_reader_type
+                              : &state->open_unbuffered_reader_type);
         }
         else {
             PyErr_Format(PyExc_ValueError,
@@ -507,10 +508,13 @@ _io_open_impl(PyObject *module, PyObject *file, const char *mode,
                                     : iomodule_get_open_type(slot));
         Py_CLEAR(unlimited_class);
         if (Buffered_class == NULL) {
-            /* Only after the module was cleared. */
-            PyErr_SetString(PyExc_RuntimeError,
-                            "open() is not available any more");
-            goto error;
+            if (buffering != 0) {
+                /* Only after the module was cleared. */
+                PyErr_SetString(PyExc_RuntimeError,
+                                "open() is not available any more");
+                goto error;
+            }
+            return result;
         }
         PyObject *bufsize = (unlimited ? Py_NewRef(Py_None)
                                        : PyLong_FromLong(buffering));
@@ -743,6 +747,27 @@ iomodule_set_open_impl(PyObject *module, int nibbler)
     return was_nibbler;
 }
 
+/* Make open(buffering=0) return the raw file, or with nibbler set, wrap it
+   in _io._nibbler's classes with buffer size 0.  Returns whether it
+   wrapped it before, or -1 on error. */
+static int
+iomodule_set_unbuffered_impl(PyObject *module, int nibbler)
+{
+    _PyIO_State *state = get_io_state(module);
+    PyObject *types[4] = {NULL, NULL, NULL, NULL};
+    if (nibbler && iomodule_get_nibbler_types(module, types) < 0) {
+        return -1;
+    }
+    Py_XDECREF(types[3]);
+    PyObject *old = iomodule_swap_open_type(
+        &state->open_unbuffered_reader_type, types[0]);
+    int was_nibbler = old != NULL;
+    Py_XDECREF(old);
+    iomodule_set_open_type(&state->open_unbuffered_writer_type, types[1]);
+    iomodule_set_open_type(&state->open_unbuffered_random_type, types[2]);
+    return was_nibbler;
+}
+
 /* Parse the name of an implementation: 1 for "_nibbler", 0 for "_io", -1
    with ValueError otherwise. */
 static int
@@ -781,6 +806,31 @@ _io__set_open_impl_impl(PyObject *module, PyObject *name)
     return PyUnicode_FromString(was_nibbler ? "_nibbler" : "_io");
 }
 
+/*[clinic input]
+_io._set_unbuffered_impl
+    name: unicode
+    /
+
+Choose what binary open(buffering=0) returns: "_io" or "_nibbler".
+
+With "_io", it returns the raw file.  With "_nibbler", it returns an
+_io._nibbler BufferedReader, BufferedWriter or BufferedRandom (by mode)
+with buffer size 0 wrapping it.  Returns the previous name.  For tests.
+[clinic start generated code]*/
+
+static PyObject *
+_io__set_unbuffered_impl_impl(PyObject *module, PyObject *name)
+/*[clinic end generated code: output=b7203c8226b4eb18 input=d3251f2c9b3103e5]*/
+{
+    int nibbler = iomodule_parse_impl(name);
+    int was_nibbler = nibbler < 0 ? -1 : iomodule_set_unbuffered_impl(
+                                             module, nibbler);
+    if (was_nibbler < 0) {
+        return NULL;
+    }
+    return PyUnicode_FromString(was_nibbler ? "_nibbler" : "_io");
+}
+
 static int
 iomodule_traverse(PyObject *mod, visitproc visit, void *arg) {
     _PyIO_State *state = get_io_state(mod);
@@ -804,6 +854,9 @@ iomodule_traverse(PyObject *mod, visitproc visit, void *arg) {
     Py_VISIT(state->open_writer_type);
     Py_VISIT(state->open_random_type);
     Py_VISIT(state->open_text_type);
+    Py_VISIT(state->open_unbuffered_reader_type);
+    Py_VISIT(state->open_unbuffered_writer_type);
+    Py_VISIT(state->open_unbuffered_random_type);
 #ifdef HAVE_WINDOWS_CONSOLE_IO
     Py_VISIT(state->PyWindowsConsoleIO_Type);
 #endif
@@ -834,6 +887,9 @@ iomodule_clear(PyObject *mod) {
     Py_CLEAR(state->open_writer_type);
     Py_CLEAR(state->open_random_type);
     Py_CLEAR(state->open_text_type);
+    Py_CLEAR(state->open_unbuffered_reader_type);
+    Py_CLEAR(state->open_unbuffered_writer_type);
+    Py_CLEAR(state->open_unbuffered_random_type);
 #ifdef HAVE_WINDOWS_CONSOLE_IO
     Py_CLEAR(state->PyWindowsConsoleIO_Type);
 #endif
@@ -860,6 +916,7 @@ static PyMethodDef module_methods[] = {
     _IO_TEXT_ENCODING_METHODDEF
     _IO_OPEN_CODE_METHODDEF
     _IO__SET_OPEN_IMPL_METHODDEF
+    _IO__SET_UNBUFFERED_IMPL_METHODDEF
     {NULL, NULL}
 };
 
@@ -960,6 +1017,16 @@ iomodule_exec(PyObject *m)
         return -1;
     }
     if (iomodule_set_open_impl(m, nibbler) < 0) {
+        return -1;
+    }
+    // _PYTHON_IO_UNBUFFERED_IMPL=_nibbler (also honors -E / -I) makes
+    // open(buffering=0) wrap the raw file in the _io._nibbler classes with
+    // buffer size 0.
+    env = config->use_environment
+        ? getenv("_PYTHON_IO_UNBUFFERED_IMPL") : NULL;
+    if (env != NULL && strcmp(env, "_nibbler") == 0
+        && iomodule_set_unbuffered_impl(m, 1) < 0)
+    {
         return -1;
     }
     if (nibbler) {

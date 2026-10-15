@@ -228,6 +228,11 @@ struct _io_state {
     PyTypeObject *open_writer_type;
     PyTypeObject *open_random_type;
     PyTypeObject *open_text_type;
+    /* The classes open(buffering=0) wraps the raw file in with buffer size
+       0 (_io._nibbler's), or NULL: it returns the raw file. */
+    PyTypeObject *open_unbuffered_reader_type;
+    PyTypeObject *open_unbuffered_writer_type;
+    PyTypeObject *open_unbuffered_random_type;
 };
 
 static inline _PyIO_State *

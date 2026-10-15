@@ -421,4 +421,37 @@ _io__set_open_impl(PyObject *module, PyObject *arg)
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=fcc41c3230eda4be input=a9049054013a1b77]*/
+
+PyDoc_STRVAR(_io__set_unbuffered_impl__doc__,
+"_set_unbuffered_impl($module, name, /)\n"
+"--\n"
+"\n"
+"Choose what binary open(buffering=0) returns: \"_io\" or \"_nibbler\".\n"
+"\n"
+"With \"_io\", it returns the raw file.  With \"_nibbler\", it returns an\n"
+"_io._nibbler BufferedReader, BufferedWriter or BufferedRandom (by mode)\n"
+"with buffer size 0 wrapping it.  Returns the previous name.  For tests.");
+
+#define _IO__SET_UNBUFFERED_IMPL_METHODDEF    \
+    {"_set_unbuffered_impl", (PyCFunction)_io__set_unbuffered_impl, METH_O, _io__set_unbuffered_impl__doc__},
+
+static PyObject *
+_io__set_unbuffered_impl_impl(PyObject *module, PyObject *name);
+
+static PyObject *
+_io__set_unbuffered_impl(PyObject *module, PyObject *arg)
+{
+    PyObject *return_value = NULL;
+    PyObject *name;
+
+    if (!PyUnicode_Check(arg)) {
+        _PyArg_BadArgument("_set_unbuffered_impl", "argument", "str", arg);
+        goto exit;
+    }
+    name = arg;
+    return_value = _io__set_unbuffered_impl_impl(module, name);
+
+exit:
+    return return_value;
+}
+/*[clinic end generated code: output=6216803617f432c1 input=a9049054013a1b77]*/

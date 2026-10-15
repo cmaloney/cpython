@@ -554,12 +554,33 @@ class SetOpenImplTest(TestCase):
 
         run_concurrently([opener] * 3 + [switcher])
 
+    def test_open_set_unbuffered_impl_race(self):
+        # open(buffering=0) gets the class _io._set_unbuffered_impl()
+        # replaces (or unsets) as one reference.
+        import _io
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(b"x")
+        prev = _io._set_unbuffered_impl("_io")
+        self.addCleanup(_io._set_unbuffered_impl, prev)
+
+        def opener():
+            for _ in range(200):
+                with open(os_helper.TESTFN, "rb", buffering=0) as f:
+                    self.assertEqual(f.read(), b"x")
+
+        def switcher():
+            for i in range(200):
+                _io._set_unbuffered_impl("_nibbler" if i % 2 else "_io")
+
+        run_concurrently([opener] * 3 + [switcher])
+
     def test_set_impl_returns_previous(self):
         # Each call returns the name it replaced: of all the names set and
         # the first one, those replaced and the last one are the same.
         import _io
         from collections import Counter
-        for func in (_io._set_open_impl,):
+        for func in _io._set_open_impl, _io._set_unbuffered_impl:
             with self.subTest(func=func.__name__):
                 first = func("_io")
                 self.addCleanup(func, first)
