@@ -247,6 +247,12 @@ class GatherTest(unittest.TestCase):
         with f._gather():
             f.write(data)
         self.assertIs(objs[0], data)
+        # And text that is its encoding, by its str.
+        text = 'x' * 100_000
+        t = _nibbler.TextIOWrapper(f, encoding='ascii')
+        with f._gather():
+            t.write(text)
+        self.assertIs(objs[1], text)
 
     def test_nesting(self):
         other = self.path + '2'

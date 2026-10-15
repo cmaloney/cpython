@@ -194,7 +194,7 @@ morsels_take(morsel_list *l, char *dst, Py_ssize_t len)
  * The buffered object.
  *
  * Data flows one way at a time.  Writing, `list` holds the pending writes:
- * copies in block[0:used], and large exact bytes kept by reference.
+ * copies in block[0:used], and large exact bytes or str kept by reference.
  * Reading, block[0:end] holds what the last fill read (but the room a
  * fresh one leaves in front, see buffered_fill()): block[0:pos] was
  * returned (seek() can move back over it), block[pos:end] is the
@@ -221,7 +221,7 @@ typedef struct {
     nibbler_mutex io;
     Py_ssize_t capacity;        /* block size; 0: unbuffered */
     Py_ssize_t threshold;       /* pending bytes past which writes go out */
-    Py_ssize_t ref_min;         /* exact bytes kept by reference from this */
+    Py_ssize_t ref_min;         /* exact bytes, str kept by reference from */
     PyObject *block;
     Py_ssize_t used;
     Py_ssize_t pos;
@@ -770,10 +770,11 @@ buffered_set_block(buffered *self, PyObject *block)
 }
 
 /* Add data[0:len] (inside obj, or NULL) to the morsels in l: exact bytes
-   by reference from ref_min (or when larger than a buffer), else copied
-   into (*block)[*used:], or a block of size bytes when it has no room
-   (the old one if nothing else references it), or past that size into a
-   bytes object of its own.  The pending writes and _gather() records. */
+   or str (immutable too) by reference from ref_min (or when larger than a
+   buffer), else copied into (*block)[*used:], or a block of size bytes
+   when it has no room (the old one if nothing else references it), or
+   past that size into a bytes object of its own.  The pending writes and
+   _gather() records. */
 static inline Py_ALWAYS_INLINE int
 buffered_append_to(buffered *self, morsel_list *l, PyObject **block,
                    Py_ssize_t *used, Py_ssize_t size, PyObject *obj,
@@ -786,7 +787,8 @@ buffered_append_to(buffered *self, morsel_list *l, PyObject **block,
     if (len >= REF_MIN
         && (len >= FT_ATOMIC_LOAD_SSIZE_RELAXED(self->ref_min)
             || len > FT_ATOMIC_LOAD_SSIZE_RELAXED(self->capacity))
-        && obj != NULL && PyBytes_CheckExact(obj))
+        && obj != NULL
+        && (PyBytes_CheckExact(obj) || PyUnicode_CheckExact(obj)))
     {
         return morsels_push(l, obj, data, len);
     }
