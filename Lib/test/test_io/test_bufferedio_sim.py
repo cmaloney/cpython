@@ -1950,7 +1950,7 @@ class NibblerRandomOpsTest(NibblerMixin, RandomOpsTest, CTestCase):
     pass
 
 
-# --- Writing out without the lock ---------------------------------------------
+# --- Writing out without the lock --------------------------------------------
 
 @threading_helper.requires_working_threading()
 class WriteOutTest:
