@@ -321,6 +321,10 @@ PyAPI_FUNC(char*) _Py_UniversalNewlineFgetsWithSize(char *, int, FILE*, PyObject
 
 extern int _PyFile_Flush(PyObject *);
 
+// In the child of a fork: release the locks of _io._nibbler's buffered
+// objects that threads gone in the fork held (Modules/_io/_nibbler).
+extern void _PyIO_AfterForkChild(void);
+
 #ifndef MS_WINDOWS
 extern int _Py_GetTicksPerSecond(long *ticks_per_second);
 #endif

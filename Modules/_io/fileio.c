@@ -77,6 +77,9 @@ typedef struct {
     signed int seekable : 2; /* -1 means unknown */
     unsigned int truncate : 1;
     unsigned int closefd : 1;
+    /* The file descriptor was given, or came from an opener: its flags
+       (O_APPEND) are unknown. */
+    unsigned int foreign_fd : 1;
     char finalizing;
     /* Stat result which was grabbed at file open, useful for optimizing common
        File I/O patterns to be more efficient. This is only guidance / an
@@ -483,6 +486,7 @@ _io_FileIO___init___impl(fileio *self, PyObject *nameobj, const char *mode,
         PyErr_NoMemory();
         goto error;
     }
+    self->foreign_fd = fd >= 0 || opener != Py_None;
     if (fd >= 0) {
         FT_ATOMIC_STORE_INT_RELAXED(self->fd, fd);
         self->closefd = closefd;
@@ -1071,14 +1075,15 @@ _io_FileIO_write_impl(fileio *self, PyTypeObject *cls, Py_buffer *b)
     return PyLong_FromSsize_t(n);
 }
 
-/* A C entry point for callers in _io when the raw stream is exactly
-   FileIO: _PyFileIO_writev() does what the _writev() method does,
-   without the method call and argument conversion.  It returns the byte
-   count, -2 when a non-blocking file descriptor would block, or -1 with an
-   exception set. */
+/* C entry points for the buffered layer when its raw stream is exactly
+   FileIO.  Same behavior as the readinto(), _writev() and readall()
+   methods without the method call and argument conversion.  The Py_ssize_t
+   variants return the byte count, -2 when a non-blocking file descriptor
+   would block, or -1 with an exception set. */
 
-/* The file descriptor, or -1 with an exception set.  The caller checks
-   the access mode. */
+/* The file descriptor, or -1 with an exception set.  The access mode is
+   checked when the buffered object is created: its bit field shares a word
+   that seekable() writes. */
 static int
 fileio_check_io(fileio *self)
 {
@@ -1100,6 +1105,16 @@ fileio_io_result(Py_ssize_t n)
         return -1;
     }
     return n;
+}
+
+Py_ssize_t
+_PyFileIO_readinto(PyObject *op, char *buf, Py_ssize_t len)
+{
+    int fd = fileio_check_io(PyFileIO_CAST(op));
+    if (fd < 0) {
+        return -1;
+    }
+    return fileio_io_result(_Py_read(fd, buf, len));
 }
 
 Py_ssize_t
@@ -1172,10 +1187,41 @@ _PyFileIO_writev(PyObject *op, const _PyIO_Span *spans, Py_ssize_t cnt)
 #endif
 }
 
+/* What _PyIOBase_check_readable() and _PyIOBase_check_writable() do for
+   an exact FileIO, without calling readable() and writable(). */
+int
+_PyFileIO_check_access(PyObject *op, int reading, int writing)
+{
+    fileio *self = PyFileIO_CAST(op);
+    if (FT_ATOMIC_LOAD_INT_RELAXED(self->fd) < 0) {
+        err_closed();
+        return -1;
+    }
+    const char *msg = NULL;
+    if (reading && !self->readable) {
+        msg = "File or stream is not readable.";
+    }
+    else if (writing && !self->writable) {
+        msg = "File or stream is not writable.";
+    }
+    if (msg != NULL) {
+        _PyIO_State *state = find_io_state_by_def(Py_TYPE(self));
+        PyErr_SetString(state->unsupported_operation, msg);
+        return -1;
+    }
+    return 0;
+}
+
 int
 _PyFileIO_appending(PyObject *op)
 {
     return PyFileIO_CAST(op)->appending;
+}
+
+int
+_PyFileIO_foreign_fd(PyObject *op)
+{
+    return PyFileIO_CAST(op)->foreign_fd;
 }
 
 int
@@ -1184,6 +1230,52 @@ _PyFileIO_regular(PyObject *op)
     struct _Py_stat_struct *st =
         FT_ATOMIC_LOAD_PTR_ACQUIRE(PyFileIO_CAST(op)->stat_atopen);
     return st != NULL && S_ISREG(st->st_mode);
+}
+
+/* Is the method `name` shadowed by an instance attribute?  1, 0, or -1. */
+static int
+fileio_overridden(fileio *self, PyObject *name)
+{
+    return self->dict == NULL ? 0 : PyDict_Contains(self->dict, name);
+}
+
+/* flush(): what IOBase.flush() does for an exact FileIO (fail if closed),
+   unless an instance attribute overrides it.  Returns 0 or -1. */
+int
+_PyFileIO_flush(PyObject *op)
+{
+    fileio *self = PyFileIO_CAST(op);
+    int r = fileio_overridden(self, &_Py_ID(flush));
+    if (r != 0) {
+        PyObject *res = r < 0 ? NULL
+                              : PyObject_CallMethodNoArgs(op, &_Py_ID(flush));
+        Py_XDECREF(res);
+        return res == NULL ? -1 : 0;
+    }
+    if (FT_ATOMIC_LOAD_INT_RELAXED(self->fd) < 0) {
+        PyErr_SetString(PyExc_ValueError, "I/O operation on closed file.");
+        return -1;
+    }
+    return 0;
+}
+
+/* close() of an exact FileIO without the method call, unless an instance
+   attribute overrides it. */
+PyObject *
+_PyFileIO_close(PyObject *op)
+{
+    fileio *self = PyFileIO_CAST(op);
+    int r = fileio_overridden(self, &_Py_ID(close));
+    if (r != 0) {
+        return r < 0 ? NULL : PyObject_CallMethodNoArgs(op, &_Py_ID(close));
+    }
+    return _io_FileIO_close_impl(self, Py_TYPE(op));
+}
+
+PyObject *
+_PyFileIO_readall(PyObject *op)
+{
+    return _io_FileIO_readall_impl(PyFileIO_CAST(op), Py_TYPE(op));
 }
 
 #ifdef HAVE_WRITEV
@@ -1685,6 +1777,7 @@ static PyType_Slot fileio_slots[] = {
     {Py_tp_getset, fileio_getsetlist},
     {Py_tp_init, _io_FileIO___init__},
     {Py_tp_new, fileio_new},
+    {Py_tp_token, Py_TP_USE_SPEC},
     {0, NULL},
 };
 
