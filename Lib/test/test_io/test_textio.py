@@ -3010,6 +3010,37 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
             self.assertEqual(got[0].getvalue(), b"")
             self.assertEqual(t.buffer.getvalue(), b"x\n")
 
+    def test_init_from_encoder_refused(self):
+        # __init__() from the codec's encoder, in a write (which holds the
+        # lock __init__() publishes under), raises RuntimeError before it
+        # changes anything: the text keeps its settings.
+        armed = []
+        class Enc(codecs.IncrementalEncoder):
+            def encode(self, s, final=False):
+                if armed:
+                    armed.clear()
+                    t.__init__(self.BytesIO(), encoding="ascii")
+                return s.encode("ascii")
+        Enc.BytesIO = self.BytesIO
+        def search(name):
+            if name == "init_on_encode_test":
+                return codecs.CodecInfo(
+                    name=name, encode=None, decode=None,
+                    incrementalencoder=Enc,
+                    incrementaldecoder=codecs.getincrementaldecoder("ascii"))
+        codecs.register(search)
+        self.addCleanup(codecs.unregister, search)
+        b = self.BytesIO()
+        t = self.TextIOWrapper(b, encoding="init_on_encode_test")
+        armed.append(1)
+        with self.assertRaisesRegex(RuntimeError, "reentrant call"):
+            t.write("x")
+        self.assertIs(t.buffer, b)
+        self.assertEqual(t.encoding, "init_on_encode_test")
+        t.write("y")
+        t.flush()
+        self.assertEqual(b.getvalue(), b"y")
+
     def test_nested_detach_in_reconfigure(self):
         # reconfigure() doesn't attach again a buffer that a nested
         # detach() (from the buffer's writable() or tell()) handed out.

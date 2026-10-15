@@ -3339,14 +3339,19 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
                                 int write_through)
 /*[clinic end generated code: output=72267c0c01032ed2 input=e6cfaaaf6059d4f5]*/
 {
-    /* Not set up meanwhile, nor after a failure, as _io's. */
+    /* Not set up meanwhile, nor after a failure, as _io's.  Nor from
+       Python code a write runs holding elock (its encoder, its buffer's
+       write()), which publishing takes: refused before anything changes. */
     if (textio_lock(self) < 0) {
         return -1;
     }
-    if (textio_refuse_nested(self, 0) < 0) {
+    if (textio_refuse_nested(self, 0) < 0
+        || nibbler_mutex_lock(&self->elock, (PyObject *)self, 1) < 0)
+    {
         textio_leave(self);
         return -1;
     }
+    nibbler_mutex_unlock(&self->elock);
     /* (The old settings are dropped once rlock is released.) */
     tconf *old = conf_swap(self, NULL);
     int r = -1;
