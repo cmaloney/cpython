@@ -4344,10 +4344,12 @@ static struct PyModuleDef _PyIO_nibbler_Module = {
 
 /* A type from spec with base, named prefix + its class name, in mod.  The
    class attribute _is_nibbler tells tests these classes from _io's, also
-   when they replace them. */
+   when they replace them; with keeps_read, _keeps_read_on_error says that
+   data (or text) read before a raw read raised is kept for the next read
+   (socket.makefile() looks at it). */
 static PyTypeObject *
 nibbler_add_type(PyObject *mod, const PyType_Spec *spec, PyTypeObject *base,
-                 const char *prefix)
+                 const char *prefix, int keeps_read)
 {
     char name[64];
     PyType_Spec named = *spec;
@@ -4361,6 +4363,8 @@ nibbler_add_type(PyObject *mod, const PyType_Spec *spec, PyTypeObject *base,
     }
     PyObject *dict = _PyType_GetDict(type);
     if (PyDict_SetItemString(dict, "_is_nibbler", Py_True) < 0
+        || (keeps_read && PyDict_SetItemString(dict, "_keeps_read_on_error",
+                                               Py_True) < 0)
         || (PyType_Modified(type), PyModule_AddType(mod, type) < 0))
     {
         Py_DECREF(type);
@@ -4385,16 +4389,16 @@ _PyIO_create_nibbler_submodule(PyObject *io_module, int as_io)
     PyTypeObject *base = io_state->PyBufferedIOBase_Type;
     state->PyBufferedIOBase_Type = (PyTypeObject *)Py_NewRef(base);
     if ((state->PyBufferedReader_Type = nibbler_add_type(
-             mod, &nibbler_bufferedreader_spec, base, prefix)) == NULL
+             mod, &nibbler_bufferedreader_spec, base, prefix, 1)) == NULL
         || (state->PyBufferedWriter_Type = nibbler_add_type(
-             mod, &nibbler_bufferedwriter_spec, base, prefix)) == NULL
+             mod, &nibbler_bufferedwriter_spec, base, prefix, 0)) == NULL
         || (state->PyBufferedRWPair_Type = nibbler_add_type(
-             mod, &nibbler_bufferedrwpair_spec, base, prefix)) == NULL
+             mod, &nibbler_bufferedrwpair_spec, base, prefix, 1)) == NULL
         || (state->PyBufferedRandom_Type = nibbler_add_type(
-             mod, &nibbler_bufferedrandom_spec, base, prefix)) == NULL
+             mod, &nibbler_bufferedrandom_spec, base, prefix, 1)) == NULL
         || (state->PyTextIOWrapper_Type = nibbler_add_type(
              mod, &_PyIONibbler_textiowrapper_spec,
-             io_state->PyTextIOBase_Type, prefix)) == NULL
+             io_state->PyTextIOBase_Type, prefix, 1)) == NULL
         || (state->Gather_Type = (PyTypeObject *)PyType_FromModuleAndSpec(
              mod, &gather_spec, NULL)) == NULL
         || (state->Record_Type = (PyTypeObject *)PyType_FromModuleAndSpec(

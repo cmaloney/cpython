@@ -1,0 +1,7 @@
+A file object from :meth:`socket.socket.makefile` now lets reading go on
+after a :exc:`TimeoutError` when its buffered reader keeps the data it read
+before the timeout for the next read, instead of failing every later read
+with "cannot read from timed out object": nothing was lost, so the read can
+be retried once more data arrives.  Only such buffered readers (the private
+:mod:`!_io._nibbler` one) are affected; with :class:`io.BufferedReader`,
+which still loses that data, reads after a timeout are still refused.
