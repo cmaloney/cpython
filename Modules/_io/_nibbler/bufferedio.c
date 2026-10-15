@@ -1629,7 +1629,11 @@ gather_direct(buffered *self, record *rec, Py_ssize_t n)
     }
     int st = 0, end = n < 0;
     n = end ? l->nbytes : Py_MIN(n, l->nbytes);
-    if (l->count - l->head > _PyIO_WRITEV_MAX) {
+    Py_ssize_t most = _PyIO_WRITEV_MAX;
+#ifdef IOV_MAX
+    most = Py_MIN(most, IOV_MAX);
+#endif
+    if (l->count - l->head > most) {
         /* Joined, for one writev(). */
         Py_ssize_t all = l->nbytes;
         PyObject *b = PyBytes_FromStringAndSize(NULL, all);
