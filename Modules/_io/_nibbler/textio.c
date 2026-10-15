@@ -3451,7 +3451,8 @@ _io_TextIOWrapper_reconfigure_impl(textio *self, PyObject *encoding,
             r = text_fix_encoder_state(self, cf);
         }
     }
-    if (r == 0) {
+    /* (Not if a nested detach() handed the buffer out meanwhile.) */
+    if (r == 0 && (r = textio_attached(self)) == 0) {
         cf = conf_swap(self, cf);
     }
     textio_leave(self);

@@ -2905,6 +2905,33 @@ class NibblerTextIOWrapperTest(NibblerMixin, CTextIOWrapperTest):
                 got[0].flush()
                 self.assertEqual(raw.getvalue(), b"abc")
 
+    def test_nested_detach_in_reconfigure(self):
+        # reconfigure() doesn't attach again a buffer that a nested
+        # detach() (from the buffer's writable() or tell()) handed out.
+        got = []
+        class B(self.BytesIO):
+            armed = None
+            def writable(self):
+                if B.armed == "writable":
+                    B.armed = None
+                    got.append(t.detach())
+                return True
+            def tell(self):
+                if B.armed == "tell":
+                    B.armed = None
+                    got.append(t.detach())
+                return super().tell()
+        for where in ("writable", "tell"):
+            with self.subTest(where=where):
+                got.clear()
+                t = self.TextIOWrapper(B(), encoding="utf-8")
+                B.armed = where
+                with self.assertRaisesRegex(ValueError, "detached"):
+                    t.reconfigure(encoding="latin-1")
+                self.assertEqual(len(got), 1)
+                self.assertRaisesRegex(ValueError, "detached", t.write, "x")
+                self.assertEqual(got[0].getvalue(), b"")
+
     @threading_helper.requires_working_threading()
     def test_threads_write_stateful_encoder(self):
         # The codec's encoder may hold state (an iso2022 shift state, the
