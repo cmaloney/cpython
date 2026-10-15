@@ -162,7 +162,7 @@ class GatherTest(unittest.TestCase):
             asyncio.run(main(f))
         with open(self.path) as f:
             self.assertEqual(f.read().split(),
-                             [f'{name}{i}' for name in 'abc' for i in range(5)])
+                             [f'{c}{i}' for c in 'abc' for i in range(5)])
 
     def test_task_created_in_block(self):
         # A task copies the context, but writes as usual.
