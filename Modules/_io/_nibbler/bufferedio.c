@@ -1321,14 +1321,17 @@ gather_move(buffered *self, record *rec, Py_ssize_t n)
    on an open stream: move what the current context's record gathered,
    and what ended blocks could not move (with all, every record's data,
    doing their deferred flush, see above), and unlist idle records (all
-   that is done with all -1, with the lock alone).  The read-ahead is
-   handed back first, so that no raw call (Python code) runs while the
-   list is walked. */
+   that is done with all -1, with the lock alone).  With all -2, for a
+   direct block's entry, only the moves: the other records are neither
+   locked, which would wait for their direct write-outs and hold up their
+   writes, nor unlisted, which would make each next block list its record
+   again.  The read-ahead is handed back first, so that no raw call
+   (Python code) runs while the list is walked. */
 Py_NO_INLINE static int
 gather_move_records(buffered *self, int all)
 {
     PyObject *ctx = _PyThreadState_GET()->context;
-#define MOVED(r) (all > 0 || (all == 0 && ((r)->ctx == ctx            \
+#define MOVED(r) (all > 0 || (all != -1 && ((r)->ctx == ctx           \
                                           || rec_state(r) == REC_PENDING)))
     if (all > 0) {
         FT_ATOMIC_STORE_UINT8_RELAXED(self->direct, 0);
@@ -1346,6 +1349,10 @@ gather_move_records(buffered *self, int all)
     record **p = &self->recs;
     while (*p != NULL) {
         record *r = *p;
+        if (all == -2 && !MOVED(r)) {
+            p = &r->next;
+            continue;
+        }
         if (rec_lock(r) < 0) {
             return -1;
         }
@@ -1359,12 +1366,12 @@ gather_move_records(buffered *self, int all)
         }
         int err = MOVED(r) ? gather_move(self, r, PY_SSIZE_T_MAX) : 0;
         if (err == 0 && MOVED(r)) {
-            r->flush &= all == 0;
+            r->flush &= all <= 0;
             if (r->state == REC_PENDING) {
                 rec_set_state(r, REC_IDLE);
             }
         }
-        int idle = r->state == REC_IDLE;
+        int idle = all != -2 && r->state == REC_IDLE;
         if (idle) {
             *p = r->next;
             r->next = NULL;
@@ -1399,6 +1406,8 @@ gather_move_records(buffered *self, int all)
 static int gather_end(buffered *, record *, Py_ssize_t, Py_ssize_t *);
 static void buffered_set_written(Py_ssize_t);
 static int buffered_enter(buffered *, const char *, int);
+/* Its flags. */
+enum { ENTER_READ = 1, ENTER_LEAVE_GATHERED = 2 };
 
 /* What a direct or line block writes out after data[0:len] was added to
    rec: all of it at the limit of a direct block, else for a line block
@@ -1804,9 +1813,11 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
     /* Its context's earlier writes first (see above), also what its
        records could not move. */
     if (r == 0 && g->direct && !(rec && rec_state(rec) == REC_ACTIVE)
-        && (r = buffered_enter(self, "gather on closed file", 0)) == 0)
+        && (r = buffered_enter(self, "gather on closed file",
+                               ENTER_LEAVE_GATHERED)) == 0)
     {
-        r = buffered_sync(self, 1);
+        r = (self->ngather > 0 && gather_move_records(self, -2) < 0 ? -1
+             : buffered_sync(self, 1));
         buffered_unlock_io(self);
     }
     int state = REC_FREE;
@@ -2637,9 +2648,6 @@ buffered_readline(buffered *self, Py_ssize_t limit)
 /*
  * Methods
  */
-
-/* Flags of buffered_enter(). */
-enum { ENTER_READ = 1, ENTER_LEAVE_GATHERED = 2 };
 
 /* Start of the methods making raw calls: take the I/O role and the lock,
    check that the object is initialized and, unless closed_msg is NULL,
