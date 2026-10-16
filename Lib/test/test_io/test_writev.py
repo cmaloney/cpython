@@ -247,6 +247,20 @@ class NibblerWritevTest(unittest.TestCase):
         self.assertEqual(raw.writes, 0)
         self.assertEqual(raw.out, b"".join(parts))
 
+    def test_batches_of_iov_max(self):
+        # Many pieces are written in batches, each one _writev() call.
+        raw = Recorder()
+        f = _nibbler.BufferedWriter(raw, None)
+        parts = [bytes([i % 256]) * 2048 for i in range(3000)]
+        for p in parts:
+            f.write(p)
+        self.assertEqual(raw.writevs, [])
+        f.flush()
+        self.assertEqual(raw.out, b"".join(parts))
+        self.assertEqual(sum(map(len, raw.writevs)), 3000)
+        self.assertLessEqual(len(raw.writevs), 3000 // 64 + 1)
+        self.assertEqual(raw.writes, 0)
+
     def test_partial_writev_retried(self):
         # A partial _writev(), also inside a piece, is retried from there.
         raw = Recorder([1000, 2500, 1])
