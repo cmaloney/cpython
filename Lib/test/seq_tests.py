@@ -3,6 +3,7 @@ Tests common to tuple, list and UserList.UserList
 """
 
 import unittest
+import struct
 import sys
 import pickle
 from test import support
@@ -442,3 +443,54 @@ class CommonTest(unittest.TestCase):
     def test_free_after_iterating(self):
         support.check_free_after_iterating(self, iter, self.type2test)
         support.check_free_after_iterating(self, reversed, self.type2test)
+
+
+class NativeItemsSearchTest:
+    """Tests of count(), index() and "in" for sequences of items in a native
+    struct format, such as array.array and memoryview.
+
+    They compare the bytes of items with the value when that is equivalent
+    to comparing them as objects, so check them on data where comparing
+    bytes would be wrong: 0.0 == -0.0 and NaN != NaN for floats, and any
+    nonzero byte is True for bools.
+
+    Subclasses set search_formats and define search_sequences(fmt, raw),
+    which returns (name, sequence) pairs of sequences of the items of raw
+    in format fmt.
+    """
+
+    search_formats = ''
+
+    def search_sequences(self, fmt, raw):
+        raise NotImplementedError
+
+    def test_search_formats(self):
+        class AlwaysEqual(int):
+            def __eq__(self, other):
+                return True
+            __hash__ = int.__hash__
+
+        nan = float('nan')
+        raw = (bytes(range(256)) + struct.pack('4d', 0.0, -0.0, nan, 1)) * 2
+        for fmt in self.search_formats:
+            for name, seq in self.search_sequences(fmt, raw):
+                items = seq.tolist()
+                values = items[::7] + [0, 1, -1, 2**64, 0.0, -0.0, nan, True,
+                                       False, 1.0, b'a', AlwaysEqual(5)]
+                for value in values:
+                    with self.subTest(fmt=fmt, sequence=name, value=value):
+                        self.check_search(seq, items, value)
+
+    def check_search(self, seq, items, value):
+        n = len(items)
+        matches = [i for i, x in enumerate(items) if x == value]
+        self.assertEqual(seq.count(value), len(matches))
+        self.assertEqual(value in seq, bool(matches))
+        for start, stop in [(0, n), (5, -5), (-3, n), (2, n + 100),
+                            (-n - 5, n // 2)]:
+            r = range(n)[start:stop]
+            expected = [i for i in matches if i in r]
+            if expected:
+                self.assertEqual(seq.index(value, start, stop), expected[0])
+            else:
+                self.assertRaises(ValueError, seq.index, value, start, stop)

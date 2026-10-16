@@ -2963,6 +2963,16 @@ class TestBufferProtocol(unittest.TestCase):
         self.assertEqual(str(cm.exception),
                          "index out of bounds on dimension %d" % (dim,))
 
+    def test_memoryview_search_unsupported_format(self):
+        # The format is only checked when an item is compared.
+        nd = ndarray([1, 2], shape=[2], format='<i')
+        m = memoryview(nd)
+        self.assertRaises(NotImplementedError, m.count, 1)
+        self.assertRaises(NotImplementedError, m.index, 1)
+        self.assertEqual(m[:0].count(1), 0)
+        self.assertRaises(ValueError, m[:0].index, 1)
+        self.assertRaises(ValueError, m.index, 1, 2)
+
     def test_memoryview_index(self):
 
         # ndim = 0

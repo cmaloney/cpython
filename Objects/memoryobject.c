@@ -12,8 +12,10 @@
 
 #include "Python.h"
 #include "pycore_abstract.h"      // _PyIndex_Check()
+#include "pycore_long.h"          // _PyLong_IsNegative()
 #include "pycore_memoryobject.h"  // _PyManagedBuffer_Type
 #include "pycore_object.h"        // _PyObject_GC_UNTRACK()
+#include "pycore_pybuffer.h"      // _PyBuffer_FindItem()
 #include "pycore_strhex.h"        // _Py_strhex_with_sep()
 #include <stddef.h>               // offsetof()
 
@@ -1086,6 +1088,235 @@ PyBuffer_ToContiguous(void *buf, const Py_buffer *src, Py_ssize_t len, char orde
     return ret;
 }
 
+/****************************************************************************/
+/*                             Searching buffers                            */
+/****************************************************************************/
+
+/* Defined with the memoryview pack and unpack functions below. */
+static inline Py_ssize_t get_native_fmtchar(const char **result,
+                                           const char *fmt);
+static inline const char *adjust_fmt(const Py_buffer *view);
+static inline PyObject *unpack_item(const char *ptr, const char *fmt);
+static inline int is_int_fmtchar(char fmtchar);
+static Py_ssize_t pack_int(char *buf, PyObject *v, char fmtchar,
+                           Py_ssize_t size);
+
+/* Instantiate the stringlib search for items of 1, 2, 4 and 8 bytes. */
+
+#define FASTSEARCH item1_fastsearch
+#define STRINGLIB(F) item1_##F
+#define STRINGLIB_CHAR uint8_t
+#define STRINGLIB_SIZEOF_CHAR 1
+#define STRINGLIB_FAST_MEMCHR memchr
+#include "stringlib/fastsearch.h"
+#include "stringlib/undef.h"
+
+#define FASTSEARCH item2_fastsearch
+#define STRINGLIB(F) item2_##F
+#define STRINGLIB_CHAR uint16_t
+#define STRINGLIB_SIZEOF_CHAR 2
+#include "stringlib/fastsearch.h"
+#include "stringlib/undef.h"
+
+#define FASTSEARCH item4_fastsearch
+#define STRINGLIB(F) item4_##F
+#define STRINGLIB_CHAR uint32_t
+#define STRINGLIB_SIZEOF_CHAR 4
+#include "stringlib/fastsearch.h"
+#include "stringlib/undef.h"
+
+#define FASTSEARCH item8_fastsearch
+#define STRINGLIB(F) item8_##F
+#define STRINGLIB_CHAR uint64_t
+#define STRINGLIB_SIZEOF_CHAR 8
+#include "stringlib/fastsearch.h"
+#include "stringlib/undef.h"
+
+/* Run the stringlib search in mode (FAST_SEARCH or FAST_COUNT) for value in
+   items [start, stop) of the one-dimensional view. Return -2 if the items
+   have to be compared with value as objects.
+
+   The items can be searched as bytes if an item is equal to value exactly
+   when its bytes are equal to the packed value. That is the case for the
+   integer formats when value is an exact int or a bool (which compares as
+   0 or 1): each integer has a single representation. It is not the case
+   for other types of value, which can compare equal to ints or override
+   __eq__, nor for other formats: 0.0 == -0.0 and NaN != NaN for floats,
+   and any nonzero byte is True for '?'. */
+static Py_ssize_t
+fast_search_items(const Py_buffer *view, PyObject *value,
+                  Py_ssize_t start, Py_ssize_t stop, int mode)
+{
+    const char *fmt;
+    Py_ssize_t itemsize = view->itemsize;
+    if (!(PyLong_CheckExact(value) || PyBool_Check(value))
+        || get_native_fmtchar(&fmt, view->format ? view->format : "B") != itemsize
+        || !is_int_fmtchar(fmt[0])
+        || !PyBuffer_IsContiguous(view, 'C')
+        || !_Py_IS_ALIGNED(view->buf, itemsize))
+    {
+        return -2;
+    }
+
+    union {
+        uint8_t u8;
+        uint16_t u16;
+        uint32_t u32;
+        uint64_t u64;
+    } needle;
+    assert(itemsize <= (Py_ssize_t)sizeof(needle));
+    if (pack_int((char *)&needle, value, fmt[0], itemsize) < 0) {
+        start = stop;  // No item can be equal to value.
+    }
+    if (start >= stop) {
+        return mode == FAST_COUNT ? 0 : -1;
+    }
+
+    const char *s = (const char *)view->buf + start * itemsize;
+    Py_ssize_t n = stop - start;
+    Py_ssize_t res;
+    switch (itemsize) {
+    case 1:
+        res = item1_fastsearch((const uint8_t *)s, n, &needle.u8, 1,
+                               PY_SSIZE_T_MAX, mode);
+        break;
+    case 2:
+        res = item2_fastsearch((const uint16_t *)s, n, &needle.u16, 1,
+                               PY_SSIZE_T_MAX, mode);
+        break;
+    case 4:
+        res = item4_fastsearch((const uint32_t *)s, n, &needle.u32, 1,
+                               PY_SSIZE_T_MAX, mode);
+        break;
+    case 8:
+        res = item8_fastsearch((const uint64_t *)s, n, &needle.u64, 1,
+                               PY_SSIZE_T_MAX, mode);
+        break;
+    default:
+        Py_UNREACHABLE();
+    }
+    if (mode == FAST_COUNT) {
+        return res;
+    }
+    return res < 0 ? -1 : start + res;
+}
+
+/* Get the buffer of obj, which must have one dimension. Return -1 with an
+   exception set on error. */
+static int
+get_items_buffer(PyObject *obj, Py_buffer *view)
+{
+    if (PyObject_GetBuffer(obj, view, PyBUF_FULL_RO) < 0) {
+        return -1;
+    }
+    if (view->ndim != 1) {
+        if (view->ndim == 0) {
+            PyErr_SetString(PyExc_TypeError,
+                            "invalid lookup on 0-dim memory");
+        }
+        else {
+            PyErr_SetString(PyExc_NotImplementedError,
+                            "multi-dimensional lookup is not implemented");
+        }
+        PyBuffer_Release(view);
+        return -1;
+    }
+    return 0;
+}
+
+/* Unpack an item of view for comparing it with a value. Unlike memoryview,
+   this supports the 'w' format, which array.array exports for Py_UCS4
+   items. */
+static PyObject *
+unpack_search_item(const Py_buffer *view, const char *ptr, const char *fmt)
+{
+    if (fmt[0] == 'w' && fmt[1] == '\0'
+        && view->itemsize == (Py_ssize_t)sizeof(Py_UCS4))
+    {
+        Py_UCS4 u;
+        memcpy(&u, ptr, sizeof(u));
+        return PyUnicode_FromOrdinal(u);
+    }
+    return unpack_item(ptr, fmt);
+}
+
+/* Compare items [start, stop) of the one-dimensional view with value as
+   objects in mode (FAST_SEARCH or FAST_COUNT). Return as fast_search_items(),
+   or -2 with an exception set on error. */
+static Py_ssize_t
+compare_items(const Py_buffer *view, PyObject *value,
+              Py_ssize_t start, Py_ssize_t stop, int mode)
+{
+    Py_ssize_t count = 0;
+    if (start >= stop) {
+        return mode == FAST_COUNT ? 0 : -1;
+    }
+    const char *fmt = view->format ? adjust_fmt(view) : "B";
+    if (fmt == NULL) {
+        return -2;
+    }
+    for (Py_ssize_t i = start; i < stop; i++) {
+        const char *ptr = (const char *)view->buf + i * view->strides[0];
+        ptr = ADJUST_PTR(ptr, view->suboffsets, 0);
+        PyObject *item = unpack_search_item(view, ptr, fmt);
+        if (item == NULL) {
+            return -2;
+        }
+        int cmp = PyObject_RichCompareBool(item, value, Py_EQ);
+        Py_DECREF(item);
+        if (cmp < 0) {
+            return -2;
+        }
+        if (cmp > 0) {
+            if (mode == FAST_SEARCH) {
+                return i;
+            }
+            count++;  // no overflow since count <= len(obj) <= PY_SSIZE_T_MAX
+        }
+    }
+    return mode == FAST_COUNT ? count : -1;
+}
+
+/* Search items [start, stop) of obj for value in mode (FAST_SEARCH or
+   FAST_COUNT). Return the index of the first item equal to value, or -1 if
+   there is none, for FAST_SEARCH, the number of items equal to value for
+   FAST_COUNT, or -2 with an exception set on error.
+
+   The buffer is held for the whole search, so a comparison which tries to
+   resize obj or release it raises BufferError. */
+static Py_ssize_t
+search_items(PyObject *obj, PyObject *value,
+             Py_ssize_t start, Py_ssize_t stop, int mode)
+{
+    assert(start >= 0);
+    Py_buffer view;
+    if (get_items_buffer(obj, &view) < 0) {
+        return -2;
+    }
+    stop = Py_MIN(stop, view.shape[0]);
+    Py_ssize_t res = fast_search_items(&view, value, start, stop, mode);
+    if (res == -2) {
+        res = compare_items(&view, value, start, stop, mode);
+    }
+    PyBuffer_Release(&view);
+    return res;
+}
+
+Py_ssize_t
+_PyBuffer_FindItem(PyObject *obj, PyObject *value,
+                   Py_ssize_t start, Py_ssize_t stop)
+{
+    return search_items(obj, value, start, stop, FAST_SEARCH);
+}
+
+Py_ssize_t
+_PyBuffer_CountItem(PyObject *obj, PyObject *value)
+{
+    Py_ssize_t count = search_items(obj, value, 0, PY_SSIZE_T_MAX,
+                                    FAST_COUNT);
+    return count == -2 ? -1 : count;
+}
+
 static inline Py_ssize_t
 get_exports(PyMemoryViewObject *buf)
 {
@@ -1725,97 +1956,6 @@ fix_error_int(const char *fmt)
 static const _Bool bool_false = 0;
 #define UNPACK_TO_BOOL(PTR) (memcmp((PTR), &bool_false, sizeof(_Bool)) != 0)
 
-/* Accept integer objects or objects with an __index__() method. */
-static long
-pylong_as_ld(PyObject *item)
-{
-    PyObject *tmp;
-    long ld;
-
-    tmp = _PyNumber_Index(item);
-    if (tmp == NULL)
-        return -1;
-
-    ld = PyLong_AsLong(tmp);
-    Py_DECREF(tmp);
-    return ld;
-}
-
-static unsigned long
-pylong_as_lu(PyObject *item)
-{
-    PyObject *tmp;
-    unsigned long lu;
-
-    tmp = _PyNumber_Index(item);
-    if (tmp == NULL)
-        return (unsigned long)-1;
-
-    lu = PyLong_AsUnsignedLong(tmp);
-    Py_DECREF(tmp);
-    return lu;
-}
-
-static long long
-pylong_as_lld(PyObject *item)
-{
-    PyObject *tmp;
-    long long lld;
-
-    tmp = _PyNumber_Index(item);
-    if (tmp == NULL)
-        return -1;
-
-    lld = PyLong_AsLongLong(tmp);
-    Py_DECREF(tmp);
-    return lld;
-}
-
-static unsigned long long
-pylong_as_llu(PyObject *item)
-{
-    PyObject *tmp;
-    unsigned long long llu;
-
-    tmp = _PyNumber_Index(item);
-    if (tmp == NULL)
-        return (unsigned long long)-1;
-
-    llu = PyLong_AsUnsignedLongLong(tmp);
-    Py_DECREF(tmp);
-    return llu;
-}
-
-static Py_ssize_t
-pylong_as_zd(PyObject *item)
-{
-    PyObject *tmp;
-    Py_ssize_t zd;
-
-    tmp = _PyNumber_Index(item);
-    if (tmp == NULL)
-        return -1;
-
-    zd = PyLong_AsSsize_t(tmp);
-    Py_DECREF(tmp);
-    return zd;
-}
-
-static size_t
-pylong_as_zu(PyObject *item)
-{
-    PyObject *tmp;
-    size_t zu;
-
-    tmp = _PyNumber_Index(item);
-    if (tmp == NULL)
-        return (size_t)-1;
-
-    zu = PyLong_AsSize_t(tmp);
-    Py_DECREF(tmp);
-    return zu;
-}
-
 /* Timings with the ndarray from _testbuffer.c indicate that using the
    struct module is around 15x slower than the two functions below. */
 
@@ -1830,7 +1970,7 @@ pylong_as_zu(PyObject *item)
    module syntax. This function is very sensitive to small changes. With this
    layout gcc automatically generates a fast jump table. */
 static inline PyObject *
-unpack_single(PyMemoryViewObject *self, const char *ptr, const char *fmt)
+unpack_item(const char *ptr, const char *fmt)
 {
     unsigned long long llu;
     unsigned long lu;
@@ -1841,8 +1981,6 @@ unpack_single(PyMemoryViewObject *self, const char *ptr, const char *fmt)
     double d[2];
     unsigned char uc;
     void *p;
-
-    CHECK_RELEASED_AGAIN(self);
 
 #if PY_LITTLE_ENDIAN
     int endian = 1;
@@ -1939,6 +2077,13 @@ err_format:
     return NULL;
 }
 
+static inline PyObject *
+unpack_single(PyMemoryViewObject *self, const char *ptr, const char *fmt)
+{
+    CHECK_RELEASED_AGAIN(self);
+    return unpack_item(ptr, fmt);
+}
+
 #define PACK_SINGLE(ptr, src, type) \
     do {                                     \
         type x;                              \
@@ -1946,17 +2091,68 @@ err_format:
         memcpy(ptr, (char *)&x, sizeof x);   \
     } while (0)
 
+/* Return 1 if fmtchar is a native integer format character, else 0. */
+static inline int
+is_int_fmtchar(char fmtchar)
+{
+    switch (fmtchar) {
+    case 'b': case 'h': case 'i': case 'l': case 'q': case 'n':
+    case 'B': case 'H': case 'I': case 'L': case 'Q': case 'N':
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Store the int v in buf as an item of size bytes of the native integer
+   format character fmtchar. buf must have room for 8 bytes. Return size, or
+   -1 without setting an exception if v is out of range for fmtchar. */
+static Py_ssize_t
+pack_int(char *buf, PyObject *v, char fmtchar, Py_ssize_t size)
+{
+    assert(PyLong_Check(v));
+    assert(is_int_fmtchar(fmtchar));
+    assert(0 < size && size <= 8);
+    int is_signed = Py_ISLOWER(fmtchar);
+    if (!is_signed && _PyLong_IsNegative((PyLongObject *)v)) {
+        return -1;
+    }
+
+    if (_PyLong_IsCompact((PyLongObject *)v)) {
+        /* Fast path: a compact int has at most PyLong_SHIFT bits, so it only
+           needs a range check for items smaller than 4 bytes. */
+        Py_BUILD_ASSERT(PyLong_SHIFT < 32);
+        Py_ssize_t ival = _PyLong_CompactValue((PyLongObject *)v);
+        if (size < 4) {
+            Py_ssize_t limit = (Py_ssize_t)1 << (size * 8 - is_signed);
+            if (ival >= limit || ival < (is_signed ? -limit : 0)) {
+                return -1;
+            }
+        }
+        switch (size) {
+        case 1: PACK_SINGLE(buf, ival, uint8_t); break;
+        case 2: PACK_SINGLE(buf, ival, uint16_t); break;
+        case 4: PACK_SINGLE(buf, ival, uint32_t); break;
+        default: PACK_SINGLE(buf, ival, uint64_t); break;
+        }
+        return size;
+    }
+
+    int flags = Py_ASNATIVEBYTES_NATIVE_ENDIAN;
+    if (!is_signed) {
+        flags |= Py_ASNATIVEBYTES_UNSIGNED_BUFFER;
+    }
+    Py_ssize_t needed = PyLong_AsNativeBytes(v, buf, size, flags);
+    assert(needed > 0);
+    return needed <= size ? size : -1;
+}
+
 /* Pack a single item. 'fmt' can be any native format in
    struct module syntax. */
 static int
 pack_single(PyMemoryViewObject *self, char *ptr, PyObject *item, const char *fmt)
 {
-    unsigned long long llu;
-    unsigned long lu;
-    size_t zu;
-    long long lld;
     long ld;
-    Py_ssize_t zd;
     double d;
     Py_complex c;
     void *p;
@@ -1967,79 +2163,25 @@ pack_single(PyMemoryViewObject *self, char *ptr, PyObject *item, const char *fmt
     int endian = 0;
 #endif
     switch (fmt[0]) {
-    /* signed integers */
-    case 'b': case 'h': case 'i': case 'l':
-        ld = pylong_as_ld(item);
-        if (ld == -1 && PyErr_Occurred())
+    /* integers */
+    case 'b': case 'h': case 'i': case 'l': case 'q': case 'n':
+    case 'B': case 'H': case 'I': case 'L': case 'Q': case 'N': {
+        char buf[8];
+        const char *f;
+        Py_ssize_t size = get_native_fmtchar(&f, fmt);
+        PyObject *tmp = _PyNumber_Index(item);
+        if (tmp == NULL) {
             goto err_occurred;
-        CHECK_RELEASED_INT_AGAIN(self);
-        switch (fmt[0]) {
-        case 'b':
-            if (ld < SCHAR_MIN || ld > SCHAR_MAX) goto err_range;
-            *((signed char *)ptr) = (signed char)ld; break;
-        case 'h':
-            if (ld < SHRT_MIN || ld > SHRT_MAX) goto err_range;
-            PACK_SINGLE(ptr, ld, short); break;
-        case 'i':
-            if (ld < INT_MIN || ld > INT_MAX) goto err_range;
-            PACK_SINGLE(ptr, ld, int); break;
-        default: /* 'l' */
-            PACK_SINGLE(ptr, ld, long); break;
         }
-        break;
-
-    /* unsigned integers */
-    case 'B': case 'H': case 'I': case 'L':
-        lu = pylong_as_lu(item);
-        if (lu == (unsigned long)-1 && PyErr_Occurred())
-            goto err_occurred;
+        size = pack_int(buf, tmp, f[0], size);
+        Py_DECREF(tmp);
         CHECK_RELEASED_INT_AGAIN(self);
-        switch (fmt[0]) {
-        case 'B':
-            if (lu > UCHAR_MAX) goto err_range;
-            *((unsigned char *)ptr) = (unsigned char)lu; break;
-        case 'H':
-            if (lu > USHRT_MAX) goto err_range;
-            PACK_SINGLE(ptr, lu, unsigned short); break;
-        case 'I':
-            if (lu > UINT_MAX) goto err_range;
-            PACK_SINGLE(ptr, lu, unsigned int); break;
-        default: /* 'L' */
-            PACK_SINGLE(ptr, lu, unsigned long); break;
+        if (size < 0) {
+            goto err_range;
         }
+        memcpy(ptr, buf, size);
         break;
-
-    /* native 64-bit */
-    case 'q':
-        lld = pylong_as_lld(item);
-        if (lld == -1 && PyErr_Occurred())
-            goto err_occurred;
-        CHECK_RELEASED_INT_AGAIN(self);
-        PACK_SINGLE(ptr, lld, long long);
-        break;
-    case 'Q':
-        llu = pylong_as_llu(item);
-        if (llu == (unsigned long long)-1 && PyErr_Occurred())
-            goto err_occurred;
-        CHECK_RELEASED_INT_AGAIN(self);
-        PACK_SINGLE(ptr, llu, unsigned long long);
-        break;
-
-    /* ssize_t and size_t */
-    case 'n':
-        zd = pylong_as_zd(item);
-        if (zd == -1 && PyErr_Occurred())
-            goto err_occurred;
-        CHECK_RELEASED_INT_AGAIN(self);
-        PACK_SINGLE(ptr, zd, Py_ssize_t);
-        break;
-    case 'N':
-        zu = pylong_as_zu(item);
-        if (zu == (size_t)-1 && PyErr_Occurred())
-            goto err_occurred;
-        CHECK_RELEASED_INT_AGAIN(self);
-        PACK_SINGLE(ptr, zu, size_t);
-        break;
+    }
 
     /* floats */
     case 'f': case 'd': case 'e':
@@ -2900,34 +3042,12 @@ static PyObject *
 memoryview_count_impl(PyMemoryViewObject *self, PyObject *value)
 /*[clinic end generated code: output=a15cb19311985063 input=e3036ce1ed7d1823]*/
 {
-    PyObject *iter = PyObject_GetIter(_PyObject_CAST(self));
-    if (iter == NULL) {
+    CHECK_RELEASED(self);
+
+    Py_ssize_t count = _PyBuffer_CountItem(_PyObject_CAST(self), value);
+    if (count < 0) {
         return NULL;
     }
-
-    Py_ssize_t count = 0;
-    PyObject *item = NULL;
-    while (PyIter_NextItem(iter, &item)) {
-        if (item == NULL) {
-            Py_DECREF(iter);
-            return NULL;
-        }
-        if (item == value) {
-            Py_DECREF(item);
-            count++;  // no overflow since count <= len(mv) <= PY_SSIZE_T_MAX
-            continue;
-        }
-        int contained = PyObject_RichCompareBool(item, value, Py_EQ);
-        Py_DECREF(item);
-        if (contained > 0) { // more likely than 'contained < 0'
-            count++;  // no overflow since count <= len(mv) <= PY_SSIZE_T_MAX
-        }
-        else if (contained < 0) {
-            Py_DECREF(iter);
-            return NULL;
-        }
-    }
-    Py_DECREF(iter);
     return PyLong_FromSsize_t(count);
 }
 
@@ -2981,32 +3101,14 @@ memoryview_index_impl(PyMemoryViewObject *self, PyObject *value,
         assert(0 <= start);
         assert(start <= stop);
 
-        PyObject *obj = _PyObject_CAST(self);
-        for (Py_ssize_t index = start; index < stop; index++) {
-            // Note: while memoryviews can be mutated during iterations
-            // when calling the == operator, their shape cannot. As such,
-            // it is safe to assume that the index remains valid for the
-            // entire loop.
-            assert(index < n);
-
-            PyObject *item = memory_item(obj, index);
-            if (item == NULL) {
-                return NULL;
-            }
-            if (item == value) {
-                Py_DECREF(item);
-                return PyLong_FromSsize_t(index);
-            }
-            int contained = PyObject_RichCompareBool(item, value, Py_EQ);
-            Py_DECREF(item);
-            if (contained > 0) {  // more likely than 'contained < 0'
-                return PyLong_FromSsize_t(index);
-            }
-            else if (contained < 0) {
-                return NULL;
-            }
+        Py_ssize_t found = _PyBuffer_FindItem(_PyObject_CAST(self), value,
+                                              start, stop);
+        if (found >= 0) {
+            return PyLong_FromSsize_t(found);
         }
-
+        if (found == -2) {
+            return NULL;
+        }
         PyErr_SetString(PyExc_ValueError, "memoryview.index(x): x not found");
         return NULL;
     }

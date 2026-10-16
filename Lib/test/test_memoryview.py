@@ -16,7 +16,7 @@ import pickle
 import struct
 
 from itertools import product
-from test import support
+from test import seq_tests, support
 from test.support import import_helper, threading_helper
 
 
@@ -948,6 +948,30 @@ class OtherTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             complex_view[0] = 1e300j
         self.assertEqual(complex_view[0], 123+321j)
+
+    def test_index_count_released_during_compare(self):
+        for search in (memoryview.index, memoryview.count):
+            with self.subTest(search=search.__name__):
+                m = memoryview(array.array('d', [1.0, 2.0, 3.0]))
+                class Release:
+                    def __eq__(self, other):
+                        m.release()
+                        return False
+                with self.assertRaises(BufferError):
+                    search(m, Release())
+                m.release()  # The buffer was released.
+
+
+class SearchTest(seq_tests.NativeItemsSearchTest, unittest.TestCase):
+    search_formats = 'bBhHiIlLqQnNPefd?c'
+
+    def search_sequences(self, fmt, raw):
+        mv = memoryview(raw).cast(fmt)
+        return [
+            ('contiguous', mv),
+            ('strided', mv[::3]),
+            ('unaligned', memoryview(b'\0' + raw)[1:].cast(fmt)),
+        ]
 
 
 @threading_helper.requires_working_threading()
