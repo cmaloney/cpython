@@ -774,9 +774,16 @@ class IOTest:
             f2.readline()
 
     def test_nonbuffered_textio(self):
-        with warnings_helper.check_no_resource_warning(self):
-            with self.assertRaises(ValueError):
-                self.open(os_helper.TESTFN, 'w', encoding="utf-8", buffering=0)
+        with self.open(os_helper.TESTFN, 'wb', buffering=0) as f:
+            # With the unbuffered switch, unbuffered text can be written
+            # (see UnbufferedImplTest).
+            switched = getattr(f, '_is_nibbler', False)
+        modes = ('r', 'w+') if switched else ('r', 'w', 'w+')
+        for mode in modes:
+            with warnings_helper.check_no_resource_warning(self):
+                with self.assertRaises(ValueError):
+                    self.open(os_helper.TESTFN, mode, encoding="utf-8",
+                              buffering=0)
 
     def test_invalid_newline(self):
         with warnings_helper.check_no_resource_warning(self):
@@ -1601,14 +1608,39 @@ class UnbufferedImplTest(unittest.TestCase):
             self.assertEqual(f.write(b"end"), 3)
             self.assertEqual(os.read(r, 10), b"end")
 
-    def test_text_raises(self):
-        # Unbuffered text stays unsupported.
-        for mode in ("r", "w", "a", "r+", "w+", "a+"):
+    def test_text_read_mode_raises(self):
+        for mode in ("r", "r+", "w+", "a+"):
             with self.subTest(mode=mode):
                 with self.assertRaisesRegex(ValueError,
                                             "can't have unbuffered text"):
                     io.open(os_helper.TESTFN, mode, buffering=0,
                             encoding="ascii")
+
+    def test_text_write_mode(self):
+        # gh-61606, gh-85394: unbuffered text can be written, through a
+        # buffered writer with buffer size 0 that keeps nothing.
+        for mode, before in (("w", b""), ("a", b"0123456789"),
+                             ("x", b"")):
+            with self.subTest(mode=mode):
+                with open(os_helper.TESTFN, "wb") as g:
+                    g.write(b"0123456789")
+                if mode == "x":
+                    os_helper.unlink(os_helper.TESTFN)
+                with io.open(os_helper.TESTFN, mode, buffering=0,
+                             encoding="utf-8") as f:
+                    self.assertIsInstance(f, io.TextIOWrapper)
+                    self.assertTrue(f.write_through)
+                    self.assertFalse(f.line_buffering)
+                    self.assertIs(type(f.buffer),
+                                  self._io._nibbler.BufferedWriter)
+                    self.assertEqual(f.mode, mode)
+                    f.write("h\xe9")
+                    # Written at once.
+                    with open(os_helper.TESTFN, "rb") as g:
+                        self.assertEqual(g.read(), before + "h\xe9".encode())
+                    f.write("llo\n")
+                    with open(os_helper.TESTFN, "rb") as g:
+                        self.assertEqual(g.read(), before + b"h\xc3\xa9llo\n")
 
     def test_switch_off(self):
         self.assertEqual(self._io._set_unbuffered_impl("_io"), "_nibbler")
