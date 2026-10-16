@@ -130,6 +130,52 @@ class MiscTest(unittest.TestCase):
                 self.assertGreaterEqual(array.array(typecode).itemsize,
                                         minimum_size)
 
+    def test_search(self):
+        # index(), count(), remove() and "in" compare the bytes of items when
+        # that is equivalent to comparing them as objects. Check them for
+        # every typecode on data where comparing bytes would be wrong for
+        # floats (0.0 == -0.0, NaN != NaN).
+        class AlwaysEqual(int):
+            def __eq__(self, other):
+                return True
+            __hash__ = int.__hash__
+
+        nan = float('nan')
+        raw = (bytes(range(256)) + struct.pack('4d', 0.0, -0.0, nan, 1)) * 2
+        for typecode in typecodes:
+            if typecode == 'w':
+                continue  # raw is not valid UCS4
+            a = array.array(typecode, raw)
+            items = a.tolist()
+            values = items[::7] + [0, 1, -1, 2**64, 0.0, -0.0, nan, True,
+                                   False, 1.0, AlwaysEqual(5)]
+            for value in values:
+                with self.subTest(typecode=typecode, value=value):
+                    self.check_search(a, items, value)
+
+    def check_search(self, a, items, value):
+        n = len(items)
+        matches = [i for i, x in enumerate(items) if x == value]
+        self.assertEqual(a.count(value), len(matches))
+        self.assertEqual(value in a, bool(matches))
+        for start, stop in [(0, n), (5, -5), (-3, n), (2, n + 100),
+                            (-n - 5, n // 2)]:
+            r = range(n)[start:stop]
+            expected = [i for i in matches if i in r]
+            if expected:
+                self.assertEqual(a.index(value, start, stop), expected[0])
+            else:
+                self.assertRaises(ValueError, a.index, value, start, stop)
+
+        b = array.array(a.typecode, a)
+        if matches:
+            b.remove(value)
+            after = array.array(a.typecode, a)
+            del after[matches[0]]
+            self.assertEqual(b.tobytes(), after.tobytes())
+        else:
+            self.assertRaises(ValueError, b.remove, value)
+
 
 # Machine format codes.
 #

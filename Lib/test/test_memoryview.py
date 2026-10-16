@@ -949,6 +949,46 @@ class OtherTest(unittest.TestCase):
             complex_view[0] = 1e300j
         self.assertEqual(complex_view[0], 123+321j)
 
+    def test_index_count_formats(self):
+        # index() and count() compare the bytes of items when that is
+        # equivalent to comparing them as objects. Check them for every
+        # format on data where comparing bytes would be wrong for floats
+        # (0.0 == -0.0, NaN != NaN) and bools (any nonzero byte is True).
+        class AlwaysEqual(int):
+            def __eq__(self, other):
+                return True
+            __hash__ = int.__hash__
+
+        nan = float('nan')
+        raw = (bytes(range(256)) + struct.pack('4d', 0.0, -0.0, nan, 1)) * 2
+        for fmt in 'bBhHiIlLqQnNPefd?c':
+            mv = memoryview(raw).cast(fmt)
+            views = {
+                'contiguous': mv,
+                'strided': mv[::3],
+                'unaligned': memoryview(b'\0' + raw)[1:].cast(fmt),
+            }
+            for name, view in views.items():
+                items = view.tolist()
+                values = items[::7] + [0, 1, -1, 2**64, 0.0, -0.0, nan, False,
+                                       True, 1.0, b'a', AlwaysEqual(5)]
+                for value in values:
+                    with self.subTest(fmt=fmt, view=name, value=value):
+                        self.check_index_count(view, items, value)
+
+    def check_index_count(self, view, items, value):
+        n = len(items)
+        matches = [i for i, x in enumerate(items) if x == value]
+        self.assertEqual(view.count(value), len(matches))
+        for start, stop in [(0, n), (5, -5), (-3, n), (2, n + 100),
+                            (-n - 5, n // 2)]:
+            r = range(n)[start:stop]
+            expected = [i for i in matches if i in r]
+            if expected:
+                self.assertEqual(view.index(value, start, stop), expected[0])
+            else:
+                self.assertRaises(ValueError, view.index, value, start, stop)
+
 
 @threading_helper.requires_working_threading()
 @support.requires_resource("cpu")
