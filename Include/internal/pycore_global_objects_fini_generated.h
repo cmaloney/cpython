@@ -433,6 +433,7 @@ _PyStaticObjects_CheckAll(PyInterpreterState *interp) {
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(digest_size), "digest_size", 11);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(digestmod), "digestmod", 9);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(dir_fd), "dir_fd", 6);
+    _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(direct), "direct", 6);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(discard), "discard", 7);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(dispatch_table), "dispatch_table", 14);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(displayhook), "displayhook", 11);
@@ -613,6 +614,7 @@ _PyStaticObjects_CheckAll(PyInterpreterState *interp) {
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(limit), "limit", 5);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(line), "line", 4);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(line_buffering), "line_buffering", 14);
+    _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(line_flush), "line_flush", 10);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(lineno), "lineno", 6);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(little), "little", 6);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(lo), "lo", 2);

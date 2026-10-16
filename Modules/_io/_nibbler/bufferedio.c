@@ -1102,6 +1102,16 @@ buffered_sync(buffered *self, int unlocked)
  * flush() inside a block takes effect at its end; tell() counts the
  * gathered bytes.
  *
+ * A direct block, meant to last a thread's or task's life, writes out
+ * the pending writes when it starts (its context's earlier writes, among
+ * others), so that what is pending at its write-outs is other contexts'
+ * data, which it needn't wait for: at its limit (by default the buffer
+ * size), flush() and end it writes its record out itself when the stream
+ * allows, without looking at the pending writes.  A line block writes
+ * out its complete lines (tracked as written) after each write with a
+ * newline, the same way, keeping the partial line.  On error, what wasn't
+ * written stays for the next write-out.
+ *
  * The stream lists its records with the lock held, and counts them
  * (ngather): every write and read checks the count, which is all
  * operations outside blocks pay.  A record stays listed when its block
@@ -1124,7 +1134,10 @@ typedef struct record {
     PyObject *block;            /* small writes are copied to block[used:] */
     Py_ssize_t used;
     Py_ssize_t limit;           /* moved to the stream once it holds this */
+    Py_ssize_t tail;            /* at least the bytes after the last \n */
     char flush;                 /* flush() was called inside the block */
+    char direct, line;          /* the block's mode (see above) */
+    char behind;                /* direct, but some of it is pending */
     char fileio;                /* raw is an exact FileIO */
     uint8_t state;              /* stored atomically */
     uint64_t tid, gen;          /* the block's thread, fork generation */
@@ -1142,6 +1155,7 @@ typedef struct gather {
     Py_ssize_t limit;
     char joined;                /* in the record of an outer block */
     char state;
+    char direct, line;
 } gather;
 
 enum { GATHER_NEW, GATHER_ACTIVE, GATHER_DONE };
@@ -1272,11 +1286,22 @@ gather_current(buffered *self)
 }
 
 /* With both locks and no read-ahead: move what rec gathered to the
-   pending writes.  On error, rec keeps the rest. */
+   pending writes (its first n bytes, copied, if fewer).  On error, rec
+   keeps the rest. */
 static int
-gather_move(buffered *self, record *rec)
+gather_move(buffered *self, record *rec, Py_ssize_t n)
 {
-    if (rec->list.nbytes > 0) {
+    if (n < rec->list.nbytes) {
+        PyObject *b = (morsels_reserve(&self->list) < 0 ? NULL
+                       : PyBytes_FromStringAndSize(NULL, n));
+        if (b == NULL) {
+            return -1;
+        }
+        (void)morsels_take(&rec->list, PyBytes_AS_STRING(b), n);
+        (void)morsels_push(&self->list, b, PyBytes_AS_STRING(b), n);
+        Py_DECREF(b);
+    }
+    else if (rec->list.nbytes > 0) {
         if (morsels_splice(&self->list, &rec->list) < 0) {
             return -1;
         }
@@ -1284,6 +1309,11 @@ gather_move(buffered *self, record *rec)
         Py_CLEAR(rec->block);
         rec->used = 0;
     }
+    else {
+        return 0;
+    }
+    /* A direct block's write-outs no longer pass the pending writes. */
+    rec->behind = rec->direct;
     return 0;
 }
 
@@ -1327,7 +1357,7 @@ gather_move_records(buffered *self, int all)
             morsels_clear(&r->list);
             rec_set_state(r, REC_IDLE);
         }
-        int err = MOVED(r) ? gather_move(self, r) : 0;
+        int err = MOVED(r) ? gather_move(self, r, PY_SSIZE_T_MAX) : 0;
         if (err == 0 && MOVED(r)) {
             r->flush &= all == 0;
             if (r->state == REC_PENDING) {
@@ -1363,9 +1393,32 @@ gather_move_records(buffered *self, int all)
    NULL) to the current context's active record, as the pending writes
    would keep it, in blocks growing with what it gathered; at the limit,
    move it to the pending writes (which may go past the threshold: the
-   next write, flush or the block's end writes it).  Returns 1 if there is
-   no such record. */
+   next write, flush or the block's end writes it), or write it out in a
+   direct block, as its complete lines in a line block.  Returns 1 if
+   there is no such record. */
+static int gather_end(buffered *, record *, Py_ssize_t, Py_ssize_t *);
 static void buffered_set_written(Py_ssize_t);
+static int buffered_enter(buffered *, const char *, int);
+
+/* What a direct or line block writes out after data[0:len] was added to
+   rec: all of it at the limit of a direct block, else for a line block
+   up to the last newline if data has one.  0: nothing. */
+Py_NO_INLINE static Py_ssize_t
+gather_out(record *rec, const char *data, Py_ssize_t len)
+{
+    Py_ssize_t n = rec->list.nbytes;
+    const char *nl = NULL;
+#ifdef HAVE_MEMRCHR
+    nl = rec->line ? memrchr(data, '\n', len) : NULL;
+#else
+    for (const char *p = data + len; rec->line && nl == NULL && p > data;) {
+        nl = *--p == '\n' ? p : NULL;
+    }
+#endif
+    rec->tail = nl ? data + len - nl - 1 : Py_MIN(rec->tail, n - len) + len;
+    return (rec->direct && n >= rec->limit ? PY_SSIZE_T_MAX
+            : nl ? n - rec->tail : 0);
+}
 
 Py_NO_INLINE static int
 gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
@@ -1400,6 +1453,7 @@ gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
         return -1;
     }
     r = 1;
+    Py_ssize_t out = 0;
     if (rec->state == REC_ACTIVE
         && (raw == NULL || raw == FT_ATOMIC_LOAD_PTR_RELAXED(self->raw)))
     {
@@ -1412,10 +1466,31 @@ gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
         r = (r ? -1
              : buffered_append_to(self, &rec->list, &rec->block, &rec->used,
                                   size, obj, data, len));
+        if (r == 0 && (rec->direct | rec->line)) {
+            out = gather_out(rec, data, len);
+        }
     }
     int full = r == 0 && rec->list.nbytes >= rec->limit;
     rec_unlock(rec);
-    if (full && !nibbler_mutex_is_mine(&self->lock)) {
+    if (out > 0) {
+        /* Kept on error for the next write-out; an OSError is left to
+           it, anything else raised now (all of data accepted).  Not from a
+           signal handler in this stream's write-out. */
+        hold = hold ? hold : Py_NewRef(rec);
+        int e = (nibbler_mutex_is_mine(&self->io)
+                 || nibbler_mutex_is_mine(&self->lock)
+                 ? 0 : gather_end(self, rec, out, NULL));
+        if (e < 0 && PyErr_Occurred()
+            && !PyErr_ExceptionMatches(PyExc_OSError))
+        {
+            buffered_set_written(len);
+            r = -1;
+        }
+        else {
+            PyErr_Clear();
+        }
+    }
+    else if (full && !nibbler_mutex_is_mine(&self->lock)) {
         /* (Kept on error, which says all of data was accepted: moved at
            the next write or the end.) */
         if (buffered_lock_ex(self, 0) < 0) {
@@ -1423,7 +1498,7 @@ gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
         }
         else {
             if (!self->reading && rec_lock(rec) == 0) {
-                r = gather_move(self, rec);
+                r = gather_move(self, rec, PY_SSIZE_T_MAX);
                 rec_unlock(rec);
             }
             buffered_unlock(self);
@@ -1510,7 +1585,7 @@ gather_splice(buffered *self, record *rec)
             goto busy;
         }
     }
-    int r = gather_move(self, rec);
+    int r = gather_move(self, rec, PY_SSIZE_T_MAX);
     rec_set_state(rec, r == 0 ? REC_IDLE : REC_PENDING);
     rec_unlock(rec);
     if (r == 0 && io) {
@@ -1528,10 +1603,11 @@ busy:
 }
 
 /* End rec's block by writing its data out with rec's lock alone, when the
-   stream allows (see above).  Returns 1 if it doesn't, or the raw stream
-   would block, else 0 or -1; rec keeps what wasn't written. */
+   stream allows (see above); with n >= 0, write out its first n bytes in
+   the block.  Returns 1 if it doesn't, or the raw stream would block, else
+   0 or -1; rec keeps what wasn't written. */
 static int
-gather_direct(buffered *self, record *rec)
+gather_direct(buffered *self, record *rec, Py_ssize_t n)
 {
     if (!FT_ATOMIC_LOAD_UINT8_RELAXED(self->direct)) {
         return 1;
@@ -1540,54 +1616,58 @@ gather_direct(buffered *self, record *rec)
         return -1;
     }
     morsel_list *l = &rec->list;
+    Py_ssize_t pending = FT_ATOMIC_LOAD_SSIZE_RELAXED(self->list.nbytes);
+    rec->behind &= pending > 0;
     /* (raw stays while direct is set and rec is locked.) */
     if (rec->state != REC_ACTIVE || !FT_ATOMIC_LOAD_UINT8(self->direct)
         || l->nbytes > GATHER_DIRECT_MAX
-        || FT_ATOMIC_LOAD_SSIZE_RELAXED(self->list.nbytes) > 0
+        || ((!rec->direct || rec->behind) && pending)
         || _PyFileIO_closed(FT_ATOMIC_LOAD_PTR_RELAXED(self->raw)))
     {
         rec_unlock(rec);
         return 1;
     }
-    int st = 0;
-    Py_ssize_t n = l->nbytes;
+    int st = 0, end = n < 0;
+    n = end ? l->nbytes : Py_MIN(n, l->nbytes);
     Py_ssize_t most = _PyIO_WRITEV_MAX;
 #ifdef IOV_MAX
     most = Py_MIN(most, IOV_MAX);
 #endif
     if (l->count - l->head > most) {
         /* Joined, for one writev(). */
-        PyObject *b = PyBytes_FromStringAndSize(NULL, n);
+        Py_ssize_t all = l->nbytes;
+        PyObject *b = PyBytes_FromStringAndSize(NULL, all);
         if (b == NULL) {
             st = -1;
         }
         else {
-            (void)morsels_take(l, PyBytes_AS_STRING(b), n);
-            (void)morsels_push(l, b, PyBytes_AS_STRING(b), n);
+            (void)morsels_take(l, PyBytes_AS_STRING(b), all);
+            (void)morsels_push(l, b, PyBytes_AS_STRING(b), all);
             Py_DECREF(b);
         }
     }
     if (st == 0 && n > 0) {
         _PyIO_Span spans[_PyIO_WRITEV_MAX];
         PyObject *objs[_PyIO_WRITEV_MAX];
-        Py_ssize_t cnt = 0, written;
-        for (Py_ssize_t i = l->head; i < l->count; i++, cnt++) {
-            spans[cnt] = (_PyIO_Span){l->items[i].ptr, l->items[i].len};
+        Py_ssize_t cnt = 0, total = 0, written;
+        for (Py_ssize_t i = l->head; total < n; i++, cnt++) {
+            Py_ssize_t k = Py_MIN(l->items[i].len, n - total);
+            spans[cnt] = (_PyIO_Span){l->items[i].ptr, k};
             objs[cnt] = Py_NewRef(l->items[i].obj);
+            total += k;
         }
         rec_set_state(rec, REC_WRITING);
-        st = buffered_write_spans(self, spans, objs, cnt, l->nbytes, -1,
-                                  &written);
+        st = buffered_write_spans(self, spans, objs, cnt, n, -1, &written);
         for (Py_ssize_t i = 0; i < cnt; i++) {
             Py_DECREF(objs[i]);
         }
         (void)morsels_consume(l, written);
     }
-    if (st == 0) {
+    if (st == 0 && l->nbytes == 0) {
         /* The block is free again for the next one. */
         rec->used = 0;
     }
-    rec_set_state(rec, st == 0 ? REC_IDLE : REC_ACTIVE);
+    rec_set_state(rec, st == 0 && end ? REC_IDLE : REC_ACTIVE);
     rec_unlock(rec);
     /* Without rec's lock: a handler may use this stream. */
     if (st != -1 && n > 0 && PyErr_CheckSignals() < 0) {
@@ -1596,23 +1676,31 @@ gather_direct(buffered *self, record *rec)
     return st == 0 ? 0 : st == WOULD_BLOCK ? 1 : -1;
 }
 
-/* End rec's block: write it out directly (see above), else move it to
-   the pending writes with the I/O role and the lock, then write them out
-   when they don't fit (all of them after a deferred flush()); or drop it
-   when the stream is closed or detached (*dropped: how many bytes;
+/* End rec's block (n < 0): write it out directly (see above), else move
+   it to the pending writes with the I/O role and the lock, then write
+   them out when they don't fit (all of them after a deferred flush()); or
+   drop it when the stream is closed or detached (*dropped: how many bytes;
    ValueError if any, or a deferred flush).  What can't be moved stays,
    pending (moved by the next operation needing the position, close(),
-   detach() or __init__()).  Returns 0, or -1 (with an exception set but
-   when dropping nothing). */
+   detach() or __init__()).  With n >= 0, write out the first n bytes of
+   the active block the same way (kept if closed; dropped is NULL).
+   Returns 0, or -1 (with an exception set but when dropping or keeping). */
 static int
-gather_end(buffered *self, record *rec, Py_ssize_t *dropped)
+gather_end(buffered *self, record *rec, Py_ssize_t n, Py_ssize_t *dropped)
 {
+    Py_ssize_t none;
+    dropped = n < 0 ? dropped : &none;
     *dropped = 0;
-    int r = gather_splice(self, rec);
-    if (r <= 0) {
+    int r = rec->direct ? gather_direct(self, rec, n) : 1;
+    if ((r > 0 && n < 0 && (r = gather_splice(self, rec)) <= 0)
+        || (r < 0 && n >= 0))
+    {
+        /* (Kept in the block on error: written out in order later.) */
         return r;
     }
-    r = gather_direct(self, rec);
+    if (r > 0 && !rec->direct) {
+        r = gather_direct(self, rec, n);
+    }
     if (r == 0) {
         return 0;
     }
@@ -1631,8 +1719,11 @@ gather_end(buffered *self, record *rec, Py_ssize_t *dropped)
         r = -1;
     }
     else {
-        flush = rec->flush;
-        if (locked && closed != 0) {
+        flush = n >= 0 || rec->flush;
+        if (locked && closed != 0 && n >= 0) {
+            r = -1;
+        }
+        else if (locked && closed != 0) {
             *dropped = rec->list.nbytes;
             if (closed > 0 && (*dropped > 0 || flush)) {
                 PyErr_SetString(PyExc_ValueError,
@@ -1643,9 +1734,11 @@ gather_end(buffered *self, record *rec, Py_ssize_t *dropped)
             r = -1;
         }
         else if (r == 0) {
-            r = gather_move(self, rec);
+            r = gather_move(self, rec, n < 0 ? PY_SSIZE_T_MAX : n);
         }
-        rec_set_state(rec, r == 0 || closed != 0 ? REC_IDLE : REC_PENDING);
+        if (n < 0) {
+            rec_set_state(rec, r == 0 || closed != 0 ? REC_IDLE : REC_PENDING);
+        }
         rec_unlock(rec);
     }
     if (r == 0 && exc == NULL) {
@@ -1671,6 +1764,9 @@ rec_start(record *rec, gather *g)
     rec->fileio = _PyFileIO_CheckExact(g->raw);
     rec->limit = g->limit;
     rec->flush = 0;
+    rec->direct = g->direct;
+    rec->behind = 0;
+    rec->line = g->line;
     rec_set_state(rec, REC_ACTIVE);
 }
 
@@ -1705,6 +1801,14 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
        Python code run below may make the context drop it.) */
     record *rec = r == 0 ? gather_current(self) : NULL;
     Py_XINCREF(rec);
+    /* Its context's earlier writes first (see above), also what its
+       records could not move. */
+    if (r == 0 && g->direct && !(rec && rec_state(rec) == REC_ACTIVE)
+        && (r = buffered_enter(self, "gather on closed file", 0)) == 0)
+    {
+        r = buffered_sync(self, 1);
+        buffered_unlock_io(self);
+    }
     int state = REC_FREE;
     if (r == 0 && rec != NULL) {
         if (rec_lock(rec) < 0) {
@@ -1794,7 +1898,7 @@ gather_exit(PyObject *op, PyObject *const *Py_UNUSED(args),
     }
     g->state = GATHER_DONE;
     Py_ssize_t dropped;
-    if (!g->joined && gather_end(g->stream, g->rec, &dropped) < 0
+    if (!g->joined && gather_end(g->stream, g->rec, -1, &dropped) < 0
         && PyErr_Occurred())
     {
         return NULL;
@@ -1820,7 +1924,7 @@ gather_finalize(PyObject *op)
     if (!nibbler_mutex_is_mine(&self->lock)
         && !nibbler_mutex_is_mine(&self->io))
     {
-        (void)gather_end(self, rec, &dropped);
+        (void)gather_end(self, rec, -1, &dropped);
     }
     else if (rec_lock(rec) == 0) {
         dropped = rec->list.nbytes;
@@ -2877,12 +2981,28 @@ static PyObject *
 _io__Buffered_flush_impl(buffered *self)
 /*[clinic end generated code: output=da2674ef1ce71f3a input=fda63444697c6bf4]*/
 {
+    /* But a direct block writes itself out (see "Gathering"). */
+    record *rec = (FT_ATOMIC_LOAD_INT_RELAXED(self->ngather) > 0
+                   ? gather_current(self) : NULL);
+    if (rec != NULL && rec_state(rec) == REC_ACTIVE && rec->direct
+        && !nibbler_mutex_is_mine(&rec->lock))
+    {
+        /* (Referenced across the Python code it may run.) */
+        Py_INCREF(rec);
+        int r = gather_end(self, rec, PY_SSIZE_T_MAX, NULL);
+        Py_DECREF(rec);
+        if (r < 0) {
+            return (PyErr_Occurred() ? NULL
+                    : PyErr_Format(PyExc_ValueError, "flush of closed file"));
+        }
+        Py_RETURN_NONE;
+    }
     if (buffered_enter(self, "flush of closed file",
                        ENTER_LEAVE_GATHERED) < 0) {
         return NULL;
     }
     /* Inside a _gather() block, flushing waits for its end. */
-    record *rec = self->ngather > 0 ? gather_current(self) : NULL;
+    rec = self->ngather > 0 ? gather_current(self) : NULL;
     int deferred = 0;
     if (rec != NULL && !nibbler_mutex_is_mine(&rec->lock)
         && rec_lock(rec) == 0)
@@ -3546,6 +3666,9 @@ _io_BufferedRandom___init___impl(buffered *self, PyObject *raw,
 /*[clinic input]
 _io._Buffered._gather
     limit as limit_obj: object(c_default="NULL") = 20971520
+    *
+    direct: bool = False
+    line_flush: bool = False
 
 Gather the writes of the current context in a with block.
 
@@ -3563,7 +3686,18 @@ takes effect at its end.  Reads, seek() and truncate() in the
 context add what it gathered first; close(), detach() and
 __init__(), from any context, what every block gathered.  A block
 on the same stream nested in one gathers into it, with the outer
-block's limit.
+block's limit and mode (direct, line_flush).
+
+A direct block is for the life of a thread or task: it writes out
+the buffered data when it starts, then, at its limit (by default
+the buffer size), flush() and its end, writes what it gathered
+directly to a regular file (of a BufferedWriter of a FileIO) without
+waiting for what other contexts buffered meanwhile: their writes,
+even ones known to come first by other means, may land after it.
+tell() inside it doesn't say where its data will land.  With
+line_flush, complete lines are written out after each write
+containing a newline: that way in a direct block, else after what
+is buffered.
 
 Gathering is by context, as with decimal.localcontext(): a block
 spanning a yield gathers what runs in the context meanwhile.  Data
@@ -3572,10 +3706,12 @@ the stream is closed, with a ResourceWarning.  Experimental.
 [clinic start generated code]*/
 
 static PyObject *
-_io__Buffered__gather_impl(buffered *self, PyObject *limit_obj)
-/*[clinic end generated code: output=707c4e9e896fa736 input=7dda59e46deebf99]*/
+_io__Buffered__gather_impl(buffered *self, PyObject *limit_obj, int direct,
+                           int line_flush)
+/*[clinic end generated code: output=cc170613f177a7e5 input=2fd2114c41ce0e9f]*/
 {
-    Py_ssize_t limit = GATHER_LIMIT;
+    Py_ssize_t limit = (!direct ? GATHER_LIMIT : Py_MAX(1,
+                        FT_ATOMIC_LOAD_SSIZE_RELAXED(self->capacity)));
     if (limit_obj == Py_None) {
         limit = PY_SSIZE_T_MAX;
     }
@@ -3606,6 +3742,8 @@ _io__Buffered__gather_impl(buffered *self, PyObject *limit_obj)
     }
     g->stream = (buffered *)Py_NewRef(self);
     g->limit = limit;
+    g->direct = direct;
+    g->line = line_flush;
     return (PyObject *)g;
 }
 
