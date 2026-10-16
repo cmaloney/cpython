@@ -699,7 +699,7 @@ PyNumber_AsOff_t(PyObject *item, PyObject *err)
 }
 
 /* Store in types new references to _io._nibbler's BufferedReader,
-   BufferedWriter and BufferedRandom, and to _io's TextIOWrapper. */
+   BufferedWriter, BufferedRandom and TextIOWrapper. */
 static int
 iomodule_get_nibbler_types(PyObject *module, PyObject *types[4])
 {
@@ -708,9 +708,9 @@ iomodule_get_nibbler_types(PyObject *module, PyObject *types[4])
         return -1;
     }
     static const char *const names[] = {
-        "BufferedReader", "BufferedWriter", "BufferedRandom",
+        "BufferedReader", "BufferedWriter", "BufferedRandom", "TextIOWrapper",
     };
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         types[i] = PyObject_GetAttrString(sub, names[i]);
         if (types[i] == NULL) {
             for (int j = 0; j < i; j++) {
@@ -721,15 +721,14 @@ iomodule_get_nibbler_types(PyObject *module, PyObject *types[4])
         }
     }
     Py_DECREF(sub);
-    types[3] = Py_NewRef(get_io_state(module)->PyTextIOWrapper_Type);
     return 0;
 }
 
 /* Point open() at _io's buffered and text classes, or with nibbler set,
-   at _io._nibbler's buffered classes.  Returns whether the reader class
-   it replaced was _io._nibbler's, or -1 on error.  The classes are not
-   replaced at once: a concurrent open() may get the buffered classes of
-   either. */
+   at _io._nibbler's.  Returns whether the reader class it replaced was
+   _io._nibbler's, or -1 on error.  The four classes are not replaced at
+   once: a concurrent open() may get a buffered object of one and a
+   TextIOWrapper of the other, which work together. */
 static int
 iomodule_set_open_impl(PyObject *module, int nibbler)
 {
@@ -798,14 +797,14 @@ _io._set_open_impl
     name: unicode
     /
 
-Make open() use the "_io" or "_nibbler" buffered classes.
+Make open() use the "_io" or "_nibbler" buffered and text classes.
 
 Returns the previous name.  For tests.
 [clinic start generated code]*/
 
 static PyObject *
 _io__set_open_impl_impl(PyObject *module, PyObject *name)
-/*[clinic end generated code: output=da5db966fe58f749 input=7720ca0e2bd32bba]*/
+/*[clinic end generated code: output=da5db966fe58f749 input=a8efd7e301a3bde5]*/
 {
     int nibbler = iomodule_parse_impl(name);
     int was_nibbler = nibbler < 0 ? -1 : iomodule_set_open_impl(module,
@@ -1014,8 +1013,9 @@ iomodule_exec(PyObject *m)
 #undef ADD_TYPE
 
     // _PYTHON_IO_DEFAULT_IMPL=_nibbler (honors -E / -I) makes the
-    // _io._nibbler classes _io's buffered classes, so io.BufferedReader,
-    // isinstance() checks, open() and the standard streams all use them.
+    // _io._nibbler classes _io's buffered and text classes, so
+    // io.BufferedReader, io.TextIOWrapper, isinstance() checks, open() and
+    // the standard streams all use them.
     PyInterpreterState *interp = _PyInterpreterState_GET();
     const PyConfig *config = _PyInterpreterState_GetConfig(interp);
     const char *env = config->use_environment
@@ -1046,7 +1046,7 @@ iomodule_exec(PyObject *m)
         }
         static const char *const names[] = {
             "BufferedReader", "BufferedWriter", "BufferedRandom",
-            "BufferedRWPair",
+            "BufferedRWPair", "TextIOWrapper",
         };
         for (size_t i = 0; i < Py_ARRAY_LENGTH(names); i++) {
             PyObject *cls = PyObject_GetAttrString(sub, names[i]);

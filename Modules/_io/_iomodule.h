@@ -103,6 +103,45 @@ extern int _PyFileIO_appending(PyObject *self);
    find "would block"? */
 extern int _PyFileIO_regular(PyObject *self);
 
+/* An exact _io._nibbler buffered object as the store of
+   _io._nibbler.TextIOWrapper's bytes, used in place (see "Bytes for
+   TextIOWrapper" in _nibbler/bufferedio.c).  Functions returning int
+   return 0 on success or -1 with an exception set, but where noted. */
+#define _PyIO_NIBBLER_NEEDIO (-2)
+#define _PyIO_NIBBLER_NO (-3)
+#define _PyIO_NIBBLER_BLOCKED (-4)
+#define _PyIO_NIBBLER_FULL (-5)
+/* Take the buffer's lock, and with io its I/O role too (reading more then
+   possible), and return the count of the unread bytes, at *p in *block
+   (borrowed).  Returns _PyIO_NIBBLER_NEEDIO (nothing held) when reading
+   needs the I/O role (pending writes first), and _PyIO_NIBBLER_NO when the
+   buffer has an instance dict (use its methods). */
+extern Py_ssize_t _PyIONibbler_begin(PyObject *buffered, int io,
+                                     PyObject **block, const char **p);
+extern void _PyIONibbler_end(PyObject *buffered, int io);
+/* Held: take k of them, and return the rest as _PyIONibbler_begin(). */
+extern Py_ssize_t _PyIONibbler_view(PyObject *buffered, Py_ssize_t k,
+                                    PyObject **block, const char **p);
+/* If the unread bytes start at p, with len of them at least, and can be
+   read without the I/O role, take k of them (one locked step).  Returns 1,
+   0 if not, or -1. */
+extern int _PyIONibbler_take(PyObject *buffered, const char *p,
+                             Py_ssize_t len, Py_ssize_t k);
+/* With the I/O role: read more after them (size more, unbuffered), keeping
+   them in front.  Returns the count, 0 at EOF, _PyIO_NIBBLER_BLOCKED,
+   _PyIO_NIBBLER_FULL when no more can be held, or -1. */
+extern Py_ssize_t _PyIONibbler_fill(PyObject *buffered, Py_ssize_t size);
+/* Held: put data[0:len] back in front of them (a read that failed). */
+extern int _PyIONibbler_unread(PyObject *buffered, const char *data,
+                               Py_ssize_t len);
+/* Like write(obj) of data[0:len], owned by obj, but ValueError("I/O
+   operation on closed file.") if closed; _PyIO_NIBBLER_NO as above.  The
+   caller holds a reference to buffered (raw.write() could drop others). */
+extern int _PyIONibbler_write(PyObject *buffered, PyObject *obj,
+                              const char *data, Py_ssize_t len);
+/* Is the raw stream closed?  1, 0, or -1. */
+extern int _PyIONibbler_closed(PyObject *buffered);
+
 /* Shortcut to the core of the IncrementalNewlineDecoder.decode method */
 extern PyObject *_PyIncrementalNewlineDecoder_decode(
     PyObject *self, PyObject *input, int final);
@@ -266,6 +305,8 @@ extern PyObject *_PyIO_create_nibbler_submodule(PyObject *io_module,
                                                 int as_io);
 /* Is the type exactly one of the _io._nibbler buffered classes? */
 extern int _PyIO_is_nibbler_buffered_type(PyTypeObject *tp);
+/* _io._nibbler.TextIOWrapper (_nibbler/textio.c), based on _TextIOBase. */
+extern PyType_Spec _PyIONibbler_textiowrapper_spec;
 
 #ifdef HAVE_WINDOWS_CONSOLE_IO
 extern char _PyIO_get_console_type(PyObject *);
