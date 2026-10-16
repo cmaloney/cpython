@@ -139,9 +139,27 @@ class ProcessTestCase(BaseTestCase):
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, bufsize=0)
         try:
-            self.assertIsInstance(p.stdin, io.RawIOBase)
-            self.assertIsInstance(p.stdout, io.RawIOBase)
-            self.assertIsInstance(p.stderr, io.RawIOBase)
+            if getattr(type(p.stdin), '_is_nibbler', False):
+                # _io._set_unbuffered_impl("_nibbler") (or
+                # _PYTHON_IO_UNBUFFERED_IMPL) makes buffering=0 give a
+                # buffered object of buffer size 0 over the raw stream.
+                for f in p.stdin, p.stdout, p.stderr:
+                    self.assertIsInstance(f, io.BufferedIOBase)
+                    self.assertIsInstance(f.raw, io.RawIOBase)
+                # Nothing to look ahead into...
+                self.assertRaises(io.UnsupportedOperation, p.stdout.peek)
+                self.assertRaises(io.UnsupportedOperation, p.stderr.peek)
+                # ...and no buffer allocated by a write.
+                try:
+                    p.stdin.write(b"x")
+                except BrokenPipeError:
+                    pass
+                self.assertEqual(p.stdin.__sizeof__(),
+                                 type(p.stdin).__basicsize__)
+            else:
+                self.assertIsInstance(p.stdin, io.RawIOBase)
+                self.assertIsInstance(p.stdout, io.RawIOBase)
+                self.assertIsInstance(p.stderr, io.RawIOBase)
         finally:
             p.stdin.close()
             p.stdout.close()

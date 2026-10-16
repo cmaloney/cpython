@@ -1196,7 +1196,9 @@ class MiscIOTest:
         self.assertIsInstance(self.TextIOBase, abc.ABCMeta)
 
     def _check_abc_inheritance(self, abcmodule):
-        with self.open(os_helper.TESTFN, "wb", buffering=0) as f:
+        # Build the raw object directly: open(buffering=0) may return a
+        # buffered object with buffer_size=0 for some implementations.
+        with self.FileIO(os_helper.TESTFN, "wb") as f:
             self.assertIsInstance(f, abcmodule.IOBase)
             self.assertIsInstance(f, abcmodule.RawIOBase)
             self.assertNotIsInstance(f, abcmodule.BufferedIOBase)
@@ -1516,6 +1518,121 @@ class NibblerIOTest(NibblerMixin, CIOTest):
 
 class NibblerMiscIOTest(NibblerMixin, CMiscIOTest):
     pass
+
+
+@support.cpython_only
+class UnbufferedImplTest(unittest.TestCase):
+    # _io._set_unbuffered_impl("_nibbler") (or _PYTHON_IO_UNBUFFERED_IMPL)
+    # makes binary open(buffering=0) wrap the FileIO in the _io._nibbler
+    # buffered class for the mode, with buffer size 0.
+
+    def setUp(self):
+        import _io
+        self._io = _io
+        prev = _io._set_unbuffered_impl("_nibbler")
+        self.addCleanup(_io._set_unbuffered_impl, prev)
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        with open(os_helper.TESTFN, "wb") as f:
+            f.write(b"0123456789")
+
+    def test_types(self):
+        nibbler = self._io._nibbler
+        for mode, tp in [("rb", nibbler.BufferedReader),
+                         ("wb", nibbler.BufferedWriter),
+                         ("ab", nibbler.BufferedWriter),
+                         ("r+b", nibbler.BufferedRandom),
+                         ("w+b", nibbler.BufferedRandom),
+                         ("a+b", nibbler.BufferedRandom)]:
+            with self.subTest(mode=mode):
+                with io.open(os_helper.TESTFN, mode, buffering=0) as f:
+                    self.assertIs(type(f), tp)
+                    self.assertIs(type(f.raw), io.FileIO)
+                    self.assertEqual(f.raw.mode, f.mode)
+        os_helper.unlink(os_helper.TESTFN)
+        with io.open(os_helper.TESTFN, "xb", buffering=0) as f:
+            self.assertIs(type(f), nibbler.BufferedWriter)
+
+    def test_round_trip(self):
+        with io.open(os_helper.TESTFN, "r+b", buffering=0) as f:
+            self.assertEqual(f.read(3), b"012")
+            self.assertEqual(f.write(b"abc"), 3)
+            # Nothing is buffered: the raw file is already up to date.
+            self.assertEqual(f.raw.tell(), 6)
+            self.assertEqual(f.seek(1), 1)
+            self.assertEqual(f.read(), b"12abc6789")
+            self.assertEqual(f.seek(-2, os.SEEK_END), 8)
+            self.assertEqual(f.write(b"XYZ"), 3)
+            self.assertEqual(f.tell(), 11)
+        with io.open(os_helper.TESTFN, "rb", buffering=0) as f:
+            self.assertEqual(f.read(), b"012abc67XYZ")
+        with io.open(os_helper.TESTFN, "wb", buffering=0) as f:
+            f.write(b"new")
+            with open(os_helper.TESTFN, "rb") as g:
+                self.assertEqual(g.read(), b"new")
+
+    @unittest.skipUnless(hasattr(os, "pipe") and hasattr(os, "set_blocking"),
+                         "requires os.pipe() and os.set_blocking()")
+    def test_nonblocking_write(self):
+        # Each write() goes straight to the raw stream: what doesn't fit in
+        # the pipe is reported, not kept.
+        r, w = os.pipe()
+        self.addCleanup(os.close, r)
+        os.set_blocking(w, False)
+        with io.open(w, "wb", buffering=0) as f:
+            self.assertEqual(f.write(b"abc"), 3)
+            self.assertEqual(os.read(r, 10), b"abc")
+            data = b"x" * (1 << 20)
+            with self.assertRaises(BlockingIOError) as cm:
+                f.write(data)
+            written = cm.exception.characters_written
+            self.assertGreater(written, 0)
+            self.assertLess(written, len(data))
+            got = 0
+            while chunk := os.read(r, 1 << 16):
+                got += len(chunk)
+                if got >= written:
+                    break
+            self.assertEqual(got, written)
+            # Nothing was kept for later.
+            f.flush()
+            os.set_blocking(r, False)
+            self.assertRaises(BlockingIOError, os.read, r, 1)
+            os.set_blocking(r, True)
+            self.assertEqual(f.write(b"end"), 3)
+            self.assertEqual(os.read(r, 10), b"end")
+
+    def test_text_raises(self):
+        # Unbuffered text stays unsupported.
+        for mode in ("r", "w", "a", "r+", "w+", "a+"):
+            with self.subTest(mode=mode):
+                with self.assertRaisesRegex(ValueError,
+                                            "can't have unbuffered text"):
+                    io.open(os_helper.TESTFN, mode, buffering=0,
+                            encoding="ascii")
+
+    def test_switch_off(self):
+        self.assertEqual(self._io._set_unbuffered_impl("_io"), "_nibbler")
+        with io.open(os_helper.TESTFN, "rb", buffering=0) as f:
+            self.assertIs(type(f), io.FileIO)
+        with io.open(os_helper.TESTFN, "rb") as f:
+            self.assertIsInstance(f, io.BufferedReader)
+        with self.assertRaisesRegex(ValueError, "can't have unbuffered text"):
+            io.open(os_helper.TESTFN, "w", buffering=0, encoding="ascii")
+        with self.assertRaises(ValueError):
+            self._io._set_unbuffered_impl("other")
+
+    def test_environment(self):
+        code = ("import io, sys\n"
+                "with io.open(sys.executable, 'rb', buffering=0) as f:\n"
+                "    print(type(f).__name__,\n"
+                "          getattr(type(f), '_is_nibbler', False))\n")
+        env = {"_PYTHON_IO_UNBUFFERED_IMPL": "_nibbler"}
+        rc, out, err = assert_python_ok("-c", code, **env)
+        self.assertEqual(out.strip(), b"BufferedReader True")
+        # -E and -I ignore it.
+        for opt in ("-E", "-I"):
+            rc, out, err = assert_python_ok(opt, "-c", code, **env)
+            self.assertEqual(out.strip(), b"FileIO False")
 
 
 class ProtocolsTest(unittest.TestCase):
