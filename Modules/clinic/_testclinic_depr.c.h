@@ -6,9 +6,11 @@ preserve
 #  include "pycore_gc.h"          // PyGC_Head
 #endif
 #include "pycore_abstract.h"      // _PyNumber_Index()
+#include "pycore_call.h"          // _PyObject_MakeTpCall()
 #include "pycore_critical_section.h"// Py_BEGIN_CRITICAL_SECTION()
 #include "pycore_long.h"          // _PyLong_UnsignedShort_Converter()
 #include "pycore_modsupport.h"    // _PyArg_CheckPositional()
+#include "pycore_pystate.h"       // _PyThreadState_GET()
 #include "pycore_runtime.h"       // _Py_ID()
 #include "pycore_tuple.h"         // _PyTuple_ITEMS()
 #include "pycore_unicodeobject.h" // _PyUnicode_AsUTF8NoNUL()
@@ -2682,4 +2684,4 @@ depr_multi(PyObject *module, PyObject *const *args, Py_ssize_t nargs, PyObject *
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=abe0af8d8c637c36 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=e82e70dfbae0f87b input=a9049054013a1b77]*/

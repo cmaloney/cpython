@@ -7,7 +7,9 @@ preserve
 #  include "pycore_runtime.h"     // _Py_ID()
 #endif
 #include "pycore_abstract.h"      // _PyNumber_Index()
+#include "pycore_call.h"          // _PyObject_MakeTpCall()
 #include "pycore_modsupport.h"    // _PyArg_CheckPositional()
+#include "pycore_pystate.h"       // _PyThreadState_GET()
 #include "pycore_unicodeobject.h" // _PyUnicode_AsUTF8NoNUL()
 
 PyDoc_STRVAR(EncodingMap_size__doc__,
@@ -1818,8 +1820,7 @@ unicode_new_impl(PyTypeObject *type, PyObject *x, const char *encoding,
                  const char *errors);
 
 static PyObject *
-unicode_new_helper(PyTypeObject *type, PyObject *const *args,
-    Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames)
+unicode_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
     PyObject *return_value = NULL;
     #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
@@ -1899,15 +1900,6 @@ exit:
 }
 
 static PyObject *
-unicode_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
-{
-    return unicode_new_helper(type, _PyTuple_CAST(args)->ob_item,
-        PyTuple_GET_SIZE(args),
-        kwargs ? PyDict_GET_SIZE(kwargs) : 0,
-        kwargs, NULL);
-}
-
-static PyObject *
 unicode_vectorcall(PyObject *type, PyObject *const *args,
     size_t nargsf, PyObject *kwnames)
 {
@@ -1922,9 +1914,8 @@ unicode_vectorcall(PyObject *type, PyObject *const *args,
      * vectorcall doesn't deal e.g. with users reassigning __init__. */
     assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
     if (kwnames != NULL || nargs > 3) {
-        return unicode_new_helper(_PyType_CAST(type), args, nargs,
-            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
-            NULL, kwnames);
+        return _PyObject_MakeTpCall(_PyThreadState_GET(), type, args,
+                                    nargs, kwnames);
     }
     if (nargs < 1) {
         goto skip_optional;
@@ -1958,4 +1949,4 @@ skip_optional:
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=39543e0cf5ed73ab input=a9049054013a1b77]*/
+/*[clinic end generated code: output=516b7110ad60e5e2 input=a9049054013a1b77]*/

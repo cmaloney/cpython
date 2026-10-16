@@ -1413,10 +1413,7 @@ class ParseArgsCodeGen:
         if self.func.kind is METHOD_INIT:
             self.return_value_declaration = "int {parser_retval} = -1;"
 
-        if self.func.vectorcall and 'METH_KEYWORDS' in self.flags:
-            self._new_or_init_delegate_to_helper()
-        else:
-            self._new_or_init_parser_body()
+        self._new_or_init_parser_body()
 
     def _new_or_init_delegate_to_helper(self) -> None:
         """Change the parser to a helper that call and vectorcall can use.
@@ -1643,38 +1640,13 @@ class ParseArgsCodeGen:
             delegate=self._vectorcall_delegate_to_helper(nkw))
 
     def _vectorcall_delegate_to_helper(self, nkw: str) -> str:
-        """Hand off to the {c_basename}_helper helper and return.
-
-        nkw: Number of keyword arguments.
-        """
-        if self.func.kind is METHOD_INIT:
-            receiver = "self"
-            bind_result = "_result = "
-            prologue = libclinic.normalize_snippet("""
-                self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
-                    (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
-                if (self == NULL) {{
-                    return NULL;
-                }}
-            """, indent=4)
-            epilogue = libclinic.normalize_snippet("""
-                if (_result != 0) {{
-                    Py_DECREF(self);
-                    return NULL;
-                }}
-                return self;
-            """, indent=4)
-        else:
-            receiver = "_PyType_CAST(type)"
-            bind_result = "return "
-            prologue = epilogue = ""
-        helper_call = libclinic.normalize_snippet(f"""
-            {bind_result}{{c_basename}}_helper({receiver}, args, nargs,
-                {nkw},
-                NULL, kwnames);
+        """Fall back to tp_call (tp_new / tp_init via tuple + dict)."""
+        self.codegen.add_include('pycore_call.h', '_PyObject_MakeTpCall()')
+        self.codegen.add_include('pycore_pystate.h', '_PyThreadState_GET()')
+        return libclinic.normalize_snippet("""
+            return _PyObject_MakeTpCall(_PyThreadState_GET(), type, args,
+                                        nargs, kwnames);
         """, indent=4)
-        parts = [prologue, helper_call, epilogue]
-        return "\n".join(part for part in parts if part)
 
     def parse_vectorcall_kw_required(self) -> None:
         """Required keyword arguemnts; always delegate to helper."""

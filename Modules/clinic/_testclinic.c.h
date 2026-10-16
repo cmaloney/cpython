@@ -6,9 +6,11 @@ preserve
 #  include "pycore_gc.h"          // PyGC_Head
 #endif
 #include "pycore_abstract.h"      // _PyNumber_Index()
+#include "pycore_call.h"          // _PyObject_MakeTpCall()
 #include "pycore_critical_section.h"// Py_BEGIN_CRITICAL_SECTION()
 #include "pycore_long.h"          // _PyLong_UnsignedShort_Converter()
 #include "pycore_modsupport.h"    // _PyArg_CheckPositional()
+#include "pycore_pystate.h"       // _PyThreadState_GET()
 #include "pycore_runtime.h"       // _Py_ID()
 #include "pycore_tuple.h"         // _PyTuple_ITEMS()
 #include "pycore_unicodeobject.h" // _PyUnicode_AsUTF8NoNUL()
@@ -4921,8 +4923,7 @@ static PyObject *
 vc_plain_new_impl(PyTypeObject *type, PyObject *a);
 
 static PyObject *
-vc_plain_new_helper(PyTypeObject *type, PyObject *const *args,
-    Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames)
+vc_plain_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
     PyObject *return_value = NULL;
     #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
@@ -4974,15 +4975,6 @@ exit:
 }
 
 static PyObject *
-vc_plain_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
-{
-    return vc_plain_new_helper(type, _PyTuple_CAST(args)->ob_item,
-        PyTuple_GET_SIZE(args),
-        kwargs ? PyDict_GET_SIZE(kwargs) : 0,
-        kwargs, NULL);
-}
-
-static PyObject *
 vc_plain_vectorcall(PyObject *type, PyObject *const *args,
     size_t nargsf, PyObject *kwnames)
 {
@@ -4995,9 +4987,8 @@ vc_plain_vectorcall(PyObject *type, PyObject *const *args,
      * vectorcall doesn't deal e.g. with users reassigning __init__. */
     assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
     if (kwnames != NULL || nargs > 1) {
-        return vc_plain_new_helper(_PyType_CAST(type), args, nargs,
-            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
-            NULL, kwnames);
+        return _PyObject_MakeTpCall(_PyThreadState_GET(), type, args,
+                                    nargs, kwnames);
     }
     if (nargs < 1) {
         goto skip_optional;
@@ -5013,8 +5004,7 @@ static int
 vc_posorkw_init_impl(PyObject *self, PyObject *a, PyObject *b);
 
 static int
-vc_posorkw_init_helper(PyObject *self, PyObject *const *args,
-    Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames)
+vc_posorkw_init(PyObject *self, PyObject *args, PyObject *kwargs)
 {
     int return_value = -1;
     #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
@@ -5069,15 +5059,6 @@ exit:
     return return_value;
 }
 
-static int
-vc_posorkw_init(PyObject *self, PyObject *args, PyObject *kwargs)
-{
-    return vc_posorkw_init_helper(self, _PyTuple_CAST(args)->ob_item,
-        PyTuple_GET_SIZE(args),
-        kwargs ? PyDict_GET_SIZE(kwargs) : 0,
-        kwargs, NULL);
-}
-
 static PyObject *
 vc_posorkw_vectorcall(PyObject *type, PyObject *const *args,
     size_t nargsf, PyObject *kwnames)
@@ -5094,19 +5075,8 @@ vc_posorkw_vectorcall(PyObject *type, PyObject *const *args,
      * vectorcall doesn't deal e.g. with users reassigning __init__. */
     assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
     if (kwnames != NULL || nargs < 1 || nargs > 2) {
-        self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
-            (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
-        if (self == NULL) {
-            return NULL;
-        }
-        _result = vc_posorkw_init_helper(self, args, nargs,
-            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
-            NULL, kwnames);
-        if (_result != 0) {
-            Py_DECREF(self);
-            return NULL;
-        }
-        return self;
+        return _PyObject_MakeTpCall(_PyThreadState_GET(), type, args,
+                                    nargs, kwnames);
     }
     a = args[0];
     if (nargs < 2) {
@@ -5136,8 +5106,7 @@ static PyObject *
 vc_base_new_impl(PyTypeObject *type, PyObject *a, PyObject *b);
 
 static PyObject *
-vc_base_new_helper(PyTypeObject *type, PyObject *const *args,
-    Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames)
+vc_base_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
     PyObject *return_value = NULL;
     #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
@@ -5191,15 +5160,6 @@ exit:
 }
 
 static PyObject *
-vc_base_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
-{
-    return vc_base_new_helper(type, _PyTuple_CAST(args)->ob_item,
-        PyTuple_GET_SIZE(args),
-        kwargs ? PyDict_GET_SIZE(kwargs) : 0,
-        kwargs, NULL);
-}
-
-static PyObject *
 vc_base_vectorcall(PyObject *type, PyObject *const *args,
     size_t nargsf, PyObject *kwnames)
 {
@@ -5213,9 +5173,8 @@ vc_base_vectorcall(PyObject *type, PyObject *const *args,
      * vectorcall doesn't deal e.g. with users reassigning __init__. */
     assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
     if (kwnames != NULL || nargs < 1 || nargs > 2) {
-        return vc_base_new_helper(_PyType_CAST(type), args, nargs,
-            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
-            NULL, kwnames);
+        return _PyObject_MakeTpCall(_PyThreadState_GET(), type, args,
+                                    nargs, kwnames);
     }
     a = args[0];
     if (nargs < 2) {
@@ -5232,8 +5191,7 @@ static PyObject *
 vc_kwonly_new_impl(PyTypeObject *type, PyObject *a, PyObject *b);
 
 static PyObject *
-vc_kwonly_new_helper(PyTypeObject *type, PyObject *const *args,
-    Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames)
+vc_kwonly_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
     PyObject *return_value = NULL;
     #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
@@ -5287,15 +5245,6 @@ exit:
 }
 
 static PyObject *
-vc_kwonly_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
-{
-    return vc_kwonly_new_helper(type, _PyTuple_CAST(args)->ob_item,
-        PyTuple_GET_SIZE(args),
-        kwargs ? PyDict_GET_SIZE(kwargs) : 0,
-        kwargs, NULL);
-}
-
-static PyObject *
 vc_kwonly_vectorcall(PyObject *type, PyObject *const *args,
     size_t nargsf, PyObject *kwnames)
 {
@@ -5305,8 +5254,7 @@ vc_kwonly_vectorcall(PyObject *type, PyObject *const *args,
     /* Make sure the type object is immutable: the generated
      * vectorcall doesn't deal e.g. with users reassigning __init__. */
     assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
-    return vc_kwonly_new_helper(_PyType_CAST(type), args, nargs,
-        kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
-        NULL, kwnames);
+    return _PyObject_MakeTpCall(_PyThreadState_GET(), type, args,
+                                nargs, kwnames);
 }
-/*[clinic end generated code: output=e1f97f59fec61b6b input=a9049054013a1b77]*/
+/*[clinic end generated code: output=fa278e5d08274570 input=a9049054013a1b77]*/
