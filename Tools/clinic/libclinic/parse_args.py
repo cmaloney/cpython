@@ -1224,21 +1224,6 @@ class ParseArgsCodeGen:
                 if has_optional_kw:
                     self.declarations += "\nPy_ssize_t noptargs = %s + (kwnames ? PyTuple_GET_SIZE(kwnames) : 0) - %d;" % (nargs, self.min_pos + self.min_kw_only)
                 unpack_args = 'args, nargs, NULL, kwnames'
-            elif self.func.vectorcall:
-                # Emit parsing body as a helper that takes both vectorcall and
-                # fastcall calling conventions.
-                self.flags = "METH_VARARGS|METH_KEYWORDS"
-                self.parser_prototype = PARSER_PROTOTYPE_KEYWORD_HELPER
-                argsname = 'fastargs'
-                argname_fmt = 'fastargs[%d]'
-                self.declarations = declare_parser(self.func, codegen=self.codegen)
-                self.declarations += "\nPyObject *argsbuf[%s];" % (len(self.converters) or 1)
-                self.declarations += "\nPyObject * const *fastargs;"
-                if has_optional_kw:
-                    self.declarations += (
-                        "\nPy_ssize_t noptargs = %s + nkw - %d;"
-                        % (nargs, self.min_pos + self.min_kw_only))
-                unpack_args = 'args, nargs, kwargs, kwnames'
             else:
                 # positional-or-keyword arguments
                 self.flags = "METH_VARARGS|METH_KEYWORDS"
