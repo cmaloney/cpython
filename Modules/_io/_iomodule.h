@@ -52,6 +52,22 @@ extern int _PyIOBase_finalize(PyObject *self);
    Doesn't check the argument type, so be careful! */
 extern int _PyFileIO_closed(PyObject *self);
 
+/* Is op an exact FileIO (of any interpreter's _io)?  Without looking up
+   the module state, which takes the type lock to search the MRO of types
+   that aren't _io's own. */
+static inline int
+_PyFileIO_CheckExact(PyObject *op)
+{
+    PyTypeObject *tp = Py_TYPE(op);
+    return (PyType_HasFeature(tp, Py_TPFLAGS_HEAPTYPE)
+            && ((PyHeapTypeObject *)tp)->ht_token == &_Py_fileio_spec);
+}
+
+/* Direct calls into an exact FileIO for the buffered layer.  The
+   Py_ssize_t ones return the byte count, -2 if a non-blocking file would
+   block, or -1 with an exception set. */
+extern Py_ssize_t _PyFileIO_readinto(PyObject *self, char *buf,
+                                     Py_ssize_t len);
 /* Most buffers passed to one vectored write, with arrays on the stack;
    _PyIO_WRITEV_LONG (IOV_MAX), with arrays on the heap, for callers with
    more. */
@@ -67,12 +83,20 @@ typedef struct {
     const char *ptr;
     Py_ssize_t len;
 } _PyIO_Span;
-/* Write spans[0:cnt] to an exact FileIO open for writing with one
-   writev() (or, without it, write() the first span); fewer bytes may be
-   written.  Returns the byte count, -2 if a non-blocking file would
-   block, or -1 with an exception set. */
+/* Write spans[0:cnt] with one writev() (or, without it, write() the first
+   span); fewer bytes may be written. */
 extern Py_ssize_t _PyFileIO_writev(PyObject *self, const _PyIO_Span *spans,
                                    Py_ssize_t cnt);
+extern PyObject *_PyFileIO_readall(PyObject *self);
+/* flush() and close() of an exact FileIO; instance attribute overrides
+   are still called.  _PyFileIO_flush() returns 0 or -1. */
+extern int _PyFileIO_flush(PyObject *self);
+extern PyObject *_PyFileIO_close(PyObject *self);
+/* Raise like _PyIOBase_check_readable()/_writable() unless the FileIO is
+   open and allows the requested access. */
+extern int _PyFileIO_check_access(PyObject *self, int reading, int writing);
+/* Was the file descriptor given, or from an opener (its flags unknown)? */
+extern int _PyFileIO_foreign_fd(PyObject *self);
 /* Was the FileIO (or subclass) opened in append mode? */
 extern int _PyFileIO_appending(PyObject *self);
 /* Was the FileIO (or subclass) opened on a regular file, which reads never
@@ -197,6 +221,13 @@ struct _io_state {
 #ifdef HAVE_WINDOWS_CONSOLE_IO
     PyTypeObject *PyWindowsConsoleIO_Type;
 #endif
+
+    /* The buffered and text classes open() uses: _io's own, or
+       _io._nibbler's. */
+    PyTypeObject *open_reader_type;
+    PyTypeObject *open_writer_type;
+    PyTypeObject *open_random_type;
+    PyTypeObject *open_text_type;
 };
 
 static inline _PyIO_State *
@@ -224,6 +255,12 @@ find_io_state_by_def(PyTypeObject *type)
 }
 
 extern PyObject *_PyIOBase_cannot_pickle(PyObject *self, PyObject *args);
+
+/* Create and register the _io._nibbler submodule. */
+extern PyObject *_PyIO_create_nibbler_submodule(PyObject *io_module,
+                                                int as_io);
+/* Is the type exactly one of the _io._nibbler buffered classes? */
+extern int _PyIO_is_nibbler_buffered_type(PyTypeObject *tp);
 
 #ifdef HAVE_WINDOWS_CONSOLE_IO
 extern char _PyIO_get_console_type(PyObject *);
