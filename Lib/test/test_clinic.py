@@ -6779,7 +6779,8 @@ class PyspecStubTest(PyspecTestBase):
         self.assertIs(pyspec_ac.stub("c_f", optimizer_info=True)(f), f)
         self.assertIs(pyspec_ac.stub(METH_O="c_f")(method), method)
         self.assertIs(pyspec_ac.generate(method), method)
-        self.assertIs(pyspec_ac.generate(prefix="p", slots=False)(f), f)
+        class C: pass
+        self.assertIs(pyspec_ac.generate(prefix="p", slots=False)(C), C)
         self.assertIs(pyspec_ac.inline(f), f)
         with self.assertRaises(AttributeError):
             pyspec_ac.classmethod

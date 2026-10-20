@@ -53,16 +53,21 @@ import ast
 import builtins
 import dataclasses as dc
 import functools
+import inspect
 import os
 import re
 import shlex
 import sys
+import types
 
 from collections.abc import Collection
+from typing import TYPE_CHECKING, Any
 
 from libclinic.errors import PYSPEC_README as README
 from libclinic.errors import SpecError, SpecErrorKind
 from . import builtin_types, cfunctions, marks, slots, specfiles, subset
+if TYPE_CHECKING:
+    from .ac import Recorded
 
 
 TYPE_CTYPE = 'PyTypeObject *'
@@ -109,24 +114,6 @@ CLINIC, SLOT, PYCFUNCTION, SHARED, ACCESSOR = (
 
 # Where a line is written: (file, line number).
 Location = tuple[str, int]
-
-
-@dc.dataclass
-class SpecParameter:
-    name: str
-    ctype: str
-    optional: bool
-
-
-@dc.dataclass
-class SpecFunction:
-    """The C signature of an implemented spec function."""
-    # "PyBytes_FromObject", or "bytes.__new__" for a method.
-    name: str
-    path: str
-    parameters: list[SpecParameter]
-    # For a __new__: the Python name of its class.
-    new_type: str | None = None
 
 
 @dc.dataclass
@@ -193,6 +180,42 @@ def without_docstring(node: ast.FunctionDef) -> list[ast.stmt]:
     return node.body[1:] if docstring_of(node.body) is not None else node.body
 
 
+def signature(node: ast.FunctionDef) -> inspect.Signature:
+    """The signature of *node*, read without running it: the annotation
+    and the default of each parameter are its ast (or empty)."""
+    P = inspect.Parameter
+
+    def param(arg: ast.arg, kind: inspect._ParameterKind,
+              default: ast.expr | None = None) -> inspect.Parameter:
+        return P(arg.arg, kind,
+                 default=P.empty if default is None else default,
+                 annotation=(P.empty if arg.annotation is None
+                             else arg.annotation))
+
+    args = node.args
+    n_posonly = len(args.posonlyargs)
+    positional = args.posonlyargs + args.args
+    defaults: list[ast.expr | None] = [None] * (
+        len(positional) - len(args.defaults)) + list(args.defaults)
+    params = [param(a, P.POSITIONAL_ONLY if i < n_posonly
+                    else P.POSITIONAL_OR_KEYWORD, d)
+              for i, (a, d) in enumerate(zip(positional, defaults))]
+    if args.vararg:
+        params.append(param(args.vararg, P.VAR_POSITIONAL))
+    params += [param(a, P.KEYWORD_ONLY, d)
+               for a, d in zip(args.kwonlyargs, args.kw_defaults)]
+    if args.kwarg:
+        params.append(param(args.kwarg, P.VAR_KEYWORD))
+    return inspect.Signature(params)
+
+
+def new_type(name: str) -> str | None:
+    """The Python name of the class of *name* if it is a __new__
+    ("bytes.__new__"), else None."""
+    cls_name, _, meth = name.rpartition('.')
+    return cls_name if meth == '__new__' else None
+
+
 def is_literal_stub(node: ast.FunctionDef) -> bool:
     """True if the body is only a docstring and/or ``...``."""
     body = without_docstring(node)
@@ -203,10 +226,10 @@ def is_literal_stub(node: ast.FunctionDef) -> bool:
 
 @dc.dataclass
 class Output:
-    """What clinic outputs for a def: its ``@ac.generate``, ``@ac.stub``
-    or ``@ac.inline`` (output())."""
+    """What clinic outputs for a def: what its ``@ac.generate``,
+    ``@ac.stub`` or ``@ac.inline`` says (ac.py records it when the spec
+    runs; output())."""
     kind: str       # GENERATE, STUB or INLINE
-    decorator: ast.expr
     # The C name (``@ac.stub("f")``), if not the default.
     name: str | None = None
     # {slot or METH_ flag: C name, or None for the default of the slot}:
@@ -224,68 +247,18 @@ def _string(node: ast.expr) -> str | None:
     return None
 
 
-def parse_output(decorator: ast.expr, where: str = '') -> Output:
-    """The Output of spec decorator *decorator* (normalised: ``stub``,
-    ``stub(...)``); a SpecError if its arguments are not its options."""
-    kind = decorator_name(decorator)
-    assert kind in SPEC_DECORATORS
-    out = Output(kind, decorator)
-    if not isinstance(decorator, ast.Call):
-        return out
-
-    def error(node: ast.AST, message: str) -> SpecError:
-        return SpecError.at(node, f"{where}{message}", SpecErrorKind.INVALID,
-                            None)
-
-    if kind == INLINE:
-        raise error(decorator, "@ac.inline takes no arguments")
-    if len(decorator.args) > 1 or any(_string(a) is None
-                                      for a in decorator.args):
-        raise error(decorator, f"@ac.{kind}(\"f\") takes one argument, the "
-                    "C name, a string")
-    if decorator.args:
-        out.name = _string(decorator.args[0])
-    for kw in decorator.keywords:
-        if kind == GENERATE or kw.arg is None:
-            raise error(kw, f"@ac.{kind}() of a def takes only the C name"
-                        if kind == GENERATE else
-                        "@ac.stub() takes the C name and keyword options")
-        value = kw.value
-        if kw.arg == 'optimizer_info':
-            if not (isinstance(value, ast.Constant)
-                    and isinstance(value.value, bool)):
-                raise error(kw, "optimizer_info=True or optimizer_info=False")
-            out.optimizer_info = value.value
-        elif kw.arg == 'slots':
-            items = (value.elts if isinstance(value, (ast.List, ast.Tuple))
-                     else None)
-            if not items or any(_string(e) is None for e in items):
-                raise error(kw, "slots= is a list of slot names: "
-                            "slots=[\"mp_length\", \"sq_length\"]")
-            for e in items:
-                out.keywords.setdefault(str(_string(e)), None)
-        elif _string(value) is not None:
-            out.keywords[kw.arg] = _string(value)
-        else:
-            raise error(kw, f"@ac.stub({kw.arg}=...): the C name, a string")
-    return out
-
-
 def output(node: ast.FunctionDef) -> Output | None:
-    """The Output of *node*, or None when it has no spec decorator."""
-    found = [d for d in node.decorator_list
-             if decorator_name(d) in SPEC_DECORATORS]
-    if not found:
-        return None
-    if len(found) > 1:
-        raise SpecError.at(found[1], f"{node.name}: one of @ac.generate, "
-                           "@ac.stub and @ac.inline", SpecErrorKind.INVALID,
-                           None)
-    cached = getattr(node, '_pyspec_output', None)
-    if cached is None:
-        cached = parse_output(found[0], f"{node.name}: ")
-        node._pyspec_output = cached    # type: ignore[attr-defined]
-    return cached
+    """The Output of *node*, recorded when its spec ran (Spec._run()), or
+    None when it has no spec decorator."""
+    found: Output | None = getattr(node, '_pyspec_output', None)
+    return found
+
+
+def first_line(node: ast.FunctionDef | ast.stmt) -> int:
+    """The line of the first decorator of *node* (or of the statement):
+    the first line of the code of a def (co_firstlineno)."""
+    decorators = getattr(node, 'decorator_list', None)
+    return decorators[0].lineno if decorators else node.lineno
 
 
 def _kind(node: ast.FunctionDef) -> str | None:
@@ -390,6 +363,8 @@ class Shared:
     c_function: str | None = None
     convention: str | None = None
     critical_section: bool = False
+    # ``ac.stub(...)(X.meth)``: what its ac.stub says (Spec._take()).
+    output: Output | None = None
 
 
 @functools.cache
@@ -599,6 +574,13 @@ class Spec:
         # Functions of imported specs, called ``module.f(...)`` (the name
         # f after Normaliser): name -> (path of the spec, name there).
         self.imported_functions: dict[str, tuple[str, str]] = {}
+        # What @ac.generate says of each class, recorded when the spec
+        # runs (class_output()).
+        self._class_outputs: dict[str, ClassOutput] = {}
+        # The statements whose values are read once the spec has run
+        # (_take()): the ``meth = ac.stub("f")`` and the shared methods.
+        self._c_methods_stmts: dict[str, ast.Assign] = {}
+        self._shared_stmts: dict[str, ast.stmt] = {}
         for node in self.module.body:
             if isinstance(node, ast.ImportFrom):
                 self._add_import(node)
@@ -640,6 +622,7 @@ class Spec:
                                      f"{ast.unparse(node).splitlines()[0]!r}"
                                      "; a spec holds imports, functions, "
                                      f"classes and assignments; see {README}")
+        self._take(self._run())
         self.loaded.setdefault(os.path.abspath(filename), self)
 
     def error(self, node: ast.AST | None, message: str,
@@ -649,13 +632,88 @@ class Spec:
         return SpecError.at(node, message, kind, self.filename)
 
     def output(self, node: ast.FunctionDef) -> Output | None:
-        """output() of *node*, its errors located in this spec."""
+        return output(node)
+
+    def _run(self) -> Recorded:
+        """Run the spec as Python, recording what its spec decorators say
+        (ac.recording()); its namespace gives the values of its class
+        statements (_take())."""
+        from . import ac
+        stem = os.path.splitext(os.path.basename(self.filename))[0]
+        module = types.ModuleType(f'_pyspec_{stem}')
+        module.__file__ = self.filename
+        root = (specfiles.import_root(self.filename)
+                if os.path.exists(self.filename) else None)
+        if root is not None:
+            sys.path.insert(0, root)
+        modules = set(sys.modules)
         try:
-            return output(node)
-        except SpecError as exc:
+            with ac.recording() as recorded:
+                exec(compile(self.source, self.filename, 'exec'),
+                     module.__dict__)
+        except Exception as exc:
+            error = self._located(exc)
+            if error is exc:
+                raise
+            raise error from exc
+        finally:
+            if root is not None:
+                sys.path.remove(root)
+            # The specs it imported: imported again by the next run, which
+            # may be of another tree (a test's).
+            for name in set(sys.modules) - modules:
+                top = name.partition('.')[0]
+                if top != 'libclinic' and top not in sys.stdlib_module_names:
+                    del sys.modules[name]
+        self._namespace = module.__dict__
+        return recorded
+
+    def _located(self, exc: Exception) -> SpecError:
+        """*exc*, raised running the spec, as a SpecError at the line of
+        the spec where it was raised."""
+        lineno = None
+        tb = exc.__traceback__
+        while tb is not None:
+            if tb.tb_frame.f_code.co_filename == self.filename:
+                lineno = tb.tb_lineno
+            tb = tb.tb_next
+        if isinstance(exc, SpecError):
             if exc.filename is None:
-                exc.filename = self.filename
-            raise
+                exc.filename, exc.lineno = self.filename, lineno
+            return exc
+        return SpecError(f"{type(exc).__name__}: {exc}",
+                         filename=self.filename, lineno=lineno)
+
+    def _take(self, recorded: Recorded) -> None:
+        """Take what the spec decorators said when the spec ran
+        (*recorded*), and check the defs against it."""
+        defs = [*self.functions.items(),
+                *((name, node) for name, accessors in self.accessors.items()
+                  for node in accessors.values())]
+        for _, node in defs:
+            node._pyspec_output = recorded.defs.get(  # type: ignore[attr-defined]
+                (self.filename, first_line(node)))
+        for cls_name in self.classes:
+            found = recorded.classes.get(self._namespace[cls_name])
+            if found is not None:
+                self._class_outputs[cls_name] = found
+        for name, assign in self._c_methods_stmts.items():
+            cls_name, _, meth = name.partition('.')
+            self._read_c_method(name, assign,
+                                vars(self._namespace[cls_name])[meth])
+        for name, stmt in self._shared_stmts.items():
+            self.shared[name].output = next(
+                (out for (filename, line), out in recorded.shared.items()
+                 if filename == self.filename
+                 and stmt.lineno <= line <= (stmt.end_lineno or stmt.lineno)),
+                None)
+        for name, node in defs:
+            if (name in self.accessors and is_generated(node)
+                    and not is_literal_stub(node)):
+                raise self.error(node, f"{name}(): an accessor with a body "
+                                 "is expressible, but not lowered to C yet",
+                                 SpecErrorKind.NOT_LOWERED)
+            self._check_output(name, node)
 
     def _check_decorators(self, name: str,
                           decorators: list[ast.expr]) -> None:
@@ -670,6 +728,21 @@ class Spec:
                                  "@ac.<name> (from libclinic.pyspec import "
                                  "ac), or @classmethod or @staticmethod, not "
                                  f"@{ast.unparse(decorator)}")
+            if decorator_name(decorator) not in SPEC_DECORATORS:
+                self._check_clinic_arguments(decorator)
+
+    def _check_clinic_arguments(self, decorator: ast.expr) -> None:
+        """The arguments of a clinic decorator are constants: clinic
+        writes them in its block."""
+        for arg in getattr(decorator, 'args', ()):
+            match arg:
+                case ast.Constant(value=str() | int() as value) \
+                        if not isinstance(value, bool):
+                    pass
+                case _:
+                    raise self.error(arg, "the arguments of a clinic "
+                                     "decorator must be string or integer "
+                                     "constants")
 
     def _check_annotations(self, name: str, node: ast.FunctionDef) -> None:
         """A method's annotations are clinic converters,
@@ -702,14 +775,18 @@ class Spec:
                              f"is {wanted}, not {ast.unparse(annotation)}")
 
     def _check_def(self, name: str, node: ast.FunctionDef) -> None:
+        """The checks of a def before the spec runs."""
         self._check_decorators(name, node.decorator_list)
         self._check_annotations(name, node)
-        found = self.output(node)
-        method = '.' in name
         body = without_docstring(node)
         if len(body) == 1 and isinstance(body[0], ast.Pass):
             raise self.error(body[0], f"{name}: use ... as the body of a "
                              "function implemented in C, not pass")
+
+    def _check_output(self, name: str, node: ast.FunctionDef) -> None:
+        """The checks of a def against what its spec decorator says."""
+        found = output(node)
+        method = '.' in name
         if found is None:
             if method:
                 raise self.error(node, f"{name} needs @ac.stub (C written "
@@ -723,7 +800,9 @@ class Spec:
                                  "body")
             return
         if not method and (found.name is not None or found.keywords):
-            raise self.error(found.decorator, f"{name}: the C name of a "
+            decorator = next(d for d in node.decorator_list
+                             if decorator_name(d) in SPEC_DECORATORS)
+            raise self.error(decorator, f"{name}: the C name of a "
                              "top-level function is its name")
         if found.kind == STUB and found.optimizer_info and is_literal_stub(node):
             raise self.error(node, f"{name}: the body of "
@@ -767,10 +846,6 @@ class Spec:
         if kind in accessors or name in self.functions \
                 or name in self.shared:
             raise self.error(node, f"{name} is defined twice")
-        if is_generated(node) and not is_literal_stub(node):
-            raise self.error(node, f"{name}(): an accessor with a body is "
-                             "expressible, but not lowered to C yet",
-                             SpecErrorKind.NOT_LOWERED)
         self._check_def(name, node)
         accessors[kind] = node
 
@@ -904,7 +979,7 @@ class Spec:
         ``def``, ``meth = ac.stub("f")``, ``meth = module.Class.meth``,
         ``field: ctype`` and ``pass``."""
         self.classes[node.name] = node
-        self.class_output(node.name)    # (checks the decorators)
+        self._check_class_decorators(node)
         for i, stmt in enumerate(node.body):
             match stmt:
                 case ast.Expr(ast.Constant(str())) if i == 0:
@@ -930,7 +1005,7 @@ class Spec:
                 case ast.Assign(targets=[ast.Name(name)],
                                 value=ast.Call(func=ast.Name('stub')) as call) \
                         if _qualified(call.func, 'ac'):
-                    self._add_c_method(node.name, stmt, name, call)
+                    self._add_c_method(node.name, stmt, name)
                 case ast.Assign(targets=[ast.Name(name)], value=value) \
                         if (source := self._shared_source(value)) is not None:
                     self._add_shared(node.name, stmt, name, *source)
@@ -985,42 +1060,49 @@ class Spec:
                                  f"{decorator_text(decorator)[1:]}")
         self.shared[f'{cls_name}.{name}'] = Shared(module, cls, meth,
                                                    stmt.lineno, decorators)
+        self._shared_stmts[f'{cls_name}.{name}'] = stmt
 
-    def _add_c_method(self, cls_name: str, stmt: ast.stmt, name: str,
-                      call: ast.Call) -> None:
-        """``name = ac.stub("f", critical_section=True)``: the C function f
-        of a header the C file includes is the method (cfunctions.py);
-        ``ac.stub(METH_O="f")`` also gives its calling convention."""
+    def _add_c_method(self, cls_name: str, stmt: ast.Assign,
+                      name: str) -> None:
+        """``name = ac.stub("f")``: a method that is a C function of a
+        header the C file includes (cfunctions.py), read once the spec
+        has run (_read_c_method())."""
         full = f'{cls_name}.{name}'
+        if full in self.functions or full in self.shared:
+            raise self.error(stmt, f"{full} is defined twice")
+        self.shared[full] = Shared(None, cls_name, name, stmt.lineno)
+        self._c_methods_stmts[full] = stmt
+
+    def _read_c_method(self, full: str, stmt: ast.Assign,
+                       value: Any) -> None:
+        """``ac.stub("f", critical_section=True)``, the value of *stmt*:
+        the C function f; ``ac.stub(METH_O="f")`` also gives its calling
+        convention."""
+        name = full.partition('.')[2]
         usage = ("a method that is a C function of a header is "
                  f"{name} = ac.stub(\"f\"), with critical_section=True to "
                  "call it in a critical section, or ac.stub(METH_O=\"f\") "
                  "when its definition does not say its calling convention")
-        c_function = convention = None
-        locked = False
-        if len(call.args) > 1 or any(_string(a) is None for a in call.args):
+        call = stmt.value
+        assert isinstance(call, ast.Call)
+        shared = self.shared[full]
+        if len(value.args) > 1 or any(not isinstance(a, str)
+                                      for a in value.args):
             raise self.error(call, f"{full}: {usage}")
-        if call.args:
-            c_function = _string(call.args[0])
-        for kw in call.keywords:
-            value = kw.value
-            if (kw.arg == 'critical_section'
-                    and isinstance(value, ast.Constant)
-                    and isinstance(value.value, bool)):
-                locked = value.value
-            elif (kw.arg in PYCFUNCTION_FLAGS and _string(value) is not None
-                  and c_function is None):
-                convention, c_function = kw.arg, _string(value)
+        if value.args:
+            shared.c_function = value.args[0]
+        for key, arg in value.kwargs.items():
+            if key == 'critical_section' and isinstance(arg, bool):
+                shared.critical_section = arg
+            elif (key in PYCFUNCTION_FLAGS and isinstance(arg, str)
+                  and shared.c_function is None):
+                shared.convention, shared.c_function = key, arg
             else:
-                raise self.error(kw, f"{full}: {usage}")
-        if c_function is None:
+                raise self.error(next((kw for kw in call.keywords
+                                       if kw.arg == key), call),
+                                 f"{full}: {usage}")
+        if shared.c_function is None:
             raise self.error(call, f"{full}: {usage}")
-        if full in self.functions or full in self.shared:
-            raise self.error(stmt, f"{full} is defined twice")
-        self.shared[full] = Shared(None, cls_name, name, stmt.lineno,
-                                   c_function=c_function,
-                                   convention=convention,
-                                   critical_section=locked)
 
     def c_method(self, name: str) -> cfunctions.CMethod:
         """The C function that shared method *name* (``ac.stub("f")``)
@@ -1137,34 +1219,28 @@ class Spec:
                 if is_native(node)]
 
     def describe(self, name: str,
-                 self_ctype: str = 'PyObject *') -> SpecFunction:
-        """The C signature of implemented spec function *name*, whose self
-        (or class) parameter has C type *self_ctype* (a __new__'s is a
-        type).  A SpecError (NOT_LOWERED) first if *name* is not in the
-        lowered subset."""
+                 self_ctype: str = 'PyObject *') -> inspect.Signature:
+        """The C signature of implemented spec function *name*: the
+        annotation of each parameter is its C type, the self (or class)
+        parameter's *self_ctype* (a __new__'s is a type).  A SpecError
+        (NOT_LOWERED) first if *name* is not in the lowered subset."""
         subset.check_lowered(self, name)
-        node = self.functions[name]
-        args = node.args
-        cls_name, _, meth = name.rpartition('.')
-        positional = args.posonlyargs + args.args
-        first_optional = len(positional) - len(args.defaults)
+        if new_type(name) is not None:
+            self_ctype = TYPE_CTYPE
+        is_method = '.' in name
         parameters = []
-        new_type = None
-        for i, arg in enumerate(positional):
-            if cls_name and i == 0:
-                if meth == '__new__':
-                    new_type, self_ctype = cls_name, TYPE_CTYPE
-                parameters.append(SpecParameter(arg.arg, self_ctype, False))
-                continue
-            match arg.annotation:
-                case ast.Name(conv) | ast.Call(func=ast.Name(conv)):
-                    ctype = subset.LOWERED_CTYPES[conv]
-                case _:
-                    raise AssertionError('checked by subset.py')
-            parameters.append(SpecParameter(arg.arg, ctype,
-                                            i >= first_optional))
-        return SpecFunction(name, self.filename, parameters,
-                            new_type)
+        for i, p in enumerate(
+                signature(self.functions[name]).parameters.values()):
+            if is_method and i == 0:
+                ctype = self_ctype
+            else:
+                match p.annotation:
+                    case ast.Name(conv) | ast.Call(func=ast.Name(conv)):
+                        ctype = subset.LOWERED_CTYPES[conv]
+                    case _:
+                        raise AssertionError('checked by subset.py')
+            parameters.append(p.replace(annotation=ctype))
+        return inspect.Signature(parameters)
 
     # -- kinds of methods and C names --------------------------------------
 
@@ -1174,10 +1250,7 @@ class Spec:
         default}) of the @ac.stub or @ac.generate of method *name* (of a
         shared method: ``ac.stub(...)(X.meth)``)."""
         if name in self.shared:
-            found = None
-            for decorator in self.shared[name].decorators:
-                if decorator_name(decorator) == STUB:
-                    found = parse_output(decorator, f"{name}: ")
+            found = self.shared[name].output
         elif name in self.functions:
             found = self.output(self.functions[name])
         else:
@@ -1186,39 +1259,23 @@ class Spec:
             return None, {}
         return found.name, found.keywords
 
+    def _check_class_decorators(self, node: ast.ClassDef) -> None:
+        """A spec class takes only ``@ac.generate``, once."""
+        found = False
+        for decorator in node.decorator_list:
+            if decorator_name(decorator) != GENERATE \
+                    or not _qualified(decorator, 'ac') or found:
+                raise self.error(decorator, f"class {node.name}: a spec "
+                                 "class takes only @ac.generate("
+                                 "prefix=\"x\", doc=..., methods=..., "
+                                 "slots=...), which generates its tables")
+            found = True
+
     def class_output(self, cls_name: str) -> ClassOutput | None:
         """The tables of class *cls_name* clinic generates: those its
         ``@ac.generate(prefix="x", doc=..., methods=..., slots=...)``
         asks for (all of them by default), or None without it."""
-        node = self.classes[cls_name]
-        found = None
-        for decorator in node.decorator_list:
-            if decorator_name(decorator) != GENERATE \
-                    or not _qualified(decorator, 'ac') or found is not None:
-                raise self.error(decorator, f"class {cls_name}: a spec "
-                                 "class takes only @ac.generate("
-                                 "prefix=\"x\", doc=..., methods=..., "
-                                 "slots=...), which generates its tables")
-            found = ClassOutput(cls_name)
-            if not isinstance(decorator, ast.Call):
-                continue
-            if decorator.args:
-                raise self.error(decorator, f"class {cls_name}: the prefix "
-                                 "of the tables is "
-                                 "@ac.generate(prefix=\"x\")")
-            for kw in decorator.keywords:
-                value = kw.value
-                if kw.arg == 'prefix' and _string(value) is not None:
-                    found.prefix = str(_string(value))
-                elif (kw.arg in CLASS_OPTIONS and kw.arg != 'prefix'
-                      and isinstance(value, ast.Constant)
-                      and isinstance(value.value, bool)):
-                    setattr(found, kw.arg, value.value)
-                else:
-                    raise self.error(kw, f"class {cls_name}: the options of "
-                                     "@ac.generate are prefix=\"x\" and "
-                                     "doc, methods, slots=True or False")
-        return found
+        return self._class_outputs.get(cls_name)
 
     def class_prefix(self, cls_name: str) -> str:
         """The C prefix of the tables of class *cls_name* and of the
@@ -1393,16 +1450,9 @@ class Spec:
             case ast.Name(name):
                 return f'@{name}'
             case ast.Call(func=ast.Name(name), args=args, keywords=[]):
-                words = []
-                for arg in args:
-                    match arg:
-                        case ast.Constant(value=str() | int() as value) \
-                                if not isinstance(value, bool):
-                            words.append(_quote(str(value)))
-                        case _:
-                            raise self.error(arg, "the arguments of a "
-                                             "clinic decorator must be "
-                                             "string or integer constants")
+                self._check_clinic_arguments(decorator)
+                words = [_quote(str(arg.value)) for arg in args
+                         if isinstance(arg, ast.Constant)]
                 return ' '.join([f'@{name}', *words])
         raise self.error(decorator, "a spec decorator is a clinic "
                          "decorator: @name or @name(args)")
@@ -1492,37 +1542,32 @@ class Spec:
                          ) -> list[tuple[str, str | None, int]]:
         """Clinic parameter lines, with the Python name of the parameter
         (None for the / and * markers) and its line in the spec."""
-        args = node.args
-        positional = args.posonlyargs + args.args
-        defaults: list[ast.expr | None] = [None] * (
-            len(positional) - len(args.defaults)) + list(args.defaults)
-        pairs = list(zip(positional, defaults))
-        n_posonly = len(args.posonlyargs)
+        P = inspect.Parameter
+        params = list(signature(node).parameters.values())
         if kind != 'staticmethod':
-            if not pairs:
+            if not params or params[0].kind > P.POSITIONAL_OR_KEYWORD:
                 raise self.error(node, f"{node.name}() needs the self or "
                                  "class parameter first")
-            if pairs[0][0].annotation is None:
+            if params[0].annotation is P.empty:
                 # Clinic's implicit self (or class) parameter.
-                pairs = pairs[1:]
-                n_posonly = max(n_posonly - 1, 0)
+                params = params[1:]
+        arg_nodes = {a.arg: a for a in ast.walk(node.args)
+                     if isinstance(a, ast.arg)}
+        prefixes: dict[inspect._ParameterKind, str] = {
+            P.VAR_POSITIONAL: '*', P.VAR_KEYWORD: '**'}
         lines: list[tuple[str, str | None, int]] = []
-        for i, (arg, default) in enumerate(pairs):
-            lines.append((self._parameter_line(arg, default), arg.arg,
-                          arg.lineno))
-            if i == n_posonly - 1:
+        for i, p in enumerate(params):
+            arg = arg_nodes[p.name]
+            if p.kind is P.KEYWORD_ONLY and (
+                    i == 0 or params[i - 1].kind < P.VAR_POSITIONAL):
+                lines.append(('*', None, arg.lineno))
+            default = None if p.default is P.empty else p.default
+            lines.append((self._parameter_line(
+                arg, default, prefixes.get(p.kind, '')), p.name, arg.lineno))
+            if p.kind is P.POSITIONAL_ONLY and (
+                    i + 1 == len(params)
+                    or params[i + 1].kind is not P.POSITIONAL_ONLY):
                 lines.append(('/', None, arg.lineno))
-        if args.vararg:
-            lines.append((self._parameter_line(args.vararg, None, '*'),
-                          args.vararg.arg, args.vararg.lineno))
-        elif args.kwonlyargs:
-            lines.append(('*', None, args.kwonlyargs[0].lineno))
-        for arg, kw_default in zip(args.kwonlyargs, args.kw_defaults):
-            lines.append((self._parameter_line(arg, kw_default), arg.arg,
-                          arg.lineno))
-        if args.kwarg:
-            lines.append((self._parameter_line(args.kwarg, None, '**'),
-                          args.kwarg.arg, args.kwarg.lineno))
         return lines
 
     def _clean_docstring(self, node: ast.stmt, text: str) -> list[str]:

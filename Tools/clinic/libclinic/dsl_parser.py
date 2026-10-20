@@ -1742,18 +1742,21 @@ class DSLParser:
         if spec is None or name is None or not spec.implemented(name):
             return
         assert self.function is not None
-        self.bind_spec(self.function, spec.describe(name))
+        self.bind_spec(self.function, name, spec.describe(name))
 
-    def bind_spec(self, func: Function,
-                  description: frontend.SpecFunction) -> None:
-        """Bind the implemented spec method *description* to clinic
-        function *func*: check that they agree, and record the binding
-        (frontend.PyspecBindings) for the C generated from the spec.
+    def bind_spec(self, func: Function, name: str,
+                  signature: inspect.Signature) -> None:
+        """Bind implemented spec method *name*, of C *signature*
+        (Spec.describe()), to clinic function *func*: check that they
+        agree, and record the binding (frontend.PyspecBindings) for the C
+        generated from the spec.
 
         A __new__ also gets a vectorcall calling its NAME_nargsN()
         specializations; for other methods and class methods, the
         parsing code is clinic's as usual."""
-        where = f"{description.name}() in {description.path}"
+        assert self.clinic.pyspec is not None
+        path = self.clinic.pyspec.filename
+        where = f"{name}() in {path}"
 
         def error(message: str) -> SpecError:
             return SpecError(f"{where}: {message}",
@@ -1769,9 +1772,10 @@ class DSLParser:
             if not func.cls.type_object:
                 raise error(f"requires the type object of {func.cls.name!r}, "
                             "which was declared without one")
-            type_object = frontend.TYPE_OBJECTS.get(description.new_type or '')
+            new_type = frontend.new_type(name)
+            type_object = frontend.TYPE_OBJECTS.get(new_type or '')
             if type_object != func.cls.type_object:
-                raise error(f"{description.new_type} is {type_object}, "
+                raise error(f"{new_type} is {type_object}, "
                             f"{func.cls.name!r} is {func.cls.type_object}")
             self_ctype = frontend.TYPE_CTYPE
             func.vectorcall = True
@@ -1790,22 +1794,22 @@ class DSLParser:
         else:
             raise error("a spec body implements __new__, methods and "
                         "class methods")
-        spec_params = description.parameters[1:]
+        spec_params = list(signature.parameters.values())[1:]
         if len(params) != len(spec_params):
             raise error(f"takes {len(spec_params)} parameters {what}, "
                         f"{func.full_name} takes {len(params)}")
         for p, sp in zip(params, spec_params):
-            if p.converter.type != sp.ctype:
-                raise error(f"parameter {sp.name!r} is {sp.ctype!r}, its "
+            if p.converter.type != sp.annotation:
+                raise error(f"parameter {sp.name!r} is {sp.annotation!r}, its "
                             f"converter gives {p.converter.type!r}")
         func.pyspec = func.c_basename
         output = os.path.relpath(frontend.output_path(self.clinic.filename),
                                  os.path.dirname(self.clinic.filename))
         func.pyspec_origin = (
             f"/* {func.c_basename}_impl() is generated from "
-            f"{specfiles.display_path(description.path)},"
+            f"{specfiles.display_path(path)},"
             f"\n   in {output.replace(os.sep, '/')}. */")
-        self.clinic.pyspec_bindings.functions[description.name] = (
+        self.clinic.pyspec_bindings.functions[name] = (
             frontend.SpecBinding(func.c_basename, self_ctype,
                                  func.condition or ''))
 

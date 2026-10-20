@@ -33,13 +33,14 @@ C.
 from __future__ import annotations
 
 import ast
+import inspect
 import os
 from collections.abc import Sequence
 
 from libclinic.errors import SpecError, SpecErrorKind
 from . import builtin_types, emit, frontend, marks, slots, specfiles
 from .facts import Facts
-from .frontend import Spec, SpecFunction, SpecParameter
+from .frontend import Spec
 from .known import NOTNULL, Env, Value
 
 # Keep a type-specialized variant when its residual has at most this
@@ -147,26 +148,29 @@ def table_name(cls_name: str) -> str:
 
 
 def generate(generator: emit.Generator,
-             descriptions: list[SpecFunction]) -> list[str]:
+             signatures: dict[str, inspect.Signature]) -> list[str]:
     """The variants and the call table of each class of table_classes(),
-    from *descriptions*, the implemented functions compiled
-    unconditionally."""
+    from *signatures*, those of the implemented functions compiled
+    unconditionally (Spec.describe())."""
     out: list[str] = []
-    news: dict[str, SpecFunction] = {}      # class name -> __new__
-    methods: dict[str, list[SpecFunction]] = {}
-    for description in descriptions:
-        cls_name, _, meth = description.name.rpartition('.')
+    news: dict[str, str] = {}       # class name -> name of its __new__
+    methods: dict[str, list[str]] = {}
+    for name in signatures:
+        cls_name, _, meth = name.rpartition('.')
         if meth == '__new__':
-            news[cls_name] = description
+            news[cls_name] = name
         elif cls_name:
-            methods.setdefault(cls_name, []).append(description)
+            methods.setdefault(cls_name, []).append(name)
     for cls_name in table_classes(generator.spec):
         type_object = _class_type_object(generator, cls_name)
         arrays = {
-            'calls': generate_calls(generator, news[cls_name], out)
+            'calls': generate_calls(generator, news[cls_name],
+                                    signatures[news[cls_name]], out)
             if cls_name in news else '',
             'methods': generate_methods(generator, cls_name,
-                                        methods[cls_name], out)
+                                        {name: signatures[name]
+                                         for name in methods[cls_name]},
+                                        out)
             if methods.get(cls_name) else '',
             'slots': generate_slots(generator, cls_name, type_object, out),
         }
@@ -203,12 +207,13 @@ def _class_type_object(generator: emit.Generator, cls_name: str) -> str:
     return type_object
 
 
-def generate_calls(generator: emit.Generator, description: SpecFunction,
-                   out: list[str]) -> str:
-    """Add the variants and the calls array of a clinic __new__ to *out*;
-    the name of the array."""
+def generate_calls(generator: emit.Generator, name: str,
+                   signature: inspect.Signature, out: list[str]) -> str:
+    """Add the variants and the calls array of clinic __new__ *name*, of
+    C *signature*, to *out*; the name of the array."""
     analyzer = generator.context.analyzer()
-    name = description.name
+    new_type = frontend.new_type(name)
+    params = list(signature.parameters.values())
     basename = generator.c_basename(name)
     entries: list[str] = []
 
@@ -216,13 +221,13 @@ def generate_calls(generator: emit.Generator, description: SpecFunction,
               const: str | None) -> None:
         shown = '' if nargs == 0 else getattr(tp, '__name__', 'x')
         entries.extend(_entry(
-            f'{description.new_type}({shown})', nargs, found, const, tp,
+            f'{new_type}({shown})', nargs, found, const, tp,
             (f'f{nargs}', function),
-            [p.name for p in description.parameters[1:nargs + 1]]))
+            [p.name for p in params[1:nargs + 1]]))
 
-    for env, _, given, missing in generator.arities(description):
+    for env, _, given, missing in generator.arities(name, signature):
         nargs = len(given)
-        if any(p.ctype != emit.OBJECT for p in given):
+        if any(p.annotation != emit.OBJECT for p in given):
             continue
         arg_names = [p.name for p in given]
         generic = generator.residual(name, env)
@@ -244,14 +249,14 @@ def generate_calls(generator: emit.Generator, description: SpecFunction,
                 elif key not in functions:
                     functions[key] = c_name = (
                         f'{basename}_nargs1_{tp.__name__}')
-                    out += _variant(generator, description, c_name,
+                    out += _variant(generator, name, c_name,
                                     residual, given, missing, tp, found,
                                     const)
                 entry(nargs, tp, functions[key], found, const)
         entry(nargs, None, f'{basename}_nargs{nargs}',
               analyzer.facts(generic, env, arg_names), _const_name(generic))
     return _array(out, '_PySpecCall', f'{basename}_spec_calls', [
-        f'/* Call table of {description.new_type}() for the tier-2 '
+        f'/* Call table of {new_type}() for the tier-2 '
         'optimizer, see',
         ' * Include/internal/pycore_pyspec.h.  Generated by '
         'Argument Clinic',
@@ -259,7 +264,7 @@ def generate_calls(generator: emit.Generator, description: SpecFunction,
 
 
 def generate_methods(generator: emit.Generator, type_name: str,
-                     descriptions: list[SpecFunction],
+                     signatures: dict[str, inspect.Signature],
                      out: list[str]) -> str:
     """Add the facts of the methods and class methods of a type that the
     spec implements to *out*: per method, a generic entry, and an entry
@@ -272,15 +277,15 @@ def generate_methods(generator: emit.Generator, type_name: str,
     # None for a class that is not a builtin type: only generic entries.
     type_value = builtin_types.by_name(type_name)
     entries: list[str] = []
-    for description in descriptions:
-        name = description.name
+    for name, signature in signatures.items():
         node = spec.functions[name]
         if frontend.has_decorator(node, 'staticmethod'):
             continue
-        first, *params = description.parameters
-        if any(p.optional or p.ctype != emit.OBJECT for p in params):
+        first, *params = signature.parameters.values()
+        if any(p.default is not p.empty or p.annotation != emit.OBJECT
+               for p in params):
             continue
-        env: Env = {p.name: NOTNULL for p in description.parameters}
+        env: Env = {p: NOTNULL for p in signature.parameters}
         if frontend.has_decorator(node, 'classmethod'):
             # The generic entry holds for any class (a subclass shares
             # the ml_meth); the others only when the class is the type
@@ -384,7 +389,7 @@ def generate_slots(generator: emit.Generator, cls_name: str,
         ' * (see Include/internal/pycore_pyspec.h). */'], entries)
 
 
-def _just_calls(residual: list[ast.stmt], given: list[SpecParameter]
+def _just_calls(residual: list[ast.stmt], given: list[inspect.Parameter]
                 ) -> marks.Specialization | None:
     """The Specialization *residual* only calls with *given*, or None."""
     match residual:
@@ -396,16 +401,16 @@ def _just_calls(residual: list[ast.stmt], given: list[SpecParameter]
     return None
 
 
-def _variant(generator: emit.Generator, description: SpecFunction,
+def _variant(generator: emit.Generator, name: str,
              c_name: str, residual: list[ast.stmt],
-             given: list[SpecParameter], missing: list[SpecParameter],
+             given: list[inspect.Parameter], missing: list[inspect.Parameter],
              tp: type, facts: Facts, const: str | None) -> list[str]:
     described = _describe(facts, const, [p.name for p in given])
     return generator.commented_function(
-        f'{generator.c_basename(description.name)}() for exactly '
-        f'{description.new_type} with 1 positional argument of exact type '
+        f'{generator.c_basename(name)}() for exactly '
+        f'{frontend.new_type(name)} with 1 positional argument of exact type '
         f'{tp.__name__}\n * ({described})',
-        c_name, residual, [(p.name, p.ctype) for p in given],
+        c_name, residual, [(p.name, p.annotation) for p in given],
         [p.name for p in missing])
 
 

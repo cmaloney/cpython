@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import inspect
 from collections.abc import Callable, Collection, Iterable
 from typing import TYPE_CHECKING
 
@@ -56,7 +57,7 @@ from .known import NOTNULL, NULL, Env, Value
 from .subset import Kind, loaded_names, terminates
 
 if TYPE_CHECKING:
-    from .frontend import PyspecBindings, Spec, SpecFunction
+    from .frontend import PyspecBindings, Spec
 
 OBJECT = 'PyObject *'
 SSIZE = 'Py_ssize_t'
@@ -64,7 +65,7 @@ TYPE = frontend.TYPE_CTYPE
 TYPE_OBJECTS = frontend.TYPE_OBJECTS
 
 # The lines that follow the functions of a spec (call_table.generate()).
-Tables = Callable[['Generator', list['SpecFunction']], list[str]]
+Tables = Callable[['Generator', dict[str, inspect.Signature]], list[str]]
 
 # What a branch leaves: (the owned locals that may hold a value, those of
 # them known not NULL), or None when it exits.
@@ -834,8 +835,9 @@ def exported(name: str) -> bool:
     return name.startswith(('Py', '_Py'))
 
 
-def c_params(description: SpecFunction) -> list[tuple[str, str]]:
-    return [(p.name, p.ctype) for p in description.parameters]
+def c_params(signature: inspect.Signature) -> list[tuple[str, str]]:
+    """(name, C type) of each parameter of a Spec.describe() signature."""
+    return [(p.name, p.annotation) for p in signature.parameters.values()]
 
 
 class Generator:
@@ -859,7 +861,7 @@ class Generator:
         if name not in self.specializations:
             self.specializations.append(name)
 
-    def describe(self, name: str) -> SpecFunction:
+    def describe(self, name: str) -> inspect.Signature:
         if '.' in name:
             self.c_basename(name)       # used by a clinic block?
             return self.spec.describe(name, self.bindings[name].self_ctype)
@@ -901,35 +903,37 @@ class Generator:
     def generate(self, spec_path: str, tables: Tables | None) -> str:
         out = [typeobj.header(spec_path), '']
         names = self.spec.implemented_functions()
-        descriptions = [self.describe(name) for name in names]
-        for description in descriptions:
-            name = self.c_name(description.name)
-            if not exported(name):
-                out += self.guard(description.name, [self.backend.prototype(
-                    name, c_params(description))])
+        signatures = {name: self.describe(name) for name in names}
+        for name, signature in signatures.items():
+            c_name = self.c_name(name)
+            if not exported(c_name):
+                out += self.guard(name, [self.backend.prototype(
+                    c_name, c_params(signature))])
         prototypes = len(out)
         out.append('')
 
-        for description in descriptions:
+        for name, signature in signatures.items():
             # For any arguments: calls of spec functions stay calls,
             # loops are specialized, arity functions are called.
             body = self.residual(
-                description.name, {}, inline=False,
-                arities=[(env, name, [p.name for p in given])
-                         for env, name, given, _ in self.arities(description)])
-            lowering = FunctionLowering(self, c_params(description))
-            out += self.guard(description.name, self.backend.function(
-                lowering.function(self.c_name(description.name), body)))
+                name, {}, inline=False,
+                arities=[(env, arity, [p.name for p in given])
+                         for env, arity, given, _
+                         in self.arities(name, signature)])
+            lowering = FunctionLowering(self, c_params(signature))
+            out += self.guard(name, self.backend.function(
+                lowering.function(self.c_name(name), body)))
             out.append('')
 
-        for description in descriptions:
-            if description.new_type is not None:
-                out += self.guard(description.name,
-                                  self.generate_arities(description))
+        for name, signature in signatures.items():
+            if frontend.new_type(name) is not None:
+                out += self.guard(name,
+                                  self.generate_arities(name, signature))
         if tables is not None:
             # The functions compiled unconditionally.
-            out += tables(self, [d for d in descriptions
-                                 if not self.condition(d.name)])
+            out += tables(self, {name: signature
+                                 for name, signature in signatures.items()
+                                 if not self.condition(name)})
         # The specializations, which may use others.
         done = 0
         while done < len(self.specializations):
@@ -976,17 +980,18 @@ class Generator:
         return [*self.backend.comment(title, code),
                 *self.backend.function(function), '']
 
-    def arities(self, description: SpecFunction
-                ) -> list[tuple[Env, str, list[frontend.SpecParameter],
-                                list[frontend.SpecParameter]]]:
+    def arities(self, name: str, signature: inspect.Signature
+                ) -> list[tuple[Env, str, list[inspect.Parameter],
+                                list[inspect.Parameter]]]:
         """(facts, C name, given, missing parameters) of the NAME_nargsN()
-        functions of a __new__."""
-        if description.new_type is None:
+        functions of a __new__ *name* of C *signature*."""
+        new_type = frontend.new_type(name)
+        if new_type is None:
             return []
-        cls, *params = description.parameters
-        required = sum(not p.optional for p in params)
-        type_value = getattr(builtins, description.new_type)
-        basename = self.c_basename(description.name)
+        cls, *params = signature.parameters.values()
+        required = sum(p.default is p.empty for p in params)
+        type_value = getattr(builtins, new_type)
+        basename = self.c_basename(name)
         out = []
         for nargs in range(required, len(params) + 1):
             given, missing = params[:nargs], params[nargs:]
@@ -996,20 +1001,22 @@ class Generator:
             out.append((env, f'{basename}_nargs{nargs}', given, missing))
         return out
 
-    def generate_arities(self, description: SpecFunction) -> list[str]:
-        """NAME_nargsN() for each allowed N: the __new__ for exactly its
-        class and N positional arguments, the rest NULL (clinic's
+    def generate_arities(self, name: str,
+                         signature: inspect.Signature) -> list[str]:
+        """NAME_nargsN() for each allowed N: the __new__ *name* for exactly
+        its class and N positional arguments, the rest NULL (clinic's
         vectorcall calls them)."""
-        basename = self.c_basename(description.name)
+        basename = self.c_basename(name)
         out = []
-        for env, name, given, missing in self.arities(description):
+        for env, c_name, given, missing in self.arities(name, signature):
             nargs = len(given)
-            residual = self.residual(description.name, env)
+            residual = self.residual(name, env)
             out += self.commented_function(
-                f'{basename}() for exactly {description.new_type} with '
+                f'{basename}() for exactly {frontend.new_type(name)} with '
                 f'{nargs} positional argument(s)',
-                name, residual,
-                [(p.name, p.ctype) for p in given], [p.name for p in missing])
+                c_name, residual,
+                [(p.name, p.annotation) for p in given],
+                [p.name for p in missing])
         return out
 
 
