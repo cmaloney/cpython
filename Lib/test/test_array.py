@@ -185,8 +185,10 @@ MACHINE_FORMAT_CODE_MAX = 27
 
 
 class SearchTest(seq_tests.NativeItemsSearchTest, unittest.TestCase):
-    search_formats = [typecode for typecode in typecodes
-                      if typecode != 'w']  # raw data is not valid UCS4
+    # 'w' is tested by test_search_unicode(), as raw is not valid UCS4.
+    search_formats = tuple(
+        fmt for fmt in seq_tests.NativeItemsSearchTest.search_formats
+        if fmt not in ('n', 'N', 'P', '?', 'c'))
 
     def search_sequences(self, typecode, raw):
         return [('array', array.array(typecode, raw))]
@@ -199,16 +201,16 @@ class SearchTest(seq_tests.NativeItemsSearchTest, unittest.TestCase):
             b.remove(value)
             after = array.array(a.typecode, a)
             del after[matches[0]]
-            self.assertEqual(b.tobytes(), after.tobytes())
+            self.assertEqual(b.tobytes(), after.tobytes(), repr(value))
         else:
-            self.assertRaises(ValueError, b.remove, value)
+            with self.assertRaises(ValueError, msg=repr(value)):
+                b.remove(value)
 
     def test_search_unicode(self):
         a = array.array('w', 'abc\U0010ffff\0ab' * 2)
         items = a.tolist()
         for value in ['a', 'b', '\U0010ffff', '\0', 'z', 'ab', '', b'a', 97]:
-            with self.subTest(value=value):
-                self.check_search(a, items, value)
+            self.check_search(a, items, value)
         # memoryview does not support 'w' items, but can search them.
         m = memoryview(a)
         self.assertEqual(m.count('a'), a.count('a'))

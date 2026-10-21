@@ -1314,11 +1314,7 @@ static PyObject *
 array_array_count_impl(arrayobject *self, PyObject *v)
 /*[clinic end generated code: output=93ead26a2affb739 input=d9bce9d65e39d1f5]*/
 {
-    Py_ssize_t count = _PyBuffer_CountItem((PyObject *)self, v);
-    if (count < 0) {
-        return NULL;
-    }
-    return PyLong_FromSsize_t(count);
+    return _PyBuffer_CountItem((PyObject *)self, v);
 }
 
 

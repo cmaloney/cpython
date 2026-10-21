@@ -1096,7 +1096,7 @@ PyBuffer_ToContiguous(void *buf, const Py_buffer *src, Py_ssize_t len, char orde
 static inline Py_ssize_t get_native_fmtchar(const char **result,
                                            const char *fmt);
 static inline const char *adjust_fmt(const Py_buffer *view);
-static inline PyObject *unpack_item(const char *ptr, const char *fmt);
+static inline PyObject *unpack_single(const char *ptr, const char *fmt);
 static inline int is_int_fmtchar(char fmtchar);
 static Py_ssize_t pack_int(char *buf, PyObject *v, char fmtchar,
                            Py_ssize_t size);
@@ -1132,20 +1132,20 @@ static Py_ssize_t pack_int(char *buf, PyObject *v, char fmtchar,
 #include "stringlib/fastsearch.h"
 #include "stringlib/undef.h"
 
-/* Run the stringlib search in mode (FAST_SEARCH or FAST_COUNT) for value in
-   items [start, stop) of the one-dimensional view. Return -2 if the items
-   have to be compared with value as objects.
+typedef union {
+    uint8_t u8;
+    uint16_t u16;
+    uint32_t u32;
+    uint64_t u64;
+} item_needle;
 
-   The items can be searched as bytes if an item is equal to value exactly
-   when its bytes are equal to the packed value. That is the case for the
-   integer formats when value is an exact int or a bool (which compares as
-   0 or 1): each integer has a single representation. It is not the case
-   for other types of value, which can compare equal to ints or override
-   __eq__, nor for other formats: 0.0 == -0.0 and NaN != NaN for floats,
-   and any nonzero byte is True for '?'. */
-static Py_ssize_t
-fast_search_items(const Py_buffer *view, PyObject *value,
-                  Py_ssize_t start, Py_ssize_t stop, int mode)
+/* Pack value into *needle if an item of view equals value exactly when its
+   bytes equal *needle: the items are contiguous and aligned in an integer
+   format, and value is an int, which has a single representation. Return 1
+   if packed, 0 if value is out of range so that no item equals it, or -1 if
+   the items have to be compared as objects. */
+static int
+pack_needle(const Py_buffer *view, PyObject *value, item_needle *needle)
 {
     const char *fmt;
     Py_ssize_t itemsize = view->itemsize;
@@ -1155,54 +1155,80 @@ fast_search_items(const Py_buffer *view, PyObject *value,
         || !PyBuffer_IsContiguous(view, 'C')
         || !_Py_IS_ALIGNED(view->buf, itemsize))
     {
-        return -2;
+        return -1;
     }
+    assert(itemsize <= (Py_ssize_t)sizeof(*needle));
+    return pack_int((char *)needle, value, fmt[0], itemsize) >= 0;
+}
 
-    union {
-        uint8_t u8;
-        uint16_t u16;
-        uint32_t u32;
-        uint64_t u64;
-    } needle;
-    assert(itemsize <= (Py_ssize_t)sizeof(needle));
-    if (pack_int((char *)&needle, value, fmt[0], itemsize) < 0) {
-        start = stop;  // No item can be equal to value.
+/* Return the index of the first of the n items at s equal to *needle, or -1
+   if there is none. */
+static Py_ssize_t
+find_needle(const char *s, Py_ssize_t n, Py_ssize_t itemsize,
+            const item_needle *needle)
+{
+    switch (itemsize) {
+    case 1: return item1_find_char((const uint8_t *)s, n, needle->u8);
+    case 2: return item2_find_char((const uint16_t *)s, n, needle->u16);
+    case 4: return item4_find_char((const uint32_t *)s, n, needle->u32);
+    case 8: return item8_find_char((const uint64_t *)s, n, needle->u64);
     }
-    if (start >= stop) {
-        return mode == FAST_COUNT ? 0 : -1;
-    }
+    Py_UNREACHABLE();
+}
 
-    const char *s = (const char *)view->buf + start * itemsize;
-    Py_ssize_t n = stop - start;
-    Py_ssize_t res;
+/* Return the number of the n items at s equal to *needle. */
+static Py_ssize_t
+count_needle(const char *s, Py_ssize_t n, Py_ssize_t itemsize,
+             const item_needle *needle)
+{
     switch (itemsize) {
     case 1:
-        res = item1_fastsearch((const uint8_t *)s, n, &needle.u8, 1,
-                               PY_SSIZE_T_MAX, mode);
-        break;
+        return item1_count_char_no_maxcount((const uint8_t *)s, n, needle->u8);
     case 2:
-        res = item2_fastsearch((const uint16_t *)s, n, &needle.u16, 1,
-                               PY_SSIZE_T_MAX, mode);
-        break;
+        return item2_count_char_no_maxcount((const uint16_t *)s, n, needle->u16);
     case 4:
-        res = item4_fastsearch((const uint32_t *)s, n, &needle.u32, 1,
-                               PY_SSIZE_T_MAX, mode);
-        break;
+        return item4_count_char_no_maxcount((const uint32_t *)s, n, needle->u32);
     case 8:
-        res = item8_fastsearch((const uint64_t *)s, n, &needle.u64, 1,
-                               PY_SSIZE_T_MAX, mode);
-        break;
-    default:
-        Py_UNREACHABLE();
+        return item8_count_char_no_maxcount((const uint64_t *)s, n, needle->u64);
     }
-    if (mode == FAST_COUNT) {
-        return res;
+    Py_UNREACHABLE();
+}
+
+/* Compare item i of the one-dimensional view with value. fmt is the format
+   of view as returned by adjust_fmt(). Return as PyObject_RichCompareBool().
+
+   Unlike memoryview, this supports the 'w' format, which array.array exports
+   for Py_UCS4 items. */
+static int
+compare_item(const Py_buffer *view, const char *fmt, Py_ssize_t i,
+             PyObject *value)
+{
+    const char *ptr = (const char *)view->buf + i * view->strides[0];
+    ptr = ADJUST_PTR(ptr, view->suboffsets, 0);
+    PyObject *item;
+    if (fmt[0] == 'w' && fmt[1] == '\0'
+        && view->itemsize == (Py_ssize_t)sizeof(Py_UCS4))
+    {
+        Py_UCS4 u;
+        memcpy(&u, ptr, sizeof(u));
+        item = PyUnicode_FromOrdinal(u);
     }
-    return res < 0 ? -1 : start + res;
+    else {
+        item = unpack_single(ptr, fmt);
+    }
+    if (item == NULL) {
+        return -1;
+    }
+    int cmp = PyObject_RichCompareBool(item, value, Py_EQ);
+    Py_DECREF(item);
+    return cmp;
 }
 
 /* Get the buffer of obj, which must have one dimension. Return -1 with an
-   exception set on error. */
+   exception set on error.
+
+   The buffer is held for the whole search, so a comparison which tries to
+   resize obj or release it raises BufferError. */
 static int
 get_items_buffer(PyObject *obj, Py_buffer *view)
 {
@@ -1224,97 +1250,92 @@ get_items_buffer(PyObject *obj, Py_buffer *view)
     return 0;
 }
 
-/* Unpack an item of view for comparing it with a value. Unlike memoryview,
-   this supports the 'w' format, which array.array exports for Py_UCS4
-   items. */
-static PyObject *
-unpack_search_item(const Py_buffer *view, const char *ptr, const char *fmt)
-{
-    if (fmt[0] == 'w' && fmt[1] == '\0'
-        && view->itemsize == (Py_ssize_t)sizeof(Py_UCS4))
-    {
-        Py_UCS4 u;
-        memcpy(&u, ptr, sizeof(u));
-        return PyUnicode_FromOrdinal(u);
-    }
-    return unpack_item(ptr, fmt);
-}
-
-/* Compare items [start, stop) of the one-dimensional view with value as
-   objects in mode (FAST_SEARCH or FAST_COUNT). Return as fast_search_items(),
-   or -2 with an exception set on error. */
 static Py_ssize_t
-compare_items(const Py_buffer *view, PyObject *value,
-              Py_ssize_t start, Py_ssize_t stop, int mode)
+find_item(const Py_buffer *view, PyObject *value,
+          Py_ssize_t start, Py_ssize_t stop)
 {
-    Py_ssize_t count = 0;
     if (start >= stop) {
-        return mode == FAST_COUNT ? 0 : -1;
+        return -1;
     }
+    item_needle needle;
+    switch (pack_needle(view, value, &needle)) {
+    case 0:
+        return -1;
+    case 1: {
+        Py_ssize_t i = find_needle((const char *)view->buf
+                                   + start * view->itemsize,
+                                   stop - start, view->itemsize, &needle);
+        return i < 0 ? -1 : start + i;
+    }
+    }
+
     const char *fmt = view->format ? adjust_fmt(view) : "B";
     if (fmt == NULL) {
         return -2;
     }
     for (Py_ssize_t i = start; i < stop; i++) {
-        const char *ptr = (const char *)view->buf + i * view->strides[0];
-        ptr = ADJUST_PTR(ptr, view->suboffsets, 0);
-        PyObject *item = unpack_search_item(view, ptr, fmt);
-        if (item == NULL) {
-            return -2;
-        }
-        int cmp = PyObject_RichCompareBool(item, value, Py_EQ);
-        Py_DECREF(item);
-        if (cmp < 0) {
-            return -2;
-        }
-        if (cmp > 0) {
-            if (mode == FAST_SEARCH) {
-                return i;
-            }
-            count++;  // no overflow since count <= len(obj) <= PY_SSIZE_T_MAX
+        int cmp = compare_item(view, fmt, i, value);
+        if (cmp != 0) {
+            return cmp > 0 ? i : -2;
         }
     }
-    return mode == FAST_COUNT ? count : -1;
+    return -1;
 }
 
-/* Search items [start, stop) of obj for value in mode (FAST_SEARCH or
-   FAST_COUNT). Return the index of the first item equal to value, or -1 if
-   there is none, for FAST_SEARCH, the number of items equal to value for
-   FAST_COUNT, or -2 with an exception set on error.
-
-   The buffer is held for the whole search, so a comparison which tries to
-   resize obj or release it raises BufferError. */
 static Py_ssize_t
-search_items(PyObject *obj, PyObject *value,
-             Py_ssize_t start, Py_ssize_t stop, int mode)
+count_item(const Py_buffer *view, PyObject *value)
 {
-    assert(start >= 0);
-    Py_buffer view;
-    if (get_items_buffer(obj, &view) < 0) {
-        return -2;
+    Py_ssize_t n = view->shape[0];
+    if (n == 0) {
+        return 0;
     }
-    stop = Py_MIN(stop, view.shape[0]);
-    Py_ssize_t res = fast_search_items(&view, value, start, stop, mode);
-    if (res == -2) {
-        res = compare_items(&view, value, start, stop, mode);
+    item_needle needle;
+    switch (pack_needle(view, value, &needle)) {
+    case 0:
+        return 0;
+    case 1:
+        return count_needle(view->buf, n, view->itemsize, &needle);
     }
-    PyBuffer_Release(&view);
-    return res;
+
+    const char *fmt = view->format ? adjust_fmt(view) : "B";
+    if (fmt == NULL) {
+        return -1;
+    }
+    Py_ssize_t count = 0;
+    for (Py_ssize_t i = 0; i < n; i++) {
+        int cmp = compare_item(view, fmt, i, value);
+        if (cmp < 0) {
+            return -1;
+        }
+        count += cmp;  // no overflow since count <= n <= PY_SSIZE_T_MAX
+    }
+    return count;
 }
 
 Py_ssize_t
 _PyBuffer_FindItem(PyObject *obj, PyObject *value,
                    Py_ssize_t start, Py_ssize_t stop)
 {
-    return search_items(obj, value, start, stop, FAST_SEARCH);
+    assert(start >= 0);
+    Py_buffer view;
+    if (get_items_buffer(obj, &view) < 0) {
+        return -2;
+    }
+    Py_ssize_t i = find_item(&view, value, start, Py_MIN(stop, view.shape[0]));
+    PyBuffer_Release(&view);
+    return i;
 }
 
-Py_ssize_t
+PyObject *
 _PyBuffer_CountItem(PyObject *obj, PyObject *value)
 {
-    Py_ssize_t count = search_items(obj, value, 0, PY_SSIZE_T_MAX,
-                                    FAST_COUNT);
-    return count == -2 ? -1 : count;
+    Py_buffer view;
+    if (get_items_buffer(obj, &view) < 0) {
+        return NULL;
+    }
+    Py_ssize_t count = count_item(&view, value);
+    PyBuffer_Release(&view);
+    return count < 0 ? NULL : PyLong_FromSsize_t(count);
 }
 
 static inline Py_ssize_t
@@ -1970,7 +1991,7 @@ static const _Bool bool_false = 0;
    module syntax. This function is very sensitive to small changes. With this
    layout gcc automatically generates a fast jump table. */
 static inline PyObject *
-unpack_item(const char *ptr, const char *fmt)
+unpack_single(const char *ptr, const char *fmt)
 {
     unsigned long long llu;
     unsigned long lu;
@@ -2075,13 +2096,6 @@ err_format:
     PyErr_Format(PyExc_NotImplementedError,
         "memoryview: format %s not supported", fmt);
     return NULL;
-}
-
-static inline PyObject *
-unpack_single(PyMemoryViewObject *self, const char *ptr, const char *fmt)
-{
-    CHECK_RELEASED_AGAIN(self);
-    return unpack_item(ptr, fmt);
 }
 
 #define PACK_SINGLE(ptr, src, type) \
@@ -2434,7 +2448,7 @@ tolist_base(PyMemoryViewObject *self, const char *ptr, const Py_ssize_t *shape,
 
     for (i = 0; i < shape[0]; ptr+=strides[0], i++) {
         const char *xptr = ADJUST_PTR(ptr, suboffsets, 0);
-        item = unpack_single(self, xptr, fmt);
+        item = unpack_single(xptr, fmt);
         if (item == NULL) {
             Py_DECREF(lst);
             return NULL;
@@ -2502,7 +2516,7 @@ memoryview_tolist_impl(PyMemoryViewObject *self)
     if (fmt == NULL)
         return NULL;
     if (view->ndim == 0) {
-        return unpack_single(self, view->buf, fmt);
+        return unpack_single(view->buf, fmt);
     }
     else if (view->ndim == 1) {
         return tolist_base(self, view->buf, view->shape,
@@ -2726,7 +2740,7 @@ memory_item(PyObject *_self, Py_ssize_t index)
         char *ptr = ptr_from_index(view, index);
         if (ptr == NULL)
             return NULL;
-        return unpack_single(self, ptr, fmt);
+        return unpack_single(ptr, fmt);
     }
 
     PyErr_SetString(PyExc_NotImplementedError,
@@ -2757,7 +2771,9 @@ memory_item_multi(PyMemoryViewObject *self, PyObject *tup)
     ptr = ptr_from_tuple(view, tup);
     if (ptr == NULL)
         return NULL;
-    return unpack_single(self, ptr, fmt);
+    // ptr_from_tuple() can call __index__(), which can release the view.
+    CHECK_RELEASED_AGAIN(self);
+    return unpack_single(ptr, fmt);
 }
 
 static inline int
@@ -2845,7 +2861,7 @@ memory_subscript(PyObject *_self, PyObject *key)
             const char *fmt = adjust_fmt(view);
             if (fmt == NULL)
                 return NULL;
-            return unpack_single(self, view->buf, fmt);
+            return unpack_single(view->buf, fmt);
         }
         else if (key == Py_Ellipsis) {
             return Py_NewRef(self);
@@ -3044,11 +3060,7 @@ memoryview_count_impl(PyMemoryViewObject *self, PyObject *value)
 {
     CHECK_RELEASED(self);
 
-    Py_ssize_t count = _PyBuffer_CountItem(_PyObject_CAST(self), value);
-    if (count < 0) {
-        return NULL;
-    }
-    return PyLong_FromSsize_t(count);
+    return _PyBuffer_CountItem(_PyObject_CAST(self), value);
 }
 
 
@@ -3765,7 +3777,7 @@ memoryiter_next(PyObject *self)
         if (ptr == NULL) {
             return NULL;
         }
-        return unpack_single(seq, ptr, it->it_fmt);
+        return unpack_single(ptr, it->it_fmt);
     }
 
     it->it_seq = NULL;

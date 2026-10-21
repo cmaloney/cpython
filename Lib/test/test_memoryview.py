@@ -949,22 +949,20 @@ class OtherTest(unittest.TestCase):
             complex_view[0] = 1e300j
         self.assertEqual(complex_view[0], 123+321j)
 
-    def test_index_count_released_during_compare(self):
-        for search in (memoryview.index, memoryview.count):
-            with self.subTest(search=search.__name__):
-                m = memoryview(array.array('d', [1.0, 2.0, 3.0]))
+    def test_search_released_during_compare(self):
+        # The buffer is held while searching, so a comparison cannot release
+        # the memoryview. Leaving the with block fails if it is still held.
+        for name in 'index', 'count':
+            with memoryview(array.array('d', [1.0, 2.0, 3.0])) as m:
                 class Release:
                     def __eq__(self, other):
                         m.release()
                         return False
-                with self.assertRaises(BufferError):
-                    search(m, Release())
-                m.release()  # The buffer was released.
+                with self.assertRaises(BufferError, msg=name):
+                    getattr(m, name)(Release())
 
 
 class SearchTest(seq_tests.NativeItemsSearchTest, unittest.TestCase):
-    search_formats = 'bBhHiIlLqQnNPefd?c'
-
     def search_sequences(self, fmt, raw):
         mv = memoryview(raw).cast(fmt)
         return [
