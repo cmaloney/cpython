@@ -386,7 +386,7 @@ static void
 buffered_unlock_io(buffered *self)
 {
     assert(self->inflight == 0);
-    _PyRecursiveMutex_Unlock(&self->io);
+    nibbler_role_unlock(&self->io);
 }
 
 /* Take the I/O role.  Returns IO_TAKEN, IO_WAITED (the critical section
@@ -401,7 +401,7 @@ buffered_take_io(buffered *self)
     if (buffered_trylock_io(self)) {
         return IO_TAKEN;
     }
-    if (_PyRecursiveMutex_IsLockedByCurrentThread(&self->io)) {
+    if (nibbler_role_mine(&self->io)) {
         return IO_MINE;
     }
     return buffered_lock_io(self) < 0 ? -1 : IO_WAITED;
@@ -1159,13 +1159,13 @@ rec_set_state(record *rec, uint8_t state)
 static inline void
 rec_unlock(record *rec)
 {
-    _PyRecursiveMutex_Unlock(&rec->lock);
+    nibbler_role_unlock(&rec->lock);
 }
 
 static inline int
 rec_is_mine(record *rec)
 {
-    return _PyRecursiveMutex_IsLockedByCurrentThread(&rec->lock);
+    return nibbler_role_mine(&rec->lock);
 }
 
 /* Take rec's lock (not interrupted).  Taken over from a holder gone while
@@ -1456,7 +1456,7 @@ gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
            signal handler in this stream's write-out. */
         hold = hold ? hold : Py_NewRef(rec);
         int e = 0;
-        if (!_PyRecursiveMutex_IsLockedByCurrentThread(&self->io)) {
+        if (!nibbler_role_mine(&self->io)) {
             PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
             e = gather_end(self, rec, out, NULL);
             nibbler_end(held);
@@ -1876,7 +1876,7 @@ gather_finalize(PyObject *op)
     Py_ssize_t dropped = 0;
     /* Code of this thread holding the I/O role further up its stack may
        be in the middle of something: the data is dropped then. */
-    if (!_PyRecursiveMutex_IsLockedByCurrentThread(&self->io)) {
+    if (!nibbler_role_mine(&self->io)) {
         PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
         (void)gather_end(self, rec, -1, &dropped);
         nibbler_end(held);

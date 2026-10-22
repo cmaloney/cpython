@@ -285,7 +285,7 @@ conf_publish(textio *self, tconf **cf, int start)
         FT_ATOMIC_STORE_CHAR_RELAXED(self->encoder_used, 0);
     }
     *cf = conf_swap(self, *cf);
-    _PyRecursiveMutex_Unlock(&self->elock);
+    nibbler_role_unlock(&self->elock);
     return 0;
 }
 
@@ -381,7 +381,7 @@ textio_check_closed(textio *self, tconf *cf)
 static int
 textio_lock(textio *self)
 {
-    if (_PyRecursiveMutex_IsLockedByCurrentThread(&self->rlock)) {
+    if (nibbler_role_mine(&self->rlock)) {
         _PyRecursiveMutex_Lock(&self->rlock);
         return 0;
     }
@@ -415,7 +415,7 @@ textio_refuse_nested(textio *self, int busy)
 static void
 textio_leave(textio *self)
 {
-    _PyRecursiveMutex_Unlock(&self->rlock);
+    nibbler_role_unlock(&self->rlock);
 }
 
 static int
@@ -1793,7 +1793,7 @@ decoder_more(textio *self, tstore *st, int *stop, int taken,
            buffer's locks, for a write, which holds elock while it waits for
            them: its encoder is past the start already.) */
         int r = encoder_reset_locked(self, self->conf->encoder, 0);
-        _PyRecursiveMutex_Unlock(&self->elock);
+        nibbler_role_unlock(&self->elock);
         if (r < 0) {
             return -1;
         }
@@ -2016,7 +2016,7 @@ text_read(textio *self, Py_ssize_t n, int line)
         if (res != NULL && !self->decoded) {
             FT_ATOMIC_STORE_UINT8_RELAXED(self->decoded, 1);
         }
-        _PyRecursiveMutex_Unlock(&self->rlock);
+        nibbler_role_unlock(&self->rlock);
         if (res != NULL || PyErr_Occurred()) {
             return res;
         }
@@ -2233,7 +2233,7 @@ text_encoder_store(textio *self, tconf *cf, PyObject *text, int final)
     }
     tconf *now = FT_ATOMIC_LOAD_PTR_ACQUIRE(self->conf);
     if (stateful && (now == NULL || now->encoder != cf->encoder)) {
-        _PyRecursiveMutex_Unlock(&self->elock);
+        nibbler_role_unlock(&self->elock);
         return 1;
     }
     if (final) {
@@ -2262,7 +2262,7 @@ text_encoder_store(textio *self, tconf *cf, PyObject *text, int final)
         r = r ? 0 : -1;
     }
     if (stateful) {
-        _PyRecursiveMutex_Unlock(&self->elock);
+        nibbler_role_unlock(&self->elock);
     }
     return r;
 }
@@ -2574,7 +2574,7 @@ text_moved(textio *self, Py_off_t pos, uint32_t flags)
         return -1;
     }
     int r = encoder_reset_locked(self, encoder, self->fresh);
-    _PyRecursiveMutex_Unlock(&self->elock);
+    nibbler_role_unlock(&self->elock);
     return r;
 }
 
@@ -3351,7 +3351,7 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
         textio_leave(self);
         return -1;
     }
-    _PyRecursiveMutex_Unlock(&self->elock);
+    nibbler_role_unlock(&self->elock);
     /* (The old settings are dropped once rlock is released.) */
     tconf *old = conf_swap(self, NULL);
     int r = -1;

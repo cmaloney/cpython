@@ -81,6 +81,38 @@ nibbler_role_gone(_PyRecursiveMutex *m, uint64_t gen)
     return !found;
 }
 
+/* Inline fast paths of _PyRecursiveMutex, which I/O takes per call: the
+   holder it records is the thread state's thread_id (the same
+   PyThread_get_thread_ident_ex()). */
+static inline int
+nibbler_role_mine(_PyRecursiveMutex *m)
+{
+    return (_Py_atomic_load_ullong_relaxed(&m->thread)
+            == _PyThreadState_GET()->thread_id);
+}
+
+static inline int
+nibbler_role_lockfast(_PyRecursiveMutex *m)
+{
+    if (!PyMutex_LockFast(&m->mutex)) {
+        return 0;
+    }
+    _Py_atomic_store_ullong_relaxed(&m->thread,
+                                    _PyThreadState_GET()->thread_id);
+    return 1;
+}
+
+static inline void
+nibbler_role_unlock(_PyRecursiveMutex *m)
+{
+    if (m->level > 0) {
+        m->level--;
+        return;
+    }
+    _Py_atomic_store_ullong_relaxed(&m->thread, 0);
+    PyMutex_Unlock(&m->mutex);
+}
+
 /* With m just taken: record the fork generation.  Returns 1 if it is a
    newer one. */
 static inline int
@@ -98,7 +130,7 @@ Py_NO_INLINE static int
 nibbler_role_wait(_PyRecursiveMutex *m, uint64_t *gen, PyObject *obj,
                   int interruptible)
 {
-    if (_PyRecursiveMutex_IsLockedByCurrentThread(m)) {
+    if (nibbler_role_mine(m)) {
         /* (By the type's name when repr() fails, as for an object not set
            up yet.) */
         PyObject *repr = PyObject_Repr(obj);
@@ -141,9 +173,7 @@ static inline int
 nibbler_role_lock(_PyRecursiveMutex *m, uint64_t *gen, PyObject *obj,
                   int interruptible)
 {
-    if (!_PyRecursiveMutex_IsLockedByCurrentThread(m)
-        && _PyRecursiveMutex_LockTimed(m, 0, 0) == PY_LOCK_ACQUIRED)
-    {
+    if (nibbler_role_lockfast(m)) {
         return nibbler_role_taken(gen);
     }
     return nibbler_role_wait(m, gen, obj, interruptible);
@@ -154,12 +184,7 @@ nibbler_role_lock(_PyRecursiveMutex *m, uint64_t *gen, PyObject *obj,
 static inline int
 nibbler_role_trylock(_PyRecursiveMutex *m, uint64_t *gen)
 {
-    if (_PyRecursiveMutex_IsLockedByCurrentThread(m)
-        || _PyRecursiveMutex_LockTimed(m, 0, 0) != PY_LOCK_ACQUIRED)
-    {
-        return 0;
-    }
-    return 1 + nibbler_role_taken(gen);
+    return nibbler_role_lockfast(m) ? 1 + nibbler_role_taken(gen) : 0;
 }
 
 static inline int
