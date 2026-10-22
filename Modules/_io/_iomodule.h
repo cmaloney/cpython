@@ -111,23 +111,24 @@ extern int _PyFileIO_regular(PyObject *self);
 #define _PyIO_NIBBLER_NO (-3)
 #define _PyIO_NIBBLER_BLOCKED (-4)
 #define _PyIO_NIBBLER_FULL (-5)
-/* Take the buffer's lock, and with io its I/O role too (reading more then
-   possible), and return the count of the unread bytes, at *p in *block
-   (borrowed).  Returns _PyIO_NIBBLER_NEEDIO (nothing held) when reading
-   needs the I/O role (pending writes first), and _PyIO_NIBBLER_NO when the
-   buffer has an instance dict (use its methods). */
+/* Take the buffer's I/O role (with io, writing out its pending writes
+   first, so that reading more is possible), and return the count of the
+   unread bytes, at *p in *block (borrowed).  Returns
+   _PyIO_NIBBLER_NEEDIO (nothing held) when reading needs io (pending
+   writes first), and _PyIO_NIBBLER_NO when the buffer has an instance
+   dict (use its methods). */
 extern Py_ssize_t _PyIONibbler_begin(PyObject *buffered, int io,
                                      PyObject **block, const char **p);
-extern void _PyIONibbler_end(PyObject *buffered, int io);
+extern void _PyIONibbler_end(PyObject *buffered);
 /* Held: take k of them, and return the rest as _PyIONibbler_begin(). */
 extern Py_ssize_t _PyIONibbler_view(PyObject *buffered, Py_ssize_t k,
                                     PyObject **block, const char **p);
-/* If the unread bytes start at p, with len of them at least, and can be
-   read without the I/O role, take k of them (one locked step).  Returns 1,
-   0 if not, or -1. */
+/* If the unread bytes start at p, with len of them at least, and the I/O
+   role is free, take k of them (one step in the buffer's critical
+   section).  Returns 1 or 0 if not. */
 extern int _PyIONibbler_take(PyObject *buffered, const char *p,
                              Py_ssize_t len, Py_ssize_t k);
-/* With the I/O role: read more after them (size more, unbuffered), keeping
+/* With io: read more after them (size more, unbuffered), keeping
    them in front.  Returns the count, 0 at EOF, _PyIO_NIBBLER_BLOCKED,
    _PyIO_NIBBLER_FULL when no more can be held, or -1. */
 extern Py_ssize_t _PyIONibbler_fill(PyObject *buffered, Py_ssize_t size);

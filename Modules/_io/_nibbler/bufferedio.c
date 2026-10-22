@@ -55,7 +55,7 @@ find_nibblermodule_state_by_def(PyTypeObject *type)
 }
 
 uint64_t _PyIO_nibbler_fork_gen;
-uint64_t _PyIO_nibbler_fork_holder;
+static uint64_t _PyIO_nibbler_fork_holder;
 
 /* Called by PyOS_AfterFork_Child() before any Python code runs. */
 void
@@ -206,19 +206,20 @@ morsels_take(morsel_list *l, char *dst, Py_ssize_t len)
  * else can see that part of it (bytes handed out, or a view a Python raw
  * stream kept, make it abandoned).
  *
- * Every field is used with `lock` held, but raw (and the fields the
- * getters read: capacity, block, dict), which are stored atomically.  The
- * I/O role `io` is taken before the lock by everything that makes raw
- * calls; write() and flush() release the lock around their raw writes,
- * keeping the bytes in flight at the front of `list` (`inflight`), so that
- * other threads can only append meanwhile.
+ * Every field is used in the object's critical section, but raw (and the
+ * fields the getters read: capacity, block, dict), which are stored
+ * atomically.  Everything that makes raw calls takes the I/O role `io`
+ * too; the critical section is suspended while it is detached, where
+ * other threads find the role taken and wait for it, but that write() and
+ * flush() let them append to the pending writes meanwhile (`writing`),
+ * keeping the bytes in flight at the front of `list` (`inflight`).
  */
 
 typedef struct {
     PyObject_HEAD
     PyObject *raw;              /* NULL while uninitialized or detached */
-    nibbler_mutex lock;
-    nibbler_mutex io;
+    _PyRecursiveMutex io;
+    uint64_t io_gen;            /* see nibbler.h */
     Py_ssize_t capacity;        /* block size; 0: unbuffered */
     Py_ssize_t threshold;       /* pending bytes past which writes go out */
     Py_ssize_t ref_min;         /* exact bytes kept by reference from this */
@@ -247,10 +248,7 @@ typedef struct {
     uint8_t raw_appending;
     uint8_t raw_regular;
     uint8_t raw_open;           /* raw said it is open (see buffered_write) */
-    /* With the I/O role (the lock may be another thread's): a holder
-       of it that can never return was taken over, but its bytes in
-       flight could not be dropped yet. */
-    uint8_t drop_inflight;
+    uint8_t writing;            /* the I/O role's holder is in a raw write */
     uint8_t reading;            /* the data is read-ahead (and stash) */
     char finalizing;
     /* _gather() blocks write out themselves (see "Gathering"). */
@@ -300,8 +298,8 @@ buffered_unsupported(buffered *self, const char *msg)
     return NULL;
 }
 
-/* raw for code without the lock: a new reference (a concurrent detach()
-   leaves the caller with the stream it took). */
+/* raw for code outside the critical section: a new reference (a
+   concurrent detach() leaves the caller with the stream it took). */
 #ifdef Py_GIL_DISABLED
 #  define buffered_ref_raw(self) _Py_XGetRef(&(self)->raw)
 static PyObject *
@@ -334,115 +332,88 @@ buffered_get_raw(buffered *self)
 }
 
 /*
- * Locking (see nibbler.h)
+ * Locking (see nibbler.h): with the critical section held.
  */
 
-/* Take the lock (interruptible: a signal handler raising interrupts the
-   wait).  Returns 0 or -1. */
+/* Can the read-ahead be used without the I/O role, and with append, the
+   pending writes be appended to?  Not while another thread uses them
+   across raw calls. */
 static inline int
-buffered_lock_ex(buffered *self, int interruptible)
+buffered_io_free(buffered *self, int append)
 {
-    int r = nibbler_mutex_lock(&self->lock, (PyObject *)self, interruptible);
-    if (r > 0) {
-        /* A fork or a takeover: the raw stream may have moved. */
-        self->raw_pos = POS_UNKNOWN;
-    }
-    return r < 0 ? -1 : 0;
-}
-
-#define buffered_lock(self) buffered_lock_ex((self), 1)
-
-static inline void
-buffered_unlock(buffered *self)
-{
-    nibbler_mutex_unlock(&self->lock);
-}
-
-/* Lock again after a raw call made without the lock: not interrupted (a
-   signal handler runs later), keeping errno and the exception of a call
-   that failed. */
-static inline Py_ALWAYS_INLINE void
-buffered_relock(buffered *self, int failed)
-{
-    if (!failed) {
-        (void)buffered_lock_ex(self, 0);
-        return;
-    }
-    int errnum = errno;
-    PyObject *exc = PyErr_GetRaisedException();
-    (void)buffered_lock_ex(self, 0);
-    PyErr_SetRaisedException(exc);
-    errno = errnum;
+    return !nibbler_role_held(&self->io) || (append && self->writing);
 }
 
 /* The I/O role was taken from a holder that will never return from its raw
-   call: drop the bytes it was writing. */
+   call (drop the bytes it was writing), or first in the child of a fork:
+   the raw stream may have moved. */
 static void
 buffered_drop_inflight(buffered *self)
 {
     (void)morsels_consume(&self->list, self->inflight);
     self->inflight = 0;
-    self->drop_inflight = 0;
+    self->writing = 0;
     self->raw_pos = POS_UNKNOWN;
 }
 
-/* Take the I/O role, then the lock. */
+/* Take the I/O role (interruptible: a signal handler raising interrupts
+   the wait). */
 static int
-buffered_lock_io(buffered *self)
+buffered_lock_io_ex(buffered *self, int interruptible)
 {
-    int taken_over = nibbler_mutex_lock(&self->io, (PyObject *)self, 1);
-    if (taken_over < 0) {
-        return -1;
-    }
-    if (buffered_lock(self) < 0) {
-        /* A reentrant call while finalizing, or a wait interrupted: the
-           next holder of the I/O role drops them. */
-        self->drop_inflight |= taken_over;
-        nibbler_mutex_unlock(&self->io);
-        return -1;
-    }
-    if (taken_over || self->drop_inflight) {
+    int r = nibbler_role_lock(&self->io, &self->io_gen, (PyObject *)self,
+                              interruptible);
+    if (r > 0) {
         buffered_drop_inflight(self);
     }
-    return 0;
+    return r < 0 ? -1 : 0;
 }
+
+/* Take the I/O role if that needs no wait. */
+static int
+buffered_trylock_io(buffered *self)
+{
+    int r = nibbler_role_trylock(&self->io, &self->io_gen);
+    if (r > 1) {
+        buffered_drop_inflight(self);
+    }
+    return r > 0;
+}
+
+#define buffered_lock_io(self) buffered_lock_io_ex((self), 1)
 
 static void
 buffered_unlock_io(buffered *self)
 {
     assert(self->inflight == 0);
-    nibbler_mutex_unlock(&self->io);
-    buffered_unlock(self);
+    _PyRecursiveMutex_Unlock(&self->io);
 }
 
-/* With the lock: take the I/O role too.  Returns IO_TAKEN, IO_WAITED (the
-   lock was released meanwhile: anything may have changed), IO_MINE (this
+/* Take the I/O role.  Returns IO_TAKEN, IO_WAITED (the critical section
+   was suspended meanwhile: anything may have changed), IO_MINE (this
    thread writes out further up its stack, as when a signal handler
-   writes), or -1 with neither held. */
+   writes), or -1. */
 enum { IO_TAKEN, IO_WAITED, IO_MINE };
 
 static int
 buffered_take_io(buffered *self)
 {
-    if (nibbler_mutex_trylock(&self->io)) {
-        if (self->drop_inflight) {
-            buffered_drop_inflight(self);
-        }
+    if (buffered_trylock_io(self)) {
         return IO_TAKEN;
     }
-    if (nibbler_mutex_is_mine(&self->io)) {
+    if (_PyRecursiveMutex_IsLockedByCurrentThread(&self->io)) {
         return IO_MINE;
     }
-    buffered_unlock(self);
     return buffered_lock_io(self) < 0 ? -1 : IO_WAITED;
 }
 
 /*
- * Raw stream calls (with the lock and the I/O role, but where noted)
+ * Raw stream calls (with the critical section and the I/O role, but where
+ * noted)
  */
 
-/* Is raw closed?  1, 0 or -1.  Without the lock too (raw: a reference
-   taken with buffered_ref_raw()). */
+/* Is raw closed?  1, 0 or -1.  Outside the critical section too (raw: a
+   reference taken with buffered_ref_raw()). */
 static int
 buffered_ref_closed(PyObject *raw)
 {
@@ -630,7 +601,8 @@ buffered_raw_read(buffered *self, char *dst, Py_ssize_t len, PyObject *memobj,
 /* One raw write of spans[0:cnt] (total bytes, inside objs, see
    buffered_memory_view()): one writev() to an exact FileIO, else write()
    of one span or _writev() of views of them.  Returns the count,
-   WOULD_BLOCK (errno set) or -1.  Without the lock. */
+   WOULD_BLOCK (errno set) or -1.  Maybe outside the critical section (a
+   _gather() block's). */
 Py_NO_INLINE static Py_ssize_t
 buffered_raw_writev_py(buffered *self, const _PyIO_Span *spans,
                        PyObject *const *objs, Py_ssize_t cnt,
@@ -756,7 +728,7 @@ buffered_position(buffered *self, Py_ssize_t gathered)
 }
 
 /*
- * Blocks and pending writes (with the lock)
+ * Blocks and pending writes (in the critical section)
  */
 
 /* Replace the block with block (a new reference, or NULL). */
@@ -782,7 +754,7 @@ buffered_append_to(buffered *self, morsel_list *l, PyObject **block,
     if (len == 0) {
         return 0;
     }
-    /* (Atomic: _gather() blocks append without the lock.) */
+    /* (Atomic: _gather() blocks append outside the critical section.) */
     if (len >= REF_MIN
         && (len >= FT_ATOMIC_LOAD_SSIZE_RELAXED(self->ref_min)
             || len > FT_ATOMIC_LOAD_SSIZE_RELAXED(self->capacity))
@@ -827,15 +799,16 @@ buffered_append_to(buffered *self, morsel_list *l, PyObject **block,
 /* Write spans[0:cnt] (total bytes) to the raw stream, retrying partial
    writes, until all of it is written (0), the raw stream would block
    (WOULD_BLOCK) or an error is raised (-1); *written gets the count.  With
-   unlocked, without the lock meanwhile; -1: called without it (and the raw
+   share, other threads may append to the pending writes meanwhile; -1:
+   for a _gather() block, maybe without the critical section (and the raw
    position, see "Gathering"). */
 static inline Py_ALWAYS_INLINE int
 buffered_write_spans(buffered *self, _PyIO_Span *spans, PyObject **objs,
-                     Py_ssize_t cnt, Py_ssize_t total, int unlocked,
+                     Py_ssize_t cnt, Py_ssize_t total, int share,
                      Py_ssize_t *written)
 {
-    if (unlocked > 0) {
-        buffered_unlock(self);
+    if (share > 0) {
+        self->writing = 1;
     }
     Py_ssize_t done = 0;
     int st = 0;
@@ -860,18 +833,18 @@ buffered_write_spans(buffered *self, _PyIO_Span *spans, PyObject **objs,
         spans->ptr += r;
         spans->len -= r;
         /* A partial write may come from a signal: run its handlers before
-           blocking again.  Without the lock, a handler writing to this
-           object queues its data (gh-118143).  (A _gather() block's
+           blocking again.  A handler writing to this object while others
+           may append queues its data (gh-118143).  (A _gather() block's
            write-out, with its record's lock, runs them after.) */
-        if (unlocked >= 0 && PyErr_CheckSignals() < 0) {
+        if (share >= 0 && PyErr_CheckSignals() < 0) {
             st = -1;
             break;
         }
     }
-    if (unlocked > 0) {
-        buffered_relock(self, st != 0);
+    if (share > 0) {
+        self->writing = 0;
     }
-    if (unlocked >= 0) {
+    if (share >= 0) {
         self->raw_pos += done;
     }
     *written = done;
@@ -882,12 +855,11 @@ buffered_write_spans(buffered *self, _PyIO_Span *spans, PyObject **objs,
    (inside obj), in batches of as many pieces as one raw call takes, until
    all is written, the raw stream would block or raises: *status 0,
    WOULD_BLOCK or -1.  Returns how much of data was written.  With the
-   lock and the I/O role; with unlocked, the lock is released around raw
-   calls (other threads can only append then).  Written bytes are dropped
-   as they go, the rest stays pending. */
+   I/O role; with share, other threads may append meanwhile.  Written
+   bytes are dropped as they go, the rest stays pending. */
 static Py_ssize_t
 buffered_write_out(buffered *self, Py_ssize_t target, PyObject *obj,
-                   const char *data, Py_ssize_t len, int unlocked,
+                   const char *data, Py_ssize_t len, int share,
                    int *status)
 {
     Py_ssize_t done = 0;
@@ -935,7 +907,7 @@ buffered_write_out(buffered *self, Py_ssize_t target, PyObject *obj,
             total += len - done;
         }
         Py_ssize_t written;
-        st = buffered_write_spans(self, spans, objs, cnt, total, unlocked,
+        st = buffered_write_spans(self, spans, objs, cnt, total, share,
                                   &written);
         for (Py_ssize_t i = 0; i < held; i++) {
             Py_DECREF(objs[i]);
@@ -967,13 +939,13 @@ buffered_set_blocking_error(Py_ssize_t written)
     }
 }
 
-/* Write out everything pending (with unlocked, what was pending at the
+/* Write out everything pending (with share, what was pending at the
    start); BlockingIOError if the raw stream would block. */
 static int
-buffered_flush_writes(buffered *self, int unlocked)
+buffered_flush_writes(buffered *self, int share)
 {
     int st;
-    (void)buffered_write_out(self, self->list.nbytes, NULL, NULL, 0, unlocked,
+    (void)buffered_write_out(self, self->list.nbytes, NULL, NULL, 0, share,
                              &st);
     if (st == WOULD_BLOCK) {
         buffered_set_blocking_error(0);
@@ -1058,10 +1030,10 @@ buffered_rewind(buffered *self)
 
 /* Bring the raw stream to the logical position. */
 static int
-buffered_sync(buffered *self, int unlocked)
+buffered_sync(buffered *self, int share)
 {
     return self->reading ? buffered_rewind(self)
-                         : buffered_flush_writes(self, unlocked);
+                         : buffered_flush_writes(self, share);
 }
 
 
@@ -1077,23 +1049,23 @@ buffered_sync(buffered *self, int unlocked)
  * Context runs in one thread at a time.  A block nested in one on the same
  * stream and context gathers into that one.
  *
- * At its end, a block whose stream's lock is free (taken without waiting)
- * moves its record to the pending writes under it, as a write that fits
- * adds its data, and writes them out when they no longer fit if the I/O
- * role is free too: no system call per block.  When the lock is busy, the
- * block writes its record out itself, with one writev() and only the
- * record's lock, when the stream is a BufferedWriter of an exact FileIO of
+ * At its end, a block whose stream no other thread uses across raw calls
+ * (but to write out) moves its record to the pending writes, as a write
+ * that fits adds its data, and writes them out when they no longer fit if
+ * the I/O role is free: no system call per block.  Else the block writes
+ * its record out itself, with one writev() and only the record's lock,
+ * when the stream is a BufferedWriter of an exact FileIO of
  * a regular file with no pending writes: POSIX makes writes to a regular
  * file atomic with respect to each other, so the kernel orders it against
  * the other threads' writes.  (The stream no longer keeps the raw position
  * then, which these writes move.)  Otherwise, the record is moved to the
- * pending writes, waiting for the lock and the I/O role:
+ * pending writes, waiting for the I/O role:
  * - pending writes may have been written before the block ended, and
  *   must come first;
  * - a read-ahead is ahead of the logical position, where data goes;
  * - pipes, sockets and terminals may split a large write, and Python raw
  *   streams are no help at all (nor is asking whether they are closed
- *   with the lock alone).
+ *   without the I/O role).
  * A record is also moved once it holds `limit` bytes (and there is no
  * read-ahead), and before an operation of its context needs the position
  * (reads, seek(), truncate()).  close(), detach() and __init__(), from any
@@ -1112,7 +1084,7 @@ buffered_sync(buffered *self, int unlocked)
  * newline, the same way, keeping the partial line.  On error, what wasn't
  * written stays for the next write-out.
  *
- * The stream lists its records with the lock held, and counts them
+ * The stream lists its records with the I/O role, and counts them
  * (ngather): every write and read checks the count, which is all
  * operations outside blocks pay.  A record stays listed when its block
  * ends, for the next block of its context, until an operation with the
@@ -1125,11 +1097,12 @@ buffered_sync(buffered *self, int unlocked)
 
 typedef struct record {
     PyObject_HEAD
-    nibbler_mutex lock;         /* for the fields below, but next */
+    _PyRecursiveMutex lock;     /* for the fields below, but next */
+    uint64_t lock_gen;          /* see nibbler.h */
     buffered *stream;           /* borrowed; NULL once it is freed */
     PyObject *ctx;              /* borrowed: the context it is for */
     PyObject *raw;              /* borrowed: the block's raw stream */
-    struct record *next;        /* in the stream's list (with its lock) */
+    struct record *next;        /* in the stream's list (with its role) */
     morsel_list list;
     PyObject *block;            /* small writes are copied to block[used:] */
     Py_ssize_t used;
@@ -1143,7 +1116,7 @@ typedef struct record {
     uint64_t tid, gen;          /* the block's thread, fork generation */
 } record;
 
-/* Listed but for REC_FREE; changed from or to it with both locks. */
+/* Listed but for REC_FREE; changed from or to it with both roles. */
 enum { REC_FREE, REC_IDLE, REC_ACTIVE, REC_PENDING, REC_WRITING };
 
 typedef struct gather {
@@ -1186,7 +1159,13 @@ rec_set_state(record *rec, uint8_t state)
 static inline void
 rec_unlock(record *rec)
 {
-    nibbler_mutex_unlock(&rec->lock);
+    _PyRecursiveMutex_Unlock(&rec->lock);
+}
+
+static inline int
+rec_is_mine(record *rec)
+{
+    return _PyRecursiveMutex_IsLockedByCurrentThread(&rec->lock);
 }
 
 /* Take rec's lock (not interrupted).  Taken over from a holder gone while
@@ -1195,7 +1174,8 @@ rec_unlock(record *rec)
 static int
 rec_lock(record *rec)
 {
-    int r = nibbler_mutex_lock(&rec->lock, (PyObject *)rec->stream, 0);
+    int r = nibbler_role_lock(&rec->lock, &rec->lock_gen,
+                              (PyObject *)rec->stream, 0);
     if (r > 0 && rec->state == REC_WRITING) {
         morsels_clear(&rec->list);
         rec_set_state(rec, REC_IDLE);
@@ -1268,7 +1248,7 @@ gather_lookup(buffered *self, PyThreadState *ts, PyObject *var)
     return (record *)rec;
 }
 
-/* Without the lock: the current context's record, or NULL. */
+/* Outside the critical section: the current context's record, or NULL. */
 static inline record *
 gather_current(buffered *self)
 {
@@ -1285,7 +1265,7 @@ gather_current(buffered *self)
     return gather_lookup(self, ts, var);
 }
 
-/* With both locks and no read-ahead: move what rec gathered to the
+/* With rec's lock too, and no read-ahead: move what rec gathered to the
    pending writes (its first n bytes, copied, if fewer).  On error, rec
    keeps the rest. */
 static int
@@ -1317,11 +1297,11 @@ gather_move(buffered *self, record *rec, Py_ssize_t n)
     return 0;
 }
 
-/* With the lock and the I/O role, for an operation needing the position
-   on an open stream: move what the current context's record gathered,
-   and what ended blocks could not move (with all, every record's data,
-   doing their deferred flush, see above), and unlist idle records (all
-   that is done with all -1, with the lock alone).  The read-ahead is
+/* With the I/O role, for an operation needing the position on an open
+   stream: move what the current context's record gathered, and what
+   ended blocks could not move (with all, every record's data, doing their
+   deferred flush, see above), and unlist idle records (all that is done
+   with all -1).  The read-ahead is
    handed back first, so that no raw call (Python code) runs while the
    list is walked. */
 Py_NO_INLINE static int
@@ -1427,14 +1407,12 @@ gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
     record *rec = gather_current(self);
     /* (A signal handler run while its block writes it out writes as
        usual.) */
-    if (rec == NULL || rec_state(rec) != REC_ACTIVE
-        || nibbler_mutex_is_mine(&rec->lock))
-    {
+    if (rec == NULL || rec_state(rec) != REC_ACTIVE || rec_is_mine(rec)) {
         return 1;
     }
     /* The block's raw stream lives while rec is active and locked.  But
        for an exact FileIO, its closed is asked before rec's lock, with rec
-       referenced: Python code may wait for this stream's lock, which
+       referenced: Python code may wait for this stream's I/O role, which
        close(), detach() or __init__() hold waiting for rec's. */
     PyObject *raw = FT_ATOMIC_LOAD_PTR_RELAXED(self->raw), *hold = NULL;
     int r = 0;
@@ -1477,9 +1455,12 @@ gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
            it, anything else raised now (all of data accepted).  Not from a
            signal handler in this stream's write-out. */
         hold = hold ? hold : Py_NewRef(rec);
-        int e = (nibbler_mutex_is_mine(&self->io)
-                 || nibbler_mutex_is_mine(&self->lock)
-                 ? 0 : gather_end(self, rec, out, NULL));
+        int e = 0;
+        if (!_PyRecursiveMutex_IsLockedByCurrentThread(&self->io)) {
+            PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
+            e = gather_end(self, rec, out, NULL);
+            nibbler_end(held);
+        }
         if (e < 0 && PyErr_Occurred()
             && !PyErr_ExceptionMatches(PyExc_OSError))
         {
@@ -1490,19 +1471,17 @@ gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
             PyErr_Clear();
         }
     }
-    else if (full && !nibbler_mutex_is_mine(&self->lock)) {
+    else if (full) {
         /* (Kept on error, which says all of data was accepted: moved at
            the next write or the end.) */
-        if (buffered_lock_ex(self, 0) < 0) {
-            r = -1;
-        }
-        else {
-            if (!self->reading && rec_lock(rec) == 0) {
+        PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
+        if (rec_lock(rec) == 0) {
+            if (!self->reading && buffered_io_free(self, 1)) {
                 r = gather_move(self, rec, PY_SSIZE_T_MAX);
-                rec_unlock(rec);
             }
-            buffered_unlock(self);
+            rec_unlock(rec);
         }
+        nibbler_end(held);
         if (r < 0) {
             buffered_set_written(len);
         }
@@ -1511,26 +1490,7 @@ gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
     return r;
 }
 
-/* Take the I/O role and the lock, not interrupted: the data a block
-   gathered was accepted. */
-static int
-gather_lock(buffered *self)
-{
-    int t = nibbler_mutex_lock(&self->io, (PyObject *)self, 0);
-    if (t < 0) {
-        return -1;
-    }
-    if (buffered_lock_ex(self, 0) < 0) {
-        nibbler_mutex_unlock(&self->io);
-        return -1;
-    }
-    if (t > 0 || self->drop_inflight) {
-        buffered_drop_inflight(self);
-    }
-    return 0;
-}
-
-/* With the lock and the I/O role, after a block's data was moved: write
+/* With the I/O role, after a block's data was moved: write
    out the pending writes if they don't fit (all of them after a deferred
    flush()); what would block stays pending, but for flush().  Returns 0
    or -1. */
@@ -1550,36 +1510,29 @@ gather_write_out(buffered *self, int flush)
     return st == -1 || (st != 0 && flush) ? -1 : 0;
 }
 
-/* End rec's block by moving its data to the pending writes with the lock
-   taken without waiting, as a write that fits would add it (and the I/O
-   role when they don't fit then).  Returns 1 when the lock is busy (or
-   the I/O role is, for a deferred flush() or twice the threshold), or the
+/* End rec's block by moving its data to the pending writes, as a write
+   that fits would add it (and with the I/O role when they don't fit then,
+   if free).  Returns 1 when another thread uses them across raw calls (or
+   has the I/O role, for a deferred flush() or twice the threshold), or the
    stream needs more than that (a read-ahead to hand back, a raw stream
    other than an exact FileIO to ask whether it is closed), else 0 or -1
    (rec keeps what it couldn't move, as gather_end() does). */
 static int
 gather_splice(buffered *self, record *rec)
 {
-    if (!nibbler_mutex_trylock(&self->lock)) {
-        return 1;
-    }
-    if (self->raw == NULL || !self->raw_fileio || self->reading
-        || _PyFileIO_closed(self->raw) || nibbler_mutex_is_mine(&rec->lock)
-        || rec_lock(rec) < 0)
-    {
-        buffered_unlock(self);
+    if (rec_is_mine(rec) || rec_lock(rec) < 0) {
         return 1;
     }
     int flush = rec->flush, io = 0;
     Py_ssize_t over = self->list.nbytes + rec->list.nbytes - self->threshold;
-    if (rec->state != REC_ACTIVE) {
+    if (rec->state != REC_ACTIVE || self->raw == NULL || !self->raw_fileio
+        || self->reading || !buffered_io_free(self, 1)
+        || _PyFileIO_closed(self->raw))
+    {
         goto busy;
     }
     if (over > 0 || flush) {
-        io = nibbler_mutex_trylock(&self->io);
-        if (io && self->drop_inflight) {
-            buffered_drop_inflight(self);
-        }
+        io = buffered_trylock_io(self);
         /* (Without the role, too much pending waits for it.) */
         if (!io && (flush || over > self->threshold)) {
             goto busy;
@@ -1592,13 +1545,11 @@ gather_splice(buffered *self, record *rec)
         r = gather_write_out(self, flush);
     }
     if (io) {
-        nibbler_mutex_unlock(&self->io);
+        buffered_unlock_io(self);
     }
-    buffered_unlock(self);
     return r;
 busy:
     rec_unlock(rec);
-    buffered_unlock(self);
     return 1;
 }
 
@@ -1677,14 +1628,15 @@ gather_direct(buffered *self, record *rec, Py_ssize_t n)
 }
 
 /* End rec's block (n < 0): write it out directly (see above), else move
-   it to the pending writes with the I/O role and the lock, then write
+   it to the pending writes with the I/O role, then write
    them out when they don't fit (all of them after a deferred flush()); or
    drop it when the stream is closed or detached (*dropped: how many bytes;
    ValueError if any, or a deferred flush).  What can't be moved stays,
    pending (moved by the next operation needing the position, close(),
    detach() or __init__()).  With n >= 0, write out the first n bytes of
-   the active block the same way (kept if closed; dropped is NULL).
-   Returns 0, or -1 (with an exception set but when dropping or keeping). */
+   the active block the same way (kept if closed; dropped is NULL).  With
+   the critical section.  Returns 0, or -1 (with an exception set but when
+   dropping or keeping). */
 static int
 gather_end(buffered *self, record *rec, Py_ssize_t n, Py_ssize_t *dropped)
 {
@@ -1705,7 +1657,8 @@ gather_end(buffered *self, record *rec, Py_ssize_t n, Py_ssize_t *dropped)
         return 0;
     }
     PyObject *exc = r < 0 ? PyErr_GetRaisedException() : NULL;
-    int locked = gather_lock(self) == 0;
+    /* Not interrupted: the data a block gathered was accepted. */
+    int locked = buffered_lock_io_ex(self, 0) == 0;
     int closed = (!locked ? 0 : self->raw == NULL ? 1
                   : buffered_is_closed(self));
     r = locked ? 0 : -1;
@@ -1797,10 +1750,12 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
     }
     Py_XSETREF(g->raw, raw);
     /* The context's record: this block is in it if active; else made
-       active, without the lock while still listed.  (Referenced: the
+       active, without the I/O role while still listed.  (Referenced: the
        Python code run below may make the context drop it.) */
     record *rec = r == 0 ? gather_current(self) : NULL;
     Py_XINCREF(rec);
+    int state = REC_FREE;
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
     /* Its context's earlier writes first (see above), also what its
        records could not move. */
     if (r == 0 && g->direct && !(rec && rec_state(rec) == REC_ACTIVE)
@@ -1809,12 +1764,7 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
         r = buffered_sync(self, 1);
         buffered_unlock_io(self);
     }
-    int state = REC_FREE;
-    if (r == 0 && rec != NULL) {
-        if (rec_lock(rec) < 0) {
-            Py_DECREF(rec);
-            return NULL;
-        }
+    if (r == 0 && rec != NULL && (r = rec_lock(rec)) == 0) {
         state = rec->state;
         if (state == REC_IDLE) {
             rec_start(rec, g);
@@ -1828,18 +1778,17 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
             Py_XSETREF(rec, (record *)tp->tp_alloc(tp, 0));
             PyObject *token = rec ? PyContextVar_Set(self->gvar,
                                                      (PyObject *)rec) : NULL;
-            if (token == NULL) {
-                Py_XDECREF(rec);
-                return NULL;
+            r = token == NULL ? -1 : 0;
+            if (token != NULL) {
+                Py_DECREF(token);
+                rec->stream = self;
+                rec->ctx = tstate->context;
+                gather_remember(tstate, self->gvar, rec);
             }
-            Py_DECREF(token);
-            rec->stream = self;
-            rec->ctx = tstate->context;
-            gather_remember(tstate, self->gvar, rec);
         }
-        /* Listed with the lock, dropping idle records; written out
+        /* Listed with the I/O role, dropping idle records; written out
            directly from now on if the stream allows (see above). */
-        if ((r = buffered_lock_io(self)) == 0) {
+        if (r == 0 && (r = buffered_lock_io(self)) == 0) {
             r = (self->raw == NULL ? buffered_not_ready()
                  : buffered_check_closed(self, "gather on closed file"));
             if (r == 0 && self->ngather > 0) {
@@ -1874,6 +1823,7 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
             buffered_unlock_io(self);
         }
     }
+    nibbler_end(held);
     if (r < 0) {
         Py_XDECREF(rec);
         return NULL;
@@ -1898,9 +1848,14 @@ gather_exit(PyObject *op, PyObject *const *Py_UNUSED(args),
     }
     g->state = GATHER_DONE;
     Py_ssize_t dropped;
-    if (!g->joined && gather_end(g->stream, g->rec, -1, &dropped) < 0
-        && PyErr_Occurred())
-    {
+    int r = 0;
+    if (!g->joined) {
+        PyCriticalSection cs;
+        PyCriticalSection *held = nibbler_begin((PyObject *)g->stream, &cs);
+        r = gather_end(g->stream, g->rec, -1, &dropped);
+        nibbler_end(held);
+    }
+    if (r < 0 && PyErr_Occurred()) {
         return NULL;
     }
     Py_RETURN_FALSE;
@@ -1919,12 +1874,12 @@ gather_finalize(PyObject *op)
     record *rec = g->rec;
     PyObject *exc = PyErr_GetRaisedException();
     Py_ssize_t dropped = 0;
-    /* Code of this thread holding the locks further up its stack may be
-       in the middle of something: the data is dropped then. */
-    if (!nibbler_mutex_is_mine(&self->lock)
-        && !nibbler_mutex_is_mine(&self->io))
-    {
+    /* Code of this thread holding the I/O role further up its stack may
+       be in the middle of something: the data is dropped then. */
+    if (!_PyRecursiveMutex_IsLockedByCurrentThread(&self->io)) {
+        PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
         (void)gather_end(self, rec, -1, &dropped);
+        nibbler_end(held);
     }
     else if (rec_lock(rec) == 0) {
         dropped = rec->list.nbytes;
@@ -1933,7 +1888,7 @@ gather_finalize(PyObject *op)
         rec_unlock(rec);
     }
     PyErr_Clear();
-    /* Without the lock: the warning may write to the stream. */
+    /* Without the I/O role: the warning may write to the stream. */
     int w = dropped > 0
         ? PyErr_WarnFormat(PyExc_ResourceWarning, 1,
                            "_gather() block never ended: %zd gathered bytes "
@@ -2075,8 +2030,7 @@ buffered_write_in_place(buffered *self, const char *data, Py_ssize_t len)
     return 1;
 }
 
-/* write() past what fits, with the lock held: write out with the I/O
-   role, without the lock. */
+/* write() past what fits: write out with the I/O role. */
 Py_NO_INLINE static int
 buffered_write_slow(buffered *self, PyObject *obj, const char *data,
                     Py_ssize_t len, const char *closed_msg, int open_fileio)
@@ -2085,9 +2039,7 @@ buffered_write_slow(buffered *self, PyObject *obj, const char *data,
     if (t == IO_MINE) {
         /* From this thread's write out (a signal handler printing,
            gh-118143): queue it all, for that write out or the next. */
-        int r = buffered_append(self, obj, data, len);
-        buffered_unlock(self);
-        return r;
+        return buffered_append(self, obj, data, len);
     }
     if (t < 0) {
         return -1;
@@ -2098,7 +2050,7 @@ buffered_write_slow(buffered *self, PyObject *obj, const char *data,
         buffered_not_ready();
         goto end;
     }
-    /* (Not if the lock was held since write() found a FileIO open.) */
+    /* (Not if the role was free since write() found a FileIO open.) */
     if ((t == IO_WAITED || !open_fileio)
         && buffered_check_closed(self, closed_msg) < 0)
     {
@@ -2186,12 +2138,12 @@ end:
 }
 
 /* write() of data[0:len], inside obj (or NULL).  A write that fits is
-   queued with the lock alone, checking only that an exact FileIO is open:
-   other raw streams are asked through `closed` (a Python call costing
-   more than such a write) by operations taking the I/O role, and small
-   writes (under REF_MIN bytes) that fit go on trusting the last answer
-   (raw_open) until the buffer is full, freed, or another operation finds
-   raw closed.  Returns 0 or -1. */
+   queued without the I/O role, checking only that an exact FileIO is
+   open: other raw streams are asked through `closed` (a Python call
+   costing more than such a write) by operations taking the I/O role, and
+   small writes (under REF_MIN bytes) that fit go on trusting the last
+   answer (raw_open) until the buffer is full, freed, or another operation
+   finds raw closed.  Returns 0 or -1. */
 static int
 buffered_write(buffered *self, PyObject *obj, const char *data,
                Py_ssize_t len, const char *closed_msg)
@@ -2202,33 +2154,32 @@ buffered_write(buffered *self, PyObject *obj, const char *data,
             return r;
         }
     }
-    if (buffered_lock(self) < 0) {
-        return -1;
-    }
     int done = 0;
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
     int open_fileio = self->raw_fileio && !_PyFileIO_closed(self->raw);
     /* Else raw is asked whether it is open, with the I/O role (see
        buffered_write_slow()). */
     int trusted = (self->raw_fileio ? open_fileio
                    : self->raw_open && len < REF_MIN);
-    if (trusted && self->reading) {
+    if (trusted && self->reading && buffered_io_free(self, 0)) {
         done = buffered_write_in_place(self, data, len);
     }
-    else if (trusted && len < self->threshold
+    else if (trusted && !self->reading && buffered_io_free(self, 1)
+             && len < self->threshold
              && self->list.nbytes + len <= self->threshold)
     {
         done = buffered_append(self, obj, data, len) < 0 ? -1 : 1;
     }
     if (done == 0) {
-        return buffered_write_slow(self, obj, data, len, closed_msg,
-                                   open_fileio);
+        done = buffered_write_slow(self, obj, data, len, closed_msg,
+                                   open_fileio) < 0 ? -1 : 1;
     }
-    buffered_unlock(self);
+    nibbler_end(held);
     return done < 0 ? -1 : 0;
 }
 
 /*
- * Reading (with the lock; raw reads with the I/O role too)
+ * Reading (in the critical section; raw reads with the I/O role too)
  */
 
 /* Take up to n bytes of the read-ahead: the block itself when that is all
@@ -2641,7 +2592,7 @@ buffered_readline(buffered *self, Py_ssize_t limit)
 /* Flags of buffered_enter(). */
 enum { ENTER_READ = 1, ENTER_LEAVE_GATHERED = 2 };
 
-/* Start of the methods making raw calls: take the I/O role and the lock,
+/* Start of the methods making raw calls: take the I/O role,
    check that the object is initialized and, unless closed_msg is NULL,
    that raw is open (but reading what is buffered needs no open raw
    stream), move what the context's _gather() block gathered (but with
@@ -2688,8 +2639,8 @@ buffered_free(buffered *self)
     buffered_drop_read(self);
     morsels_clear(&self->list);
     PyMem_Free(self->list.items);
-    /* Not a struct store: _gather() blocks read list.nbytes without the
-       lock (morsels_clear() zeroed it). */
+    /* Not a struct store: _gather() blocks read list.nbytes outside the
+       critical section (morsels_clear() zeroed it). */
     self->list.items = NULL;
     self->list.head = self->list.count = self->list.cap = 0;
     buffered_set_block(self, NULL);
@@ -2803,19 +2754,21 @@ static PyObject *
 _io__Buffered__discard_writes_impl(buffered *self)
 /*[clinic end generated code: output=4a612257ab62b745 input=8c98a37d7a14ddfa]*/
 {
-    if (buffered_enter(self, NULL, 0) < 0) {
-        return NULL;
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
+    Py_ssize_t n = -1;
+    if (buffered_enter(self, NULL, 0) == 0) {
+        n = self->reading ? 0 : self->list.nbytes;
+        if (n > 0) {
+            morsels_clear(&self->list);
+        }
+        buffered_unlock_io(self);
     }
-    Py_ssize_t n = self->reading ? 0 : self->list.nbytes;
-    if (n > 0) {
-        morsels_clear(&self->list);
-    }
-    buffered_unlock_io(self);
-    return PyLong_FromSsize_t(n);
+    nibbler_end(held);
+    return n < 0 ? NULL : PyLong_FromSsize_t(n);
 }
 
-/* Methods and attributes passed on to the raw stream, without the lock,
-   so that they never wait for I/O in another thread. */
+/* Methods and attributes passed on to the raw stream, outside the
+   critical section, so that they never wait for I/O in another thread. */
 static PyObject *
 buffered_raw_call(PyObject *op, PyObject *name)
 {
@@ -2884,11 +2837,12 @@ static PyObject *
 _io__Buffered_close_impl(buffered *self)
 /*[clinic end generated code: output=7280b7b42033be0c input=d20b83d1ddd7d805]*/
 {
-    if (buffered_enter(self, NULL, 0) < 0) {
-        return NULL;
-    }
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
     PyObject *res = NULL, *exc = NULL;
     Py_ssize_t discarded = 0;
+    if (buffered_enter(self, NULL, 0) < 0) {
+        goto done;
+    }
     /* gh-138720: the same closed check as flush(). */
     int r = buffered_is_closed(self);
     if (r != 0) {
@@ -2911,11 +2865,11 @@ _io__Buffered_close_impl(buffered *self)
                                      : buffered_raw_flush(self));
     }
     else {
-        /* flush() was overridden: it takes the locks itself. */
+        /* flush() was overridden: it takes the I/O role itself. */
         buffered_unlock_io(self);
         r = _PyFile_Flush((PyObject *)self);
         if (buffered_enter(self, NULL, 0) < 0) {
-            return NULL;
+            goto done;
         }
     }
     if (r < 0) {
@@ -2934,8 +2888,10 @@ _io__Buffered_close_impl(buffered *self)
     }
 end:
     buffered_unlock_io(self);
+done:
+    nibbler_end(held);
     if (discarded > 0) {
-        /* Without the lock: the warning may write to this file. */
+        /* Without the I/O role: the warning may write to this file. */
         _PyIO_warn_discarded(discarded, PyErr_GivenExceptionMatches(
             exc, PyExc_BlockingIOError));
     }
@@ -2956,20 +2912,21 @@ _io__Buffered_detach_impl(buffered *self)
         return NULL;
     }
     /* Also what other threads wrote since flush(). */
-    if (_PyFile_Flush((PyObject *)self) < 0
-        || buffered_enter(self, NULL, 0) < 0)
-    {
+    if (_PyFile_Flush((PyObject *)self) < 0) {
         return NULL;
     }
-    if ((self->ngather > 0 && gather_move_records(self, 1) < 0)
-        || (buffered_writable(self) && buffered_sync(self, 0) < 0))
-    {
+    PyObject *raw = NULL;
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
+    if (buffered_enter(self, NULL, 0) == 0) {
+        if (!(self->ngather > 0 && gather_move_records(self, 1) < 0)
+            && !(buffered_writable(self) && buffered_sync(self, 0) < 0))
+        {
+            raw = buffered_swap_raw(self, NULL);
+            buffered_free(self);
+        }
         buffered_unlock_io(self);
-        return NULL;
     }
-    PyObject *raw = buffered_swap_raw(self, NULL);
-    buffered_free(self);
-    buffered_unlock_io(self);
+    nibbler_end(held);
     return raw;
 }
 
@@ -2981,38 +2938,37 @@ static PyObject *
 _io__Buffered_flush_impl(buffered *self)
 /*[clinic end generated code: output=da2674ef1ce71f3a input=fda63444697c6bf4]*/
 {
+    int r;
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
     /* But a direct block writes itself out (see "Gathering"). */
     record *rec = (FT_ATOMIC_LOAD_INT_RELAXED(self->ngather) > 0
                    ? gather_current(self) : NULL);
     if (rec != NULL && rec_state(rec) == REC_ACTIVE && rec->direct
-        && !nibbler_mutex_is_mine(&rec->lock))
+        && !rec_is_mine(rec))
     {
         /* (Referenced across the Python code it may run.) */
         Py_INCREF(rec);
-        int r = gather_end(self, rec, PY_SSIZE_T_MAX, NULL);
+        r = gather_end(self, rec, PY_SSIZE_T_MAX, NULL);
         Py_DECREF(rec);
-        if (r < 0) {
-            return (PyErr_Occurred() ? NULL
-                    : PyErr_Format(PyExc_ValueError, "flush of closed file"));
+        if (r < 0 && !PyErr_Occurred()) {
+            PyErr_SetString(PyExc_ValueError, "flush of closed file");
         }
-        Py_RETURN_NONE;
     }
-    if (buffered_enter(self, "flush of closed file",
-                       ENTER_LEAVE_GATHERED) < 0) {
-        return NULL;
-    }
-    /* Inside a _gather() block, flushing waits for its end. */
-    rec = self->ngather > 0 ? gather_current(self) : NULL;
-    int deferred = 0;
-    if (rec != NULL && !nibbler_mutex_is_mine(&rec->lock)
-        && rec_lock(rec) == 0)
+    else if ((r = buffered_enter(self, "flush of closed file",
+                                 ENTER_LEAVE_GATHERED)) == 0)
     {
-        deferred = rec->state == REC_ACTIVE;
-        rec->flush |= deferred;
-        rec_unlock(rec);
+        /* Inside a _gather() block, flushing waits for its end. */
+        rec = self->ngather > 0 ? gather_current(self) : NULL;
+        int deferred = 0;
+        if (rec != NULL && !rec_is_mine(rec) && rec_lock(rec) == 0) {
+            deferred = rec->state == REC_ACTIVE;
+            rec->flush |= deferred;
+            rec_unlock(rec);
+        }
+        r = deferred ? 0 : buffered_sync(self, 1);
+        buffered_unlock_io(self);
     }
-    int r = deferred ? 0 : buffered_sync(self, 1);
-    buffered_unlock_io(self);
+    nibbler_end(held);
     return r < 0 ? NULL : Py_NewRef(Py_None);
 }
 
@@ -3038,33 +2994,31 @@ static PyObject *
 _io__Buffered_peek_impl(buffered *self, Py_ssize_t size)
 /*[clinic end generated code: output=ba7a097ca230102b input=37ffb97d06ff4adb]*/
 {
-    if (buffered_lock(self) < 0) {
-        return NULL;
-    }
-    if (self->end > self->pos && self->ngather == 0) {
-        PyObject *res = buffered_peek_held(self);
-        buffered_unlock(self);
-        return res;
-    }
-    buffered_unlock(self);
-    if (buffered_enter(self, "peek of closed file", ENTER_READ) < 0) {
-        return NULL;
-    }
     PyObject *res = NULL;
     Py_ssize_t r = 1;
-    if (self->capacity == 0 && self->end == self->pos) {
-        /* Unbuffered: it can't look ahead without taking the bytes. */
-        buffered_unsupported(self, "peek() needs a buffer (buffer_size is 0)");
-    }
-    else if (self->end > self->pos
-             || (r = buffered_fill(self, 0, PY_SSIZE_T_MAX)) >= 0)
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
+    if (self->end > self->pos && self->ngather == 0
+        && buffered_io_free(self, 0))
     {
         res = buffered_peek_held(self);
     }
-    else if (r == WOULD_BLOCK) {
-        res = Py_NewRef(Py_None);
+    else if (buffered_enter(self, "peek of closed file", ENTER_READ) == 0) {
+        if (self->capacity == 0 && self->end == self->pos) {
+            /* Unbuffered: it can't look ahead without taking the bytes. */
+            buffered_unsupported(self,
+                                 "peek() needs a buffer (buffer_size is 0)");
+        }
+        else if (self->end > self->pos
+                 || (r = buffered_fill(self, 0, PY_SSIZE_T_MAX)) >= 0)
+        {
+            res = buffered_peek_held(self);
+        }
+        else if (r == WOULD_BLOCK) {
+            res = Py_NewRef(Py_None);
+        }
+        buffered_unlock_io(self);
     }
-    buffered_unlock_io(self);
+    nibbler_end(held);
     return res;
 }
 
@@ -3099,19 +3053,19 @@ _io__Buffered_read_impl(buffered *self, Py_ssize_t n)
                         "read length must be non-negative or -1");
         return NULL;
     }
-    if (n > 0) {
-        /* With the lock alone when the read-ahead has all of it. */
-        if (buffered_lock(self) < 0) {
-            return NULL;
-        }
-        if (self->end - self->pos >= n && self->ngather == 0) {
-            PyObject *res = buffered_take(self, n);
-            buffered_unlock(self);
-            return res;
-        }
-        buffered_unlock(self);
+    PyObject *res;
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
+    /* Without the I/O role when the read-ahead has all of it. */
+    if (n > 0 && self->end - self->pos >= n && self->ngather == 0
+        && buffered_io_free(self, 0))
+    {
+        res = buffered_take(self, n);
     }
-    return buffered_read_locked(self, n, 0);
+    else {
+        res = buffered_read_locked(self, n, 0);
+    }
+    nibbler_end(held);
+    return res;
 }
 
 /*[clinic input]
@@ -3124,7 +3078,10 @@ static PyObject *
 _io__Buffered_readall_impl(buffered *self)
 /*[clinic end generated code: output=78e22877f49cb977 input=2c2a4790ffd94db6]*/
 {
-    return buffered_read_locked(self, -1, 0);
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
+    PyObject *res = buffered_read_locked(self, -1, 0);
+    nibbler_end(held);
+    return res;
 }
 
 /*[clinic input]
@@ -3137,33 +3094,38 @@ static PyObject *
 _io__Buffered_read1_impl(buffered *self, Py_ssize_t n)
 /*[clinic end generated code: output=bcc4fb4e54d103a3 input=7d22de9630b61774]*/
 {
-    if (buffered_lock(self) < 0) {
-        return NULL;
+    PyObject *res;
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
+    if (self->end > self->pos && n != 0 && self->ngather == 0
+        && buffered_io_free(self, 0))
+    {
+        res = buffered_take(self, n < 0 ? PY_SSIZE_T_MAX : n);
     }
-    if (self->end > self->pos && n != 0 && self->ngather == 0) {
-        PyObject *res = buffered_take(self, n < 0 ? PY_SSIZE_T_MAX : n);
-        buffered_unlock(self);
-        return res;
+    else {
+        if (n < 0) {
+            n = self->capacity > 0 ? self->capacity : DEFAULT_BUFFER_SIZE;
+        }
+        res = buffered_read_locked(self, n, 1);
     }
-    if (n < 0) {
-        n = self->capacity > 0 ? self->capacity : DEFAULT_BUFFER_SIZE;
-    }
-    buffered_unlock(self);
-    return buffered_read_locked(self, n, 1);
+    nibbler_end(held);
+    return res;
 }
 
 static PyObject *
 buffered_readinto_common(buffered *self, Py_buffer *buffer, int readinto1)
 {
-    if (buffered_enter(self, "readinto of closed file", ENTER_READ) < 0) {
-        return NULL;
+    Py_ssize_t n = -1;
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
+    if (buffered_enter(self, "readinto of closed file", ENTER_READ) == 0) {
+        /* The raw stream reads into the caller's memory, through a view
+           bound to the caller's object: what it keeps stays valid through
+           that. */
+        int shared = 0;
+        n = buffered_read_into(self, buffer->buf, buffer->len, readinto1,
+                               buffer->obj, &shared);
+        buffered_unlock_io(self);
     }
-    /* The raw stream reads into the caller's memory, through a view bound
-       to the caller's object: what it keeps stays valid through that. */
-    int shared = 0;
-    Py_ssize_t n = buffered_read_into(self, buffer->buf, buffer->len,
-                                      readinto1, buffer->obj, &shared);
-    buffered_unlock_io(self);
+    nibbler_end(held);
     if (n == WOULD_BLOCK) {
         Py_RETURN_NONE;
     }
@@ -3206,27 +3168,24 @@ static PyObject *
 _io__Buffered_readline_impl(buffered *self, Py_ssize_t size)
 /*[clinic end generated code: output=24dd2aa6e33be83c input=673b6240e315ef8a]*/
 {
-    if (buffered_lock(self) < 0) {
-        return NULL;
-    }
+    PyObject *res = NULL;
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
     Py_ssize_t k = (self->end > self->pos && self->ngather == 0
+                    && buffered_io_free(self, 0)
                     ? buffered_find_line(self, size) : -1);
     if (k >= 0) {
-        PyObject *res = buffered_take(self, k);
-        buffered_unlock(self);
-        return res;
+        res = buffered_take(self, k);
     }
-    buffered_unlock(self);
-    if (buffered_enter(self, "readline of closed file",
-                       size == 0 ? 0 : ENTER_READ) < 0)
+    else if (buffered_enter(self, "readline of closed file",
+                            size == 0 ? 0 : ENTER_READ) == 0)
     {
-        return NULL;
+        res = (self->capacity == 0
+               ? buffered_unsupported(self, "readline() needs a buffer "
+                                            "(buffer_size is 0)")
+               : buffered_readline(self, size));
+        buffered_unlock_io(self);
     }
-    PyObject *res = (self->capacity == 0
-                     ? buffered_unsupported(self, "readline() needs a buffer "
-                                                  "(buffer_size is 0)")
-                     : buffered_readline(self, size));
-    buffered_unlock_io(self);
+    nibbler_end(held);
     return res;
 }
 
@@ -3238,21 +3197,22 @@ static PyObject *
 _io__Buffered_tell_impl(buffered *self)
 /*[clinic end generated code: output=386972ae84716c1e input=ad61e04a6b349573]*/
 {
-    if (buffered_enter(self, NULL, ENTER_LEAVE_GATHERED) < 0) {
-        return NULL;
-    }
+    PyObject *res = NULL;
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
     /* Pending writes in append mode go to the end of the file: write them
        out, and the raw position is the logical one (gh-80592).  Inside a
        _gather() block, the position is after what it gathered. */
-    PyObject *res = NULL;
-    if (!self->raw_appending || self->reading
-        || buffered_flush_writes(self, 0) == 0)
-    {
-        record *rec = self->ngather > 0 ? gather_current(self) : NULL;
-        res = buffered_position(self, rec && rec_state(rec) == REC_ACTIVE
-                                      ? rec->list.nbytes : 0);
+    if (buffered_enter(self, NULL, ENTER_LEAVE_GATHERED) == 0) {
+        if (!self->raw_appending || self->reading
+            || buffered_flush_writes(self, 0) == 0)
+        {
+            record *rec = self->ngather > 0 ? gather_current(self) : NULL;
+            res = buffered_position(self, rec && rec_state(rec) == REC_ACTIVE
+                                          ? rec->list.nbytes : 0);
+        }
+        buffered_unlock_io(self);
     }
-    buffered_unlock_io(self);
+    nibbler_end(held);
     return res;
 }
 
@@ -3306,27 +3266,29 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
         PyErr_Format(PyExc_ValueError, "whence value %d unsupported", whence);
         return NULL;
     }
-    /* Before taking the lock: its __index__() may use this object. */
+    /* Before the I/O role: its __index__() may use this object. */
     Py_off_t target = PyNumber_AsOff_t(targetobj, PyExc_ValueError);
-    if ((target == -1 && PyErr_Occurred()) || buffered_lock(self) < 0) {
+    if (target == -1 && PyErr_Occurred()) {
         return NULL;
     }
-    /* Inside the block of a regular file, whose raw position is kept: with
-       the lock alone. */
+    /* Inside the block of a regular file, whose raw position is kept:
+       without the I/O role (but first in the child of a fork). */
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
     PyObject *res = (self->raw_fileio && !_PyFileIO_closed(self->raw)
-                     && self->ngather == 0
+                     && self->ngather == 0 && buffered_io_free(self, 0)
+                     && (_Py_atomic_load_uint64_relaxed(&self->io_gen)
+                         == _PyIO_nibbler_fork_gen)
                      ? buffered_seek_within(self, target, whence,
                                             self->raw_pos) : NULL);
     int regular = self->raw_regular;
-    buffered_unlock(self);
     if (res != NULL || PyErr_Occurred()) {
-        return res;
+        goto done;
     }
-    /* Python calls, which may use this object: without the lock.  (A
+    /* Python calls, which may use this object: without the I/O role.  (A
        regular file FileIO opened is seekable: not asked, an lseek().) */
     PyObject *raw = buffered_get_raw(self);
     if (raw == NULL) {
-        return NULL;
+        goto done;
     }
     int r = buffered_ref_closed(raw);
     if (r > 0) {
@@ -3344,7 +3306,7 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
     if (r <= 0
         || buffered_enter(self, "seek of closed file", 0) < 0)
     {
-        return NULL;
+        goto done;
     }
     Py_off_t pos = self->raw_pos;
     if (self->reading && pos < 0 && (whence == SEEK_SET || whence == SEEK_CUR)
@@ -3376,6 +3338,8 @@ _io__Buffered_seek_impl(buffered *self, PyObject *targetobj, int whence)
     }
 end:
     buffered_unlock_io(self);
+done:
+    nibbler_end(held);
     return res;
 }
 
@@ -3389,18 +3353,20 @@ static PyObject *
 _io__Buffered_truncate_impl(buffered *self, PyObject *pos)
 /*[clinic end generated code: output=667ca03c60c270de input=8a1be34d57cca2d3]*/
 {
-    if (buffered_enter(self, "truncate of closed file", 0) < 0) {
-        return NULL;
-    }
     PyObject *res = NULL;
-    if (!buffered_writable(self)) {
-        buffered_unsupported(self, "truncate");
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
+    if (buffered_enter(self, "truncate of closed file", 0) == 0) {
+        if (!buffered_writable(self)) {
+            buffered_unsupported(self, "truncate");
+        }
+        else if (buffered_sync(self, 0) == 0) {
+            res = PyObject_CallMethodOneArg(self->raw, &_Py_ID(truncate),
+                                            pos);
+            self->raw_pos = POS_UNKNOWN;
+        }
+        buffered_unlock_io(self);
     }
-    else if (buffered_sync(self, 0) == 0) {
-        res = PyObject_CallMethodOneArg(self->raw, &_Py_ID(truncate), pos);
-        self->raw_pos = POS_UNKNOWN;
-    }
-    buffered_unlock_io(self);
+    nibbler_end(held);
     return res;
 }
 
@@ -3512,7 +3478,9 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
         err = -1;
     }
     PyObject *exc = err < 0 ? PyErr_GetRaisedException() : NULL;
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
     if (buffered_lock_io(self) < 0) {
+        nibbler_end(held);
         _PyErr_ChainExceptions1(exc);
         return -1;
     }
@@ -3527,6 +3495,7 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
                     : 0) < 0)))
     {
         buffered_unlock_io(self);
+        nibbler_end(held);
         _PyErr_ChainExceptions1(exc);
         return -1;
     }
@@ -3566,8 +3535,9 @@ buffered_init(buffered *self, PyObject *raw, Py_ssize_t buffer_size,
     }
     PyObject *old = buffered_swap_raw(self, err ? NULL : Py_NewRef(raw));
     buffered_unlock_io(self);
+    nibbler_end(held);
     Py_XDECREF(old);
-    /* Without the lock: the warning may write to this object. */
+    /* Without the I/O role: the warning may write to this object. */
     if (discarded > 0
         && PyErr_WarnFormat(PyExc_ResourceWarning, 1,
                             "__init__() discarded %zd buffered bytes: the raw "
@@ -3805,37 +3775,34 @@ _PyIONibbler_begin(PyObject *op, int io, PyObject **block, const char **p)
     if (FT_ATOMIC_LOAD_PTR_RELAXED(self->dict) != NULL) {
         return _PyIO_NIBBLER_NO;
     }
-    if ((io ? buffered_enter(self, NULL, ENTER_READ)
-         : buffered_lock(self)) < 0)
-    {
-        return -1;
+    Py_ssize_t r;
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
+    r = io ? buffered_enter(self, NULL, ENTER_READ) : buffered_lock_io(self);
+    if (r == 0) {
+        PyObject *dict = FT_ATOMIC_LOAD_PTR_RELAXED(self->dict);
+        if (dict != NULL || self->raw == NULL) {
+            r = self->raw == NULL ? buffered_not_ready() : _PyIO_NIBBLER_NO;
+        }
+        else if (!io && ((!self->reading && self->list.nbytes > 0)
+                         || self->ngather > 0))
+        {
+            r = _PyIO_NIBBLER_NEEDIO;
+        }
+        if (r != 0) {
+            buffered_unlock_io(self);
+        }
+        else {
+            r = _PyIONibbler_view(op, 0, block, p);
+        }
     }
-    Py_ssize_t r = 0;
-    PyObject *dict = FT_ATOMIC_LOAD_PTR_RELAXED(self->dict);
-    if (dict != NULL || self->raw == NULL) {
-        r = self->raw == NULL ? buffered_not_ready() : _PyIO_NIBBLER_NO;
-    }
-    else if (!io && ((!self->reading && self->list.nbytes > 0)
-                     || self->ngather > 0))
-    {
-        r = _PyIO_NIBBLER_NEEDIO;
-    }
-    if (r != 0) {
-        _PyIONibbler_end(op, io);
-        return r;
-    }
-    return _PyIONibbler_view(op, 0, block, p);
+    nibbler_end(held);
+    return r;
 }
 
 void
-_PyIONibbler_end(PyObject *op, int io)
+_PyIONibbler_end(PyObject *op)
 {
-    if (io) {
-        buffered_unlock_io(buffered_cast(op));
-    }
-    else {
-        buffered_unlock(buffered_cast(op));
-    }
+    buffered_unlock_io(buffered_cast(op));
 }
 
 Py_ssize_t
@@ -3843,38 +3810,14 @@ _PyIONibbler_view(PyObject *op, Py_ssize_t k, PyObject **block,
                   const char **p)
 {
     buffered *self = buffered_cast(op);
+    Py_ssize_t r;
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
     self->pos += k;
     *block = self->block;
     *p = self->block ? PyBytes_AS_STRING(self->block) + self->pos : NULL;
-    return self->end - self->pos;
-}
-
-/* With the lock: the rest of _PyIONibbler_take(). */
-static inline int
-buffered_take_at(buffered *self, const char *p, Py_ssize_t len,
-                 Py_ssize_t k)
-{
-    int r = (FT_ATOMIC_LOAD_PTR_RELAXED(self->dict) == NULL
-             && self->raw != NULL && self->block != NULL
-             && (self->reading || self->list.nbytes == 0)
-             && self->ngather == 0
-             && PyBytes_AS_STRING(self->block) + self->pos == p
-             && self->end - self->pos >= len);
-    if (r) {
-        self->pos += k;
-    }
-    buffered_unlock(self);
+    r = self->end - self->pos;
+    nibbler_end(held);
     return r;
-}
-
-/* (Out of line, so that the usual step needs no stack frame.) */
-Py_NO_INLINE static int
-buffered_take_wait(buffered *self, const char *p, Py_ssize_t len,
-                   Py_ssize_t k)
-{
-    /* The lock is held briefly by everyone: not interrupted. */
-    return (buffered_lock_ex(self, 0) < 0 ? -1
-            : buffered_take_at(self, p, len, k));
 }
 
 int
@@ -3884,34 +3827,53 @@ _PyIONibbler_take(PyObject *op, const char *p, Py_ssize_t len, Py_ssize_t k)
     if (FT_ATOMIC_LOAD_PTR_RELAXED(self->dict) != NULL) {
         return 0;
     }
-    if (!nibbler_mutex_trylock(&self->lock)) {
-        return buffered_take_wait(self, p, len, k);
+    int r;
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
+    r = (FT_ATOMIC_LOAD_PTR_RELAXED(self->dict) == NULL
+         && self->raw != NULL && self->block != NULL
+         && (self->reading || self->list.nbytes == 0)
+         && self->ngather == 0 && buffered_io_free(self, 0)
+         && PyBytes_AS_STRING(self->block) + self->pos == p
+         && self->end - self->pos >= len);
+    if (r) {
+        self->pos += k;
     }
-    return buffered_take_at(self, p, len, k);
+    nibbler_end(held);
+    return r;
 }
 
 Py_ssize_t
 _PyIONibbler_fill(PyObject *op, Py_ssize_t size)
 {
     buffered *self = buffered_cast(op);
+    Py_ssize_t n;
+    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
     /* A long line is gathered in one block up to 64 blocks, and at least
        DEFAULT_BUFFER_SIZE. */
     Py_ssize_t max = Py_MAX(Py_MIN(self->capacity, PY_SSIZE_T_MAX / 64) * 64,
                             DEFAULT_BUFFER_SIZE);
     if (self->end - self->pos >= max) {
-        return _PyIO_NIBBLER_FULL;
+        n = _PyIO_NIBBLER_FULL;
     }
-    if (buffered_check_closed(self, TEXT_CLOSED) < 0) {
-        return -1;
+    else if (buffered_check_closed(self, TEXT_CLOSED) < 0) {
+        n = -1;
     }
-    Py_ssize_t n = buffered_fill(self, size, max);
-    return n == WOULD_BLOCK ? _PyIO_NIBBLER_BLOCKED : n;
+    else {
+        n = buffered_fill(self, size, max);
+        n = n == WOULD_BLOCK ? _PyIO_NIBBLER_BLOCKED : n;
+    }
+    nibbler_end(held);
+    return n;
 }
 
 int
 _PyIONibbler_unread(PyObject *op, const char *data, Py_ssize_t len)
 {
-    return buffered_push_back(buffered_cast(op), data, len);
+    int r;
+    PyCriticalSection cs, *held = nibbler_begin(op, &cs);
+    r = buffered_push_back(buffered_cast(op), data, len);
+    nibbler_end(held);
+    return r;
 }
 
 int

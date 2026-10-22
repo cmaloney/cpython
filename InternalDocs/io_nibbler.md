@@ -5,8 +5,9 @@ The `_io._nibbler` buffered classes
 `BufferedWriter`, `BufferedRandom` and `BufferedRWPair` (and of
 `TextIOWrapper`, see below).  Its point is free threading: `_io`'s classes
 hold one lock across every raw call, so a thread writing to a slow pipe
-blocks every other thread that prints.  The nibbler never holds its lock
-across a raw write: other threads keep appending meanwhile.
+blocks every other thread that prints.  The nibbler guards its data with
+critical sections, which a thread blocked in a raw call doesn't hold:
+other threads keep appending meanwhile.
 
 It is opt-in and private: `_PYTHON_IO_DEFAULT_IMPL=_nibbler` makes the
 nibbler classes `_io`'s (so `open()`, `io.*` and the standard streams use
@@ -20,7 +21,8 @@ This document is a map; the details are in the comments it points to.
 Reading order
 -------------
 
-1. `nibbler.h`: the mutex (holder id, fork generation, takeover).
+1. `nibbler.h`: critical sections and roles (`_PyRecursiveMutex`es held
+   across raw calls; fork generation, takeover).
 2. `bufferedio.c`: "Morsel lists", the comment before `typedef struct {
    ... } buffered`, "Locking", then "Writing" (`buffered_write()` →
    `buffered_write_slow()` → `buffered_write_out()`), then "Reading"
@@ -72,46 +74,50 @@ Invariants
   block is reused only while uniquely referenced; one a Python raw stream
   may still reach through a view is abandoned to it (gh-60198).
 - `inflight` bytes (the front of the pending writes, given to a raw write
-  made without the lock) belong to the I/O-role holder until the raw call
-  returns: other threads only append meanwhile.
+  while others may append, `writing`) belong to the I/O-role holder until
+  the raw call returns: other threads only append meanwhile.
 
 
-Locks and roles per operation
------------------------------
+Critical section and roles per operation
+----------------------------------------
 
-There are two mutexes per object (`nibbler_mutex`, a `PyMutex` recording
-its holder's thread state id, so that a reentrant call raises
-`RuntimeError` instead of deadlocking): the **lock**, which guards every
-field, and the **I/O role**, which gives one thread the raw stream (taken
-before the lock).  Fast paths take the lock alone; anything needing raw
-I/O releases it, takes the role, takes the lock again and looks again.
+Every field is used in the object's **critical section** (but those read
+atomically, below), which is suspended while its thread is detached, as
+in a raw call.  The **I/O role** (a `_PyRecursiveMutex`, whose holder a
+reentrant call finds: `RuntimeError` instead of deadlocking) gives one
+thread the raw stream across raw calls.  Fast paths take the critical
+section alone, and only while the role is free (`buffered_io_free()`):
+another thread's raw call may have suspended it anywhere.  Appends are
+also allowed while the role's holder writes out (`writing`).  Anything
+needing raw I/O takes the role and looks again.
 
-| Operation | I/O role | lock | Notes |
-|---|---|---|---|
-| `write()` that fits below the threshold | – | yes | an exact FileIO is checked by its fd; others see "Closing the raw stream alone" |
-| other `write()`, `flush()` | yes | yes | the lock is released around the raw write (`buffered_write_spans()`) |
-| `read(n)`, `read1()`, `readline()`, `peek()` hitting the read-ahead | – | yes | |
-| other reads, `readinto()`, `peek()` that fills | yes | yes | raw reads are made with both held |
-| `seek()` inside the read-ahead (known raw position) | – | yes | |
-| other `seek()`, `tell()`, `truncate()` | yes | yes | raw calls with both held |
-| `close()`, `detach()`, `__init__()` | yes | yes | flush with both held |
-| `fileno()`, `isatty()`, `seekable()`, `name`, `mode`, `closed`, `raw` | – | – | a reference to raw, taken atomically |
-| `_gather()` enter / write in a block | – | – | the record's lock; listing a new record takes both |
-| `_gather()` exit with the lock free | if free, to write out | yes (trylock) | moved to the pending writes; written out when they don't fit |
-| `_gather()` exit with the lock busy, written out directly | – | – | the record's lock, across one `writev()` |
-| other `_gather()` exits | yes | yes (not interruptible) | writes out when the pending writes don't fit |
-| `_gather(direct=True)` enter | yes | yes | writes out the pending writes |
-| its limit, `flush()`, exit; `line_flush` lines | – | – | written out directly as above, pending writes or not |
+| Operation | I/O role | Notes |
+|---|---|---|
+| `write()` that fits below the threshold | – | an exact FileIO is checked by its fd; others see "Closing the raw stream alone" |
+| other `write()`, `flush()` | yes | others may append during the raw write (`buffered_write_spans()`) |
+| `read(n)`, `read1()`, `readline()`, `peek()` hitting the read-ahead | – | |
+| other reads, `readinto()`, `peek()` that fills | yes | |
+| `seek()` inside the read-ahead (known raw position) | – | not first in the child of a fork |
+| other `seek()`, `tell()`, `truncate()` | yes | |
+| `close()`, `detach()`, `__init__()` | yes | |
+| `fileno()`, `isatty()`, `seekable()`, `name`, `mode`, `closed`, `raw` | – | a reference to raw, taken atomically, outside the critical section |
+| `_gather()` enter / write in a block | – | the record's lock; listing a new record takes the role |
+| `_gather()` exit, the role free or writing out | if free, to write out | moved to the pending writes; written out when they don't fit |
+| `_gather()` exit, the role busy, written out directly | – | the record's lock, across one `writev()` |
+| other `_gather()` exits | yes (not interruptible) | writes out when the pending writes don't fit |
+| `_gather(direct=True)` enter | yes | writes out the pending writes |
+| its limit, `flush()`, exit; `line_flush` lines | – | written out directly as above, pending writes or not |
 
-Waits release the GIL (or detach) and a signal handler that raises
-interrupts them, except the relock after a raw call, whose result must be
-kept.  A signal handler writing to the stream during a raw write of its
-own thread finds the role is its own and queues its data (gh-118143).
+Waits detach (suspending the critical section) and a signal handler that
+raises interrupts them.  A signal handler writing to the stream during a
+raw write of its own thread finds the role is its own and queues its data
+(gh-118143).
 
-On free-threaded builds every field is used with the lock, but `raw`
-(`_Py_XGetRef()` / atomic exchange), `dict`, `block` and `capacity`
-(relaxed, for the getters and `__sizeof__()`); mutex holders and
-generations are relaxed (a thread only compares with its own id).
+On free-threaded builds `raw` (`_Py_XGetRef()` / atomic exchange),
+`dict`, `block` and `capacity` (relaxed, for the getters and
+`__sizeof__()`) are read outside the critical section; roles' fork
+generations are relaxed.  On the default build the critical section is
+the GIL.
 
 
 Closing the raw stream alone
@@ -133,7 +139,7 @@ stream:
   or more, `seek()`, reads.  That operation raises `ValueError` and clears
   `raw_open`, so every later write asks and raises too.
 - Queued bytes never reach the closed raw stream: every write-out asks
-  `closed` with the lock first.  `close()` of the buffered object then
+  `closed` with the I/O role first.  `close()` of the buffered object then
   finds the raw stream closed and returns without writing them or
   warning (as `_io` does with bytes buffered before `raw.close()`); they
   are dropped with the object.
@@ -171,21 +177,22 @@ closed could write to a reused descriptor, with `_io` as here.
 Fork and finalization
 ---------------------
 
-A holder that can never release a mutex is not waited for (see
-`nibbler.h`):
+A thread can be stopped for good only while detached, where it holds no
+critical section; a role it holds is not waited for (see `nibbler.h`):
 
 - **fork**: `PyOS_AfterFork_Child()` calls `_PyIO_AfterForkChild()`,
-  which bumps a global fork generation.  Every acquisition records the
-  generation; the first lock of a mutex in a newer one claims it, resets
-  it if a thread gone in the fork held it, and tells the caller (which
-  forgets `raw_pos`, or drops the bytes in flight).  No set of objects, no
-  walk.
+  which bumps a global fork generation.  Every role records the
+  generation it was taken in; one of an older generation whose holder has
+  no thread state left (or none recorded yet: a mutex handed on to a
+  thread gone in the fork) is taken over, and the first taker in a newer
+  generation is told (it forgets `raw_pos`, or drops the bytes in
+  flight).  No set of objects; a walk of the thread states only then.
 - **finalization**: every other thread is detached and hangs as soon as
-  it attaches, so the finalizing thread takes over a mutex such a thread
-  holds, dropping the bytes in flight.  If it takes the role over but the
-  lock fails (a reentrant call, or a wait interrupted after a fork),
-  `drop_inflight` (used only with the role) leaves that to the next
-  holder of the role.
+  it attaches, maybe owning a mutex it was handed while it waited.  The
+  finalizing thread takes no critical section (late Python runs
+  unsynchronized, `nibbler_begin()`), and takes over a role another
+  thread holds, dropping the bytes in flight.  So there is no
+  "could not acquire lock ... at interpreter shutdown" fatal error.
 
 
 Buffer size 0 and None
@@ -208,15 +215,15 @@ Private and experimental.  See "Gathering" in `bufferedio.c`: a block's
 writes from the context that entered it are kept in the context's record
 for the stream (found through a context variable, remembered per thread,
 with a lock of its own that only `close()` and the like wait for), and
-added in one piece at its end: moved to the pending writes when the
-stream's lock can be taken without waiting; when it is busy, by one
+added in one piece at its end: moved to the pending writes when no other
+thread uses the stream across raw calls (but to write out); else by one
 `writev()` of its own (up to 1 GiB) for a `BufferedWriter` of a regular
 file with nothing pending, which the kernel orders against other writes
-(POSIX); else moved to the pending writes once the lock is free (also at
+(POSIX); else moved to the pending writes with the I/O role (also at
 `limit`, before an operation of that context needs the position, and by
 `close()`/`detach()`/`__init__()`).  While a stream has records
-(`ngather`), the fast paths that take the lock alone go the way that takes
-the I/O role, where records are moved.  A direct block (for a thread's
+(`ngather`), the fast paths go the way that takes the I/O role, where
+records are moved.  A direct block (for a thread's
 or task's life) writes out the pending writes at its start, then writes
 itself out directly at its limit (the buffer size by default), `flush()`
 and end without regard to pending writes, which are other contexts'
@@ -248,8 +255,8 @@ Each of these is a bug of `_io`'s classes, which the tests skip for them:
 
 And one of the nibbler: after a raw stream other than an exact FileIO is
 closed by itself, small writes (and the usual text writes) are queued
-without an error until the block is full or an operation takes the lock
-(see "Closing the raw stream alone"); `_io` asks `closed` on every write.
+without an error until the block is full or an operation takes the I/O
+role (see "Closing the raw stream alone"); `_io` asks `closed` on every write.
 
 Two more, kept for speed:
 
@@ -285,7 +292,8 @@ buffer's position, and `write()` and `truncate()` after a read act there
 Over an exact `_io._nibbler` buffered object, text uses the buffer's bytes
 in place through the byte API ("Bytes for TextIOWrapper" in
 `bufferedio.c`, declared in `_iomodule.h`): `_PyIONibbler_begin()` takes
-the buffer's lock (and with `io` its role) and shows the unread bytes,
+the buffer's I/O role (with `io` writing out its pending writes, so that
+reading more is possible) and shows the unread bytes,
 `_PyIONibbler_view()` takes some and shows the rest, `_PyIONibbler_fill()`
 reads more after them (growing the block for a long line up to 64 blocks,
 at least `DEFAULT_BUFFER_SIZE`, then `_PyIO_NIBBLER_FULL`),
@@ -325,7 +333,7 @@ characters decoded ahead (`dchars`) with a snapshot (flags, bytes) for
 `tell()`.  Their state is kept as flags (an `unsigned long long`, as
 iso2022_kr's go past 32 bits; only `tell()`, whose cookie holds 32 bits,
 raises `OverflowError`).  The decoder may be Python code using the
-buffer, so it runs without the buffer's locks, on the unread bytes (their
+buffer, so it runs without the buffer's I/O role, on the unread bytes (their
 block held), which are taken after only if still the unread ones.
 
 Invalid bytes with `strict` end the read before them (as at the end of the
@@ -351,7 +359,7 @@ to skip, and a write or `detach()` reads the bytes again first.
 
 ### Locking
 
-- **rlock** (a nibbler mutex, reentrant through `rdepth` for calls nested
+- **rlock** (a role, see `nibbler.h`, whose level counts the calls nested
   from Python code it runs): held by reads, `seek()`, `tell()`,
   `truncate()`, `reconfigure()`, `detach()`, `close()` and `__init__()`,
   across buffer calls, so that a read is atomic (each line once, whole).
@@ -387,15 +395,14 @@ to skip, and a write or `detach()` reads the bytes again first.
   `RuntimeError`).  The encoder's flags (may write a BOM, needs
   `final=True`) are set with elock held when a new encoder is published;
   a write holding elock whose encoder was replaced starts again.  A read
-  past the start of the stream only tries it (with the buffer's locks
-  held, it must not wait for a write that waits for them).  Order:
-  rlock, elock, the buffer's I/O role, the buffer's lock.  Python code
-  run with elock held (the encoder, a Python buffer's or raw's `write()`)
-  that calls `seek()`, `close()`, `detach()` or `reconfigure()` of the
-  same text waits for a thread holding rlock and waiting for elock (from
-  the same thread, they raise `RuntimeError`).  (Critical sections were
-  tried: daemon threads stopped at exit inside one hung the main
-  thread's writes.)
+  past the start of the stream only tries it (with the buffer's I/O role
+  held, it must not wait for a write that waits for it).  Order: rlock,
+  elock, the buffer's I/O role.  Python code run with elock held (the
+  encoder, a Python buffer's or raw's `write()`) that calls `seek()`,
+  `close()`, `detach()` or `reconfigure()` of the same text waits for a
+  thread holding rlock and waiting for elock (from the same thread, they
+  raise `RuntimeError`).  rlock and elock are roles, not critical
+  sections: they are held across Python code.
 
 ### Differences from `_io.TextIOWrapper`
 

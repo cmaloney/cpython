@@ -102,13 +102,15 @@ typedef struct {
 
 typedef struct {
     PyObject_HEAD
-    nibbler_mutex rlock;
-    Py_ssize_t rdepth;          /* calls of the holder of rlock nested in it */
+    _PyRecursiveMutex rlock;    /* see nibbler.h; its level: calls nested in
+                                   its holder's */
+    uint64_t rlock_gen;
     char rbusy;                 /* its read state is used across Python code */
     /* Held across the use of the codec's encoder (CODEC_DECODER), which may
        hold state, and the store of its bytes, so that they reach the buffer
        in its order: only to write, flush the encoder or reset it. */
-    nibbler_mutex elock;
+    _PyRecursiveMutex elock;
+    uint64_t elock_gen;
     tconf *conf;                /* NULL: not initialized */
     char finalizing;
     /* With elock, of the published settings' encoder (set with it, see
@@ -261,6 +263,13 @@ conf_swap(textio *self, tconf *cf)
     return old;
 }
 
+static inline int
+textio_elock(textio *self)
+{
+    return nibbler_role_lock(&self->elock, &self->elock_gen,
+                             (PyObject *)self, 1);
+}
+
 /* Publish cf (see conf_swap()) with elock: with start >= 0, cf has a new
    encoder, at the stream's start or past it (start), whose flags are set
    with it, so that a write holding elock finds them and the published
@@ -268,7 +277,7 @@ conf_swap(textio *self, tconf *cf)
 static int
 conf_publish(textio *self, tconf **cf, int start)
 {
-    if (nibbler_mutex_lock(&self->elock, (PyObject *)self, 1) < 0) {
+    if (textio_elock(self) < 0) {
         return -1;
     }
     if (start >= 0) {
@@ -276,7 +285,7 @@ conf_publish(textio *self, tconf **cf, int start)
         FT_ATOMIC_STORE_CHAR_RELAXED(self->encoder_used, 0);
     }
     *cf = conf_swap(self, *cf);
-    nibbler_mutex_unlock(&self->elock);
+    _PyRecursiveMutex_Unlock(&self->elock);
     return 0;
 }
 
@@ -372,14 +381,15 @@ textio_check_closed(textio *self, tconf *cf)
 static int
 textio_lock(textio *self)
 {
-    if (nibbler_mutex_is_mine(&self->rlock)) {
-        self->rdepth++;
+    if (_PyRecursiveMutex_IsLockedByCurrentThread(&self->rlock)) {
+        _PyRecursiveMutex_Lock(&self->rlock);
         return 0;
     }
-    int r = nibbler_mutex_lock(&self->rlock, (PyObject *)self, 1);
+    int r = nibbler_role_lock(&self->rlock, &self->rlock_gen,
+                              (PyObject *)self, 1);
     if (r > 0) {
         /* Taken from a holder gone in a fork (or hung at exit). */
-        self->rdepth = self->rbusy = 0;
+        self->rbusy = 0;
     }
     return r < 0 ? -1 : 0;
 }
@@ -394,7 +404,7 @@ textio_lock(textio *self)
 static int
 textio_refuse_nested(textio *self, int busy)
 {
-    if (self->rdepth > 0 && (!busy || self->rbusy)) {
+    if (self->rlock.level > 0 && (!busy || self->rbusy)) {
         PyErr_Format(PyExc_RuntimeError, "reentrant call inside %R",
                      (PyObject *)self);
         return -1;
@@ -405,12 +415,7 @@ textio_refuse_nested(textio *self, int busy)
 static void
 textio_leave(textio *self)
 {
-    if (self->rdepth > 0) {
-        self->rdepth--;
-    }
-    else {
-        nibbler_mutex_unlock(&self->rlock);
-    }
+    _PyRecursiveMutex_Unlock(&self->rlock);
 }
 
 static int
@@ -712,16 +717,16 @@ decode_error(Py_ssize_t *start, Py_ssize_t *end)
 
 /*
  * The store: the unread bytes a read works on, in place.  Over an exact
- * nibbler buffer they are its read-ahead, used with its lock (and its I/O
- * role to read more, see _iomodule.h); else rbuf[rpos:], filled with
- * read1().  Reads hold rlock throughout.
+ * nibbler buffer they are its read-ahead, used with its I/O role (see
+ * _iomodule.h); else rbuf[rpos:], filled with read1().  Reads hold rlock
+ * throughout.
  */
 
 typedef struct {
     textio *self;
     PyObject *buffer;   /* the store's, kept while it is used */
     char nib;           /* the buffer's own bytes */
-    char io;            /* with the buffer's I/O role */
+    char io;            /* able to read more (see _PyIONibbler_begin()) */
     char eof;           /* nothing more after p[0:avail] */
     char blocked;       /* the stream would block after them */
     char full;          /* the store can't hold more of them */
@@ -784,7 +789,7 @@ static void
 store_end(tstore *st, int release)
 {
     if (st->nib) {
-        _PyIONibbler_end(st->buffer, st->io);
+        _PyIONibbler_end(st->buffer);
         st->nib = 0;
     }
     if (release) {
@@ -1411,7 +1416,7 @@ text_read_quick(textio *self, Py_ssize_t want, int line)
    bytes are taken.  A read that can't end with what the store holds (a
    line longer than the buffer gathers, read() of everything) takes it in
    pieces, keeping copies of the bytes to give back if it fails.  The
-   first try only looks, without the buffer's I/O role. */
+   first try only looks, writing nothing out. */
 Py_NO_INLINE static PyObject *
 text_read_native(textio *self, Py_ssize_t want, int line)
 {
@@ -1781,13 +1786,14 @@ decoder_more(textio *self, tstore *st, int *stop, int taken,
     *took = used;
     self->flags = flags;
     if (used > 0 && FT_ATOMIC_LOAD_CHAR_RELAXED(self->encoding_start_of_stream)
-        && self->conf->encoder != NULL && nibbler_mutex_trylock(&self->elock))
+        && self->conf->encoder != NULL
+        && nibbler_role_trylock(&self->elock, &self->elock_gen))
     {
         /* Not at the start any more: no BOM.  (Not waiting, with the
            buffer's locks, for a write, which holds elock while it waits for
            them: its encoder is past the start already.) */
         int r = encoder_reset_locked(self, self->conf->encoder, 0);
-        nibbler_mutex_unlock(&self->elock);
+        _PyRecursiveMutex_Unlock(&self->elock);
         if (r < 0) {
             return -1;
         }
@@ -2001,7 +2007,7 @@ end:
 static PyObject *
 text_read(textio *self, Py_ssize_t n, int line)
 {
-    if (n != 0 && nibbler_mutex_trylock(&self->rlock)) {
+    if (n != 0 && nibbler_role_trylock(&self->rlock, &self->rlock_gen)) {
         PyObject *res = NULL;
         tconf *cf = self->conf;
         if (cf != NULL && cf->quick && FT_ATOMIC_LOAD_UINT8_RELAXED(cf->nib)) {
@@ -2010,7 +2016,7 @@ text_read(textio *self, Py_ssize_t n, int line)
         if (res != NULL && !self->decoded) {
             FT_ATOMIC_STORE_UINT8_RELAXED(self->decoded, 1);
         }
-        nibbler_mutex_unlock(&self->rlock);
+        _PyRecursiveMutex_Unlock(&self->rlock);
         if (res != NULL || PyErr_Occurred()) {
             return res;
         }
@@ -2222,14 +2228,12 @@ static int
 text_encoder_store(textio *self, tconf *cf, PyObject *text, int final)
 {
     int stateful = cf->enc == CODEC_DECODER, r = 0;
-    if (stateful
-        && nibbler_mutex_lock(&self->elock, (PyObject *)self, 1) < 0)
-    {
+    if (stateful && textio_elock(self) < 0) {
         return -1;
     }
     tconf *now = FT_ATOMIC_LOAD_PTR_ACQUIRE(self->conf);
     if (stateful && (now == NULL || now->encoder != cf->encoder)) {
-        nibbler_mutex_unlock(&self->elock);
+        _PyRecursiveMutex_Unlock(&self->elock);
         return 1;
     }
     if (final) {
@@ -2258,7 +2262,7 @@ text_encoder_store(textio *self, tconf *cf, PyObject *text, int final)
         r = r ? 0 : -1;
     }
     if (stateful) {
-        nibbler_mutex_unlock(&self->elock);
+        _PyRecursiveMutex_Unlock(&self->elock);
     }
     return r;
 }
@@ -2566,11 +2570,11 @@ text_moved(textio *self, Py_off_t pos, uint32_t flags)
     if (encoder == NULL) {
         return 0;
     }
-    if (nibbler_mutex_lock(&self->elock, (PyObject *)self, 1) < 0) {
+    if (textio_elock(self) < 0) {
         return -1;
     }
     int r = encoder_reset_locked(self, encoder, self->fresh);
-    nibbler_mutex_unlock(&self->elock);
+    _PyRecursiveMutex_Unlock(&self->elock);
     return r;
 }
 
@@ -3343,13 +3347,11 @@ _io_TextIOWrapper___init___impl(textio *self, PyObject *buffer,
     if (textio_lock(self) < 0) {
         return -1;
     }
-    if (textio_refuse_nested(self, 0) < 0
-        || nibbler_mutex_lock(&self->elock, (PyObject *)self, 1) < 0)
-    {
+    if (textio_refuse_nested(self, 0) < 0 || textio_elock(self) < 0) {
         textio_leave(self);
         return -1;
     }
-    nibbler_mutex_unlock(&self->elock);
+    _PyRecursiveMutex_Unlock(&self->elock);
     /* (The old settings are dropped once rlock is released.) */
     tconf *old = conf_swap(self, NULL);
     int r = -1;
