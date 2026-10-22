@@ -1455,12 +1455,8 @@ gather_write(buffered *self, PyObject *obj, const char *data, Py_ssize_t len,
            it, anything else raised now (all of data accepted).  Not from a
            signal handler in this stream's write-out. */
         hold = hold ? hold : Py_NewRef(rec);
-        int e = 0;
-        if (!nibbler_role_mine(&self->io)) {
-            PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
-            e = gather_end(self, rec, out, NULL);
-            nibbler_end(held);
-        }
+        int e = (nibbler_role_mine(&self->io)
+                 ? 0 : gather_end(self, rec, out, NULL));
         if (e < 0 && PyErr_Occurred()
             && !PyErr_ExceptionMatches(PyExc_OSError))
         {
@@ -1634,19 +1630,26 @@ gather_direct(buffered *self, record *rec, Py_ssize_t n)
    ValueError if any, or a deferred flush).  What can't be moved stays,
    pending (moved by the next operation needing the position, close(),
    detach() or __init__()).  With n >= 0, write out the first n bytes of
-   the active block the same way (kept if closed; dropped is NULL).  With
-   the critical section.  Returns 0, or -1 (with an exception set but when
-   dropping or keeping). */
+   the active block the same way (kept if closed; dropped is NULL).
+   Returns 0, or -1 (with an exception set but when dropping or
+   keeping). */
 static int
 gather_end(buffered *self, record *rec, Py_ssize_t n, Py_ssize_t *dropped)
 {
     Py_ssize_t none;
     dropped = n < 0 ? dropped : &none;
     *dropped = 0;
+    PyCriticalSection cs, *held;
     int r = rec->direct ? gather_direct(self, rec, n) : 1;
-    if ((r > 0 && n < 0 && (r = gather_splice(self, rec)) <= 0)
-        || (r < 0 && n >= 0))
-    {
+    if (r > 0 && n < 0) {
+        held = nibbler_begin((PyObject *)self, &cs);
+        r = gather_splice(self, rec);
+        nibbler_end(held);
+        if (r <= 0) {
+            return r;
+        }
+    }
+    else if (r < 0 && n >= 0) {
         /* (Kept in the block on error: written out in order later.) */
         return r;
     }
@@ -1657,6 +1660,7 @@ gather_end(buffered *self, record *rec, Py_ssize_t n, Py_ssize_t *dropped)
         return 0;
     }
     PyObject *exc = r < 0 ? PyErr_GetRaisedException() : NULL;
+    held = nibbler_begin((PyObject *)self, &cs);
     /* Not interrupted: the data a block gathered was accepted. */
     int locked = buffered_lock_io_ex(self, 0) == 0;
     int closed = (!locked ? 0 : self->raw == NULL ? 1
@@ -1700,6 +1704,7 @@ gather_end(buffered *self, record *rec, Py_ssize_t n, Py_ssize_t *dropped)
     if (locked) {
         buffered_unlock_io(self);
     }
+    nibbler_end(held);
     if (exc != NULL) {
         _PyErr_ChainExceptions1(exc);
         r = -1;
@@ -1848,14 +1853,9 @@ gather_exit(PyObject *op, PyObject *const *Py_UNUSED(args),
     }
     g->state = GATHER_DONE;
     Py_ssize_t dropped;
-    int r = 0;
-    if (!g->joined) {
-        PyCriticalSection cs;
-        PyCriticalSection *held = nibbler_begin((PyObject *)g->stream, &cs);
-        r = gather_end(g->stream, g->rec, -1, &dropped);
-        nibbler_end(held);
-    }
-    if (r < 0 && PyErr_Occurred()) {
+    if (!g->joined && gather_end(g->stream, g->rec, -1, &dropped) < 0
+        && PyErr_Occurred())
+    {
         return NULL;
     }
     Py_RETURN_FALSE;
@@ -1877,9 +1877,7 @@ gather_finalize(PyObject *op)
     /* Code of this thread holding the I/O role further up its stack may
        be in the middle of something: the data is dropped then. */
     if (!nibbler_role_mine(&self->io)) {
-        PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
         (void)gather_end(self, rec, -1, &dropped);
-        nibbler_end(held);
     }
     else if (rec_lock(rec) == 0) {
         dropped = rec->list.nbytes;
