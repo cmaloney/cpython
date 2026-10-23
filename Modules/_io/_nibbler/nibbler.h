@@ -51,6 +51,18 @@ nibbler_begin(PyObject *obj, PyCriticalSection *cs)
     return NULL;
 }
 
+/* Does another thread hold obj's critical section now?  (For code with a
+   way around waiting for it.) */
+static inline int
+nibbler_busy(PyObject *obj)
+{
+#ifdef Py_GIL_DISABLED
+    return PyMutex_IsLocked(&obj->ob_mutex);
+#else
+    return 0;
+#endif
+}
+
 static inline void
 nibbler_end(PyCriticalSection *cs)
 {

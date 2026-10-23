@@ -1658,7 +1658,8 @@ gather_end(buffered *self, record *rec, Py_ssize_t n, Py_ssize_t *dropped)
     *dropped = 0;
     PyCriticalSection cs, *held;
     int r = rec->direct ? gather_direct(self, rec, n) : 1;
-    if (r > 0 && n < 0) {
+    /* (Writing out directly rather than waiting for the stream.) */
+    if (r > 0 && n < 0 && !nibbler_busy((PyObject *)self)) {
         held = nibbler_begin((PyObject *)self, &cs);
         r = gather_splice(self, rec);
         nibbler_end(held);
@@ -1777,14 +1778,16 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
     record *rec = r == 0 ? gather_current(self) : NULL;
     Py_XINCREF(rec);
     int state = REC_FREE;
-    PyCriticalSection cs, *held = nibbler_begin((PyObject *)self, &cs);
+    PyCriticalSection cs, *held;
     /* Its context's earlier writes first (see above), also what its
        records could not move. */
-    if (r == 0 && g->direct && !(rec && rec_state(rec) == REC_ACTIVE)
-        && (r = buffered_enter(self, "gather on closed file", 0)) == 0)
-    {
-        r = buffered_sync(self, 1);
-        buffered_unlock_io(self);
+    if (r == 0 && g->direct && !(rec && rec_state(rec) == REC_ACTIVE)) {
+        held = nibbler_begin((PyObject *)self, &cs);
+        if ((r = buffered_enter(self, "gather on closed file", 0)) == 0) {
+            r = buffered_sync(self, 1);
+            buffered_unlock_io(self);
+        }
+        nibbler_end(held);
     }
     if (r == 0 && rec != NULL && (r = rec_lock(rec)) == 0) {
         state = rec->state;
@@ -1810,6 +1813,7 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
         }
         /* Listed with the I/O role, dropping idle records; written out
            directly from now on if the stream allows (see above). */
+        held = nibbler_begin((PyObject *)self, &cs);
         if (r == 0 && (r = buffered_lock_io(self)) == 0) {
             r = (self->raw == NULL ? buffered_not_ready()
                  : buffered_check_closed(self, "gather on closed file"));
@@ -1844,8 +1848,8 @@ gather_enter(PyObject *op, PyObject *Py_UNUSED(dummy))
             }
             buffered_unlock_io(self);
         }
+        nibbler_end(held);
     }
-    nibbler_end(held);
     if (r < 0) {
         Py_XDECREF(rec);
         return NULL;
