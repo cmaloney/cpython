@@ -209,10 +209,12 @@ morsels_take(morsel_list *l, char *dst, Py_ssize_t len)
  * Every field is used in the object's critical section, but raw (and the
  * fields the getters read: capacity, block, dict), which are stored
  * atomically.  Everything that makes raw calls takes the I/O role `io`
- * too; the critical section is suspended while it is detached, where
- * other threads find the role taken and wait for it, but that write() and
- * flush() let them append to the pending writes meanwhile (`writing`),
- * keeping the bytes in flight at the front of `list` (`inflight`).
+ * too, and says how it uses them (`io_use`): the critical section is
+ * suspended while it is detached, where other threads find them in use
+ * and wait for the role, but that write() and flush() let them append to
+ * the pending writes meanwhile (IO_WRITING), keeping the bytes in flight
+ * at the front of `list` (`inflight`).  A role handed on to a thread that
+ * hasn't run yet is IO_IDLE, as a free one.
  */
 
 typedef struct {
@@ -248,7 +250,7 @@ typedef struct {
     uint8_t raw_appending;
     uint8_t raw_regular;
     uint8_t raw_open;           /* raw said it is open (see buffered_write) */
-    uint8_t writing;            /* the I/O role's holder is in a raw write */
+    uint8_t io_use;             /* IO_* (relaxed: _PyIONibbler_end()) */
     uint8_t reading;            /* the data is read-ahead (and stash) */
     char finalizing;
     /* _gather() blocks write out themselves (see "Gathering"). */
@@ -335,13 +337,22 @@ buffered_get_raw(buffered *self)
  * Locking (see nibbler.h): with the critical section held.
  */
 
+enum { IO_IDLE, IO_BUSY, IO_WRITING };
+
+static inline void
+buffered_set_use(buffered *self, uint8_t use)
+{
+    FT_ATOMIC_STORE_UINT8_RELAXED(self->io_use, use);
+}
+
 /* Can the read-ahead be used without the I/O role, and with append, the
    pending writes be appended to?  Not while another thread uses them
    across raw calls. */
 static inline int
 buffered_io_free(buffered *self, int append)
 {
-    return !nibbler_role_held(&self->io) || (append && self->writing);
+    uint8_t use = FT_ATOMIC_LOAD_UINT8_RELAXED(self->io_use);
+    return use == IO_IDLE || (append && use == IO_WRITING);
 }
 
 /* The I/O role was taken from a holder that will never return from its raw
@@ -352,7 +363,6 @@ buffered_drop_inflight(buffered *self)
 {
     (void)morsels_consume(&self->list, self->inflight);
     self->inflight = 0;
-    self->writing = 0;
     self->raw_pos = POS_UNKNOWN;
 }
 
@@ -366,6 +376,9 @@ buffered_lock_io_ex(buffered *self, int interruptible)
     if (r > 0) {
         buffered_drop_inflight(self);
     }
+    if (r >= 0) {
+        buffered_set_use(self, IO_BUSY);
+    }
     return r < 0 ? -1 : 0;
 }
 
@@ -377,6 +390,9 @@ buffered_trylock_io(buffered *self)
     if (r > 1) {
         buffered_drop_inflight(self);
     }
+    if (r > 0) {
+        buffered_set_use(self, IO_BUSY);
+    }
     return r > 0;
 }
 
@@ -386,6 +402,7 @@ static void
 buffered_unlock_io(buffered *self)
 {
     assert(self->inflight == 0);
+    buffered_set_use(self, IO_IDLE);
     nibbler_role_unlock(&self->io);
 }
 
@@ -808,7 +825,7 @@ buffered_write_spans(buffered *self, _PyIO_Span *spans, PyObject **objs,
                      Py_ssize_t *written)
 {
     if (share > 0) {
-        self->writing = 1;
+        buffered_set_use(self, IO_WRITING);
     }
     Py_ssize_t done = 0;
     int st = 0;
@@ -842,7 +859,7 @@ buffered_write_spans(buffered *self, _PyIO_Span *spans, PyObject **objs,
         }
     }
     if (share > 0) {
-        self->writing = 0;
+        buffered_set_use(self, IO_BUSY);
     }
     if (share >= 0) {
         self->raw_pos += done;

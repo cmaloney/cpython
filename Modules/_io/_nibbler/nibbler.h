@@ -187,10 +187,4 @@ nibbler_role_trylock(_PyRecursiveMutex *m, uint64_t *gen)
     return nibbler_role_lockfast(m) ? 1 + nibbler_role_taken(gen) : 0;
 }
 
-static inline int
-nibbler_role_held(_PyRecursiveMutex *m)
-{
-    return PyMutex_IsLocked(&m->mutex);
-}
-
 #endif  // !Py_IO_NIBBLER_NIBBLER_H

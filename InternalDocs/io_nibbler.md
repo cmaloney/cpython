@@ -74,7 +74,7 @@ Invariants
   block is reused only while uniquely referenced; one a Python raw stream
   may still reach through a view is abandoned to it (gh-60198).
 - `inflight` bytes (the front of the pending writes, given to a raw write
-  while others may append, `writing`) belong to the I/O-role holder until
+  while others may append, `IO_WRITING`) belong to the I/O-role holder until
   the raw call returns: other threads only append meanwhile.
 
 
@@ -85,11 +85,14 @@ Every field is used in the object's **critical section** (but those read
 atomically, below), which is suspended while its thread is detached, as
 in a raw call.  The **I/O role** (a `_PyRecursiveMutex`, whose holder a
 reentrant call finds: `RuntimeError` instead of deadlocking) gives one
-thread the raw stream across raw calls.  Fast paths take the critical
-section alone, and only while the role is free (`buffered_io_free()`):
-another thread's raw call may have suspended it anywhere.  Appends are
-also allowed while the role's holder writes out (`writing`).  Anything
-needing raw I/O takes the role and looks again.
+thread the raw stream across raw calls; its holder says how it uses the
+data (`io_use`).  Fast paths take the critical section alone, and only
+while the data is not in use (`buffered_io_free()`): another thread's raw
+call may have suspended it anywhere.  Appends are also allowed while the
+role's holder writes out (`IO_WRITING`).  A role handed on to a waiter
+that hasn't run yet (with the GIL, up to a switch interval) is not in
+use: otherwise every other thread queues for it.  Anything needing raw
+I/O takes the role and looks again.
 
 | Operation | I/O role | Notes |
 |---|---|---|
