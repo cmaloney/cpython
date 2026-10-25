@@ -1,6 +1,8 @@
 This directory contains a collection of executable Python scripts that are
 useful while building, extending or managing Python.
 
+check_hasattr.py          Check that hasattr() does not raise for stdlib
+                          modules, types and instances
 combinerefs.py            A helper for analyzing PYTHONDUMPREFS output
 divmod_threshold.py       Determine threshold for switching from longobject.c
                           divmod to _pylong.int_divmod()
