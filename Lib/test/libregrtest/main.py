@@ -6,13 +6,13 @@ import sys
 import sysconfig
 import time
 import trace
-from _colorize import get_colors  # type: ignore[import-not-found]
 from typing import NoReturn
 
 from test.support import os_helper, MS_WINDOWS, flush_std_streams
 
 from .cmdline import _parse_args, Namespace
-from .console import ConsoleReporter, use_modern_console
+from .console import (
+    ClassicConsoleReporter, ModernConsoleReporter, use_modern_console)
 from .findtests import findtests, split_test_packages, list_cases, collect_cases
 from .logger import Logger
 from .pgo import setup_pgo_tests
@@ -21,12 +21,12 @@ from .result import TestResult
 from .results import TestResults, EXITCODE_INTERRUPTED
 from .runtests import RunTests, HuntRefleak
 from .setup import setup_process, setup_test_dir
-from .single import run_single_test, PROGRESS_MIN_TIME
+from .single import run_single_test
 from .tsan import setup_tsan_tests, setup_tsan_parallel_tests
 from .utils import (
     StrPath, StrJSON, TestName, TestList, TestTuple, TestFilter,
     strip_py_suffix, count, format_duration,
-    printlist, get_temp_dir, get_work_dir, exit_timeout,
+    get_temp_dir, get_work_dir, exit_timeout,
     display_header, cleanup_temp_dir, print_warning,
     is_cross_compiled, get_host_runner, display_title,
     get_process_memory_usage, EXIT_TIMEOUT)
@@ -70,15 +70,20 @@ class Regrtest:
 
         # Logger
         self.logger = Logger(self.results, self.quiet, self.pgo)
-        self.reporter = get_reporter(junit_filename=ns.xmlpath)
-        self.console: ConsoleReporter | None = None
+        console: ClassicConsoleReporter | ModernConsoleReporter
         if not self.pgo and use_modern_console(ns.console):
-            self.console = ConsoleReporter(
+            console = ModernConsoleReporter(
                 fail_env_changed=ns.fail_env_changed,
                 print_slowest=ns.print_slow,
                 filtered=bool(ns.match_tests))
-            self.reporter.add(self.console)
-            self.logger.console = self.console
+        else:
+            console = ClassicConsoleReporter(
+                self.logger,
+                quiet=self.quiet,
+                print_slowest=ns.print_slow,
+                filtered=bool(ns.match_tests))
+        self.reporter = get_reporter(junit_filename=ns.xmlpath,
+                                     console=console)
 
         # Actions
         self.want_header: bool = ns.header
@@ -178,7 +183,7 @@ class Regrtest:
         self.next_single_filename: StrPath | None = None
 
     def log(self, line: str = '') -> None:
-        self.logger.log(line)
+        self.reporter.log(line)
 
     def find_tests(self, tests: TestList | None = None) -> tuple[TestTuple, TestList | None]:
         if tests is None:
@@ -301,22 +306,16 @@ class Regrtest:
         self.reporter.run_started(runtests)
 
         msg = f"Re-running {len(tests)} failed tests in verbose mode"
-        try:
-            if not self.single_process:
-                msg = f"{msg} in subprocesses"
-                self.log(msg)
-                self._run_tests_mp(runtests, self.num_workers)
-            else:
-                self.log(msg)
-                self.run_tests_sequentially(runtests)
-        finally:
-            self.reporter.run_finished()
+        if not self.single_process:
+            msg = f"{msg} in subprocesses"
+            self.log(msg)
+            self._run_tests_mp(runtests, self.num_workers)
+        else:
+            self.log(msg)
+            self.run_tests_sequentially(runtests)
         return runtests
 
     def rerun_failed_tests(self, runtests: RunTests) -> None:
-        ansi = get_colors()
-        red, reset = ansi.BOLD_RED, ansi.RESET
-
         if self.python_cmd:
             # Temp patch for https://github.com/python/cpython/issues/94052
             self.log(
@@ -327,17 +326,8 @@ class Regrtest:
 
         self.first_state = self.get_state()
 
-        print()
-        rerun_runtests = self._rerun_failed_tests(runtests)
-
-        if self.results.bad and self.console is None:
-            print(
-                f"{red}{count(len(self.results.bad), 'test')} "
-                f"failed again:{reset}"
-            )
-            printlist(self.results.bad)
-
-        self.display_result(rerun_runtests)
+        self._rerun_failed_tests(runtests)
+        self.reporter.run_finished(self.results, self.get_state())
 
     def _run_bisect(self, runtests: RunTests, test: str, progress: str) -> bool:
         print()
@@ -384,19 +374,6 @@ class Regrtest:
             if not self._run_bisect(runtests, name, progress):
                 return
 
-    def display_result(self, runtests: RunTests) -> None:
-        # If running the test suite for PGO then no one cares about results.
-        # The modern console lists the results in its summary.
-        if runtests.pgo or self.console is not None:
-            return
-
-        state = self.get_state()
-        print()
-        print(f"== Tests result: {state} ==")
-
-        self.results.display_result(runtests.tests,
-                                    self.quiet, self.print_slowest)
-
     def run_test(
         self, test_name: TestName, runtests: RunTests, tracer: trace.Trace | None
     ) -> TestResult:
@@ -439,13 +416,8 @@ class Regrtest:
             msg += " (timeout: %s)" % format_duration(runtests.timeout)
         self.log(msg)
 
-        tests_iter = runtests.iter_tests()
-        for test_index, test_name in enumerate(tests_iter, 1):
-            start_time = time.perf_counter()
-
-            self.logger.display_progress(test_index, test_name)
-            if self.console is not None:
-                self.console.update_running([(test_name, 0.0)])
+        for test_name in runtests.iter_tests():
+            self.reporter.test_started(test_name)
 
             result = self.run_test(test_name, runtests, tracer)
 
@@ -461,12 +433,6 @@ class Regrtest:
                     delattr(sys.modules[parent], name)
                 except (KeyError, AttributeError):
                     pass
-
-            text = str(result)
-            test_time = time.perf_counter() - start_time
-            if test_time >= PROGRESS_MIN_TIME:
-                text = f"{text} in {format_duration(test_time)}"
-            self.logger.display_progress(test_index, text)
 
             if result.must_stop(self.fail_fast, self.fail_env_changed):
                 break
@@ -498,29 +464,12 @@ class Regrtest:
         if self.want_run_leaks:
             os.system("leaks %d" % os.getpid())
 
-        self.reporter.summary(self.results, self.get_state())
-
     def display_summary(self) -> None:
         if self.first_runtests is None:
             raise ValueError(
                 "Should never call `display_summary()` before calling `_run_test()`"
             )
-        if self.console is not None:
-            # Displayed by ConsoleReporter.summary()
-            return
-
-        duration = time.perf_counter() - self.logger.start_time
-        filtered = bool(self.match_tests)
-
-        # Total duration
-        print()
-        print("Total duration: %s" % format_duration(duration))
-
-        self.results.display_summary(self.first_runtests, filtered)
-
-        # Result
-        state = self.get_state()
-        print(f"Result: {state}")
+        self.reporter.summary(self.results, self.get_state())
 
     def create_run_tests(self, tests: TestTuple) -> RunTests:
         return RunTests(
@@ -604,16 +553,13 @@ class Regrtest:
         if use_load_tracker:
             self.logger.start_load_tracker()
         try:
-            try:
-                if self.num_workers:
-                    self._run_tests_mp(runtests, self.num_workers)
-                else:
-                    self.run_tests_sequentially(runtests)
-            finally:
-                self.reporter.run_finished()
+            if self.num_workers:
+                self._run_tests_mp(runtests, self.num_workers)
+            else:
+                self.run_tests_sequentially(runtests)
 
             coverage = self.results.get_coverage_results()
-            self.display_result(runtests)
+            self.reporter.run_finished(self.results, self.get_state())
 
             if self.want_rerun and self.results.need_rerun():
                 self.rerun_failed_tests(runtests)

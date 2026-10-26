@@ -4,7 +4,7 @@ from _colorize import get_colors  # type: ignore[import-not-found]
 from .runtests import RunTests
 from .result import State, TestResult, TestStats, Location
 from .utils import (
-    StrPath, TestName, TestTuple, TestList, FilterDict,
+    TestName, TestTuple, TestList, FilterDict,
     printlist, count, format_duration)
 
 

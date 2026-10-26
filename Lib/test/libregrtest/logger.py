@@ -3,7 +3,6 @@ import time
 from typing import Callable
 
 from test.support import MS_WINDOWS
-from .console import ConsoleReporter
 from .results import TestResults
 from .runtests import RunTests
 from .utils import print_warning
@@ -22,14 +21,8 @@ class Logger:
         self._quiet: bool = quiet
         self._pgo: bool = pgo
         self.get_mem_usage: Callable[[], int | None] | None = None
-        # Modern console output, replacing the log lines
-        self.console: ConsoleReporter | None = None
 
     def log(self, line: str = '') -> None:
-        if self.console is not None:
-            self.console.log(line)
-            return
-
         empty = not line
 
         # Add the memory usage: "mem: 1 GiB "
@@ -72,7 +65,7 @@ class Logger:
         return None
 
     def display_progress(self, test_index: int, text: str) -> None:
-        if self._quiet or self.console is not None:
+        if self._quiet:
             return
         results = self._results
 
@@ -82,12 +75,6 @@ class Logger:
         if fails and not self._pgo:
             line = f"{line}/{fails}"
         self.log(f"[{line}] {text}")
-
-    def write_output(self, output: str) -> None:
-        if self.console is not None:
-            self.console.write(output)
-        else:
-            print(output, flush=True)
 
     def set_tests(self, runtests: RunTests) -> None:
         if runtests.forever:

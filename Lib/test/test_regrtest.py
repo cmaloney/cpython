@@ -39,6 +39,7 @@ from test.libregrtest import main
 from test.libregrtest import setup
 from test.libregrtest import utils
 from test.libregrtest.filter import get_match_tests, match_test
+from test.libregrtest.logger import Logger
 from test.libregrtest.reporter import (
     GitHubActionsReporter, JUnitReporter, MultiReporter, Reporter)
 from test.libregrtest.result import State, TestResult, TestStats
@@ -3198,14 +3199,54 @@ class JUnitReporterTestCase(unittest.TestCase):
 
 
 @support.force_not_colorized_test_class
-class ConsoleReporterTestCase(unittest.TestCase):
+class ClassicConsoleReporterTestCase(unittest.TestCase):
+    def setUp(self):
+        logger = Logger(TestResults(), quiet=False, pgo=False)
+        self.reporter = console.ClassicConsoleReporter(logger)
+        self.reporter.run_started(types.SimpleNamespace(
+            rerun=False, forever=False, pgo=False,
+            tests=('test_a', 'test_b', 'test_c')))
+
+    def output(self, func, *args):
+        with support.captured_stdout() as stdout:
+            func(*args)
+        # Remove the "0:00:00 load avg: 1.00 mem: ... " prefix
+        return re.sub(r'^\d+:\d\d:\d\d .*?(?=\[)', '', stdout.getvalue(),
+                      flags=re.MULTILINE)
+
+    def test_main_process(self):
+        self.assertEqual(self.output(self.reporter.test_started, 'test_a'),
+                         '[1/3] test_a\n')
+        result = TestResult('test_a', state=State.PASSED, duration=31.0)
+        self.assertEqual(self.output(self.reporter.test_result, result),
+                         '[1/3] test_a passed in 31.0 sec\n')
+
+    def test_worker_process(self):
+        self.reporter.tests_running([('test_b', 40.0), ('test_c', 1.0)])
+        result = TestResult('test_a', state=State.PASSED, duration=31.0)
+        self.assertEqual(
+            self.output(self.reporter.test_result, result, 'output'),
+            '[1/3] test_a passed (31.0 sec) -- running (1): '
+            'test_b (40.0 sec)\n'
+            'output\n')
+        result = TestResult('test_b', state=State.WORKER_BUG)
+        self.assertEqual(
+            self.output(self.reporter.test_result, result, None, 'bad JSON'),
+            '[2/3] test_b worker bug (bad JSON) -- running (1): '
+            'test_b (40.0 sec)\n')
+
+
+@support.force_not_colorized_test_class
+class ModernConsoleReporterTestCase(unittest.TestCase):
     def create_console(self, live, **kwargs):
         stream = io.StringIO()
-        reporter = console.ConsoleReporter(stream, live=live, **kwargs)
+        reporter = console.ModernConsoleReporter(stream, live=live,
+                                                 **kwargs)
         runtests = types.SimpleNamespace(rerun=False, forever=False,
                                          tests=('test_a', 'test_b', 'test_c'),
-                                         pgo=False, fail_env_changed=True)
-        self.addCleanup(reporter.run_finished)
+                                         pgo=False, fail_env_changed=True,
+                                         verbose=0)
+        self.addCleanup(reporter.run_finished, TestResults(), "SUCCESS")
         reporter.run_started(runtests)
         return reporter, stream
 
@@ -3249,7 +3290,7 @@ class ConsoleReporterTestCase(unittest.TestCase):
         reporter, stream = self.create_console(live=True)
         # Output written while tests run clears the status line
         self.assertIsNot(sys.stdout, orig_stdout)
-        reporter.update_running([('test_a', 2.0)])
+        reporter.tests_running([('test_a', 2.0)])
         self.assertTrue(stream.getvalue().endswith('test_a (2.0s)'))
 
         reporter.test_result(TestResult('test_a', state=State.PASSED,
@@ -3257,7 +3298,7 @@ class ConsoleReporterTestCase(unittest.TestCase):
         reporter.test_result(TestResult(
             'test_b', state=State.ENV_CHANGED,
             env_changed_reasons=['dangling thread']))
-        reporter.run_finished()
+        reporter.run_finished(TestResults(), "SUCCESS")
         self.assertIs(sys.stdout, orig_stdout)
 
         # Passed tests collapse into the status line

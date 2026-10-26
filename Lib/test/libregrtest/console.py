@@ -1,10 +1,13 @@
-"""Modern console output of regrtest.
+"""Console output of regrtest, written by reporters.
 
-At a terminal, the results of passing and skipped tests collapse into a
-status line redrawn at the bottom of the output: only the notable results
-(failures, environment changes, ...) and the test output stay on screen.
-Elsewhere, one line is written per test file. A compact summary lists what
-needs attention at the end.
+ClassicConsoleReporter logs a line per test, with the time, the load and the
+memory usage.
+
+ModernConsoleReporter: at a terminal, the results of passing and skipped
+tests collapse into a status line redrawn at the bottom of the output: only
+the notable results (failures, environment changes, ...) and the test output
+stay on screen. Elsewhere, one line is written per test file. A compact
+summary lists what needs attention at the end.
 """
 
 import os
@@ -16,15 +19,18 @@ from _colorize import decolor, get_colors  # type: ignore[import-not-found]
 from typing import Any, TextIO
 
 from test import support
+from .logger import Logger
 from .reporter import Reporter
 from .result import State, TestResult
 from .results import TestResults
 from .runtests import RunTests
-from .utils import TestName, count
+from .single import PROGRESS_MIN_TIME
+from .utils import TestName, count, format_duration, printlist
 
 
-# Seconds between two refreshes of the status line
-REFRESH_INTERVAL = 1.0
+# Classic console: log the running tests if nothing happened last N seconds
+PROGRESS_UPDATE = 30.0   # seconds
+assert PROGRESS_UPDATE >= PROGRESS_MIN_TIME
 
 # Maximum number of failed test cases listed per test file in the summary
 MAX_FAILED_CASES = 10
@@ -106,6 +112,119 @@ def describe_result(result: TestResult) -> str:
     return ""
 
 
+class ClassicConsoleReporter(Reporter):
+    """Log a line per test, and the results after each run."""
+
+    def __init__(self, logger: Logger, *, quiet: bool = False,
+                 print_slowest: bool = False,
+                 filtered: bool = False) -> None:
+        self.logger = logger
+        self.quiet = quiet
+        self.print_slowest = print_slowest
+        self.filtered = filtered
+        self.runtests: RunTests | None = None
+        self.first_runtests: RunTests | None = None
+        self.test_index = 0
+        # Test run by the main process
+        self.main_test: TestName | None = None
+        # (test name, seconds running) of the tests run by the workers
+        self.running: list[tuple[TestName, float]] = []
+        self.last_progress = time.monotonic()
+
+    def run_started(self, runtests: RunTests) -> None:
+        if runtests.rerun:
+            print()
+        if self.first_runtests is None:
+            self.first_runtests = runtests
+        self.runtests = runtests
+        self.test_index = 0
+        self.last_progress = time.monotonic()
+        self.logger.set_tests(runtests)
+
+    def log(self, message: str = "") -> None:
+        self.logger.log(message)
+
+    def test_started(self, test_name: TestName) -> None:
+        self.test_index += 1
+        self.main_test = test_name
+        self.logger.display_progress(self.test_index, test_name)
+
+    def tests_running(self, running: list[tuple[TestName, float]]) -> None:
+        self.running = running
+        assert self.runtests is not None
+        now = time.monotonic()
+        if self.runtests.pgo or now - self.last_progress < PROGRESS_UPDATE:
+            return
+        self.last_progress = now
+        text = self.format_running()
+        if text:
+            self.log(text)
+
+    def format_running(self) -> str | None:
+        running = [f'{test_name} ({format_duration(dt)})'
+                   for test_name, dt in self.running
+                   if dt >= PROGRESS_MIN_TIME]
+        if not running:
+            return None
+        return f"running ({len(running)}): {', '.join(running)}"
+
+    def test_result(self, result: TestResult, output: str | None = None,
+                    error: str | None = None) -> None:
+        assert self.runtests is not None
+        pgo = self.runtests.pgo
+        self.last_progress = time.monotonic()
+        text = str(result)
+        duration = result.duration
+        if result.test_name == self.main_test:
+            self.main_test = None
+            if duration is not None and duration >= PROGRESS_MIN_TIME:
+                text = f"{text} in {format_duration(duration)}"
+        else:
+            self.test_index += 1
+            if error:
+                # WORKER_BUG
+                text += ' (%s)' % error
+            elif duration and duration >= PROGRESS_MIN_TIME and not pgo:
+                text += ' (%s)' % format_duration(duration)
+            if not pgo:
+                running = self.format_running()
+                if running:
+                    text += f' -- {running}'
+        self.logger.display_progress(self.test_index, text)
+        if output:
+            print(output, flush=True)
+
+    def run_finished(self, results: TestResults, state: str) -> None:
+        runtests = self.runtests
+        assert runtests is not None
+        # If running the test suite for PGO then no one cares about results.
+        if runtests.pgo:
+            return
+
+        if runtests.rerun and results.bad:
+            ansi = get_colors()
+            print(f"{ansi.BOLD_RED}{count(len(results.bad), 'test')} "
+                  f"failed again:{ansi.RESET}")
+            printlist(results.bad)
+
+        print()
+        print(f"== Tests result: {state} ==")
+        results.display_result(runtests.tests, self.quiet, self.print_slowest)
+
+    def summary(self, results: TestResults, state: str) -> None:
+        assert self.first_runtests is not None
+        duration = time.perf_counter() - self.logger.start_time
+
+        # Total duration
+        print()
+        print("Total duration: %s" % format_duration(duration))
+
+        results.display_summary(self.first_runtests, self.filtered)
+
+        # Result
+        print(f"Result: {state}")
+
+
 class _StatusClearingStream:
     """Clear the status line before anything is written to the terminal.
 
@@ -113,7 +232,8 @@ class _StatusClearingStream:
     tests running in the main process doesn't end up on the status line.
     """
 
-    def __init__(self, stream: TextIO, console: 'ConsoleReporter') -> None:
+    def __init__(self, stream: TextIO,
+                 console: 'ModernConsoleReporter') -> None:
         self._stream = stream
         self._console = console
 
@@ -129,8 +249,8 @@ class _StatusClearingStream:
         return getattr(self._stream, name)
 
 
-class ConsoleReporter(Reporter):
-    """Write the progress and the results of the tests to the console."""
+class ModernConsoleReporter(Reporter):
+    """Write a status line, the notable results and a summary."""
 
     def __init__(self, stream: TextIO | None = None, *,
                  live: bool | None = None,
@@ -148,6 +268,7 @@ class ConsoleReporter(Reporter):
 
         self.first_runtests: RunTests | None = None
         self.rerun = False
+        self.verbose = 0
         self.total: int | None = None
         self.done = 0
         self.failed = 0
@@ -268,6 +389,7 @@ class ConsoleReporter(Reporter):
 
     def run_started(self, runtests: RunTests) -> None:
         self.rerun = runtests.rerun
+        self.verbose = runtests.verbose
         if self.first_runtests is None:
             self.first_runtests = runtests
         self.total = None if runtests.forever else len(runtests.tests)
@@ -275,6 +397,8 @@ class ConsoleReporter(Reporter):
         self.failed = 0
         self.env_changed = 0
         self.running = []
+        if self.rerun:
+            self._write("\n")
         if self.live and self._saved_streams is None:
             self._saved_streams = (sys.stdout, sys.stderr,
                                    support.print_warning.orig_stderr)
@@ -283,18 +407,26 @@ class ConsoleReporter(Reporter):
             support.print_warning.orig_stderr = sys.stderr
         self.draw_status()
 
-    def run_finished(self) -> None:
+    def run_finished(self, results: TestResults, state: str) -> None:
         self.clear_status()
         if self._saved_streams is not None:
             (sys.stdout, sys.stderr,
              support.print_warning.orig_stderr) = self._saved_streams
             self._saved_streams = None
 
-    def update_running(self, running: list[tuple[TestName, float]]) -> None:
+    def test_started(self, test_name: TestName) -> None:
+        self.tests_running([(test_name, 0.0)])
+
+    def tests_running(self, running: list[tuple[TestName, float]]) -> None:
         self.running = running
         self.draw_status()
 
-    def test_result(self, result: TestResult) -> None:
+    def test_result(self, result: TestResult, output: str | None = None,
+                    error: str | None = None) -> None:
+        # The output of a collapsed result is only shown in verbose mode
+        if output and (self.verbose or not self.collapses(result)):
+            self.write(output)
+
         self.done += 1
         self.running = [item for item in self.running
                         if item[0] != result.test_name]
@@ -309,7 +441,7 @@ class ConsoleReporter(Reporter):
             self.notable[result.test_name] = result
 
         if not self.collapses(result):
-            self._write(self.format_result(result) + "\n")
+            self._write(self.format_result(result, error) + "\n")
         self.draw_status()
 
     def collapses(self, result: TestResult) -> bool:
@@ -324,7 +456,8 @@ class ConsoleReporter(Reporter):
         ansi = self.colors
         return f"{getattr(ansi, color)}{label:>{_LABEL_WIDTH}}{ansi.RESET}"
 
-    def format_result(self, result: TestResult) -> str:
+    def format_result(self, result: TestResult,
+                      error: str | None = None) -> str:
         ansi = self.colors
         line = f"{self.format_label(result.state)} "
         if result.duration is not None and result.has_meaningful_duration():
@@ -336,6 +469,8 @@ class ConsoleReporter(Reporter):
         description = describe_result(result)
         if description:
             line += f" {description}"
+        if error:
+            line += f" {ansi.GREY}{error}{ansi.RESET}"
         for reason in result.env_changed_reasons or ():
             line += (f"\n{'':{_LABEL_WIDTH + 10}}"
                      f"{ansi.GREY}{reason}{ansi.RESET}")

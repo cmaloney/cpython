@@ -15,7 +15,7 @@ from .findtests import findtestdir
 from .result import TestResult
 from .results import TestResults
 from .runtests import RunTests
-from .utils import StrPath, count, sanitize_xml
+from .utils import StrPath, TestName, count, sanitize_xml
 
 lazy import xml.etree.ElementTree as ET
 lazy from xml.etree.ElementTree import Element
@@ -51,10 +51,28 @@ class Reporter:
                          stream: TextIO) -> None:
         """Called in the test process after a test case failed."""
 
-    def test_result(self, result: TestResult) -> None:
-        """Called in the main process after a test file completed."""
+    def log(self, message: str = "") -> None:
+        """Called in the main process to report a message of regrtest."""
 
-    def run_finished(self) -> None:
+    def test_started(self, test_name: TestName) -> None:
+        """Called in the main process before running a test in it."""
+
+    def tests_running(self, running: list[tuple[TestName, float]]) -> None:
+        """Called in the main process with the tests run by the workers.
+
+        running is a list of (test name, seconds running). Called
+        periodically, and before test_result().
+        """
+
+    def test_result(self, result: TestResult, output: str | None = None,
+                    error: str | None = None) -> None:
+        """Called in the main process after a test file completed.
+
+        output is the output of a test run in a worker process, if it must be
+        displayed. error explains why the worker process failed.
+        """
+
+    def run_finished(self, results: TestResults, state: str) -> None:
         """Called in the main process at the end of each run."""
 
     def summary(self, results: TestResults, state: str) -> None:
@@ -106,13 +124,18 @@ class MultiReporter(Reporter):
 
 
 def get_reporter(*, use_junit: bool = False,
-                 junit_filename: StrPath | None = None) -> MultiReporter:
+                 junit_filename: StrPath | None = None,
+                 console: Reporter | None = None) -> MultiReporter:
     """Create the reporters of a process.
 
     The test process only needs use_junit to record the JUnit XML results,
-    the main process writes them to junit_filename.
+    the main process writes them to junit_filename, and its output to the
+    console reporter.
     """
     reporter = MultiReporter()
+    if console is not None:
+        # First, to report the test output before the other reporters
+        reporter.add(console)
     if use_junit or junit_filename:
         reporter.add(JUnitReporter(junit_filename))
     if GitHubActionsReporter.enabled():
@@ -237,7 +260,8 @@ class JUnitReporter(Reporter):
 
     # Main process
 
-    def test_result(self, result: TestResult) -> None:
+    def test_result(self, result: TestResult, output: str | None = None,
+                    error: str | None = None) -> None:
         for e in result.xml_data or ():
             try:
                 self.testsuites.append(ET.fromstring(e))
@@ -290,7 +314,8 @@ class GitHubActionsReporter(Reporter):
         filename, line, exception = self.parse_traceback(decolor(traceback))
         self.annotate(test_case, exception, filename, line, stream)
 
-    def test_result(self, result: TestResult) -> None:
+    def test_result(self, result: TestResult, output: str | None = None,
+                    error: str | None = None) -> None:
         if not self.runtests.final_run:
             return
         if not result.is_failed(self.runtests.fail_env_changed):

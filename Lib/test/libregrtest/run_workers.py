@@ -15,13 +15,11 @@ from typing import Any, Literal, TextIO
 from test import support
 from test.support import os_helper, MS_WINDOWS
 
-from .console import REFRESH_INTERVAL
 from .logger import Logger
 from .reporter import Reporter
 from .result import TestResult, State
 from .results import TestResults
 from .runtests import RunTests, WorkerRunTests, JsonFile, JsonFileType
-from .single import PROGRESS_MIN_TIME
 from .utils import (
     StrPath, TestName,
     format_duration, print_warning, count, plural, get_process_memory_usage)
@@ -33,15 +31,14 @@ if MS_WINDOWS:
 
 
 
-# Display the running tests if nothing happened last N seconds
-PROGRESS_UPDATE = 30.0   # seconds
-assert PROGRESS_UPDATE >= PROGRESS_MIN_TIME
+# Report the running tests every N seconds
+PROGRESS_REFRESH = 1.0   # seconds
 
-# Kill the main process after 5 minutes. It is supposed to write an update
-# every PROGRESS_UPDATE seconds. Tolerate 5 minutes for Python slowest
+# Kill the main process after 5 minutes. It is supposed to report the running
+# tests every PROGRESS_REFRESH seconds. Tolerate 5 minutes for Python slowest
 # buildbot workers.
 MAIN_PROCESS_TIMEOUT = 5 * 60.0
-assert MAIN_PROCESS_TIMEOUT >= PROGRESS_UPDATE
+assert MAIN_PROCESS_TIMEOUT >= PROGRESS_REFRESH
 
 # Time to wait until a worker completes: should be immediate
 WAIT_COMPLETED_TIMEOUT = 30.0   # seconds
@@ -484,21 +481,6 @@ class WorkerThread(threading.Thread):
         return get_process_memory_usage(popen.pid)
 
 
-def get_running(workers: list[WorkerThread]) -> str | None:
-    running: list[str] = []
-    for worker in workers:
-        test_name = worker.test_name
-        if test_name == _NOT_RUNNING:
-            continue
-        dt = time.monotonic() - worker.start_time
-        if dt >= PROGRESS_MIN_TIME:
-            text = f'{test_name} ({format_duration(dt)})'
-            running.append(text)
-    if not running:
-        return None
-    return f"running ({len(running)}): {', '.join(running)}"
-
-
 class RunWorkers:
     def __init__(self, num_workers: int, runtests: RunTests,
                  logger: Logger, results: TestResults,
@@ -506,17 +488,9 @@ class RunWorkers:
         self.num_workers = num_workers
         self.runtests = runtests
         self.logger = logger
-        self.log = logger.log
-        self.display_progress = logger.display_progress
         self.results: TestResults = results
         self.reporter = reporter
-        self.console = logger.console
-        if self.console is not None and self.console.live:
-            # Refresh the status line, instead of logging the running tests
-            self.progress_update = REFRESH_INTERVAL
-        else:
-            self.console = None
-            self.progress_update = PROGRESS_UPDATE
+        self.log = reporter.log
         self.live_worker_count = 0
 
         self.output: queue.Queue[QueueContent] = queue.Queue()
@@ -566,7 +540,6 @@ class RunWorkers:
             worker.wait_stopped(start_time)
 
     def _get_result(self) -> QueueOutput | None:
-        pgo = self.runtests.pgo
         use_faulthandler = (self.timeout is not None)
 
         # bpo-46205: check the status of workers every iteration to avoid
@@ -578,7 +551,7 @@ class RunWorkers:
 
             # wait for a thread
             try:
-                result = self.output.get(timeout=self.progress_update)
+                result = self.output.get(timeout=PROGRESS_REFRESH)
                 if isinstance(result, WorkerThreadExited):
                     self.live_worker_count -= 1
                     continue
@@ -586,36 +559,14 @@ class RunWorkers:
             except queue.Empty:
                 pass
 
-            if self.console is not None:
-                self.console.update_running(self.get_running_tests())
-            elif not pgo:
-                # display progress
-                running = get_running(self.workers)
-                if running:
-                    self.log(running)
+            self.reporter.tests_running(self.get_running())
         return None
 
-    def get_running_tests(self) -> list[tuple[TestName, float]]:
+    def get_running(self) -> list[tuple[TestName, float]]:
         now = time.monotonic()
         return [(worker.test_name, now - worker.start_time)
                 for worker in self.workers
                 if worker.test_name != _NOT_RUNNING]
-
-    def display_result(self, mp_result: MultiprocessResult) -> None:
-        result = mp_result.result
-        pgo = self.runtests.pgo
-
-        text = str(result)
-        if mp_result.err_msg:
-            # WORKER_BUG
-            text += ' (%s)' % mp_result.err_msg
-        elif (result.duration and result.duration >= PROGRESS_MIN_TIME and not pgo):
-            text += ' (%s)' % format_duration(result.duration)
-        if not pgo:
-            running = get_running(self.workers)
-            if running:
-                text += f' -- {running}'
-        self.display_progress(self.test_index, text)
 
     def _process_result(self, item: QueueOutput) -> TestResult:
         """Returns True if test runner must stop."""
@@ -627,11 +578,9 @@ class RunWorkers:
             self.results.accumulate_result(result, self.runtests)
             return result
 
-        self.test_index += 1
         mp_result = item[1]
         result = mp_result.result
         self.results.accumulate_result(result, self.runtests)
-        self.display_result(mp_result)
 
         # Display worker stdout
         if not self.runtests.output_on_failure:
@@ -639,17 +588,9 @@ class RunWorkers:
         else:
             # --verbose3 ignores stdout on success
             show_stdout = (result.state != State.PASSED)
-        if self.console is not None and not self.runtests.verbose:
-            # Don't show the output of results collapsed in the status line
-            show_stdout = show_stdout and not self.console.collapses(result)
-        if show_stdout:
-            stdout = mp_result.worker_stdout
-            if stdout:
-                self.logger.write_output(stdout)
-        # Report after the output: env changed warnings, crash traceback
-        self.reporter.test_result(result)
-        if self.console is not None:
-            self.console.update_running(self.get_running_tests())
+        output = mp_result.worker_stdout if show_stdout else None
+        self.reporter.tests_running(self.get_running())
+        self.reporter.test_result(result, output, mp_result.err_msg)
 
         return result
 
@@ -671,7 +612,6 @@ class RunWorkers:
 
         self.start_workers()
 
-        self.test_index = 0
         try:
             while True:
                 item = self._get_result()
