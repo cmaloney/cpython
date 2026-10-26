@@ -1,15 +1,24 @@
 import html
+import inspect
 import os
 import pathlib
 import re
+import sys
+import time
+import traceback as traceback_module
+import unittest
 from _colorize import decolor  # type: ignore[import-not-found]
-from typing import TextIO
+from typing import Any, Callable, Iterable, TextIO
 
+from test import support
 from .findtests import findtestdir
 from .result import TestResult
 from .results import TestResults
 from .runtests import RunTests
-from .utils import count
+from .utils import StrPath, count, sanitize_xml
+
+lazy import xml.etree.ElementTree as ET
+lazy from xml.etree.ElementTree import Element
 
 
 class Reporter:
@@ -17,6 +26,26 @@ class Reporter:
 
     def run_started(self, runtests: RunTests) -> None:
         """Called at the start of each run, and in the test process."""
+
+    def test_run_started(self) -> None:
+        """Called in the test process before running a test suite."""
+
+    def test_case_started(self, test: unittest.TestCase) -> None:
+        """Called in the test process before a test case runs."""
+
+    def test_case_finished(self, test: unittest.TestCase, outcome: str,
+                           details: Any = None,
+                           output: tuple[str, str] | None = None) -> None:
+        """Called in the test process after a test case ran.
+
+        outcome is "success", "error", "failure", "skipped",
+        "expected_failure" or "unexpected_success". details is the
+        exc_info of an error, failure or expected failure, or the reason of
+        a skip. output is the captured (stdout, stderr), if captured.
+        """
+
+    def test_run_finished(self, result: unittest.TestResult) -> None:
+        """Called in the test process after running a test suite."""
 
     def test_case_failed(self, test_case: str, traceback: str,
                          stream: TextIO) -> None:
@@ -47,10 +76,194 @@ class Reporter:
         return filename, line, exception.strip()
 
 
-def get_reporter() -> Reporter:
+class MultiReporter(Reporter):
+    """Forward every Reporter call to each added reporter."""
+
+    def __init__(self, reporters: Iterable[Reporter] = ()) -> None:
+        self.reporters: list[Reporter] = list(reporters)
+
+    def add(self, reporter: Reporter) -> None:
+        self.reporters.append(reporter)
+
+
+def _forward(name: str) -> Callable[..., None]:
+    def forward(self: MultiReporter, *args: Any, **kwargs: Any) -> None:
+        for reporter in self.reporters:
+            getattr(reporter, name)(*args, **kwargs)
+    forward.__name__ = forward.__qualname__ = name
+    return forward
+
+
+# Define a forwarding method for each hook (plain function) of Reporter
+for _name, _value in vars(Reporter).items():
+    if inspect.isfunction(_value) and not _name.startswith('_'):
+        setattr(MultiReporter, _name, _forward(_name))
+del _name, _value
+
+
+def get_reporter(*, use_junit: bool = False,
+                 junit_filename: StrPath | None = None) -> MultiReporter:
+    """Create the reporters of a process.
+
+    The test process only needs use_junit to record the JUnit XML results,
+    the main process writes them to junit_filename.
+    """
+    reporter = MultiReporter()
+    if use_junit or junit_filename:
+        reporter.add(JUnitReporter(junit_filename))
     if GitHubActionsReporter.enabled():
-        return GitHubActionsReporter()
-    return Reporter()
+        reporter.add(GitHubActionsReporter())
+    return reporter
+
+
+class JUnitReporter(Reporter):
+    """Write the results of the test cases to a JUnit XML file.
+
+    The test process records a testsuite element per test suite run in
+    support.junit_xml_list, which is sent to the main process in
+    TestResult.xml_data. The main process writes them all in summary().
+    """
+
+    def __init__(self, filename: StrPath | None = None) -> None:
+        # Resolve the filename before the tests change the current directory
+        self.filename = os.path.abspath(filename) if filename else None
+        self.testsuites: list[Element] = []
+        self._suite: Element | None = None
+        self._case: Element | None = None
+        self._start_time: float | None = None
+
+    # Test process
+
+    def test_run_started(self) -> None:
+        from datetime import datetime, UTC
+        self._suite = ET.Element('testsuite')
+        self._suite.set('start',
+                        datetime.now(UTC).replace(tzinfo=None).isoformat(' '))
+        self._case = None
+        self._start_time = None
+
+    def test_case_started(self, test: unittest.TestCase) -> None:
+        if self._suite is None:
+            return
+        self._case = ET.SubElement(self._suite, 'testcase')
+        self._start_time = time.perf_counter()
+
+    def test_case_finished(self, test: unittest.TestCase, outcome: str,
+                           details: Any = None,
+                           output: tuple[str, str] | None = None) -> None:
+        e = self._case
+        self._case = None
+        if e is None:
+            return
+
+        e.set('name', self.get_test_id(test))
+        e.set('status', 'run')
+        e.set('result', 'completed')
+        if self._start_time:
+            e.set('time', f'{time.perf_counter() - self._start_time:0.6f}')
+
+        children: dict[str, Any] = {}
+        match outcome:
+            case 'error' | 'failure' | 'expected_failure':
+                if output is not None:
+                    stdout, stderr = output
+                    ET.SubElement(e, 'system-out').text = \
+                        sanitize_xml(stdout.rstrip())
+                    ET.SubElement(e, 'system-err').text = \
+                        sanitize_xml(stderr.rstrip())
+                tag = 'output' if outcome == 'expected_failure' else outcome
+                children[tag] = self.make_error_dict(*details)
+            case 'skipped':
+                children['skipped'] = details
+            case 'unexpected_success':
+                children['outcome'] = 'UNEXPECTED_SUCCESS'
+
+        for k, v in children.items():
+            if not v:
+                continue
+            e2 = ET.SubElement(e, k)
+            if hasattr(v, 'items'):
+                for k2, v2 in v.items():
+                    if k2:
+                        e2.set(k2, sanitize_xml(str(v2)))
+                    else:
+                        e2.text = sanitize_xml(str(v2))
+            else:
+                e2.text = sanitize_xml(str(v))
+
+    def test_run_finished(self, result: unittest.TestResult) -> None:
+        e = self._suite
+        self._suite = None
+        if e is None or support.junit_xml_list is None:
+            return
+        e.set('tests', str(result.testsRun))
+        e.set('errors', str(len(result.errors)))
+        e.set('failures', str(len(result.failures)))
+        support.junit_xml_list.append(ET.tostring(e).decode('ascii'))
+
+    @staticmethod
+    def get_test_id(test: unittest.TestCase) -> str:
+        try:
+            test_id = test.id
+        except AttributeError:
+            return str(test)
+        try:
+            return test_id()
+        except TypeError:
+            return str(test_id)
+
+    @staticmethod
+    def make_error_dict(err_type, err_value, err_tb) -> dict[str, str]:
+        if isinstance(err_type, type):
+            if err_type.__module__ == 'builtins':
+                typename = err_type.__name__
+            else:
+                typename = f'{err_type.__module__}.{err_type.__name__}'
+        else:
+            typename = repr(err_type)
+
+        msg = traceback_module.format_exception(err_type, err_value, None)
+        tb = traceback_module.format_exception(err_type, err_value, err_tb)
+
+        return {
+            'type': typename,
+            'message': ''.join(msg),
+            '': ''.join(tb),
+        }
+
+    # Main process
+
+    def test_result(self, result: TestResult) -> None:
+        for e in result.xml_data or ():
+            try:
+                self.testsuites.append(ET.fromstring(e))
+            except ET.ParseError:
+                print(result.xml_data, file=sys.__stderr__)
+                raise
+
+    def summary(self, results: TestResults, state: str) -> None:
+        if self.filename is None or not self.testsuites:
+            # Don't create empty XML file
+            return
+
+        root = ET.Element("testsuites")
+
+        # Manually count the totals for the overall summary
+        totals = {'tests': 0, 'errors': 0, 'failures': 0}
+        for suite in self.testsuites:
+            root.append(suite)
+            for k in totals:
+                try:
+                    totals[k] += int(suite.get(k, 0))
+                except ValueError:
+                    pass
+
+        for k, v in totals.items():
+            root.set(k, str(v))
+
+        with open(self.filename, 'wb') as f:
+            for s in ET.tostringlist(root):
+                f.write(s)
 
 
 class GitHubActionsReporter(Reporter):

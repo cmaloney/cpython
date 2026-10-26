@@ -114,12 +114,11 @@ def setup_tests(runtests: RunTests) -> None:
 
     set_match_tests(runtests.match_tests)
 
-    reporter = get_reporter()
+    reporter = get_reporter(use_junit=runtests.use_junit)
     reporter.run_started(runtests)
     RegressionTestResult.reporter = reporter
     if runtests.use_junit:
         support.junit_xml_list = []
-        RegressionTestResult.USE_XML = True
     else:
         support.junit_xml_list = None
 

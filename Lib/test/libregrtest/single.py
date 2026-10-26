@@ -83,12 +83,6 @@ def _run_suite(suite):
 
     result = runner.run(suite)
 
-    if support.junit_xml_list is not None:
-        import xml.etree.ElementTree as ET
-        xml_elem = result.get_xml_element()
-        xml_str = ET.tostring(xml_elem).decode('ascii')
-        support.junit_xml_list.append(xml_str)
-
     if not result.testsRun and not result.skipped and not result.errors:
         raise support.TestDidNotRun
     if not result.wasSuccessful():

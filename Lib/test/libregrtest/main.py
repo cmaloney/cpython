@@ -69,7 +69,7 @@ class Regrtest:
 
         # Logger
         self.logger = Logger(self.results, self.quiet, self.pgo)
-        self.reporter = get_reporter()
+        self.reporter = get_reporter(junit_filename=ns.xmlpath)
 
         # Actions
         self.want_header: bool = ns.header
@@ -482,9 +482,6 @@ class Regrtest:
 
         if self.want_run_leaks:
             os.system("leaks %d" % os.getpid())
-
-        if self.junit_filename:
-            self.results.write_junit(self.junit_filename)
 
         self.reporter.summary(self.results, self.get_state())
 

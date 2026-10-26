@@ -1,7 +1,5 @@
-import sys
 import trace
 from _colorize import get_colors  # type: ignore[import-not-found]
-lazy from xml.etree.ElementTree import Element
 
 from .runtests import RunTests
 from .result import State, TestResult, TestStats, Location
@@ -37,8 +35,6 @@ class TestResults:
         self.worker_bug: bool = False
         self.test_times: list[tuple[float, TestName]] = []
         self.stats = TestStats()
-        # used by --junit-xml
-        self.testsuite_xml: list[Element] = []
         # used by -T with -j
         self.covered_lines: set[Location] = set()
 
@@ -139,9 +135,6 @@ class TestResults:
         if result.covered_lines:
             # we don't care about trace counts so we don't have to sum them up
             self.covered_lines.update(result.covered_lines)
-        xml_data = result.xml_data
-        if xml_data:
-            self.add_junit(xml_data)
 
     def get_coverage_results(self) -> trace.CoverageResults:
         counts = {loc: 1 for loc in self.covered_lines}
@@ -169,40 +162,6 @@ class TestResults:
             self.rerun_results.clear()
 
         return (tuple(tests), match_tests_dict)
-
-    def add_junit(self, xml_data: list[str]) -> None:
-        import xml.etree.ElementTree as ET
-        for e in xml_data:
-            try:
-                self.testsuite_xml.append(ET.fromstring(e))
-            except ET.ParseError:
-                print(xml_data, file=sys.__stderr__)
-                raise
-
-    def write_junit(self, filename: StrPath) -> None:
-        if not self.testsuite_xml:
-            # Don't create empty XML file
-            return
-
-        import xml.etree.ElementTree as ET
-        root = ET.Element("testsuites")
-
-        # Manually count the totals for the overall summary
-        totals = {'tests': 0, 'errors': 0, 'failures': 0}
-        for suite in self.testsuite_xml:
-            root.append(suite)
-            for k in totals:
-                try:
-                    totals[k] += int(suite.get(k, 0))
-                except ValueError:
-                    pass
-
-        for k, v in totals.items():
-            root.set(k, str(v))
-
-        with open(filename, 'wb') as f:
-            for s in ET.tostringlist(root):
-                f.write(s)
 
     def display_result(self, tests: TestTuple, quiet: bool, print_slowest: bool) -> None:
         ansi = get_colors()

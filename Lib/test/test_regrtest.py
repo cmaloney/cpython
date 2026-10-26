@@ -38,9 +38,11 @@ from test.libregrtest import main
 from test.libregrtest import setup
 from test.libregrtest import utils
 from test.libregrtest.filter import get_match_tests, match_test
-from test.libregrtest.reporter import GitHubActionsReporter
+from test.libregrtest.reporter import (
+    GitHubActionsReporter, JUnitReporter, MultiReporter, Reporter)
 from test.libregrtest.result import State, TestResult, TestStats
 from test.libregrtest.results import TestResults
+from test.libregrtest.testresult import RegressionTestResult, get_test_runner
 from test.libregrtest.utils import normalize_test_name
 
 if not support.has_subprocess_support:
@@ -3049,6 +3051,100 @@ class GitHubActionsReporterTestCase(unittest.TestCase):
             - dangling thread
 
         """))
+
+
+class MultiReporterTestCase(unittest.TestCase):
+    def test_forward(self):
+        calls = []
+
+        class Recorder(Reporter):
+            def __init__(self, name):
+                self.name = name
+
+            def test_result(self, result):
+                calls.append((self.name, result))
+
+        reporter = MultiReporter([Recorder('a')])
+        reporter.add(Recorder('b'))
+        reporter.test_result('result')
+        # Hooks not overridden by a reporter are no-ops
+        reporter.summary(TestResults(), 'SUCCESS')
+        self.assertEqual(calls, [('a', 'result'), ('b', 'result')])
+
+    def test_forward_every_hook(self):
+        for name, value in vars(Reporter).items():
+            if (isinstance(value, types.FunctionType)
+                    and not name.startswith('_')):
+                with self.subTest(name=name):
+                    self.assertIn(name, vars(MultiReporter))
+
+
+class JUnitReporterTestCase(unittest.TestCase):
+    def run_suite(self, reporter, *tests):
+        class Tests(unittest.TestCase):
+            def test_pass(self):
+                pass
+
+            def test_fail(self):
+                print('out')
+                self.fail('boom')
+
+            @unittest.skip('reason')
+            def test_skip(self):
+                pass
+
+        suite = unittest.TestSuite(Tests(name) for name in tests)
+        self.addCleanup(setattr, support, 'junit_xml_list',
+                        support.junit_xml_list)
+        support.junit_xml_list = []
+        self.addCleanup(setattr, RegressionTestResult, 'reporter',
+                        RegressionTestResult.reporter)
+        RegressionTestResult.reporter = reporter
+        stream = io.StringIO()
+        # unittest writes the output captured from a failed test
+        with support.captured_stdout(), support.captured_stderr():
+            runner = get_test_runner(
+                stream, verbosity=0, capture_output=True)
+            runner.run(suite)
+        return support.junit_xml_list
+
+    def test_junit_xml(self):
+        filename = os_helper.TESTFN
+        self.addCleanup(os_helper.unlink, filename)
+        xml_data = self.run_suite(JUnitReporter(),
+                                  'test_pass', 'test_fail', 'test_skip')
+        self.assertEqual(len(xml_data), 1)
+
+        # The main process collects the XML of each test file
+        reporter = JUnitReporter(filename)
+        reporter.test_result(TestResult('test_x', xml_data=xml_data))
+        reporter.test_result(TestResult('test_y', xml_data=xml_data))
+        reporter.summary(TestResults(), 'FAILURE')
+
+        root = ElementTree.parse(filename).getroot()
+        self.assertEqual(root.tag, 'testsuites')
+        self.assertEqual((root.get('tests'), root.get('errors'),
+                          root.get('failures')), ('6', '0', '2'))
+        self.assertEqual(len(root), 2)
+        suite = root[0]
+        self.assertEqual([case.get('name').rsplit('.', 1)[1]
+                          for case in suite],
+                         ['test_pass', 'test_fail', 'test_skip'])
+        test_pass, test_fail, test_skip = suite
+        self.assertEqual([child.tag for child in test_pass], [])
+        self.assertEqual([child.tag for child in test_fail],
+                         ['system-out', 'system-err', 'failure'])
+        self.assertEqual(test_fail.find('system-out').text, 'out')
+        self.assertEqual(test_fail.find('failure').get('type'),
+                         'AssertionError')
+        self.assertEqual(test_skip.find('skipped').text, 'reason')
+
+    def test_no_file(self):
+        # Without a filename, or without results, no file is written
+        filename = os_helper.TESTFN
+        self.addCleanup(os_helper.unlink, filename)
+        JUnitReporter(filename).summary(TestResults(), 'SUCCESS')
+        self.assertFalse(os.path.exists(filename))
 
 
 class TestColorized(unittest.TestCase):
