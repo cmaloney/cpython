@@ -12,6 +12,7 @@ from typing import NoReturn
 from test.support import os_helper, MS_WINDOWS, flush_std_streams
 
 from .cmdline import _parse_args, Namespace
+from .console import ConsoleReporter, use_modern_console
 from .findtests import findtests, split_test_packages, list_cases, collect_cases
 from .logger import Logger
 from .pgo import setup_pgo_tests
@@ -70,6 +71,14 @@ class Regrtest:
         # Logger
         self.logger = Logger(self.results, self.quiet, self.pgo)
         self.reporter = get_reporter(junit_filename=ns.xmlpath)
+        self.console: ConsoleReporter | None = None
+        if not self.pgo and use_modern_console(ns.console):
+            self.console = ConsoleReporter(
+                fail_env_changed=ns.fail_env_changed,
+                print_slowest=ns.print_slow,
+                filtered=bool(ns.match_tests))
+            self.reporter.add(self.console)
+            self.logger.console = self.console
 
         # Actions
         self.want_header: bool = ns.header
@@ -292,13 +301,16 @@ class Regrtest:
         self.reporter.run_started(runtests)
 
         msg = f"Re-running {len(tests)} failed tests in verbose mode"
-        if not self.single_process:
-            msg = f"{msg} in subprocesses"
-            self.log(msg)
-            self._run_tests_mp(runtests, self.num_workers)
-        else:
-            self.log(msg)
-            self.run_tests_sequentially(runtests)
+        try:
+            if not self.single_process:
+                msg = f"{msg} in subprocesses"
+                self.log(msg)
+                self._run_tests_mp(runtests, self.num_workers)
+            else:
+                self.log(msg)
+                self.run_tests_sequentially(runtests)
+        finally:
+            self.reporter.run_finished()
         return runtests
 
     def rerun_failed_tests(self, runtests: RunTests) -> None:
@@ -318,7 +330,7 @@ class Regrtest:
         print()
         rerun_runtests = self._rerun_failed_tests(runtests)
 
-        if self.results.bad:
+        if self.results.bad and self.console is None:
             print(
                 f"{red}{count(len(self.results.bad), 'test')} "
                 f"failed again:{reset}"
@@ -374,7 +386,8 @@ class Regrtest:
 
     def display_result(self, runtests: RunTests) -> None:
         # If running the test suite for PGO then no one cares about results.
-        if runtests.pgo:
+        # The modern console lists the results in its summary.
+        if runtests.pgo or self.console is not None:
             return
 
         state = self.get_state()
@@ -431,6 +444,8 @@ class Regrtest:
             start_time = time.perf_counter()
 
             self.logger.display_progress(test_index, test_name)
+            if self.console is not None:
+                self.console.update_running([(test_name, 0.0)])
 
             result = self.run_test(test_name, runtests, tracer)
 
@@ -490,6 +505,9 @@ class Regrtest:
             raise ValueError(
                 "Should never call `display_summary()` before calling `_run_test()`"
             )
+        if self.console is not None:
+            # Displayed by ConsoleReporter.summary()
+            return
 
         duration = time.perf_counter() - self.logger.start_time
         filtered = bool(self.match_tests)
@@ -586,10 +604,13 @@ class Regrtest:
         if use_load_tracker:
             self.logger.start_load_tracker()
         try:
-            if self.num_workers:
-                self._run_tests_mp(runtests, self.num_workers)
-            else:
-                self.run_tests_sequentially(runtests)
+            try:
+                if self.num_workers:
+                    self._run_tests_mp(runtests, self.num_workers)
+                else:
+                    self.run_tests_sequentially(runtests)
+            finally:
+                self.reporter.run_finished()
 
             coverage = self.results.get_coverage_results()
             self.display_result(runtests)

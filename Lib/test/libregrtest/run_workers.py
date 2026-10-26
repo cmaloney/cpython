@@ -15,6 +15,7 @@ from typing import Any, Literal, TextIO
 from test import support
 from test.support import os_helper, MS_WINDOWS
 
+from .console import REFRESH_INTERVAL
 from .logger import Logger
 from .reporter import Reporter
 from .result import TestResult, State
@@ -509,6 +510,13 @@ class RunWorkers:
         self.display_progress = logger.display_progress
         self.results: TestResults = results
         self.reporter = reporter
+        self.console = logger.console
+        if self.console is not None and self.console.live:
+            # Refresh the status line, instead of logging the running tests
+            self.progress_update = REFRESH_INTERVAL
+        else:
+            self.console = None
+            self.progress_update = PROGRESS_UPDATE
         self.live_worker_count = 0
 
         self.output: queue.Queue[QueueContent] = queue.Queue()
@@ -570,7 +578,7 @@ class RunWorkers:
 
             # wait for a thread
             try:
-                result = self.output.get(timeout=PROGRESS_UPDATE)
+                result = self.output.get(timeout=self.progress_update)
                 if isinstance(result, WorkerThreadExited):
                     self.live_worker_count -= 1
                     continue
@@ -578,12 +586,20 @@ class RunWorkers:
             except queue.Empty:
                 pass
 
-            if not pgo:
+            if self.console is not None:
+                self.console.update_running(self.get_running_tests())
+            elif not pgo:
                 # display progress
                 running = get_running(self.workers)
                 if running:
                     self.log(running)
         return None
+
+    def get_running_tests(self) -> list[tuple[TestName, float]]:
+        now = time.monotonic()
+        return [(worker.test_name, now - worker.start_time)
+                for worker in self.workers
+                if worker.test_name != _NOT_RUNNING]
 
     def display_result(self, mp_result: MultiprocessResult) -> None:
         result = mp_result.result
@@ -623,12 +639,17 @@ class RunWorkers:
         else:
             # --verbose3 ignores stdout on success
             show_stdout = (result.state != State.PASSED)
+        if self.console is not None and not self.runtests.verbose:
+            # Don't show the output of results collapsed in the status line
+            show_stdout = show_stdout and not self.console.collapses(result)
         if show_stdout:
             stdout = mp_result.worker_stdout
             if stdout:
-                print(stdout, flush=True)
+                self.logger.write_output(stdout)
         # Report after the output: env changed warnings, crash traceback
         self.reporter.test_result(result)
+        if self.console is not None:
+            self.console.update_running(self.get_running_tests())
 
         return result
 

@@ -54,6 +54,9 @@ class Reporter:
     def test_result(self, result: TestResult) -> None:
         """Called in the main process after a test file completed."""
 
+    def run_finished(self) -> None:
+        """Called in the main process at the end of each run."""
+
     def summary(self, results: TestResults, state: str) -> None:
         """Called in the main process after all runs."""
 

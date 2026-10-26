@@ -178,6 +178,7 @@ class Namespace(argparse.Namespace):
         self.parallel_threads = None
         self.forever = False
         self.header = False
+        self.console = 'auto'
         self.failfast = False
         self.match_tests: TestFilter = []
         self.pgo = False
@@ -275,6 +276,12 @@ def _create_parser():
                        help='print the slowest 10 tests')
     group.add_argument('--header', action='store_true',
                        help='print header with interpreter info')
+    group.add_argument('--console', choices=('auto', 'modern', 'classic'),
+                       help='console output: "modern" collapses the progress '
+                            'into a status line at a terminal and lists what '
+                            'needs attention at the end, "classic" logs a '
+                            'line per test; "auto" (default) is "modern" '
+                            'at a terminal')
 
     group = parser.add_argument_group('Selecting tests')
     group.add_argument('-r', '--randomize', action='store_true',

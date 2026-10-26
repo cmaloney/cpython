@@ -34,6 +34,7 @@ from test import support
 from test.support import import_helper
 from test.support import os_helper
 from test.libregrtest import cmdline
+from test.libregrtest import console
 from test.libregrtest import main
 from test.libregrtest import setup
 from test.libregrtest import utils
@@ -165,6 +166,15 @@ class ParseArgsTestCase(unittest.TestCase):
             with self.subTest(opt=opt):
                 ns = self.parse_args([opt])
                 self.assertTrue(ns.print_slow)
+
+    def test_console(self):
+        ns = self.parse_args([])
+        self.assertEqual(ns.console, 'auto')
+        for value in ('auto', 'modern', 'classic'):
+            with self.subTest(value=value):
+                ns = self.parse_args([f'--console={value}'])
+                self.assertEqual(ns.console, value)
+        self.checkError(['--console=fancy'], 'invalid choice')
 
     def test_header(self):
         ns = self.parse_args(['--header'])
@@ -1677,6 +1687,34 @@ class ArgsTestCase(BaseTestCase):
         with open(summary, encoding='utf-8') as fp:
             self.assertIn('2 test files and 1 test case failed', fp.read())
 
+    def test_console_modern(self):
+        code = textwrap.dedent("""
+            import unittest
+
+            class Tests(unittest.TestCase):
+                def test_fail(self):
+                    self.fail()
+        """)
+        tests = [self.create_test('console_pass'),
+                 self.create_test('console_fail', code)]
+        for args in ([], ['-j2']):
+            with self.subTest(args=args):
+                output = self.run_tests('--console=modern', *args, *tests,
+                                        exitcode=EXITCODE_BAD_TEST)
+                # Not at a terminal: one line per test file
+                self.assertRegex(output, rf' PASS \[ *\S+\] {tests[0]}\n')
+                self.assertRegex(output,
+                                 rf' FAIL \[ *\S+\] {tests[1]} \(1 failure\)')
+                summary = output[output.index('Summary'):]
+                self.assertIn(f'FAIL {tests[1]} (1 failure)\n'
+                              f'      test_fail ', summary)
+                self.assertIn('Files  1 passed, 1 failed\n', summary)
+                self.assertIn('Tests  2 run, 1 failed\n', summary)
+                self.assertIn('Result  FAILURE\n', summary)
+                # No classic output
+                self.assertNotIn('== Tests result', output)
+                self.assertNotIn('Total test files', output)
+
     def test_rerun_fail(self):
         # FAILURE then FAILURE
         code = textwrap.dedent("""
@@ -3157,6 +3195,110 @@ class JUnitReporterTestCase(unittest.TestCase):
         self.addCleanup(os_helper.unlink, filename)
         JUnitReporter(filename).summary(TestResults(), 'SUCCESS')
         self.assertFalse(os.path.exists(filename))
+
+
+@support.force_not_colorized_test_class
+class ConsoleReporterTestCase(unittest.TestCase):
+    def create_console(self, live, **kwargs):
+        stream = io.StringIO()
+        reporter = console.ConsoleReporter(stream, live=live, **kwargs)
+        runtests = types.SimpleNamespace(rerun=False, forever=False,
+                                         tests=('test_a', 'test_b', 'test_c'),
+                                         pgo=False, fail_env_changed=True)
+        self.addCleanup(reporter.run_finished)
+        reporter.run_started(runtests)
+        return reporter, stream
+
+    def test_use_modern_console(self):
+        stream = io.StringIO()
+        self.assertTrue(console.use_modern_console('modern', stream))
+        self.assertFalse(console.use_modern_console('classic', stream))
+        self.assertFalse(console.use_modern_console('auto', stream))
+        stream.isatty = lambda: True
+        with os_helper.EnvironmentVarGuard() as env:
+            env['TERM'] = 'xterm'
+            self.assertTrue(console.use_modern_console('auto', stream))
+            env['TERM'] = 'dumb'
+            self.assertFalse(console.use_modern_console('auto', stream))
+
+    def test_format_short_duration(self):
+        fmt = console.format_short_duration
+        self.assertEqual(fmt(0.25), '0.2s')
+        self.assertEqual(fmt(59.9), '59.9s')
+        self.assertEqual(fmt(65), '1m05s')
+        self.assertEqual(fmt(3 * 3600 + 120), '3h02m')
+
+    def test_not_live(self):
+        orig_stdout = sys.stdout
+        reporter, stream = self.create_console(live=False)
+        self.assertIs(sys.stdout, orig_stdout)
+        reporter.test_result(TestResult('test_a', state=State.PASSED,
+                                        duration=1.5))
+        reporter.test_result(TestResult('test_b', state=State.SKIPPED))
+        reporter.test_result(TestResult(
+            'test_c', state=State.FAILED, duration=0.5,
+            failures=[('test_x (test.test_c.T.test_x)', 'Traceback')]))
+        # One line per result, no status line
+        self.assertEqual(stream.getvalue(),
+                         ' PASS [  1.5s] test_a\n'
+                         ' SKIP          test_b\n'
+                         ' FAIL [  0.5s] test_c (1 failure)\n')
+
+    def test_live(self):
+        orig_stdout = sys.stdout
+        reporter, stream = self.create_console(live=True)
+        # Output written while tests run clears the status line
+        self.assertIsNot(sys.stdout, orig_stdout)
+        reporter.update_running([('test_a', 2.0)])
+        self.assertTrue(stream.getvalue().endswith('test_a (2.0s)'))
+
+        reporter.test_result(TestResult('test_a', state=State.PASSED,
+                                        duration=1.5))
+        reporter.test_result(TestResult(
+            'test_b', state=State.ENV_CHANGED,
+            env_changed_reasons=['dangling thread']))
+        reporter.run_finished()
+        self.assertIs(sys.stdout, orig_stdout)
+
+        # Passed tests collapse into the status line
+        lines = stream.getvalue().replace('\r\x1b[K', '\n').splitlines()
+        lines = [line for line in lines if line]
+        self.assertNotIn(' PASS [  1.5s] test_a', lines)
+        self.assertIn('  ENV          test_b (env changed)', lines)
+        self.assertIn('               dangling thread', lines)
+        self.assertIn('2/3 \u00b7 1 env changed \u00b7 ', lines[-1])
+        # The status line is cleared at the end
+        self.assertTrue(stream.getvalue().endswith('\r\x1b[K'))
+
+    def test_summary(self):
+        reporter, stream = self.create_console(live=False,
+                                               fail_env_changed=True)
+        results = TestResults()
+        for result in (
+            TestResult('test_a', state=State.PASSED, duration=1.0),
+            TestResult('test_b', state=State.FAILED, duration=1.0,
+                       errors=[(f'test_{i} (test.test_b.T.test_{i})', 'tb')
+                               for i in range(12)]),
+            TestResult('test_c', state=State.ENV_CHANGED, duration=1.0,
+                       env_changed_reasons=['dangling thread']),
+        ):
+            results.accumulate_result(result, reporter.first_runtests)
+            reporter.test_result(result)
+        results.stats = TestStats(30, 12, 2)
+        stream.seek(0)
+        stream.truncate()
+        reporter.summary(results, 'FAILURE')
+        summary = stream.getvalue()
+        self.assertRegex(summary, r'Summary')
+        self.assertIn(' FAIL test_b (12 errors)\n'
+                      '      test_0 (test.test_b.T.test_0)\n', summary)
+        self.assertIn('      test_9 (test.test_b.T.test_9)\n'
+                      '      ... and 2 more\n'
+                      '  ENV test_c (env changed)\n'
+                      '      dangling thread\n', summary)
+        self.assertIn(' Files  1 passed, 1 failed, 1 env changed\n'
+                      ' Tests  30 run, 12 failed, 2 skipped\n', summary)
+        self.assertTrue(summary.endswith('Result  FAILURE\n'), summary)
 
 
 class TestColorized(unittest.TestCase):
