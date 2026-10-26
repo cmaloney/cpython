@@ -3072,11 +3072,23 @@ class MultiReporterTestCase(unittest.TestCase):
         self.assertEqual(calls, [('a', 'result'), ('b', 'result')])
 
     def test_forward_every_hook(self):
-        for name, value in vars(Reporter).items():
-            if (isinstance(value, types.FunctionType)
-                    and not name.startswith('_')):
-                with self.subTest(name=name):
-                    self.assertIn(name, vars(MultiReporter))
+        calls = []
+
+        class Recorder:
+            def __getattr__(self, name):
+                return lambda *args: calls.append((name, args))
+
+        reporter = MultiReporter()
+        reporter.add(Recorder())
+        hooks = [name for name, value in vars(Reporter).items()
+                 if isinstance(value, types.FunctionType)
+                 and not name.startswith('_')]
+        self.assertIn('test_result', hooks)
+        for name in hooks:
+            getattr(reporter, name)(name)
+        self.assertEqual(calls, [(name, (name,)) for name in hooks])
+        # Static methods are not hooks
+        self.assertIs(reporter.parse_traceback, Reporter.parse_traceback)
 
 
 class JUnitReporterTestCase(unittest.TestCase):

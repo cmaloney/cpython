@@ -8,7 +8,7 @@ import time
 import traceback as traceback_module
 import unittest
 from _colorize import decolor  # type: ignore[import-not-found]
-from typing import Any, Callable, Iterable, TextIO
+from typing import Any, Iterable, TextIO
 
 from test import support
 from .findtests import findtestdir
@@ -79,26 +79,27 @@ class Reporter:
 class MultiReporter(Reporter):
     """Forward every Reporter call to each added reporter."""
 
+    # Hooks of Reporter: its public methods, except static methods
+    HOOKS = frozenset(name for name, value in vars(Reporter).items()
+                      if inspect.isfunction(value)
+                      and not name.startswith('_'))
+
     def __init__(self, reporters: Iterable[Reporter] = ()) -> None:
         self.reporters: list[Reporter] = list(reporters)
 
     def add(self, reporter: Reporter) -> None:
         self.reporters.append(reporter)
 
+    def __getattribute__(self, name: str) -> Any:
+        # Look up hooks on the added reporters instead of on Reporter
+        if name not in MultiReporter.HOOKS:
+            return super().__getattribute__(name)
+        reporters = super().__getattribute__('reporters')
 
-def _forward(name: str) -> Callable[..., None]:
-    def forward(self: MultiReporter, *args: Any, **kwargs: Any) -> None:
-        for reporter in self.reporters:
-            getattr(reporter, name)(*args, **kwargs)
-    forward.__name__ = forward.__qualname__ = name
-    return forward
-
-
-# Define a forwarding method for each hook (plain function) of Reporter
-for _name, _value in vars(Reporter).items():
-    if inspect.isfunction(_value) and not _name.startswith('_'):
-        setattr(MultiReporter, _name, _forward(_name))
-del _name, _value
+        def forward(*args: Any, **kwargs: Any) -> None:
+            for reporter in reporters:
+                getattr(reporter, name)(*args, **kwargs)
+        return forward
 
 
 def get_reporter(*, use_junit: bool = False,
