@@ -54,6 +54,18 @@ class CAPIFileTest(unittest.TestCase):
             finally:
                 obj.close()
 
+        # closefd
+        for closefd in (0, 1):
+            fd = os.open(filename, os.O_RDONLY)
+            obj = pyfile_fromfd(fd, filename, "rb", 0, NULL, NULL, NULL,
+                                closefd)
+            try:
+                self.assertIs(obj.closefd, bool(closefd))
+            finally:
+                obj.close()
+                if not closefd:
+                    os.close(fd)
+
     def test_pyfile_getline(self):
         # Test PyFile_GetLine(file, n): call file.readline()
         # and strip "\n" suffix if n < 0.

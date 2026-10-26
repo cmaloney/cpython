@@ -36,12 +36,12 @@ PyFile_FromFd(int fd, const char *name, const char *mode, int buffering, const c
     PyObject *open, *stream;
 
     /* import _io in case we are being used to open io.py */
-    open = PyImport_ImportModuleAttrString("_io", "open");
+    open = PyImport_ImportModuleAttr(&_Py_ID(_io), &_Py_ID(open));
     if (open == NULL)
         return NULL;
-    stream = PyObject_CallFunction(open, "isisssO", fd, mode,
+    stream = PyObject_CallFunction(open, "isisssp", fd, mode,
                                   buffering, encoding, errors,
-                                  newline, closefd ? Py_True : Py_False);
+                                  newline, closefd);
     Py_DECREF(open);
     if (stream == NULL)
         return NULL;
@@ -534,7 +534,7 @@ PyFile_OpenCodeObject(PyObject *path)
     if (hook) {
         f = hook(path, _PyRuntime.open_code_userdata);
     } else {
-        PyObject *open = PyImport_ImportModuleAttrString("_io", "open");
+        PyObject *open = PyImport_ImportModuleAttr(&_Py_ID(_io), &_Py_ID(open));
         if (open) {
             f = PyObject_CallFunction(open, "Os", path, "rb");
             Py_DECREF(open);
