@@ -441,7 +441,7 @@ class CLanguage(Language):
         # First vectorcall argument depends on method.
         if f.vectorcall and f.cls:
             if f.kind is METHOD_INIT:
-                vc_first = f"({f.cls.typedef})self"
+                vc_first = f"({f_self.converter.type})self"
             elif f.kind is METHOD_NEW:
                 vc_first = "_PyType_CAST(type)"
             else:
