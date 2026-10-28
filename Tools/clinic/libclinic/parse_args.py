@@ -109,10 +109,6 @@ PARSER_PROTOTYPE_KEYWORD_HELPER: Final[str] = libclinic.normalize_snippet("""
     {c_basename}_helper({self_type}{self_name}, PyObject *const *args,
         Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames)
 """)
-# The tuple of tp_new / tp_init, NULL from vectorcall, see _helper_argstuple().
-PARSER_PROTOTYPE_KEYWORD_HELPER_ARGSTUPLE: Final[str] = (
-    PARSER_PROTOTYPE_KEYWORD_HELPER.replace(
-        "PyObject *kwnames)", "PyObject *kwnames,\n    PyObject *argstuple)"))
 PARSER_PROTOTYPE_VARARGS: Final[str] = libclinic.normalize_snippet("""
     static PyObject *
     {c_basename}({self_type}{self_name}, PyObject *args)
@@ -939,6 +935,21 @@ class ParseArgsCodeGen:
                               limited_capi=self.limited_capi,
                               argstuple=argstuple)
 
+    def _has_optional_kw(self) -> bool:
+        return (max(self.pos_only, self.min_pos) + self.min_kw_only
+                < len(self.converters))
+
+    def _helper_prototype(self) -> str:
+        """The @vectorcall helper takes only the arguments it uses."""
+        prototype = PARSER_PROTOTYPE_KEYWORD_HELPER
+        if not self._has_optional_kw():
+            prototype = prototype.replace(" Py_ssize_t nkw,", "")
+        if self._helper_argstuple():
+            prototype = prototype.replace(
+                "PyObject *kwnames)",
+                "PyObject *kwnames,\n    PyObject *argstuple)")
+        return prototype
+
     def _helper_argstuple(self) -> bool:
         """Whether the @vectorcall helper reuses the slot's tuple for *args.
 
@@ -1130,10 +1141,7 @@ class ParseArgsCodeGen:
         # The @vectorcall helper parses an array, like parse_general().
         fastcall = self.func.vectorcall
         if fastcall:
-            self.parser_prototype = (
-                PARSER_PROTOTYPE_KEYWORD_HELPER_ARGSTUPLE
-                if self._helper_argstuple() else
-                PARSER_PROTOTYPE_KEYWORD_HELPER)
+            self.parser_prototype = self._helper_prototype()
             nargs = 'nargs'
             argname_fmt = 'args[%d]'
         else:
@@ -1262,10 +1270,7 @@ class ParseArgsCodeGen:
             if p.deprecated_keyword:
                 deprecated_keywords[i] = p
 
-        has_optional_kw = (
-            max(self.pos_only, self.min_pos) + self.min_kw_only
-            < len(self.converters)
-        )
+        has_optional_kw = self._has_optional_kw()
 
         use_parser_code = True
         if self.limited_capi:
@@ -1299,10 +1304,7 @@ class ParseArgsCodeGen:
                 # Emit parsing body as a helper that takes both vectorcall and
                 # fastcall calling conventions.
                 self.flags = "METH_VARARGS|METH_KEYWORDS"
-                self.parser_prototype = (
-                    PARSER_PROTOTYPE_KEYWORD_HELPER_ARGSTUPLE
-                    if self._helper_argstuple() else
-                    PARSER_PROTOTYPE_KEYWORD_HELPER)
+                self.parser_prototype = self._helper_prototype()
                 argsname = 'fastargs'
                 argname_fmt = 'fastargs[%d]'
                 self.declarations = declare_parser(self.func, codegen=self.codegen)
@@ -1506,17 +1508,18 @@ class ParseArgsCodeGen:
         """
         self.parser_helper = self.parser_definition
         self.parser_prototype = PARSER_PROTOTYPE_KEYWORD
-        self.parser_definition = '\n'.join([
+        lines = [
             self.parser_prototype,
             '{{',
             '    return {c_basename}_helper({self_name}, '
                 '_PyTuple_CAST(args)->ob_item,',
             '        PyTuple_GET_SIZE(args),',
-            '        kwargs ? PyDict_GET_SIZE(kwargs) : 0,',
-            '        kwargs, NULL, args);' if self._helper_argstuple() else
-            '        kwargs, NULL);',
-            '}}',
-        ])
+        ]
+        if self._has_optional_kw():
+            lines.append('        kwargs ? PyDict_GET_SIZE(kwargs) : 0,')
+        argstuple = ', args' if self._helper_argstuple() else ''
+        lines += [f'        kwargs, NULL{argstuple});', '}}']
+        self.parser_definition = '\n'.join(lines)
 
     def _new_or_init_parser_body(self) -> None:
         """Rebuild the parser body with the checks tp_new / tp_init need."""
@@ -1716,7 +1719,7 @@ class ParseArgsCodeGen:
         parser_code.extend(self._vectorcall_positional())
         self.vectorcall_body(*parser_code)
 
-    def _vectorcall_guarded_delegate(self, condition: str, nkw: str) -> str:
+    def _vectorcall_guarded_delegate(self, condition: str) -> str:
         """Emit `if (condition) { <delegate to helper> }`."""
         return libclinic.linear_format(
             libclinic.normalize_snippet(f"""
@@ -1724,13 +1727,10 @@ class ParseArgsCodeGen:
                 {{delegate}}
                 }}}}
                 """, indent=4),
-            delegate=self._vectorcall_delegate_to_helper(nkw))
+            delegate=self._vectorcall_delegate_to_helper())
 
-    def _vectorcall_delegate_to_helper(self, nkw: str) -> str:
-        """Hand off to the {c_basename}_helper helper and return.
-
-        nkw: Number of keyword arguments.
-        """
+    def _vectorcall_delegate_to_helper(self) -> str:
+        """Hand off to the {c_basename}_helper helper and return."""
         if self.func.kind is METHOD_INIT:
             receiver = "self"
             bind_result = "_result = "
@@ -1752,20 +1752,19 @@ class ParseArgsCodeGen:
             receiver = "_PyType_CAST(type)"
             bind_result = "return "
             prologue = epilogue = ""
+        call = [f"{bind_result}{{c_basename}}_helper({receiver}, args, nargs,"]
+        if self._has_optional_kw():
+            call.append("    kwnames ? PyTuple_GET_SIZE(kwnames) : 0,")
         argstuple = ', NULL' if self._helper_argstuple() else ''
-        helper_call = libclinic.normalize_snippet(f"""
-            {bind_result}{{c_basename}}_helper({receiver}, args, nargs,
-                {nkw},
-                NULL, kwnames{argstuple});
-        """, indent=4)
+        call.append(f"    NULL, kwnames{argstuple});")
+        helper_call = libclinic.normalize_snippet("\n".join(call), indent=4)
         parts = [prologue, helper_call, epilogue]
         return "\n".join(part for part in parts if part)
 
     def parse_vectorcall_kw_required(self) -> None:
         """Required keyword-only arguments; always delegate to helper."""
         parser_code = self._vectorcall_type_check()
-        parser_code.append(self._vectorcall_delegate_to_helper(
-            'kwnames ? PyTuple_GET_SIZE(kwnames) : 0'))
+        parser_code.append(self._vectorcall_delegate_to_helper())
         preamble = libclinic.normalize_snippet("""
             {{
                 Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
@@ -1788,7 +1787,7 @@ class ParseArgsCodeGen:
 
         parser_code = self._vectorcall_type_check()
         parser_code.append(self._vectorcall_guarded_delegate(
-            " || ".join(checks), 'kwnames ? PyTuple_GET_SIZE(kwnames) : 0'))
+            " || ".join(checks)))
         parser_code.extend(self._vectorcall_positional(arity_checked=True))
         self.vectorcall_body(*parser_code)
 

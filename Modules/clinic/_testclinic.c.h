@@ -5499,7 +5499,7 @@ vc_var_kwargs_new_impl(PyTypeObject *type, PyObject *args, PyObject *kwargs);
 
 static PyObject *
 vc_var_kwargs_new_helper(PyTypeObject *type, PyObject *const *args,
-    Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames,
+    Py_ssize_t nargs, PyObject *kwargs, PyObject *kwnames,
     PyObject *argstuple)
 {
     PyObject *return_value = NULL;
@@ -5537,7 +5537,6 @@ vc_var_kwargs_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
     return vc_var_kwargs_new_helper(type, _PyTuple_CAST(args)->ob_item,
         PyTuple_GET_SIZE(args),
-        kwargs ? PyDict_GET_SIZE(kwargs) : 0,
         kwargs, NULL, args);
 }
 
@@ -5556,7 +5555,6 @@ vc_var_kwargs_vectorcall(PyObject *type, PyObject *const *args,
     assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
     if (kwnames != NULL) {
         return vc_var_kwargs_new_helper(_PyType_CAST(type), args, nargs,
-            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
             NULL, kwnames, NULL);
     }
     __clinic_args = PyTuple_FromArray(args, nargs);
@@ -5575,4 +5573,4 @@ exit:
 
     return return_value;
 }
-/*[clinic end generated code: output=97e47219ae208012 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=d649239f7277254f input=a9049054013a1b77]*/
