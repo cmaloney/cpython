@@ -1446,13 +1446,19 @@ class var_keyword_dict_converter(VarKeywordCConverter):
     c_init_default = 'NULL'
 
     def cleanup(self) -> str:
+        if self.function.vectorcall:
+            # Only the dict built from kwnames is owned.
+            return (f'if (kwnames != NULL) {{\n'
+                    f'    Py_XDECREF({self.parser_name});\n'
+                    f'}}\n')
         return f'Py_XDECREF({self.parser_name});\n'
 
     def parse_var_keyword(self, *, fastcall: bool) -> str:
         param_name = self.parser_name
         if fastcall:
             # The @vectorcall helper gets kwargs from tp_new / tp_init and
-            # kwnames from vectorcall.
+            # kwnames from vectorcall.  The impl gets a borrowed dict or
+            # NULL, so a caller's dict stays uniquely referenced.
             return f"""
                 if (kwnames != NULL) {{{{
                     {param_name} = _PyStack_AsDict(args + nargs, kwnames);
@@ -1460,14 +1466,8 @@ class var_keyword_dict_converter(VarKeywordCConverter):
                         goto exit;
                     }}}}
                 }}}}
-                else if (kwargs == NULL) {{{{
-                    {param_name} = PyDict_New();
-                    if ({param_name} == NULL) {{{{
-                        goto exit;
-                    }}}}
-                }}}}
                 else {{{{
-                    {param_name} = Py_NewRef(kwargs);
+                    {param_name} = kwargs;
                 }}}}
                 """
         return f"""

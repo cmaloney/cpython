@@ -5489,14 +5489,8 @@ vc_var_kwargs_new_helper(PyTypeObject *type, PyObject *const *args,
             goto exit;
         }
     }
-    else if (kwargs == NULL) {
-        __clinic_kwargs = PyDict_New();
-        if (__clinic_kwargs == NULL) {
-            goto exit;
-        }
-    }
     else {
-        __clinic_kwargs = Py_NewRef(kwargs);
+        __clinic_kwargs = kwargs;
     }
     return_value = vc_var_kwargs_new_impl(type, __clinic_args, __clinic_kwargs);
 
@@ -5504,7 +5498,9 @@ exit:
     /* Cleanup for args */
     Py_XDECREF(__clinic_args);
     /* Cleanup for kwargs */
-    Py_XDECREF(__clinic_kwargs);
+    if (kwnames != NULL) {
+        Py_XDECREF(__clinic_kwargs);
+    }
 
     return return_value;
 }
@@ -5532,4 +5528,4 @@ vc_var_kwargs_vectorcall(PyObject *type, PyObject *const *args,
         kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
         NULL, kwnames);
 }
-/*[clinic end generated code: output=56c641e01baf789f input=a9049054013a1b77]*/
+/*[clinic end generated code: output=350e237091af9cec input=a9049054013a1b77]*/
