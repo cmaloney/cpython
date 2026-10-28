@@ -3,6 +3,7 @@ preserve
 [clinic start generated code]*/
 
 #include "pycore_critical_section.h"// Py_BEGIN_CRITICAL_SECTION()
+#include "pycore_modsupport.h"    // _PyArg_CheckPositional()
 
 static PyObject *
 set_repr_impl(PySetObject *so);
@@ -69,6 +70,69 @@ set_update(PyObject *so, PyObject *const *args, Py_ssize_t nargs)
     others_length = nargs;
     return_value = set_update_impl((PySetObject *)so, others, others_length);
 
+    return return_value;
+}
+
+PyDoc_STRVAR(frozenset_new__doc__,
+"frozenset(iterable=(), /)\n"
+"--\n"
+"\n"
+"Build an immutable unordered collection of unique elements.");
+
+static PyObject *
+frozenset_new_impl(PyTypeObject *type, PyObject *iterable);
+
+static PyObject *
+frozenset_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    PyObject *return_value = NULL;
+    PyTypeObject *base_tp = &PyFrozenSet_Type;
+    PyObject *iterable = NULL;
+
+    if ((type == base_tp || type->tp_init == base_tp->tp_init) &&
+        !_PyArg_NoKeywords("frozenset", kwargs)) {
+        goto exit;
+    }
+    if (!_PyArg_CheckPositional("frozenset", PyTuple_GET_SIZE(args), 0, 1)) {
+        goto exit;
+    }
+    if (PyTuple_GET_SIZE(args) < 1) {
+        goto skip_optional;
+    }
+    iterable = PyTuple_GET_ITEM(args, 0);
+skip_optional:
+    return_value = frozenset_new_impl(type, iterable);
+
+exit:
+    return return_value;
+}
+
+static PyObject *
+frozenset_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyObject *iterable = NULL;
+
+    assert(_PyType_CAST(type)->tp_new == frozenset_new);
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    if (!_PyArg_NoKwnames("frozenset", kwnames)) {
+        goto exit;
+    }
+    if (!_PyArg_CheckPositional("frozenset", nargs, 0, 1)) {
+        goto exit;
+    }
+    if (nargs < 1) {
+        goto skip_optional;
+    }
+    iterable = args[0];
+skip_optional:
+    return_value = frozenset_new_impl(_PyType_CAST(type), iterable);
+
+exit:
     return return_value;
 }
 
@@ -567,4 +631,4 @@ set___sizeof__(PyObject *so, PyObject *Py_UNUSED(ignored))
 
     return return_value;
 }
-/*[clinic end generated code: output=5d794137d2614aaf input=a9049054013a1b77]*/
+/*[clinic end generated code: output=08d4a5f8d392639d input=a9049054013a1b77]*/
