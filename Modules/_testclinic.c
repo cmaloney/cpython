@@ -2008,6 +2008,7 @@ static PyTypeObject DeprStarInitNoInline = {
 /*[clinic input]
 class _testclinic.DeprKwdNew "PyObject *" "PyObject"
 @classmethod
+@vectorcall
 _testclinic.DeprKwdNew.__new__ as depr_kwd_new
     a: object = None
     / [from 3.14]
@@ -2016,7 +2017,7 @@ The deprecation message should use the class name instead of __new__.
 
 static PyObject *
 depr_kwd_new_impl(PyTypeObject *type, PyObject *a)
-/*[clinic end generated code: output=618d07afc5616149 input=6c7d13c471013c10]*/
+/*[clinic end generated code: output=618d07afc5616149 input=d9637bba9466db04]*/
 {
     return type->tp_alloc(type, 0);
 }
@@ -2026,6 +2027,7 @@ static PyTypeObject DeprKwdNew = {
     .tp_name = "_testclinic.DeprKwdNew",
     .tp_basicsize = sizeof(PyObject),
     .tp_new = depr_kwd_new,
+    .tp_vectorcall = depr_kwd_vectorcall,
     .tp_flags = Py_TPFLAGS_DEFAULT,
 };
 

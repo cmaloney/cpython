@@ -250,7 +250,10 @@ class CLanguage(Language):
         if len(conditions) > 1:
             condition = f"(({condition}))"
         if last_param.is_optional():
-            if fastcall:
+            if func.vectorcall:
+                # The @vectorcall helper gets kwargs or kwnames.
+                condition = f"nkw && {condition}"
+            elif fastcall:
                 if limited_capi:
                     condition = f"kwnames && PyTuple_Size(kwnames) && {condition}"
                 else:

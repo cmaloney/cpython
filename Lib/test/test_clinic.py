@@ -5419,6 +5419,8 @@ class ClinicFunctionalTest(unittest.TestCase):
         cls()
         cls(None)
         self.check_depr_kwd("'a'", cls, a=None)
+        self.check_depr_kwd("'a'", cls.__new__, cls, a=None,
+                            name='_testclinic.DeprKwdNew')
 
     def test_depr_kwd_init(self):
         cls = ac_tester.DeprKwdInit

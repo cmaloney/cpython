@@ -444,19 +444,9 @@ PyDoc_STRVAR(depr_kwd_new__doc__,
 static PyObject *
 depr_kwd_new_impl(PyTypeObject *type, PyObject *a);
 
-// Emit compiler warnings when we get to Python 3.14.
-#if PY_VERSION_HEX >= 0x030e00C0
-#  error "Update the clinic input of '_testclinic.DeprKwdNew.__new__'."
-#elif PY_VERSION_HEX >= 0x030e00A0
-#  ifdef _MSC_VER
-#    pragma message ("Update the clinic input of '_testclinic.DeprKwdNew.__new__'.")
-#  else
-#    warning "Update the clinic input of '_testclinic.DeprKwdNew.__new__'."
-#  endif
-#endif
-
 static PyObject *
-depr_kwd_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+depr_kwd_new_helper(PyTypeObject *type, PyObject *const *args,
+    Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames)
 {
     PyObject *return_value = NULL;
     #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
@@ -488,16 +478,15 @@ depr_kwd_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     #undef KWTUPLE
     PyObject *argsbuf[1];
     PyObject * const *fastargs;
-    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
-    Py_ssize_t noptargs = nargs + (kwargs ? PyDict_GET_SIZE(kwargs) : 0) - 0;
+    Py_ssize_t noptargs = nargs + nkw - 0;
     PyObject *a = Py_None;
 
-    fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser,
+    fastargs = _PyArg_UnpackKeywords(args, nargs, kwargs, kwnames, &_parser,
             /*minpos*/ 0, /*maxpos*/ 1, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
     if (!fastargs) {
         goto exit;
     }
-    if (kwargs && PyDict_GET_SIZE(kwargs) && nargs < 1 && fastargs[0]) {
+    if (nkw && nargs < 1 && fastargs[0]) {
         if (PyErr_WarnEx(PyExc_DeprecationWarning,
                 "Passing keyword argument 'a' to _testclinic.DeprKwdNew() is "
                 "deprecated. Parameter 'a' will become positional-only in Python "
@@ -514,6 +503,53 @@ skip_optional_pos:
     return_value = depr_kwd_new_impl(type, a);
 
 exit:
+    return return_value;
+}
+
+// Emit compiler warnings when we get to Python 3.14.
+#if PY_VERSION_HEX >= 0x030e00C0
+#  error "Update the clinic input of '_testclinic.DeprKwdNew.__new__'."
+#elif PY_VERSION_HEX >= 0x030e00A0
+#  ifdef _MSC_VER
+#    pragma message ("Update the clinic input of '_testclinic.DeprKwdNew.__new__'.")
+#  else
+#    warning "Update the clinic input of '_testclinic.DeprKwdNew.__new__'."
+#  endif
+#endif
+
+static PyObject *
+depr_kwd_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    return depr_kwd_new_helper(type, _PyTuple_CAST(args)->ob_item,
+        PyTuple_GET_SIZE(args),
+        kwargs ? PyDict_GET_SIZE(kwargs) : 0,
+        kwargs, NULL);
+}
+
+static PyObject *
+depr_kwd_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyObject *a = Py_None;
+
+    assert(_PyType_CAST(type)->tp_new == depr_kwd_new);
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    if (kwnames != NULL || nargs > 1) {
+        return depr_kwd_new_helper(_PyType_CAST(type), args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames);
+    }
+    if (nargs < 1) {
+        goto skip_optional;
+    }
+    a = args[0];
+skip_optional:
+    return_value = depr_kwd_new_impl(_PyType_CAST(type), a);
+
     return return_value;
 }
 
@@ -2682,4 +2718,4 @@ depr_multi(PyObject *module, PyObject *const *args, Py_ssize_t nargs, PyObject *
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=abe0af8d8c637c36 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=145cb66244217ebd input=a9049054013a1b77]*/

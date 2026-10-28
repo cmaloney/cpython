@@ -1305,12 +1305,9 @@ class ParseArgsCodeGen:
 
         if use_parser_code:
             if deprecated_keywords:
-                # The helper guards on kwargs only, so the vectorcall
-                # doesn't warn about an optional parameter.
                 code = clang.deprecate_keyword_use(
                     self.func, deprecated_keywords, argname_fmt,
-                    codegen=self.codegen,
-                    fastcall=self.fastcall and not self.func.vectorcall)
+                    codegen=self.codegen, fastcall=self.fastcall)
                 parser_code.append(code)
 
             add_label: str | None = None
