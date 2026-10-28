@@ -1143,23 +1143,19 @@ class ParseArgsCodeGen:
             self.parser_prototype = self._helper_prototype()
             nargs = 'nargs'
             argname_fmt = 'args[%d]'
+            no_positional = '_PyArg_NoPositionalStack', 'nargs'
         else:
             self.parser_prototype = PARSER_PROTOTYPE_KEYWORD
             nargs = 'PyTuple_GET_SIZE(args)'
             argname_fmt = 'PyTuple_GET_ITEM(args, %d)'
+            no_positional = '_PyArg_NoPositional', 'args'
 
         parser_code = []
         if self.varpos is None and self.min_pos == self.max_pos == 0:
-            if self.fastcall:
-                self.codegen.add_include('pycore_modsupport.h',
-                                         '_PyArg_NoPositionalStack()')
-                check = '_PyArg_NoPositionalStack("{name}", nargs)'
-            else:
-                self.codegen.add_include('pycore_modsupport.h',
-                                         '_PyArg_NoPositional()')
-                check = '_PyArg_NoPositional("{name}", args)'
+            check, arg = no_positional
+            self.codegen.add_include('pycore_modsupport.h', f'{check}()')
             parser_code.append(libclinic.normalize_snippet(f"""
-                if (!{check}) {{{{
+                if (!{check}("{{name}}", {arg})) {{{{
                     goto exit;
                 }}}}
                 """, indent=4))
