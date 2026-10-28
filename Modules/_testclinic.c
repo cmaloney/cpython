@@ -26,9 +26,6 @@ custom_converter(PyObject *obj, custom_t *val)
 static PyTypeObject VcNew_Type;
 static PyTypeObject VcNewBase_Type;
 static PyTypeObject VcKwOnly_Type;
-static PyTypeObject VcVarargs_Type;
-static PyTypeObject VcVarargsKwOnly_Type;
-static PyTypeObject VcVarKwargs_Type;
 #include "clinic/_testclinic.c.h"
 
 
@@ -2604,10 +2601,9 @@ static PyTypeObject VcNewBase_Type = {
 };
 
 
-/* VcKwOnly: @vectorcall + keyword-only arg.
- * Exercises the no-kwnames==NULL-fast-path branch of the vectorcall codegen:
- * the vectorcall function delegates unconditionally to the helper because the
- * keyword-only parameter rules out the positional-only fast path. */
+/* VcKwOnly: @vectorcall + *args and an optional keyword-only arg.
+ * Without kwnames, the vectorcall parses positionals inline.
+ * __new__ returns its arguments instead of an instance. */
 
 /*[clinic input]
 class _testclinic.VcKwOnly "PyObject *" "&VcKwOnly_Type"
@@ -2615,15 +2611,16 @@ class _testclinic.VcKwOnly "PyObject *" "&VcKwOnly_Type"
 @vectorcall
 _testclinic.VcKwOnly.__new__ as vc_kwonly_new
     a: object
-    *
+    *args: tuple
     b: object = None
 [clinic start generated code]*/
 
 static PyObject *
-vc_kwonly_new_impl(PyTypeObject *type, PyObject *a, PyObject *b)
-/*[clinic end generated code: output=00417079caa234dc input=68c863b55575a9e1]*/
+vc_kwonly_new_impl(PyTypeObject *type, PyObject *a, PyObject *args,
+                   PyObject *b)
+/*[clinic end generated code: output=8c9a1dd1410ff1a4 input=d20ac6bdea0504fb]*/
 {
-    return type->tp_alloc(type, 0);
+    return pack_arguments_newref(3, a, args, b);
 }
 
 static PyTypeObject VcKwOnly_Type = {
@@ -2637,10 +2634,11 @@ static PyTypeObject VcKwOnly_Type = {
 
 
 /* VcVarargs: @vectorcall + positional-only and *args, never keywords.
- * __new__ returns its arguments instead of an instance. */
+ * __new__ returns its arguments instead of an instance.  Not subclassable,
+ * so "type" is the base type for the tp_new keywords check. */
 
 /*[clinic input]
-class _testclinic.VcVarargs "PyObject *" "&VcVarargs_Type"
+class _testclinic.VcVarargs "PyObject *" "type"
 @classmethod
 @vectorcall
 _testclinic.VcVarargs.__new__ as vc_varargs_new
@@ -2653,55 +2651,29 @@ _testclinic.VcVarargs.__new__ as vc_varargs_new
 static PyObject *
 vc_varargs_new_impl(PyTypeObject *type, PyObject *a, PyObject *b,
                     PyObject * const *args, Py_ssize_t args_length)
-/*[clinic end generated code: output=d3e2efdf1b2c735f input=cd61412b632ba6e5]*/
-
+/*[clinic end generated code: output=d3e2efdf1b2c735f input=28b448efbee4b134]*/
 {
     return pack_arguments_2pos_varpos(a, b, args, args_length);
 }
 
-static PyTypeObject VcVarargs_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "_testclinic.VcVarargs",
-    .tp_basicsize = sizeof(PyObject),
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_new = vc_varargs_new,
-    .tp_vectorcall = vc_varargs_vectorcall,
+static PyType_Slot VcVarargs_slots[] = {
+    {Py_tp_new, vc_varargs_new},
+    {Py_tp_vectorcall, vc_varargs_vectorcall},
+    {0, NULL},
 };
 
-
-/* VcVarargsKwOnly: @vectorcall + *args and a keyword-only arg. */
-
-/*[clinic input]
-class _testclinic.VcVarargsKwOnly "PyObject *" "&VcVarargsKwOnly_Type"
-@classmethod
-@vectorcall
-_testclinic.VcVarargsKwOnly.__new__ as vc_varargs_kwonly_new
-    *args: tuple
-    b: object = None
-[clinic start generated code]*/
-
-static PyObject *
-vc_varargs_kwonly_new_impl(PyTypeObject *type, PyObject *args, PyObject *b)
-/*[clinic end generated code: output=d1041450ee22e6cb input=a5524bdb7cfc77ad]*/
-
-{
-    return pack_arguments_newref(2, args, b);
-}
-
-static PyTypeObject VcVarargsKwOnly_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "_testclinic.VcVarargsKwOnly",
-    .tp_basicsize = sizeof(PyObject),
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_new = vc_varargs_kwonly_new,
-    .tp_vectorcall = vc_varargs_kwonly_vectorcall,
+static PyType_Spec VcVarargs_spec = {
+    .name = "_testclinic.VcVarargs",
+    .basicsize = sizeof(PyObject),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_IMMUTABLETYPE,
+    .slots = VcVarargs_slots,
 };
 
 
 /* VcVarKwargs: @vectorcall + *args and **kwargs. */
 
 /*[clinic input]
-class _testclinic.VcVarKwargs "PyObject *" "&VcVarKwargs_Type"
+class _testclinic.VcVarKwargs "PyObject *" ""
 @classmethod
 @vectorcall
 _testclinic.VcVarKwargs.__new__ as vc_var_kwargs_new
@@ -2711,21 +2683,23 @@ _testclinic.VcVarKwargs.__new__ as vc_var_kwargs_new
 
 static PyObject *
 vc_var_kwargs_new_impl(PyTypeObject *type, PyObject *args, PyObject *kwargs)
-/*[clinic end generated code: output=107aef277a970bf3 input=d4eb303faf818518]*/
-
+/*[clinic end generated code: output=107aef277a970bf3 input=70101d44da770101]*/
 {
     return pack_arguments_newref(2, args, kwargs);
 }
 
-static PyTypeObject VcVarKwargs_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "_testclinic.VcVarKwargs",
-    .tp_basicsize = sizeof(PyObject),
-    .tp_flags = Py_TPFLAGS_DEFAULT,
-    .tp_new = vc_var_kwargs_new,
-    .tp_vectorcall = vc_var_kwargs_vectorcall,
+static PyType_Slot VcVarKwargs_slots[] = {
+    {Py_tp_new, vc_var_kwargs_new},
+    {Py_tp_vectorcall, vc_var_kwargs_vectorcall},
+    {0, NULL},
 };
 
+static PyType_Spec VcVarKwargs_spec = {
+    .name = "_testclinic.VcVarKwargs",
+    .basicsize = sizeof(PyObject),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_IMMUTABLETYPE,
+    .slots = VcVarKwargs_slots,
+};
 
 
 /*[clinic input]
@@ -2988,13 +2962,12 @@ PyInit__testclinic(void)
     if (PyModule_AddType(m, &VcKwOnly_Type) < 0) {
         goto error;
     }
-    if (PyModule_AddType(m, &VcVarargs_Type) < 0) {
+    if (PyModule_Add(m, "VcVarargs",
+                     PyType_FromModuleAndSpec(m, &VcVarargs_spec, NULL)) < 0) {
         goto error;
     }
-    if (PyModule_AddType(m, &VcVarargsKwOnly_Type) < 0) {
-        goto error;
-    }
-    if (PyModule_AddType(m, &VcVarKwargs_Type) < 0) {
+    if (PyModule_Add(m, "VcVarKwargs",
+                     PyType_FromModuleAndSpec(m, &VcVarKwargs_spec, NULL)) < 0) {
         goto error;
     }
     return m;

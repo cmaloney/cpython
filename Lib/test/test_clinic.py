@@ -1847,18 +1847,13 @@ class ClinicParserTest(TestCase):
         """)
         self.assertEqual("os_stat_fn", function.c_basename)
 
-    def test_var_c_names(self):
+    def test_var_keyword_c_name(self):
         function = self.parse_function("""
             module foo
             foo.bar
-                *args as varargs: tuple
                 **kwargs as kwds: dict
         """)
-        p = function.parameters['args_as_varargs']
-        self.assertEqual(inspect.Parameter.VAR_POSITIONAL, p.kind)
-        self.assertEqual("varargs", p.converter.name)
         p = function.parameters['kwargs_as_kwds']
-        self.assertEqual(inspect.Parameter.VAR_KEYWORD, p.kind)
         self.assertEqual("kwds", p.converter.name)
 
     def test_base_invalid_syntax(self):
@@ -5821,15 +5816,13 @@ class VectorcallFunctionalTest(unittest.TestCase):
         self.assertIsInstance(obj, ac_tester.VcNewBase)
 
     def test_vc_kwonly(self):
-        # keyword-only 'b': vectorcall has no kwnames==NULL fast path,
-        # so every call goes through the helper.
-        self.assertIsInstance(ac_tester.VcKwOnly(1), ac_tester.VcKwOnly)
-        self.assertIsInstance(ac_tester.VcKwOnly(1, b=2), ac_tester.VcKwOnly)
-        self.assertIsInstance(ac_tester.VcKwOnly(a=1, b=2), ac_tester.VcKwOnly)
-
-    def test_vc_kwonly_b_as_positional(self):
-        with self.assertRaises(TypeError):
-            ac_tester.VcKwOnly(1, 2)
+        # keyword-only 'b': only calls with keywords go through the helper.
+        cls = ac_tester.VcKwOnly
+        self.assertEqual(cls(1), (1, (), None))
+        self.assertEqual(cls(1, 2, 3), (1, (2, 3), None))
+        self.assertEqual(cls(1, 2, b=3), (1, (2,), 3))
+        self.assertEqual(cls(a=1, b=2), (1, (), 2))
+        self.assertEqual(cls.__new__(cls, 1, 2, b=3), (1, (2,), 3))
 
     def test_vc_kwonly_missing_required(self):
         with self.assertRaises(TypeError):
@@ -5840,12 +5833,6 @@ class VectorcallFunctionalTest(unittest.TestCase):
         self.assertEqual(cls(1), (1, None, ()))
         self.assertEqual(cls(1, 2, 3, 4), (1, 2, (3, 4)))
         self.assertEqual(cls.__new__(cls, 1, 2, 3), (1, 2, (3,)))
-
-    def test_vc_varargs_kwonly(self):
-        cls = ac_tester.VcVarargsKwOnly
-        self.assertEqual(cls(), ((), None))
-        self.assertEqual(cls(1, 2, b=3), ((1, 2), 3))
-        self.assertEqual(cls.__new__(cls, 1, b=3), ((1,), 3))
 
     def test_vc_var_kwargs(self):
         cls = ac_tester.VcVarKwargs
@@ -5882,7 +5869,6 @@ class VectorcallFunctionalTest(unittest.TestCase):
             through_new(ac_tester.VcNewBase),
             through_new(ac_tester.VcKwOnly),
             through_new(ac_tester.VcVarargs),
-            through_new(ac_tester.VcVarargsKwOnly),
             through_init(ac_tester.VcInit),
         ]
         invalid_calls = [

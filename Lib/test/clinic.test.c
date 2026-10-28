@@ -4948,6 +4948,7 @@ Test_cls_with_param_impl(TestObj *self, PyTypeObject *cls, int a)
 /*[clinic input]
 @vectorcall
 Test.__init__
+    self: self(type="PyObject *")
 Empty init method.
 [clinic start generated code]*/
 
@@ -4958,7 +4959,7 @@ PyDoc_STRVAR(Test___init____doc__,
 "Empty init method.");
 
 static int
-Test___init___impl(TestObj *self);
+Test___init___impl(PyObject *self);
 
 static int
 Test___init__(PyObject *self, PyObject *args, PyObject *kwargs)
@@ -4976,7 +4977,7 @@ Test___init__(PyObject *self, PyObject *args, PyObject *kwargs)
         !_PyArg_NoKeywords("Test", kwargs)) {
         goto exit;
     }
-    return_value = Test___init___impl((TestObj *)self);
+    return_value = Test___init___impl(self);
 
 exit:
     return return_value;
@@ -5004,7 +5005,7 @@ Test_vectorcall(PyObject *type, PyObject *const *args,
     if (self == NULL) {
         goto exit;
     }
-    _result = Test___init___impl((TestObj *)self);
+    _result = Test___init___impl((PyObject *)self);
     if (_result != 0) {
         Py_DECREF(self);
         goto exit;
@@ -5016,141 +5017,8 @@ exit:
 }
 
 static int
-Test___init___impl(TestObj *self)
-/*[clinic end generated code: output=ce04b9d7beacd894 input=645fe693f6c6b9b6]*/
-
-
-/*[clinic input]
-@vectorcall
-m.T.__init__
-    self: self(type="PyObject *")
-    a: object
-    /
-    b: object = None
-[clinic start generated code]*/
-
-static int
-m_T___init___impl(PyObject *self, PyObject *a, PyObject *b);
-
-static int
-m_T___init___helper(PyObject *self, PyObject *const *args,
-    Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames)
-{
-    int return_value = -1;
-    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
-
-    #define NUM_KEYWORDS 1
-    static struct {
-        PyGC_Head _this_is_not_used;
-        PyObject_VAR_HEAD
-        Py_hash_t ob_hash;
-        PyObject *ob_item[NUM_KEYWORDS];
-    } _kwtuple = {
-        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
-        .ob_hash = -1,
-        .ob_item = { _Py_LATIN1_CHR('b'), },
-    };
-    #undef NUM_KEYWORDS
-    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
-
-    #else  // !Py_BUILD_CORE
-    #  define KWTUPLE NULL
-    #endif  // !Py_BUILD_CORE
-
-    static const char * const _keywords[] = {"", "b", NULL};
-    static _PyArg_Parser _parser = {
-        .keywords = _keywords,
-        .fname = "T",
-        .kwtuple = KWTUPLE,
-    };
-    #undef KWTUPLE
-    PyObject *argsbuf[2];
-    PyObject * const *fastargs;
-    Py_ssize_t noptargs = nargs + nkw - 1;
-    PyObject *a;
-    PyObject *b = Py_None;
-
-    fastargs = _PyArg_UnpackKeywords(args, nargs, kwargs, kwnames, &_parser,
-            /*minpos*/ 1, /*maxpos*/ 2, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
-    if (!fastargs) {
-        goto exit;
-    }
-    a = fastargs[0];
-    if (!noptargs) {
-        goto skip_optional_pos;
-    }
-    b = fastargs[1];
-skip_optional_pos:
-    return_value = m_T___init___impl(self, a, b);
-
-exit:
-    return return_value;
-}
-
-static int
-m_T___init__(PyObject *self, PyObject *args, PyObject *kwargs)
-{
-    return m_T___init___helper(self, _PyTuple_CAST(args)->ob_item,
-        PyTuple_GET_SIZE(args),
-        kwargs ? PyDict_GET_SIZE(kwargs) : 0,
-        kwargs, NULL);
-}
-
-static PyObject *
-m_T_vectorcall(PyObject *type, PyObject *const *args,
-    size_t nargsf, PyObject *kwnames)
-{
-    PyObject *return_value = NULL;
-    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
-    PyObject *self;
-    int _result;
-    PyObject *a;
-    PyObject *b = Py_None;
-
-    assert(_PyType_CAST(type)->tp_init == m_T___init__);
-    /* Make sure the type object is immutable: the generated
-     * vectorcall doesn't deal e.g. with users reassigning __init__. */
-    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
-    if (kwnames != NULL || nargs < 1 || nargs > 2) {
-        self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
-            (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
-        if (self == NULL) {
-            return NULL;
-        }
-        _result = m_T___init___helper(self, args, nargs,
-            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
-            NULL, kwnames);
-        if (_result != 0) {
-            Py_DECREF(self);
-            return NULL;
-        }
-        return self;
-    }
-    a = args[0];
-    if (nargs < 2) {
-        goto skip_optional;
-    }
-    b = args[1];
-skip_optional:
-    self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
-        (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
-    if (self == NULL) {
-        goto exit;
-    }
-    _result = m_T___init___impl((PyObject *)self, a, b);
-    if (_result != 0) {
-        Py_DECREF(self);
-        goto exit;
-    }
-    return_value = self;
-
-exit:
-    return return_value;
-}
-
-static int
-m_T___init___impl(PyObject *self, PyObject *a, PyObject *b)
-/*[clinic end generated code: output=059377e7c1a5f381 input=47786f3a44f94e49]*/
+Test___init___impl(PyObject *self)
+/*[clinic end generated code: output=0f111274c4cd66e6 input=205a48a750d7333e]*/
 
 
 /*[clinic input]
