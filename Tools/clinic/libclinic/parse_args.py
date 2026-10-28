@@ -1624,20 +1624,6 @@ class ParseArgsCodeGen:
             assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
             """, indent=4)]
 
-    def _vectorcall_positional(self, *,
-                               arity_checked: bool = False) -> list[str]:
-        """Positional argument parsing for vectorcall.
-
-        arity_checked: Already have a number of arguments check.
-        """
-        pos_code = self._parse_positional_args(
-            argname_fmt='args[%d]', nargs='nargs', limited_capi=False)
-        # Converter support was validated when @vectorcall was parsed.
-        assert pos_code is not None
-        if arity_checked:
-            return pos_code
-        return [*self._check_positional('nargs'), *pos_code]
-
     def _assemble_vectorcall(self, preamble: str, fields: tuple[str, ...],
                              finale: str) -> None:
         """Wrap parser code in the vectorcall prototype."""
@@ -1669,30 +1655,6 @@ class ParseArgsCodeGen:
                 {initializers}
         """) + "\n"
         self._assemble_vectorcall(preamble, fields, PARSER_FINALE_SKELETON)
-
-    def parse_vectorcall_pos_only(self) -> None:
-        """All positional sometimes optional arguments."""
-        parser_code = self._vectorcall_type_check()
-        self.codegen.add_include('pycore_modsupport.h',
-                                 '_PyArg_NoKwnames()')
-        parser_code.append(libclinic.normalize_snippet("""
-            if (!_PyArg_NoKwnames("{name}", kwnames)) {{
-                goto exit;
-            }}
-            """, indent=4))
-
-        parser_code.extend(self._vectorcall_positional())
-        self.vectorcall_body(*parser_code)
-
-    def _vectorcall_guarded_delegate(self, condition: str) -> str:
-        """Emit `if (condition) { <delegate to helper> }`."""
-        return libclinic.linear_format(
-            libclinic.normalize_snippet(f"""
-                if ({condition}) {{{{
-                {{delegate}}
-                }}}}
-                """, indent=4),
-            delegate=self._vectorcall_delegate_to_helper())
 
     def _vectorcall_delegate_to_helper(self) -> str:
         """Hand off to the {c_basename}_helper helper and return."""
@@ -1737,23 +1699,42 @@ class ParseArgsCodeGen:
         """) + "\n"
         self._assemble_vectorcall(preamble, tuple(parser_code), "}}")
 
-    def parse_vectorcall_pos_or_kw(self) -> None:
+    def parse_vectorcall_positional(self) -> None:
         """Vectorcall which parses positional arguments inline.
 
-        Delegate to the helper if keywords present or if position count is out
-        of range. Position count so the error messages match the non-vectorcall.
-        Keyword-only parameters keep their defaults and **kwargs is NULL.
+        With a helper, delegate to it if keywords are present or if the
+        positional count is out of range, so the error messages match the
+        non-vectorcall.  Keyword-only parameters keep their defaults and
+        **kwargs is NULL.
         """
-        checks = ['kwnames != NULL']
-        if self.min_pos:
-            checks.append(f"nargs < {self.min_pos}")
-        if not self.varpos:
-            checks.append(f"nargs > {self.max_pos}")
-
         parser_code = self._vectorcall_type_check()
-        parser_code.append(self._vectorcall_guarded_delegate(
-            " || ".join(checks)))
-        parser_code.extend(self._vectorcall_positional(arity_checked=True))
+        if self.parser_helper:
+            checks = ['kwnames != NULL']
+            if self.min_pos:
+                checks.append(f"nargs < {self.min_pos}")
+            if not self.varpos:
+                checks.append(f"nargs > {self.max_pos}")
+            parser_code.append(libclinic.linear_format(
+                libclinic.normalize_snippet(f"""
+                    if ({" || ".join(checks)}) {{{{
+                    {{delegate}}
+                    }}}}
+                    """, indent=4),
+                delegate=self._vectorcall_delegate_to_helper()))
+        else:
+            self.codegen.add_include('pycore_modsupport.h',
+                                     '_PyArg_NoKwnames()')
+            parser_code.append(libclinic.normalize_snippet("""
+                if (!_PyArg_NoKwnames("{name}", kwnames)) {{
+                    goto exit;
+                }}
+                """, indent=4))
+            parser_code.extend(self._check_positional('nargs'))
+        pos_code = self._parse_positional_args(
+            argname_fmt='args[%d]', nargs='nargs', limited_capi=False)
+        # Converter support was validated when @vectorcall was parsed.
+        assert pos_code is not None
+        parser_code.extend(pos_code)
         self.vectorcall_body(*parser_code)
 
     def parse_vectorcall_no_args(self) -> None:
@@ -1779,15 +1760,14 @@ class ParseArgsCodeGen:
         # __new__/__init__.
         assert not self.has_option_groups()
         assert not self.use_meth_o()
+        # The vectorcall parses an args array.
         self.fastcall = True
         if not self.parameters and not self.varpos and not self.var_keyword:
             self.parse_vectorcall_no_args()
-        elif self.pos_only == len(self.parameters) and not self.var_keyword:
-            self.parse_vectorcall_pos_only()
         elif self.min_kw_only:
             self.parse_vectorcall_kw_required()
         else:
-            self.parse_vectorcall_pos_or_kw()
+            self.parse_vectorcall_positional()
 
     def parse_args(self, clang: CLanguage) -> dict[str, str]:
         self.select_prototypes()
