@@ -1449,7 +1449,7 @@ class VarKeywordCConverter(CConverter):
     def parse_arg(self, argname: str, displayname: str, *, limited_capi: bool) -> str | None:
         raise AssertionError('should never be called')
 
-    def parse_var_keyword(self) -> str:
+    def parse_var_keyword(self, *, fastcall: bool) -> str:
         raise NotImplementedError
 
 
@@ -1459,18 +1459,15 @@ class var_keyword_dict_converter(VarKeywordCConverter):
 
     def cleanup(self) -> str:
         if self.function.vectorcall:
-            # Only the dict built from kwnames is owned.
-            return (f'if (kwnames != NULL) {{\n'
-                    f'    Py_XDECREF({self.parser_name});\n'
-                    f'}}\n')
+            # The vectorcall frees the dict built from kwnames itself.
+            return ''
         return f'Py_XDECREF({self.parser_name});\n'
 
-    def parse_var_keyword(self) -> str:
+    def parse_var_keyword(self, *, fastcall: bool) -> str:
         param_name = self.parser_name
-        if self.function.vectorcall:
-            # The @vectorcall helper gets kwargs from tp_new / tp_init and
-            # kwnames from vectorcall.  The impl gets a borrowed dict or
-            # NULL, so a caller's dict stays uniquely referenced.
+        # With @vectorcall, the impl gets a borrowed dict or NULL, so a
+        # caller's dict stays uniquely referenced.
+        if fastcall:
             return f"""
                 if (kwnames != NULL) {{{{
                     {param_name} = _PyStack_AsDict(args + nargs, kwnames);
@@ -1478,10 +1475,9 @@ class var_keyword_dict_converter(VarKeywordCConverter):
                         goto exit;
                     }}}}
                 }}}}
-                else {{{{
-                    {param_name} = kwargs;
-                }}}}
                 """
+        if self.function.vectorcall:
+            return f"{param_name} = kwargs;\n"
         return f"""
             if (kwargs == NULL) {{{{
                 {param_name} = PyDict_New();

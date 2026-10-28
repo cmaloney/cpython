@@ -5415,46 +5415,20 @@ static PyObject *
 vc_var_kwargs_new_impl(PyTypeObject *type, PyObject *args, PyObject *kwargs);
 
 static PyObject *
-vc_var_kwargs_new_helper(PyTypeObject *type, PyObject *const *args,
-    Py_ssize_t nargs, PyObject *kwargs, PyObject *kwnames,
-    PyObject *argstuple)
+vc_var_kwargs_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
     PyObject *return_value = NULL;
     PyObject *__clinic_args = NULL;
     PyObject *__clinic_kwargs = NULL;
 
-    __clinic_args = argstuple != NULL ? Py_NewRef(argstuple) : PyTuple_FromArray(args, nargs);
-    if (__clinic_args == NULL) {
-        goto exit;
-    }
-    if (kwnames != NULL) {
-        __clinic_kwargs = _PyStack_AsDict(args + nargs, kwnames);
-        if (__clinic_kwargs == NULL) {
-            goto exit;
-        }
-    }
-    else {
-        __clinic_kwargs = kwargs;
-    }
+    __clinic_args = Py_NewRef(args);
+    __clinic_kwargs = kwargs;
     return_value = vc_var_kwargs_new_impl(type, __clinic_args, __clinic_kwargs);
 
-exit:
     /* Cleanup for args */
     Py_XDECREF(__clinic_args);
-    /* Cleanup for kwargs */
-    if (kwnames != NULL) {
-        Py_XDECREF(__clinic_kwargs);
-    }
 
     return return_value;
-}
-
-static PyObject *
-vc_var_kwargs_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
-{
-    return vc_var_kwargs_new_helper(type, _PyTuple_CAST(args)->ob_item,
-        PyTuple_GET_SIZE(args),
-        kwargs, NULL, args);
 }
 
 static PyObject *
@@ -5470,24 +5444,26 @@ vc_var_kwargs_vectorcall(PyObject *type, PyObject *const *args,
     /* Make sure the type object is immutable: the generated
      * vectorcall doesn't deal e.g. with users reassigning __init__. */
     assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
-    if (kwnames != NULL) {
-        return vc_var_kwargs_new_helper(_PyType_CAST(type), args, nargs,
-            NULL, kwnames, NULL);
-    }
     __clinic_args = PyTuple_FromArray(args, nargs);
     if (__clinic_args == NULL) {
         goto exit;
+    }
+    if (kwnames != NULL) {
+        __clinic_kwargs = _PyStack_AsDict(args + nargs, kwnames);
+        if (__clinic_kwargs == NULL) {
+            goto exit;
+        }
     }
     return_value = vc_var_kwargs_new_impl(_PyType_CAST(type), __clinic_args, __clinic_kwargs);
 
 exit:
     /* Cleanup for args */
     Py_XDECREF(__clinic_args);
-    /* Cleanup for kwargs */
+
     if (kwnames != NULL) {
         Py_XDECREF(__clinic_kwargs);
     }
 
     return return_value;
 }
-/*[clinic end generated code: output=2f31a9cf4c4a0512 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=2abcc6284986fd78 input=a9049054013a1b77]*/
