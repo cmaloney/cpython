@@ -989,12 +989,13 @@ class ParseArgsCodeGen:
         argname_fmt: str,
         nargs: str,
         limited_capi: bool,
+        argstuple: bool = False,
     ) -> list[str] | None:
         """Emit per-parameter positional argument parsing.
 
-        Shared by parse_pos_only() and the vectorcall paths.  Returns the
-        code snippets, or None if a converter doesn't support parse_arg
-        (the caller must fall back to a tuple/stack parser).
+        Shared by parse_pos_only(), parse_var_keyword() and the vectorcall
+        paths.  Returns the code snippets, or None if a converter doesn't
+        support parse_arg (the caller must fall back to a tuple/stack parser).
         """
         parser_code: list[str] = []
         for i, p in enumerate(self.parameters[:self.max_pos]):
@@ -1022,7 +1023,7 @@ class ParseArgsCodeGen:
             parser_code.append("skip_optional:")
         if self.varpos:
             parser_code.append(libclinic.normalize_snippet(
-                self._parse_vararg(), indent=4))
+                self._parse_vararg(argstuple=argstuple), indent=4))
         return parser_code
 
     def select_positional_convention(self) -> tuple[str, str]:
@@ -1164,33 +1165,14 @@ class ParseArgsCodeGen:
                 """, indent=4))
         else:
             parser_code.extend(self._check_positional(nargs))
-
-        has_optional = False
-        for i, p in enumerate(self.parameters):
-            parse_arg = p.converter.parse_arg(
-                argname_fmt % i,
-                p.get_displayname(i+1),
-                limited_capi=self.limited_capi,
-            )
-            assert parse_arg is not None
-            if has_optional or p.is_optional():
-                has_optional = True
-                parser_code.append(libclinic.normalize_snippet("""
-                    if (%s < %d) {{
-                        goto skip_optional;
-                    }}
-                    """, indent=4) % (nargs, i + 1))
-            parser_code.append(libclinic.normalize_snippet(parse_arg, indent=4))
-        if has_optional:
-            parser_code.append("skip_optional:")
-
-        if self.varpos:
-            parser_code.append(libclinic.normalize_snippet(
-                self._parse_vararg(argstuple=self._helper_argstuple()),
-                indent=4))
-        if self.var_keyword:
-            parser_code.append(libclinic.normalize_snippet(
-                self._parse_kwarg(), indent=4))
+        pos_code = self._parse_positional_args(
+            argname_fmt=argname_fmt, nargs=nargs,
+            limited_capi=self.limited_capi,
+            argstuple=self._helper_argstuple())
+        assert pos_code is not None
+        parser_code.extend(pos_code)
+        parser_code.append(libclinic.normalize_snippet(self._parse_kwarg(),
+                                                       indent=4))
         self.parser_body(*parser_code)
 
     def use_converters(self) -> None:
