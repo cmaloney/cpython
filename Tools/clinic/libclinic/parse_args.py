@@ -972,7 +972,7 @@ class ParseArgsCodeGen:
         (the caller must fall back to a tuple/stack parser).
         """
         parser_code: list[str] = []
-        for i, p in enumerate(self.parameters):
+        for i, p in enumerate(self.parameters[:self.max_pos]):
             parsearg = p.converter.parse_arg(argname_fmt % i,
                                              p.get_displayname(i + 1),
                                              limited_capi=limited_capi)
@@ -993,14 +993,11 @@ class ParseArgsCodeGen:
                     """, indent=4))
             parser_code.append(libclinic.normalize_snippet(parsearg, indent=4))
 
-        if self.min_pos < len(self.parameters):
+        if self.min_pos < self.max_pos:
             parser_code.append("skip_optional:")
         if self.varpos:
             parser_code.append(libclinic.normalize_snippet(
                 self._parse_vararg(fastcall=fastcall), indent=4))
-        elif self.var_keyword:
-            parser_code.append(libclinic.normalize_snippet(
-                self._parse_kwarg(fastcall=fastcall), indent=4))
         return parser_code
 
     def select_positional_convention(self) -> tuple[str, str]:
@@ -1738,7 +1735,7 @@ class ParseArgsCodeGen:
         return "\n".join(part for part in parts if part)
 
     def parse_vectorcall_kw_required(self) -> None:
-        """Required keyword arguemnts; always delegate to helper."""
+        """Required keyword-only arguments; always delegate to helper."""
         parser_code = self._vectorcall_type_check()
         parser_code.append(self._vectorcall_delegate_to_helper(
             'kwnames ? PyTuple_GET_SIZE(kwnames) : 0'))
@@ -1750,16 +1747,17 @@ class ParseArgsCodeGen:
         self._assemble_vectorcall(preamble, tuple(parser_code), "}}")
 
     def parse_vectorcall_pos_or_kw(self) -> None:
-        """Optional positional and keyword argument vectorcall.
+        """Vectorcall which parses positional arguments inline.
 
         Delegate to the helper if keywords present or if position count is out
         of range. Position count so the error messages match the non-vectorcall.
+        Keyword-only parameters keep their defaults and **kwargs is NULL.
         """
-        assert not self.varpos
         checks = ['kwnames != NULL']
         if self.min_pos:
             checks.append(f"nargs < {self.min_pos}")
-        checks.append(f"nargs > {self.max_pos}")
+        if not self.varpos:
+            checks.append(f"nargs > {self.max_pos}")
 
         parser_code = self._vectorcall_type_check()
         parser_code.append(self._vectorcall_guarded_delegate(
@@ -1792,11 +1790,9 @@ class ParseArgsCodeGen:
         assert not self.use_meth_o()
         if not self.parameters and not self.varpos and not self.var_keyword:
             self.parse_vectorcall_no_args()
-        elif self.var_keyword is not None:
-            self.parse_vectorcall_kw_required()
-        elif self.pos_only == len(self.parameters):
+        elif self.pos_only == len(self.parameters) and not self.var_keyword:
             self.parse_vectorcall_pos_only()
-        elif any(p.is_keyword_only() for p in self.parameters) or self.varpos:
+        elif self.min_kw_only:
             self.parse_vectorcall_kw_required()
         else:
             self.parse_vectorcall_pos_or_kw()

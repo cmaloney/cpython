@@ -5299,15 +5299,24 @@ static PyObject *
 vc_kwonly_vectorcall(PyObject *type, PyObject *const *args,
     size_t nargsf, PyObject *kwnames)
 {
+    PyObject *return_value = NULL;
     Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyObject *a;
+    PyObject *b = Py_None;
 
     assert(_PyType_CAST(type)->tp_new == vc_kwonly_new);
     /* Make sure the type object is immutable: the generated
      * vectorcall doesn't deal e.g. with users reassigning __init__. */
     assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
-    return vc_kwonly_new_helper(_PyType_CAST(type), args, nargs,
-        kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
-        NULL, kwnames);
+    if (kwnames != NULL || nargs < 1 || nargs > 1) {
+        return vc_kwonly_new_helper(_PyType_CAST(type), args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames);
+    }
+    a = args[0];
+    return_value = vc_kwonly_new_impl(_PyType_CAST(type), a, b);
+
+    return return_value;
 }
 
 static PyObject *
@@ -5457,15 +5466,31 @@ static PyObject *
 vc_varargs_kwonly_vectorcall(PyObject *type, PyObject *const *args,
     size_t nargsf, PyObject *kwnames)
 {
+    PyObject *return_value = NULL;
     Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyObject *__clinic_args = NULL;
+    PyObject *b = Py_None;
 
     assert(_PyType_CAST(type)->tp_new == vc_varargs_kwonly_new);
     /* Make sure the type object is immutable: the generated
      * vectorcall doesn't deal e.g. with users reassigning __init__. */
     assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
-    return vc_varargs_kwonly_new_helper(_PyType_CAST(type), args, nargs,
-        kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
-        NULL, kwnames);
+    if (kwnames != NULL) {
+        return vc_varargs_kwonly_new_helper(_PyType_CAST(type), args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames);
+    }
+    __clinic_args = PyTuple_FromArray(args, nargs);
+    if (__clinic_args == NULL) {
+        goto exit;
+    }
+    return_value = vc_varargs_kwonly_new_impl(_PyType_CAST(type), __clinic_args, b);
+
+exit:
+    /* Cleanup for args */
+    Py_XDECREF(__clinic_args);
+
+    return return_value;
 }
 
 static PyObject *
@@ -5518,14 +5543,34 @@ static PyObject *
 vc_var_kwargs_vectorcall(PyObject *type, PyObject *const *args,
     size_t nargsf, PyObject *kwnames)
 {
+    PyObject *return_value = NULL;
     Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyObject *__clinic_args = NULL;
+    PyObject *__clinic_kwargs = NULL;
 
     assert(_PyType_CAST(type)->tp_new == vc_var_kwargs_new);
     /* Make sure the type object is immutable: the generated
      * vectorcall doesn't deal e.g. with users reassigning __init__. */
     assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
-    return vc_var_kwargs_new_helper(_PyType_CAST(type), args, nargs,
-        kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
-        NULL, kwnames);
+    if (kwnames != NULL) {
+        return vc_var_kwargs_new_helper(_PyType_CAST(type), args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames);
+    }
+    __clinic_args = PyTuple_FromArray(args, nargs);
+    if (__clinic_args == NULL) {
+        goto exit;
+    }
+    return_value = vc_var_kwargs_new_impl(_PyType_CAST(type), __clinic_args, __clinic_kwargs);
+
+exit:
+    /* Cleanup for args */
+    Py_XDECREF(__clinic_args);
+    /* Cleanup for kwargs */
+    if (kwnames != NULL) {
+        Py_XDECREF(__clinic_kwargs);
+    }
+
+    return return_value;
 }
-/*[clinic end generated code: output=350e237091af9cec input=a9049054013a1b77]*/
+/*[clinic end generated code: output=df3c48bbdd82f322 input=a9049054013a1b77]*/

@@ -5851,6 +5851,7 @@ class VectorcallFunctionalTest(unittest.TestCase):
         cls = ac_tester.VcVarKwargs
         # The impl gets NULL (packed as None) when there are no keywords.
         self.assertEqual(cls(), ((), None))
+        self.assertEqual(cls(1), ((1,), None))
         self.assertEqual(cls.__new__(cls), ((), None))
         self.assertEqual(cls(1, x=2), ((1,), {'x': 2}))
         self.assertEqual(cls.__new__(cls, 1, x=2), ((1,), {'x': 2}))
