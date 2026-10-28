@@ -923,21 +923,21 @@ class ParseArgsCodeGen:
         parser_code.append("    }}")
         return parser_code
 
-    def _parse_vararg(self) -> str:
+    def _parse_vararg(self, *, fastcall: bool) -> str:
         assert self.varpos is not None
         c = self.varpos.converter
         assert isinstance(c, libclinic.converters.VarPosCConverter)
         return c.parse_vararg(pos_only=self.pos_only,
                               min_pos=self.min_pos,
                               max_pos=self.max_pos,
-                              fastcall=self.fastcall,
+                              fastcall=fastcall,
                               limited_capi=self.limited_capi)
 
-    def _parse_kwarg(self) -> str:
+    def _parse_kwarg(self, *, fastcall: bool) -> str:
         assert self.var_keyword is not None
         c = self.var_keyword.converter
         assert isinstance(c, libclinic.converters.VarKeywordCConverter)
-        return c.parse_var_keyword()
+        return c.parse_var_keyword(fastcall=fastcall)
 
     def _check_positional(self, nargs: str, *,
                           indent: int = 4) -> list[str]:
@@ -963,6 +963,7 @@ class ParseArgsCodeGen:
         argname_fmt: str,
         nargs: str,
         limited_capi: bool,
+        fastcall: bool,
     ) -> list[str] | None:
         """Emit per-parameter positional argument parsing.
 
@@ -995,11 +996,11 @@ class ParseArgsCodeGen:
         if self.min_pos < len(self.parameters):
             parser_code.append("skip_optional:")
         if self.varpos:
-            parser_code.append(libclinic.normalize_snippet(self._parse_vararg(),
-                                                           indent=4))
+            parser_code.append(libclinic.normalize_snippet(
+                self._parse_vararg(fastcall=fastcall), indent=4))
         elif self.var_keyword:
-            parser_code.append(libclinic.normalize_snippet(self._parse_kwarg(),
-                                                           indent=4))
+            parser_code.append(libclinic.normalize_snippet(
+                self._parse_kwarg(fastcall=fastcall), indent=4))
         return parser_code
 
     def select_positional_convention(self) -> tuple[str, str]:
@@ -1090,7 +1091,7 @@ class ParseArgsCodeGen:
 
         pos_code = self._parse_positional_args(
             argname_fmt=argname_fmt, nargs=nargs,
-            limited_capi=self.limited_capi)
+            limited_capi=self.limited_capi, fastcall=self.fastcall)
         if pos_code is not None:
             parser_code.extend(pos_code)
         else:
@@ -1113,17 +1114,31 @@ class ParseArgsCodeGen:
 
     def parse_var_keyword(self) -> None:
         self.flags = "METH_VARARGS|METH_KEYWORDS"
-        self.parser_prototype = PARSER_PROTOTYPE_KEYWORD
-        nargs = 'PyTuple_GET_SIZE(args)'
+        # The @vectorcall helper parses an array, like parse_general().
+        fastcall = self.func.vectorcall
+        if fastcall:
+            self.parser_prototype = PARSER_PROTOTYPE_KEYWORD_HELPER
+            nargs = 'nargs'
+            argname_fmt = 'args[%d]'
+        else:
+            self.parser_prototype = PARSER_PROTOTYPE_KEYWORD
+            nargs = 'PyTuple_GET_SIZE(args)'
+            argname_fmt = 'PyTuple_GET_ITEM(args, %d)'
 
         parser_code = []
         if self.varpos is None and self.min_pos == self.max_pos == 0:
-            self.codegen.add_include('pycore_modsupport.h',
-                                     '_PyArg_NoPositional()')
-            parser_code.append(libclinic.normalize_snippet("""
-                if (!_PyArg_NoPositional("{name}", args)) {{
+            if fastcall:
+                self.codegen.add_include('pycore_modsupport.h',
+                                         '_PyArg_NoPositionalStack()')
+                check = '_PyArg_NoPositionalStack("{name}", nargs)'
+            else:
+                self.codegen.add_include('pycore_modsupport.h',
+                                         '_PyArg_NoPositional()')
+                check = '_PyArg_NoPositional("{name}", args)'
+            parser_code.append(libclinic.normalize_snippet(f"""
+                if (!{check}) {{{{
                     goto exit;
-                }}
+                }}}}
                 """, indent=4))
         else:
             parser_code.extend(self._check_positional(nargs))
@@ -1131,7 +1146,7 @@ class ParseArgsCodeGen:
         has_optional = False
         for i, p in enumerate(self.parameters):
             parse_arg = p.converter.parse_arg(
-                f'PyTuple_GET_ITEM(args, {i})',
+                argname_fmt % i,
                 p.get_displayname(i+1),
                 limited_capi=self.limited_capi,
             )
@@ -1148,9 +1163,11 @@ class ParseArgsCodeGen:
             parser_code.append("skip_optional:")
 
         if self.varpos:
-            parser_code.append(libclinic.normalize_snippet(self._parse_vararg(), indent=4))
+            parser_code.append(libclinic.normalize_snippet(
+                self._parse_vararg(fastcall=fastcall), indent=4))
         if self.var_keyword:
-            parser_code.append(libclinic.normalize_snippet(self._parse_kwarg(), indent=4))
+            parser_code.append(libclinic.normalize_snippet(
+                self._parse_kwarg(fastcall=fastcall), indent=4))
         self.parser_body(*parser_code)
 
     def use_converters(self) -> None:
@@ -1376,7 +1393,11 @@ class ParseArgsCodeGen:
             if add_label:
                 parser_code.append("%s:" % add_label)
             if self.varpos:
-                parser_code.append(libclinic.normalize_snippet(self._parse_vararg(), indent=4))
+                # The @vectorcall helper parses an array.
+                parser_code.append(libclinic.normalize_snippet(
+                    self._parse_vararg(
+                        fastcall=self.fastcall or self.func.vectorcall),
+                    indent=4))
         else:
             self.use_converters()
 
@@ -1618,7 +1639,8 @@ class ParseArgsCodeGen:
         arity_checked: Already have a number of arguments check.
         """
         pos_code = self._parse_positional_args(
-            argname_fmt='args[%d]', nargs='nargs', limited_capi=False)
+            argname_fmt='args[%d]', nargs='nargs', limited_capi=False,
+            fastcall=True)
         # Converter support was validated when @vectorcall was parsed.
         assert pos_code is not None
         if arity_checked:

@@ -5821,6 +5821,24 @@ class VectorcallFunctionalTest(unittest.TestCase):
         with self.assertRaises(TypeError):
             ac_tester.VcKwOnly()
 
+    def test_vc_varargs(self):
+        cls = ac_tester.VcVarargs
+        self.assertEqual(cls(1), (1, None, ()))
+        self.assertEqual(cls(1, 2, 3, 4), (1, 2, (3, 4)))
+        self.assertEqual(cls.__new__(cls, 1, 2, 3), (1, 2, (3,)))
+
+    def test_vc_varargs_kwonly(self):
+        cls = ac_tester.VcVarargsKwOnly
+        self.assertEqual(cls(), ((), None))
+        self.assertEqual(cls(1, 2, b=3), ((1, 2), 3))
+        self.assertEqual(cls.__new__(cls, 1, b=3), ((1,), 3))
+
+    def test_vc_var_kwargs(self):
+        cls = ac_tester.VcVarKwargs
+        self.assertEqual(cls(), ((), {}))
+        self.assertEqual(cls(1, x=2), ((1,), {'x': 2}))
+        self.assertEqual(cls.__new__(cls, 1, x=2), ((1,), {'x': 2}))
+
     def test_parse_errors_match_slot(self):
         # tp_vectorcall and tp_new/tp_init slot should match in argument parsing
         # error messages. Explicit calls to __new__ and __init__, as well as
@@ -5846,6 +5864,8 @@ class VectorcallFunctionalTest(unittest.TestCase):
             through_new(ac_tester.VcNew),
             through_new(ac_tester.VcNewBase),
             through_new(ac_tester.VcKwOnly),
+            through_new(ac_tester.VcVarargs),
+            through_new(ac_tester.VcVarargsKwOnly),
             through_init(ac_tester.VcInit),
         ]
         invalid_calls = [

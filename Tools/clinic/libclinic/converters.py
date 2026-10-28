@@ -1437,7 +1437,7 @@ class VarKeywordCConverter(CConverter):
     def parse_arg(self, argname: str, displayname: str, *, limited_capi: bool) -> str | None:
         raise AssertionError('should never be called')
 
-    def parse_var_keyword(self) -> str:
+    def parse_var_keyword(self, *, fastcall: bool) -> str:
         raise NotImplementedError
 
 
@@ -1448,8 +1448,28 @@ class var_keyword_dict_converter(VarKeywordCConverter):
     def cleanup(self) -> str:
         return f'Py_XDECREF({self.parser_name});\n'
 
-    def parse_var_keyword(self) -> str:
+    def parse_var_keyword(self, *, fastcall: bool) -> str:
         param_name = self.parser_name
+        if fastcall:
+            # The @vectorcall helper gets kwargs from tp_new / tp_init and
+            # kwnames from vectorcall.
+            return f"""
+                if (kwnames != NULL) {{{{
+                    {param_name} = _PyStack_AsDict(args + nargs, kwnames);
+                    if ({param_name} == NULL) {{{{
+                        goto exit;
+                    }}}}
+                }}}}
+                else if (kwargs == NULL) {{{{
+                    {param_name} = PyDict_New();
+                    if ({param_name} == NULL) {{{{
+                        goto exit;
+                    }}}}
+                }}}}
+                else {{{{
+                    {param_name} = Py_NewRef(kwargs);
+                }}}}
+                """
         return f"""
             if (kwargs == NULL) {{{{
                 {param_name} = PyDict_New();

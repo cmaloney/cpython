@@ -354,6 +354,9 @@ Modules/_testclinic.c	-	TestClass	-
 Modules/_testclinic.c	-	VcKwOnly_Type	-
 Modules/_testclinic.c	-	VcNew_Type	-
 Modules/_testclinic.c	-	VcNewBase_Type	-
+Modules/_testclinic.c	-	VcVarKwargs_Type	-
+Modules/_testclinic.c	-	VcVarargs_Type	-
+Modules/_testclinic.c	-	VcVarargsKwOnly_Type	-
 
 
 ##################################
