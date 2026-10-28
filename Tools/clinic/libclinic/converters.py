@@ -1449,7 +1449,7 @@ class VarKeywordCConverter(CConverter):
     def parse_arg(self, argname: str, displayname: str, *, limited_capi: bool) -> str | None:
         raise AssertionError('should never be called')
 
-    def parse_var_keyword(self, *, fastcall: bool) -> str:
+    def parse_var_keyword(self) -> str:
         raise NotImplementedError
 
 
@@ -1465,9 +1465,9 @@ class var_keyword_dict_converter(VarKeywordCConverter):
                     f'}}\n')
         return f'Py_XDECREF({self.parser_name});\n'
 
-    def parse_var_keyword(self, *, fastcall: bool) -> str:
+    def parse_var_keyword(self) -> str:
         param_name = self.parser_name
-        if fastcall:
+        if self.function.vectorcall:
             # The @vectorcall helper gets kwargs from tp_new / tp_init and
             # kwnames from vectorcall.  The impl gets a borrowed dict or
             # NULL, so a caller's dict stays uniquely referenced.

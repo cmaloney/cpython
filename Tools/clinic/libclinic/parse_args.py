@@ -923,15 +923,14 @@ class ParseArgsCodeGen:
         parser_code.append("    }}")
         return parser_code
 
-    def _parse_vararg(self, *, fastcall: bool,
-                      argstuple: bool = False) -> str:
+    def _parse_vararg(self, *, argstuple: bool = False) -> str:
         assert self.varpos is not None
         c = self.varpos.converter
         assert isinstance(c, libclinic.converters.VarPosCConverter)
         return c.parse_vararg(pos_only=self.pos_only,
                               min_pos=self.min_pos,
                               max_pos=self.max_pos,
-                              fastcall=fastcall,
+                              fastcall=self.fastcall,
                               limited_capi=self.limited_capi,
                               argstuple=argstuple)
 
@@ -960,11 +959,11 @@ class ParseArgsCodeGen:
                 and isinstance(self.varpos.converter,
                                libclinic.converters.varpos_tuple_converter))
 
-    def _parse_kwarg(self, *, fastcall: bool) -> str:
+    def _parse_kwarg(self) -> str:
         assert self.var_keyword is not None
         c = self.var_keyword.converter
         assert isinstance(c, libclinic.converters.VarKeywordCConverter)
-        return c.parse_var_keyword(fastcall=fastcall)
+        return c.parse_var_keyword()
 
     def _check_positional(self, nargs: str, *,
                           indent: int = 4) -> list[str]:
@@ -990,7 +989,6 @@ class ParseArgsCodeGen:
         argname_fmt: str,
         nargs: str,
         limited_capi: bool,
-        fastcall: bool,
     ) -> list[str] | None:
         """Emit per-parameter positional argument parsing.
 
@@ -1024,7 +1022,7 @@ class ParseArgsCodeGen:
             parser_code.append("skip_optional:")
         if self.varpos:
             parser_code.append(libclinic.normalize_snippet(
-                self._parse_vararg(fastcall=fastcall), indent=4))
+                self._parse_vararg(), indent=4))
         return parser_code
 
     def select_positional_convention(self) -> tuple[str, str]:
@@ -1115,7 +1113,7 @@ class ParseArgsCodeGen:
 
         pos_code = self._parse_positional_args(
             argname_fmt=argname_fmt, nargs=nargs,
-            limited_capi=self.limited_capi, fastcall=self.fastcall)
+            limited_capi=self.limited_capi)
         if pos_code is not None:
             parser_code.extend(pos_code)
         else:
@@ -1138,9 +1136,9 @@ class ParseArgsCodeGen:
 
     def parse_var_keyword(self) -> None:
         self.flags = "METH_VARARGS|METH_KEYWORDS"
-        # The @vectorcall helper parses an array, like parse_general().
-        fastcall = self.func.vectorcall
-        if fastcall:
+        # The @vectorcall helper parses an array.
+        self.fastcall = self.fastcall or self.func.vectorcall
+        if self.fastcall:
             self.parser_prototype = self._helper_prototype()
             nargs = 'nargs'
             argname_fmt = 'args[%d]'
@@ -1151,7 +1149,7 @@ class ParseArgsCodeGen:
 
         parser_code = []
         if self.varpos is None and self.min_pos == self.max_pos == 0:
-            if fastcall:
+            if self.fastcall:
                 self.codegen.add_include('pycore_modsupport.h',
                                          '_PyArg_NoPositionalStack()')
                 check = '_PyArg_NoPositionalStack("{name}", nargs)'
@@ -1188,12 +1186,11 @@ class ParseArgsCodeGen:
 
         if self.varpos:
             parser_code.append(libclinic.normalize_snippet(
-                self._parse_vararg(fastcall=fastcall,
-                                   argstuple=self._helper_argstuple()),
+                self._parse_vararg(argstuple=self._helper_argstuple()),
                 indent=4))
         if self.var_keyword:
             parser_code.append(libclinic.normalize_snippet(
-                self._parse_kwarg(fastcall=fastcall), indent=4))
+                self._parse_kwarg(), indent=4))
         self.parser_body(*parser_code)
 
     def use_converters(self) -> None:
@@ -1271,6 +1268,8 @@ class ParseArgsCodeGen:
                 deprecated_keywords[i] = p
 
         has_optional_kw = self._has_optional_kw()
+        # The @vectorcall helper parses an array.
+        self.fastcall = self.fastcall or self.func.vectorcall
 
         use_parser_code = True
         if self.limited_capi:
@@ -1288,46 +1287,32 @@ class ParseArgsCodeGen:
             if self.fastcall:
                 self.flags = "METH_FASTCALL|METH_KEYWORDS"
                 self.parser_prototype = PARSER_PROTOTYPE_FASTCALL_KEYWORDS
-                self.declarations = declare_parser(self.func, codegen=self.codegen)
-                self.declarations += "\nPyObject *argsbuf[%s];" % (len(self.converters) or 1)
-                if self.varpos:
-                    self.declarations += "\nPyObject * const *fastargs;"
-                    argsname = 'fastargs'
-                    argname_fmt = 'fastargs[%d]'
-                else:
-                    argsname = 'args'
-                    argname_fmt = 'args[%d]'
-                if has_optional_kw:
-                    self.declarations += "\nPy_ssize_t noptargs = %s + (kwnames ? PyTuple_GET_SIZE(kwnames) : 0) - %d;" % (nargs, self.min_pos + self.min_kw_only)
+                nkw = '(kwnames ? PyTuple_GET_SIZE(kwnames) : 0)'
                 unpack_args = 'args, nargs, NULL, kwnames'
-            elif self.func.vectorcall:
-                # Emit parsing body as a helper that takes both vectorcall and
-                # fastcall calling conventions.
-                self.flags = "METH_VARARGS|METH_KEYWORDS"
-                self.parser_prototype = self._helper_prototype()
-                argsname = 'fastargs'
-                argname_fmt = 'fastargs[%d]'
-                self.declarations = declare_parser(self.func, codegen=self.codegen)
-                self.declarations += "\nPyObject *argsbuf[%s];" % (len(self.converters) or 1)
-                self.declarations += "\nPyObject * const *fastargs;"
-                if has_optional_kw:
-                    self.declarations += (
-                        "\nPy_ssize_t noptargs = %s + nkw - %d;"
-                        % (nargs, self.min_pos + self.min_kw_only))
-                unpack_args = 'args, nargs, kwargs, kwnames'
+                if self.func.vectorcall:
+                    # The helper shared by tp_new / tp_init and vectorcall.
+                    self.parser_prototype = self._helper_prototype()
+                    nkw = 'nkw'
+                    unpack_args = 'args, nargs, kwargs, kwnames'
             else:
-                # positional-or-keyword arguments
                 self.flags = "METH_VARARGS|METH_KEYWORDS"
                 self.parser_prototype = PARSER_PROTOTYPE_KEYWORD
-                argsname = 'fastargs'
-                argname_fmt = 'fastargs[%d]'
-                self.declarations = declare_parser(self.func, codegen=self.codegen)
-                self.declarations += "\nPyObject *argsbuf[%s];" % (len(self.converters) or 1)
-                self.declarations += "\nPyObject * const *fastargs;"
-                self.declarations += "\nPy_ssize_t nargs = PyTuple_GET_SIZE(args);"
-                if has_optional_kw:
-                    self.declarations += "\nPy_ssize_t noptargs = %s + (kwargs ? PyDict_GET_SIZE(kwargs) : 0) - %d;" % (nargs, self.min_pos + self.min_kw_only)
+                nkw = '(kwargs ? PyDict_GET_SIZE(kwargs) : 0)'
                 unpack_args = '_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL'
+            self.declarations = declare_parser(self.func, codegen=self.codegen)
+            self.declarations += "\nPyObject *argsbuf[%s];" % (len(self.converters) or 1)
+            if self.fastcall and not self.varpos and not self.func.vectorcall:
+                argsname = 'args'
+            else:
+                argsname = 'fastargs'
+                self.declarations += "\nPyObject * const *fastargs;"
+            argname_fmt = argsname + '[%d]'
+            if not self.fastcall:
+                self.declarations += "\nPy_ssize_t nargs = PyTuple_GET_SIZE(args);"
+            if has_optional_kw:
+                self.declarations += (
+                    f"\nPy_ssize_t noptargs = {nargs} + {nkw} - "
+                    f"{self.min_pos + self.min_kw_only};")
             parser_code = [libclinic.normalize_snippet(f"""
                 {argsname} = _PyArg_UnpackKeywords({unpack_args}, &_parser,
                         /*minpos*/ {self.min_pos}, /*maxpos*/ {self.max_pos}, /*minkw*/ {self.min_kw_only}, /*varpos*/ {1 if self.varpos else 0}, argsbuf);
@@ -1342,10 +1327,12 @@ class ParseArgsCodeGen:
 
         if use_parser_code:
             if deprecated_keywords:
-                code = clang.deprecate_keyword_use(self.func, deprecated_keywords,
-                                                   argname_fmt,
-                                                   codegen=self.codegen,
-                                                   fastcall=self.fastcall)
+                # The helper guards on kwargs only, so the vectorcall
+                # doesn't warn about an optional parameter.
+                code = clang.deprecate_keyword_use(
+                    self.func, deprecated_keywords, argname_fmt,
+                    codegen=self.codegen,
+                    fastcall=self.fastcall and not self.func.vectorcall)
                 parser_code.append(code)
 
             add_label: str | None = None
@@ -1416,11 +1403,8 @@ class ParseArgsCodeGen:
             if add_label:
                 parser_code.append("%s:" % add_label)
             if self.varpos:
-                # The @vectorcall helper parses an array.
                 parser_code.append(libclinic.normalize_snippet(
-                    self._parse_vararg(
-                        fastcall=self.fastcall or self.func.vectorcall,
-                        argstuple=self._helper_argstuple()),
+                    self._parse_vararg(argstuple=self._helper_argstuple()),
                     indent=4))
         else:
             self.use_converters()
@@ -1665,8 +1649,7 @@ class ParseArgsCodeGen:
         arity_checked: Already have a number of arguments check.
         """
         pos_code = self._parse_positional_args(
-            argname_fmt='args[%d]', nargs='nargs', limited_capi=False,
-            fastcall=True)
+            argname_fmt='args[%d]', nargs='nargs', limited_capi=False)
         # Converter support was validated when @vectorcall was parsed.
         assert pos_code is not None
         if arity_checked:
@@ -1814,6 +1797,7 @@ class ParseArgsCodeGen:
         # __new__/__init__.
         assert not self.has_option_groups()
         assert not self.use_meth_o()
+        self.fastcall = True
         if not self.parameters and not self.varpos and not self.var_keyword:
             self.parse_vectorcall_no_args()
         elif self.pos_only == len(self.parameters) and not self.var_keyword:
