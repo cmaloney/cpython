@@ -1344,7 +1344,8 @@ class VarPosCConverter(CConverter):
         raise AssertionError('should never be called')
 
     def parse_vararg(self, *, pos_only: int, min_pos: int, max_pos: int,
-                     fastcall: bool, limited_capi: bool) -> str:
+                     fastcall: bool, limited_capi: bool,
+                     argstuple: bool = False) -> str:
         raise NotImplementedError
 
 
@@ -1356,8 +1357,18 @@ class varpos_tuple_converter(VarPosCConverter):
         return f"""Py_XDECREF({self.parser_name});\n"""
 
     def parse_vararg(self, *, pos_only: int, min_pos: int, max_pos: int,
-                     fastcall: bool, limited_capi: bool) -> str:
+                     fastcall: bool, limited_capi: bool,
+                     argstuple: bool = False) -> str:
         paramname = self.parser_name
+        if argstuple:
+            # The @vectorcall helper gets the tp_new / tp_init tuple, or NULL.
+            assert fastcall and not max_pos
+            return f"""
+                {paramname} = argstuple != NULL ? Py_NewRef(argstuple) : PyTuple_FromArray(args, nargs);
+                if ({paramname} == NULL) {{{{
+                    goto exit;
+                }}}}
+                """
         if fastcall:
             if limited_capi:
                 if min(pos_only, min_pos) < max_pos:
@@ -1409,7 +1420,8 @@ class varpos_array_converter(VarPosCConverter):
     length = True
 
     def parse_vararg(self, *, pos_only: int, min_pos: int, max_pos: int,
-                     fastcall: bool, limited_capi: bool) -> str:
+                     fastcall: bool, limited_capi: bool,
+                     argstuple: bool = False) -> str:
         paramname = self.parser_name
         if not fastcall:
             self.add_include('pycore_tuple.h', '_PyTuple_ITEMS()')
