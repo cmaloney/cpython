@@ -1262,6 +1262,9 @@ class ParseArgsCodeGen:
             else:
                 nargs = f"Py_MIN(nargs, {self.max_pos})" if self.max_pos else "0"
 
+            self.declarations = declare_parser(self.func, codegen=self.codegen)
+            self.declarations += "\nPyObject *argsbuf[%s];" % (len(self.converters) or 1)
+            argsname = 'fastargs'
             if self.fastcall:
                 self.flags = "METH_FASTCALL|METH_KEYWORDS"
                 self.parser_prototype = PARSER_PROTOTYPE_FASTCALL_KEYWORDS
@@ -1272,21 +1275,18 @@ class ParseArgsCodeGen:
                     self.parser_prototype = self._helper_prototype()
                     nkw = 'nkw'
                     unpack_args = 'args, nargs, kwargs, kwnames'
+                if self.varpos or self.func.vectorcall:
+                    self.declarations += "\nPyObject * const *fastargs;"
+                else:
+                    argsname = 'args'
             else:
                 self.flags = "METH_VARARGS|METH_KEYWORDS"
                 self.parser_prototype = PARSER_PROTOTYPE_KEYWORD
                 nkw = '(kwargs ? PyDict_GET_SIZE(kwargs) : 0)'
                 unpack_args = '_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL'
-            self.declarations = declare_parser(self.func, codegen=self.codegen)
-            self.declarations += "\nPyObject *argsbuf[%s];" % (len(self.converters) or 1)
-            if self.fastcall and not self.varpos and not self.func.vectorcall:
-                argsname = 'args'
-            else:
-                argsname = 'fastargs'
                 self.declarations += "\nPyObject * const *fastargs;"
-            argname_fmt = argsname + '[%d]'
-            if not self.fastcall:
                 self.declarations += "\nPy_ssize_t nargs = PyTuple_GET_SIZE(args);"
+            argname_fmt = argsname + '[%d]'
             if has_optional_kw:
                 self.declarations += (
                     f"\nPy_ssize_t noptargs = {nargs} + {nkw} - "
