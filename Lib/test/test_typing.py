@@ -6592,6 +6592,25 @@ class InternalsTests(BaseTestCase):
             "annotationlib",
         })
 
+    @cpython_only
+    def test_lazy_import_ast(self):
+        # gh-153568: common uses of typing that need annotationlib
+        # must not import ast as a side effect.
+        import_helper.ensure_lazy_imports(
+            "typing",
+            {"ast"},
+            additional_code=textwrap.dedent("""
+                class P(typing.NamedTuple):
+                    x: int
+                    y: str = ""
+                class D(typing.TypedDict):
+                    x: int
+                def f(a: int) -> str: ...
+                typing.get_type_hints(f)
+                typing.get_type_hints(P)
+            """),
+        )
+
 
 @lru_cache()
 def cached_func(x, y):

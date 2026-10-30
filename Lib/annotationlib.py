@@ -1,6 +1,6 @@
 """Helpers for introspecting and wrapping annotations."""
 
-import ast
+lazy import ast
 import builtins
 import enum
 import keyword
@@ -261,7 +261,7 @@ class ForwardRef:
             names = self.__extra_names__
 
             if names:
-                visitor = _ExtraNameFixer(names)
+                visitor = _get_extra_name_fixer()(names)
                 ast_expr = ast.parse(resolved_str, mode="eval").body
                 node = visitor.visit(ast_expr)
                 resolved_str = ast.unparse(node)
@@ -511,63 +511,65 @@ class _Stringifier:
     def __format__(self, format_spec):
         raise TypeError("Cannot stringify annotation containing string formatting")
 
-    def _make_binop(op: ast.AST):
+    def _make_binop(op_name):
         def binop(self, other):
             rhs, extra_names = self.__convert_to_ast(other)
             return self.__make_new(
-                ast.BinOp(self.__get_ast(), op, rhs), extra_names
+                ast.BinOp(self.__get_ast(), getattr(ast, op_name)(), rhs),
+                extra_names,
             )
 
         return binop
 
-    __add__ = _make_binop(ast.Add())
-    __sub__ = _make_binop(ast.Sub())
-    __mul__ = _make_binop(ast.Mult())
-    __matmul__ = _make_binop(ast.MatMult())
-    __truediv__ = _make_binop(ast.Div())
-    __mod__ = _make_binop(ast.Mod())
-    __lshift__ = _make_binop(ast.LShift())
-    __rshift__ = _make_binop(ast.RShift())
-    __or__ = _make_binop(ast.BitOr())
-    __xor__ = _make_binop(ast.BitXor())
-    __and__ = _make_binop(ast.BitAnd())
-    __floordiv__ = _make_binop(ast.FloorDiv())
-    __pow__ = _make_binop(ast.Pow())
+    __add__ = _make_binop("Add")
+    __sub__ = _make_binop("Sub")
+    __mul__ = _make_binop("Mult")
+    __matmul__ = _make_binop("MatMult")
+    __truediv__ = _make_binop("Div")
+    __mod__ = _make_binop("Mod")
+    __lshift__ = _make_binop("LShift")
+    __rshift__ = _make_binop("RShift")
+    __or__ = _make_binop("BitOr")
+    __xor__ = _make_binop("BitXor")
+    __and__ = _make_binop("BitAnd")
+    __floordiv__ = _make_binop("FloorDiv")
+    __pow__ = _make_binop("Pow")
 
     del _make_binop
 
-    def _make_rbinop(op: ast.AST):
+    def _make_rbinop(op_name):
         def rbinop(self, other):
             new_other, extra_names = self.__convert_to_ast(other)
             return self.__make_new(
-                ast.BinOp(new_other, op, self.__get_ast()), extra_names
+                ast.BinOp(new_other, getattr(ast, op_name)(), self.__get_ast()),
+                extra_names,
             )
 
         return rbinop
 
-    __radd__ = _make_rbinop(ast.Add())
-    __rsub__ = _make_rbinop(ast.Sub())
-    __rmul__ = _make_rbinop(ast.Mult())
-    __rmatmul__ = _make_rbinop(ast.MatMult())
-    __rtruediv__ = _make_rbinop(ast.Div())
-    __rmod__ = _make_rbinop(ast.Mod())
-    __rlshift__ = _make_rbinop(ast.LShift())
-    __rrshift__ = _make_rbinop(ast.RShift())
-    __ror__ = _make_rbinop(ast.BitOr())
-    __rxor__ = _make_rbinop(ast.BitXor())
-    __rand__ = _make_rbinop(ast.BitAnd())
-    __rfloordiv__ = _make_rbinop(ast.FloorDiv())
-    __rpow__ = _make_rbinop(ast.Pow())
+    __radd__ = _make_rbinop("Add")
+    __rsub__ = _make_rbinop("Sub")
+    __rmul__ = _make_rbinop("Mult")
+    __rmatmul__ = _make_rbinop("MatMult")
+    __rtruediv__ = _make_rbinop("Div")
+    __rmod__ = _make_rbinop("Mod")
+    __rlshift__ = _make_rbinop("LShift")
+    __rrshift__ = _make_rbinop("RShift")
+    __ror__ = _make_rbinop("BitOr")
+    __rxor__ = _make_rbinop("BitXor")
+    __rand__ = _make_rbinop("BitAnd")
+    __rfloordiv__ = _make_rbinop("FloorDiv")
+    __rpow__ = _make_rbinop("Pow")
 
     del _make_rbinop
 
-    def _make_compare(op):
+    def _make_compare(op_name):
         def compare(self, other):
             rhs, extra_names = self.__convert_to_ast(other)
             return self.__make_new(
                 ast.Compare(
                     left=self.__get_ast(),
-                    ops=[op],
+                    ops=[getattr(ast, op_name)()],
                     comparators=[rhs],
                 ),
                 extra_names,
@@ -575,24 +577,26 @@ class _Stringifier:
 
         return compare
 
-    __lt__ = _make_compare(ast.Lt())
-    __le__ = _make_compare(ast.LtE())
-    __eq__ = _make_compare(ast.Eq())
-    __ne__ = _make_compare(ast.NotEq())
-    __gt__ = _make_compare(ast.Gt())
-    __ge__ = _make_compare(ast.GtE())
+    __lt__ = _make_compare("Lt")
+    __le__ = _make_compare("LtE")
+    __eq__ = _make_compare("Eq")
+    __ne__ = _make_compare("NotEq")
+    __gt__ = _make_compare("Gt")
+    __ge__ = _make_compare("GtE")
 
     del _make_compare
 
-    def _make_unary_op(op):
+    def _make_unary_op(op_name):
         def unary_op(self):
-            return self.__make_new(ast.UnaryOp(op, self.__get_ast()))
+            return self.__make_new(
+                ast.UnaryOp(getattr(ast, op_name)(), self.__get_ast())
+            )
 
         return unary_op
 
-    __invert__ = _make_unary_op(ast.Invert())
-    __pos__ = _make_unary_op(ast.UAdd())
-    __neg__ = _make_unary_op(ast.USub())
+    __invert__ = _make_unary_op("Invert")
+    __pos__ = _make_unary_op("UAdd")
+    __neg__ = _make_unary_op("USub")
 
     del _make_unary_op
 
@@ -1186,12 +1190,24 @@ def _get_dunder_annotations(obj):
     return ann
 
 
-class _ExtraNameFixer(ast.NodeTransformer):
-    """Fixer for __extra_names__ items in ForwardRef __repr__ and string evaluation"""
-    def __init__(self, extra_names):
-        self.extra_names = extra_names
+_ExtraNameFixer = None
 
-    def visit_Name(self, node: ast.Name):
-        if (new_name := self.extra_names.get(node.id, _sentinel)) is not _sentinel:
-            node = ast.Name(id=type_repr(new_name))
-        return node
+
+def _get_extra_name_fixer():
+    # Created on first use: ast.NodeTransformer would otherwise force
+    # the import of ast as soon as annotationlib is imported.
+    global _ExtraNameFixer
+    if _ExtraNameFixer is not None:
+        return _ExtraNameFixer
+
+    class _ExtraNameFixer(ast.NodeTransformer):
+        """Fixer for __extra_names__ items in ForwardRef __repr__ and string evaluation"""
+        def __init__(self, extra_names):
+            self.extra_names = extra_names
+
+        def visit_Name(self, node: ast.Name):
+            if (new_name := self.extra_names.get(node.id, _sentinel)) is not _sentinel:
+                node = ast.Name(id=type_repr(new_name))
+            return node
+
+    return _ExtraNameFixer

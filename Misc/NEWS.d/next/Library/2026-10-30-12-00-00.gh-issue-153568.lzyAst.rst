@@ -1,0 +1,4 @@
+:mod:`annotationlib` now imports :mod:`ast` lazily, so evaluating annotations
+that do not need to be stringified (for example when defining a
+:class:`typing.NamedTuple` or :class:`typing.TypedDict` class, or calling
+:func:`typing.get_type_hints`) no longer imports :mod:`ast`.

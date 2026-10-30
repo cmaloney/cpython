@@ -2540,7 +2540,25 @@ class TestAnnotationLib(unittest.TestCase):
         import_helper.ensure_lazy_imports(
             "annotationlib",
             {
+                "ast",
                 "typing",
                 "warnings",
             },
+        )
+
+    @support.cpython_only
+    def test_lazy_import_ast(self):
+        # gh-153568: evaluating annotations that resolve without
+        # stringification must not import ast.
+        import_helper.ensure_lazy_imports(
+            "annotationlib",
+            {"ast"},
+            additional_code=textwrap.dedent("""
+                class A:
+                    x: int
+                    y: list[str]
+                annotationlib.get_annotations(A)
+                annotationlib.get_annotations(
+                    A, format=annotationlib.Format.FORWARDREF)
+            """),
         )
