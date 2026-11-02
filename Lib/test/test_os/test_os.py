@@ -8,6 +8,7 @@ import contextlib
 import decimal
 import errno
 import fractions
+import importlib.util
 import itertools
 import locale
 import os
@@ -187,6 +188,36 @@ class MiscTests(unittest.TestCase):
             self.assertEqual(fqdn(os.sched_param), (native, "sched_param"))
         if hasattr(os, "waitid_result"):
             self.assertEqual(fqdn(os.waitid_result), (native, "waitid_result"))
+
+    def test_platform_module(self):
+        # posix and nt stay builtins, importable only on their own platform.
+        other = 'posix' if os.name == 'nt' else 'nt'
+        self.assertIs(importlib.import_module(os.name).stat, os.stat)
+        self.assertIn(os.name, sys.builtin_module_names)
+        self.assertNotIn(other, sys.builtin_module_names)
+        with self.assertRaises(ImportError):
+            importlib.import_module(other)
+
+    def test_platform_module_from_spec(self):
+        # Loading by hand (as LazyLoader does) must give a working module.
+        spec = importlib.util.find_spec(os.name)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertEqual(mod.getpid(), os.getpid())
+        self.assertIs(sys.modules[os.name].stat, os.stat)
+
+    def test_pickle_global_names(self):
+        # Pickles reference these via the platform module (posix or nt) or
+        # via os; both must keep loading.
+        names = ['stat', 'stat_result', 'times', 'times_result', 'DirEntry']
+        names += [name for name in ('statvfs_result', 'uname_result',
+                                    'sched_param', 'waitid_result')
+                  if hasattr(os, name)]
+        for module in ('os', os.name):
+            for name in names:
+                with self.subTest(module=module, name=name):
+                    p = f'c{module}\n{name}\n.'.encode()
+                    self.assertIs(pickle.loads(p), getattr(os, name))
 
 
 # Tests creating TESTFN
@@ -5576,6 +5607,15 @@ class TimesTests(unittest.TestCase):
             self.assertEqual(times.children_user, 0)
             self.assertEqual(times.children_system, 0)
             self.assertEqual(times.elapsed, 0)
+
+    def test_times_result_pickle(self):
+        result = os.times()
+        for proto in range(pickle.HIGHEST_PROTOCOL + 1):
+            with self.subTest(f'protocol {proto}'):
+                p = pickle.dumps(result, proto)
+                self.assertIn(b'times_result', p)
+                unpickled = pickle.loads(p)
+                self.assertEqual(result, unpickled)
 
 
 @support.requires_fork()
