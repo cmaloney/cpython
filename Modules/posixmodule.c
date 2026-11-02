@@ -655,10 +655,9 @@ static const unsigned int _Py_STATX_KNOWN = (STATX_BASIC_STATS | STATX_BTIME
 #endif
 
 /*[clinic input]
-# one of the few times we lie about this name!
 module os
 [clinic start generated code]*/
-/*[clinic end generated code: output=da39a3ee5e6b4b0d input=94a0f0f978acae17]*/
+/*[clinic end generated code: output=da39a3ee5e6b4b0d input=8cff096d1133288f]*/
 
 PyDoc_STRVAR(posix__doc__,
 "This module provides access to operating system functionality that is\n\
@@ -2561,7 +2560,7 @@ static PyStructSequence_Field waitid_result_fields[] = {
 };
 
 static PyStructSequence_Desc waitid_result_desc = {
-    MODNAME ".waitid_result", /* name */
+    "os.waitid_result", /* name */
     waitid_result__doc__, /* doc */
     waitid_result_fields,
     5
@@ -6768,7 +6767,7 @@ or via the attributes sysname, nodename, release, version, and machine.\n\
 See os.uname for more information.");
 
 static PyStructSequence_Desc uname_result_desc = {
-    MODNAME ".uname_result", /* name */
+    "os.uname_result", /* name */
     uname_result__doc__, /* doc */
     uname_result_fields,
     5
@@ -8818,7 +8817,7 @@ static PyStructSequence_Field sched_param_fields[] = {
 };
 
 static PyStructSequence_Desc sched_param_desc = {
-    MODNAME ".sched_param", /* name */
+    "os.sched_param", /* name */
     os_sched_param__doc__, /* doc */
     sched_param_fields,
     1
@@ -11376,7 +11375,7 @@ and elapsed.\n\
 See os.times for more information.");
 
 static PyStructSequence_Desc times_result_desc = {
-    MODNAME ".times_result", /* name */
+    "os.times_result", /* name */
     times_result__doc__, /* doc */
     times_result_fields,
     5
@@ -16840,7 +16839,7 @@ static PyType_Slot DirEntryType_slots[] = {
 };
 
 static PyType_Spec DirEntryType_spec = {
-    .name = MODNAME ".DirEntry",
+    .name = "os.DirEntry",
     .basicsize = sizeof(DirEntry),
     .flags = (
         Py_TPFLAGS_DEFAULT
@@ -17397,7 +17396,7 @@ static PyType_Slot ScandirIteratorType_slots[] = {
 };
 
 static PyType_Spec ScandirIteratorType_spec = {
-    .name = MODNAME ".ScandirIterator",
+    .name = "os.ScandirIterator",
     .basicsize = sizeof(ScandirIterator),
     // bpo-40549: Py_TPFLAGS_BASETYPE should not be used, since
     // PyType_GetModule(Py_TYPE(self)) doesn't work on a subclass instance.
@@ -19106,6 +19105,15 @@ posixmodule_exec(PyObject *m)
 {
     _posixstate *state = get_posix_state(m);
 
+    // Name the module os before adding functions, so they report os as
+    // their module and pickle as os.<name> on every platform.
+    if (PyObject_SetAttr(m, &_Py_ID(__name__), &_Py_ID(os)) < 0) {
+        return -1;
+    }
+    if (PyModule_AddFunctions(m, posix_methods) < 0) {
+        return -1;
+    }
+
 #if defined(HAVE_PWRITEV)
     if (HAVE_PWRITEV_RUNTIME) {} else {
         PyObject* dct = PyModule_GetDict(m);
@@ -19302,7 +19310,6 @@ static struct PyModuleDef posixmodule = {
     .m_name = MODNAME,
     .m_doc = posix__doc__,
     .m_size = sizeof(_posixstate),
-    .m_methods = posix_methods,
     .m_slots = posixmodile_slots,
     .m_traverse = _posix_traverse,
     .m_clear = _posix_clear,

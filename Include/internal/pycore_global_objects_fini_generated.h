@@ -705,6 +705,7 @@ _PyStaticObjects_CheckAll(PyInterpreterState *interp) {
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(options), "options", 7);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(order), "order", 5);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(origin), "origin", 6);
+    _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(os), "os", 2);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(other), "other", 5);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(out_fd), "out_fd", 6);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(outgoing), "outgoing", 8);

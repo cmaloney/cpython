@@ -1992,6 +1992,7 @@ extern "C" {
     INIT_ID(options), \
     INIT_ID(order), \
     INIT_ID(origin), \
+    INIT_ID(os), \
     INIT_ID(other), \
     INIT_ID(out_fd), \
     INIT_ID(outgoing), \

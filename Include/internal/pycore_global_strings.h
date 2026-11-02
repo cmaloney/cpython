@@ -717,6 +717,7 @@ struct _Py_global_strings {
         STRUCT_FOR_ID(options)
         STRUCT_FOR_ID(order)
         STRUCT_FOR_ID(origin)
+        STRUCT_FOR_ID(os)
         STRUCT_FOR_ID(other)
         STRUCT_FOR_ID(out_fd)
         STRUCT_FOR_ID(outgoing)

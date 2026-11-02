@@ -179,15 +179,16 @@ class MiscTests(unittest.TestCase):
         def fqdn(obj):
             return (obj.__module__, obj.__qualname__)
 
-        native = os.name
         self.assertEqual(fqdn(os.stat_result), ("os", "stat_result"))
-        self.assertEqual(fqdn(os.times_result), (native, "times_result"))
+        self.assertEqual(fqdn(os.times_result), ("os", "times_result"))
+        self.assertEqual(fqdn(os.DirEntry), ("os", "DirEntry"))
+        self.assertEqual(fqdn(os.stat), ("os", "stat"))
         if hasattr(os, "statvfs_result"):
             self.assertEqual(fqdn(os.statvfs_result), ("os", "statvfs_result"))
         if hasattr(os, "sched_param"):
-            self.assertEqual(fqdn(os.sched_param), (native, "sched_param"))
+            self.assertEqual(fqdn(os.sched_param), ("os", "sched_param"))
         if hasattr(os, "waitid_result"):
-            self.assertEqual(fqdn(os.waitid_result), (native, "waitid_result"))
+            self.assertEqual(fqdn(os.waitid_result), ("os", "waitid_result"))
 
     def test_platform_module(self):
         # posix and nt stay builtins, importable only on their own platform.
@@ -205,6 +206,14 @@ class MiscTests(unittest.TestCase):
         spec.loader.exec_module(mod)
         self.assertEqual(mod.getpid(), os.getpid())
         self.assertIs(sys.modules[os.name].stat, os.stat)
+
+    def test_function_pickle(self):
+        for proto in range(pickle.HIGHEST_PROTOCOL + 1):
+            with self.subTest(f'protocol {proto}'):
+                p = pickle.dumps(os.stat, proto)
+                if proto < 4:
+                    self.assertIn(b'cos\nstat\n', p)
+                self.assertIs(pickle.loads(p), os.stat)
 
     def test_pickle_global_names(self):
         # Pickles reference these via the platform module (posix or nt) or
@@ -5614,6 +5623,8 @@ class TimesTests(unittest.TestCase):
             with self.subTest(f'protocol {proto}'):
                 p = pickle.dumps(result, proto)
                 self.assertIn(b'times_result', p)
+                if proto < 4:
+                    self.assertIn(b'cos\ntimes_result\n', p)
                 unpickled = pickle.loads(p)
                 self.assertEqual(result, unpickled)
 

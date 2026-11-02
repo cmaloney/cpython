@@ -1447,7 +1447,10 @@ class PosixTester(unittest.TestCase):
     def test_sched_param(self):
         param = posix.sched_param(1)
         for proto in range(pickle.HIGHEST_PROTOCOL+1):
-            newparam = pickle.loads(pickle.dumps(param, proto))
+            p = pickle.dumps(param, proto)
+            if proto < 4:
+                self.assertIn(b'cos\nsched_param\n', p)
+            newparam = pickle.loads(p)
             self.assertEqual(newparam, param)
         newparam = copy.copy(param)
         self.assertIsNot(newparam, param)
