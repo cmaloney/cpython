@@ -1,0 +1,4 @@
+The C module behind :mod:`os` is now built as ``_os`` on every platform;
+``posix`` (``nt`` on Windows) remains importable and refers to the same module.
+Its functions now report ``os`` as their ``__module__`` and are pickled as
+``os.<name>``, so pickles load on any platform.
