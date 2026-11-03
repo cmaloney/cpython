@@ -1971,7 +1971,7 @@ Programs/_testembed.o: $(srcdir)/Programs/_testembed.c Programs/test_frozenmain.
 
 Modules/_sre/sre.o: $(srcdir)/Modules/_sre/sre.c $(srcdir)/Modules/_sre/sre.h $(srcdir)/Modules/_sre/sre_constants.h $(srcdir)/Modules/_sre/sre_lib.h
 
-Modules/posixmodule.o: $(srcdir)/Modules/posixmodule.c $(srcdir)/Modules/posixmodule.h
+Modules/_osmodule.o: $(srcdir)/Modules/_osmodule.c $(srcdir)/Modules/posixmodule.h
 
 Modules/grpmodule.o: $(srcdir)/Modules/grpmodule.c $(srcdir)/Modules/posixmodule.h
 

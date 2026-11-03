@@ -290,7 +290,7 @@ class PosixPathTest(unittest.TestCase):
     @unittest.skipIf(sys.platform == 'win32', "Fast paths are not for win32")
     @support.cpython_only
     def test_fast_paths_in_use(self):
-        # There are fast paths of these functions implemented in posixmodule.c.
+        # There are fast paths of these functions implemented in _osmodule.c.
         # Confirm that they are being used, and not the Python fallbacks
         self.assertTrue(os.path.splitroot is posix._path_splitroot_ex)
         self.assertFalse(inspect.isfunction(os.path.splitroot))

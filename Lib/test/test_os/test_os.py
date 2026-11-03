@@ -1344,7 +1344,7 @@ class UtimeTests(unittest.TestCase):
 
         times = (
             5000000000,  # some day in 2128
-            # boundaries of the fast path cutoff in posixmodule.c:fill_time
+            # boundaries of the fast path cutoff in _osmodule.c:fill_time
             -9223372037, -9223372036, 9223372035, 9223372036,
         )
         for large in times:

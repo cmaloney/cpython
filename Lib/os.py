@@ -213,8 +213,8 @@ if _exists("_have_functions"):
 
 
 # Python uses fixed values for the SEEK_ constants; they are mapped
-# to native constants if necessary in posixmodule.c
-# Other possible SEEK values are directly imported from posixmodule.c
+# to native constants if necessary in _osmodule.c
+# Other possible SEEK values are directly imported from _osmodule.c
 SEEK_SET = 0
 SEEK_CUR = 1
 SEEK_END = 2

@@ -352,7 +352,7 @@
     <ClCompile Include="..\Objects\picklebufobject.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\Modules\posixmodule.c">
+    <ClCompile Include="..\Modules\_osmodule.c">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\Python\preconfig.c">

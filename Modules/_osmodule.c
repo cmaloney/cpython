@@ -16805,7 +16805,7 @@ static PyMemberDef DirEntry_members[] = {
     {NULL}
 };
 
-#include "clinic/posixmodule.c.h"
+#include "clinic/_osmodule.c.h"
 
 static PyMethodDef DirEntry_methods[] = {
     OS_DIRENTRY_IS_DIR_METHODDEF

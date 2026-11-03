@@ -52,7 +52,7 @@ Modules/_tracemalloc.c:tracemalloc_traces                        static _Py_hash
 Modules/faulthandler.c:old_stack                                 static stack_t old_stack
 Modules/faulthandler.c:stack                                     static stack_t stack
 Modules/faulthandler.c:faulthandler_dump_traceback():reentrant   static volatile int reentrant
-Modules/posixmodule.c:initialized                                static int initialized
+Modules/_osmodule.c:initialized                                static int initialized
 Modules/signalmodule.c:initialized                               static int initialized
 Modules/timemodule.c:initialized                                 static int initialized
 Objects/dictobject.c:pydict_global_version                       static uint64_t pydict_global_version
@@ -277,10 +277,10 @@ Modules/faulthandler.c:PyId_stderr                               _Py_IDENTIFIER(
 Modules/itertoolsmodule.c:itertools_tee_impl():PyId___copy__     _Py_IDENTIFIER(__copy__)
 Modules/itertoolsmodule.c:zip_longest_new():PyId_fillvalue       _Py_IDENTIFIER(fillvalue)
 Modules/main.c:pymain_sys_path_add_path0():PyId_path             _Py_IDENTIFIER(path)
-Modules/posixmodule.c:DirEntry_test_mode():PyId_st_mode          _Py_IDENTIFIER(st_mode)
-Modules/posixmodule.c:PyOS_FSPath():PyId___fspath__              _Py_IDENTIFIER(__fspath__)
-Modules/posixmodule.c:path_converter():PyId___fspath__           _Py_IDENTIFIER(__fspath__)
-Modules/posixmodule.c:wait_helper():PyId_struct_rusage           _Py_IDENTIFIER(struct_rusage)
+Modules/_osmodule.c:DirEntry_test_mode():PyId_st_mode          _Py_IDENTIFIER(st_mode)
+Modules/_osmodule.c:PyOS_FSPath():PyId___fspath__              _Py_IDENTIFIER(__fspath__)
+Modules/_osmodule.c:path_converter():PyId___fspath__           _Py_IDENTIFIER(__fspath__)
+Modules/_osmodule.c:wait_helper():PyId_struct_rusage           _Py_IDENTIFIER(struct_rusage)
 Modules/timemodule.c:time_strptime():PyId__strptime_time         _Py_IDENTIFIER(_strptime_time)
 Objects/abstract.c:PyMapping_Items():PyId_items                  _Py_IDENTIFIER(items)
 Objects/abstract.c:PyMapping_Keys():PyId_keys                    _Py_IDENTIFIER(keys)

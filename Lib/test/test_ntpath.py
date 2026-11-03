@@ -1661,7 +1661,7 @@ class TestNtpath(NtpathTestCase):
     @unittest.skipIf(sys.platform != 'win32', "Fast paths are only for win32")
     @support.cpython_only
     def test_fast_paths_in_use(self):
-        # There are fast paths of these functions implemented in posixmodule.c.
+        # There are fast paths of these functions implemented in _osmodule.c.
         # Confirm that they are being used, and not the Python fallbacks in
         # genericpath.py.
         self.assertTrue(os.path.splitroot is nt._path_splitroot_ex)

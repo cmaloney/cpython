@@ -1634,7 +1634,7 @@ def active_count():
     enumerate().
 
     """
-    # NOTE: if the logic in here ever changes, update Modules/posixmodule.c
+    # NOTE: if the logic in here ever changes, update Modules/_osmodule.c
     # warn_about_fork_with_threads() to match.
     with _active_limbo_lock:
         return len(_active) + len(_limbo)
