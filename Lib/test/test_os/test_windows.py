@@ -7,6 +7,7 @@ if sys.platform != "win32":
 import _winapi
 import fnmatch
 import mmap
+import _os
 import os
 import shutil
 import signal
@@ -16,7 +17,6 @@ import textwrap
 import time
 import uuid
 from test import support
-from test.support import import_helper
 from test.support import os_helper
 from .utils import create_file
 
@@ -456,7 +456,6 @@ class Win32JunctionTests(unittest.TestCase):
 
 class Win32NtTests(unittest.TestCase):
     def test_getfinalpathname_handles(self):
-        nt = import_helper.import_module('nt')
         before_count = os_helper.handle_count()
 
         # The first two test the error path, __file__ tests the success path
@@ -470,7 +469,7 @@ class Win32NtTests(unittest.TestCase):
         for _ in range(10):
             for name in filenames:
                 try:
-                    nt._getfinalpathname(name)
+                    _os._getfinalpathname(name)
                 except Exception:
                     # Failure is expected
                     pass

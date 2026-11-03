@@ -2059,7 +2059,7 @@ kqueue_tracking_init(PyObject *module) {
     // Register a callback to invalidate kqueues with open fds after fork.
     PyObject *register_at_fork = NULL, *cb = NULL, *args = NULL,
              *kwargs = NULL, *result = NULL;
-    register_at_fork = PyImport_ImportModuleAttrString("posix",
+    register_at_fork = PyImport_ImportModuleAttrString("_os",
                                                      "register_at_fork");
     if (register_at_fork == NULL) {
         goto finally;

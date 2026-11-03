@@ -1,5 +1,6 @@
 import errno
 import inspect
+import _os
 import os
 import posixpath
 import random
@@ -14,10 +15,6 @@ from test.support import os_helper
 from test.support.os_helper import FakePath, TESTFN
 from unittest import mock
 
-try:
-    import posix
-except ImportError:
-    posix = None
 
 
 # An absolute path to a temporary filename for testing. We can't rely on TESTFN
@@ -244,43 +241,43 @@ class PosixPathTest(unittest.TestCase):
         finally:
             os_helper.unlink(ABSTFN)
 
-    @unittest.skipIf(posix is None, "Test requires posix module")
     def test_ismount_different_device(self):
         # Simulate the path being on a different device from its parent by
         # mocking out st_dev.
+        mount = "/mnt/fake"
         save_lstat = os.lstat
         def fake_lstat(path):
             st_ino = 0
             st_dev = 0
-            if path == ABSTFN:
+            if path == mount:
                 st_dev = 1
                 st_ino = 1
-            return posix.stat_result((0, st_ino, st_dev, 0, 0, 0, 0, 0, 0, 0))
+            return os.stat_result((0, st_ino, st_dev, 0, 0, 0, 0, 0, 0, 0))
         try:
             os.lstat = fake_lstat
-            self.assertIs(posixpath.ismount(ABSTFN), True)
+            self.assertIs(posixpath.ismount(mount), True)
         finally:
             os.lstat = save_lstat
 
-    @unittest.skipIf(posix is None, "Test requires posix module")
     def test_ismount_directory_not_readable(self):
         # issue #2466: Simulate ismount run on a directory that is not
         # readable, which used to return False.
+        mount = "/mnt/fake"
         save_lstat = os.lstat
         def fake_lstat(path):
             st_ino = 0
             st_dev = 0
-            if path.startswith(ABSTFN) and path != ABSTFN:
-                # ismount tries to read something inside the ABSTFN directory;
+            if path.startswith(mount) and path != mount:
+                # ismount tries to read something inside the mount directory;
                 # simulate this being forbidden (no read permission).
                 raise OSError("Fake [Errno 13] Permission denied")
-            if path == ABSTFN:
+            if path == mount:
                 st_dev = 1
                 st_ino = 1
-            return posix.stat_result((0, st_ino, st_dev, 0, 0, 0, 0, 0, 0, 0))
+            return os.stat_result((0, st_ino, st_dev, 0, 0, 0, 0, 0, 0, 0))
         try:
             os.lstat = fake_lstat
-            self.assertIs(posixpath.ismount(ABSTFN), True)
+            self.assertIs(posixpath.ismount(mount), True)
         finally:
             os.lstat = save_lstat
 
@@ -292,9 +289,9 @@ class PosixPathTest(unittest.TestCase):
     def test_fast_paths_in_use(self):
         # There are fast paths of these functions implemented in _osmodule.c.
         # Confirm that they are being used, and not the Python fallbacks
-        self.assertTrue(os.path.splitroot is posix._path_splitroot_ex)
+        self.assertTrue(os.path.splitroot is _os._path_splitroot_ex)
         self.assertFalse(inspect.isfunction(os.path.splitroot))
-        self.assertTrue(os.path.normpath is posix._path_normpath)
+        self.assertTrue(os.path.normpath is _os._path_normpath)
         self.assertFalse(inspect.isfunction(os.path.normpath))
 
     def test_expanduser(self):

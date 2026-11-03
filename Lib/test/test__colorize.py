@@ -1,6 +1,7 @@
 import contextlib
 import dataclasses
 import io
+import os
 import sys
 import unittest
 import unittest.mock
@@ -18,7 +19,7 @@ def clear_env():
 
 def supports_virtual_terminal():
     if sys.platform == "win32":
-        return unittest.mock.patch("nt._supports_virtual_terminal", return_value=True)
+        return unittest.mock.patch("os._supports_virtual_terminal", return_value=True)
     else:
         return contextlib.nullcontext()
 
@@ -128,8 +129,7 @@ class TestColorizeFunction(unittest.TestCase):
             self.assertEqual(_colorize.can_colorize(), True)
             vt_mock.return_value = False
             self.assertEqual(_colorize.can_colorize(), False)
-            import nt
-            del nt._supports_virtual_terminal
+            del os._supports_virtual_terminal
             self.assertEqual(_colorize.can_colorize(), False)
 
     def test_colorized_detection_checks_for_std_streams(self):

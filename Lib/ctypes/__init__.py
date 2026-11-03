@@ -430,16 +430,15 @@ class CDLL(object):
     if _os.name == "nt":
         def _load_library(self, name, mode, handle, winmode):
             if winmode is None:
-                import nt as _nt
-                winmode = _nt._LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+                winmode = _os._LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
                 # WINAPI LoadLibrary searches for a DLL if the given name
                 # is not fully qualified with an explicit drive. For POSIX
                 # compatibility, and because the DLL search path no longer
                 # contains the working directory, begin by fully resolving
                 # any name that contains a path separator.
                 if name is not None and ('/' in name or '\\' in name):
-                    name = _nt._getfullpathname(name)
-                    winmode |= _nt._LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR
+                    name = _os._getfullpathname(name)
+                    winmode |= _os._LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR
             self._name = name
             if handle is not None:
                 return handle

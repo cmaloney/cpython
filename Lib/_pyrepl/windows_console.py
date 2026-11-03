@@ -68,13 +68,10 @@ except:
 
 # declare optional to allow None assignment on other platforms
 _winapi: types.ModuleType | None
-nt: types.ModuleType | None
 try:
     import _winapi
-    import nt
 except ImportError:
     _winapi = None
-    nt = None
 
 lazy from typing import IO
 
@@ -145,7 +142,7 @@ class WindowsRefreshPlan:
 
 def _supports_vt():
     try:
-        return nt._supports_virtual_terminal()
+        return os._supports_virtual_terminal()
     except AttributeError:
         return False
 
@@ -312,8 +309,8 @@ class WindowsConsole(Console):
     def input_hook(self):
         # avoid inline imports here so the repl doesn't get flooded
         # with import logging from -X importtime=2
-        if nt is not None and nt._is_inputhook_installed():
-            return nt._inputhook
+        if os._is_inputhook_installed():
+            return os._inputhook
 
     def __plan_changed_line(  # keep in sync with UnixConsole.__plan_changed_line
         self,

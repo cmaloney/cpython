@@ -31,10 +31,6 @@ try:
     import grp, pwd
 except ImportError:
     grp = pwd = None
-try:
-    import posix
-except ImportError:
-    posix = None
 
 
 def patch_replace(old_test):
@@ -1525,8 +1521,8 @@ class PathTest(PurePathTest):
         with contextlib.ExitStack() as ctx:
             if fcntl and hasattr(fcntl, 'FICLONE'):
                 ctx.enter_context(mock.patch('fcntl.ioctl', make_raiser(errno.EXDEV)))
-            if posix and hasattr(posix, '_fcopyfile'):
-                ctx.enter_context(mock.patch('posix._fcopyfile', make_raiser(errno.ENOTSUP)))
+            if hasattr(os, '_fcopyfile'):
+                ctx.enter_context(mock.patch('os._fcopyfile', make_raiser(errno.ENOTSUP)))
             if hasattr(os, 'copy_file_range'):
                 ctx.enter_context(mock.patch('os.copy_file_range', make_raiser(errno.EXDEV)))
             if hasattr(os, 'sendfile'):
@@ -1539,8 +1535,8 @@ class PathTest(PurePathTest):
         # Raise fatal OSError from first available fast copy function.
         if fcntl and hasattr(fcntl, 'FICLONE'):
             patchpoint = 'fcntl.ioctl'
-        elif posix and hasattr(posix, '_fcopyfile'):
-            patchpoint = 'posix._fcopyfile'
+        elif hasattr(os, '_fcopyfile'):
+            patchpoint = 'os._fcopyfile'
         elif hasattr(os, 'copy_file_range'):
             patchpoint = 'os.copy_file_range'
         elif hasattr(os, 'sendfile'):

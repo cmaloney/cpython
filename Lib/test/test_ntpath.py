@@ -1,6 +1,7 @@
 import errno
 import inspect
 import ntpath
+import _os
 import os
 import string
 import subprocess
@@ -16,12 +17,6 @@ from test import test_genericpath
 from tempfile import TemporaryFile
 
 
-try:
-    import nt
-except ImportError:
-    # Most tests can complete without the nt module,
-    # but for those that require it we import here.
-    nt = None
 
 try:
     ntpath._getfinalpathname
@@ -1029,7 +1024,7 @@ class TestNtpath(NtpathTestCase):
             raise unittest.SkipTest('the filesystem seems to lack support for short filenames')
 
         # Deny the right to [S]YNCHRONIZE on the file to
-        # force nt._getfinalpathname to fail with ERROR_ACCESS_DENIED.
+        # force _os._getfinalpathname to fail with ERROR_ACCESS_DENIED.
         p = subprocess.run(
             ['icacls.exe', test_file, '/deny', '*S-1-5-32-545:(S)'],
             creationflags=subprocess.DETACHED_PROCESS
@@ -1235,7 +1230,8 @@ class TestNtpath(NtpathTestCase):
 
 
 
-    @unittest.skipUnless(nt, "abspath requires 'nt' module")
+    @unittest.skipUnless(hasattr(_os, '_getfullpathname'),
+                         "requires the native abspath")
     def test_abspath(self):
         tester('ntpath.abspath("C:\\")', "C:\\")
         tester('ntpath.abspath("\\\\?\\C:////spam////eggs. . .")', "\\\\?\\C:\\spam\\eggs")
@@ -1514,33 +1510,34 @@ class TestNtpath(NtpathTestCase):
         """Assert that two strings are equal ignoring case differences."""
         self.assertEqual(s1.lower(), s2.lower())
 
-    @unittest.skipUnless(nt, "OS helpers require 'nt' module")
+    @unittest.skipUnless(hasattr(_os, '_getfinalpathname'),
+                         "requires the Windows path helpers")
     def test_nt_helpers(self):
         # Trivial validation that the helpers do not break, and support both
         # unicode and bytes (UTF-8) paths
 
-        executable = nt._getfinalpathname(sys.executable)
+        executable = _os._getfinalpathname(sys.executable)
 
         for path in executable, os.fsencode(executable):
-            volume_path = nt._getvolumepathname(path)
+            volume_path = _os._getvolumepathname(path)
             path_drive = ntpath.splitdrive(path)[0]
             volume_path_drive = ntpath.splitdrive(volume_path)[0]
             self.assertEqualCI(path_drive, volume_path_drive)
 
-        cap, free = nt._getdiskusage(sys.exec_prefix)
+        cap, free = _os._getdiskusage(sys.exec_prefix)
         self.assertGreater(cap, 0)
         self.assertGreater(free, 0)
-        b_cap, b_free = nt._getdiskusage(sys.exec_prefix.encode())
+        b_cap, b_free = _os._getdiskusage(sys.exec_prefix.encode())
         # Free space may change, so only test the capacity is equal
         self.assertEqual(b_cap, cap)
         self.assertGreater(b_free, 0)
 
         for path in [sys.prefix, sys.executable]:
-            final_path = nt._getfinalpathname(path)
+            final_path = _os._getfinalpathname(path)
             self.assertIsInstance(final_path, str)
             self.assertGreater(len(final_path), 0)
 
-            b_final_path = nt._getfinalpathname(path.encode())
+            b_final_path = _os._getfinalpathname(path.encode())
             self.assertIsInstance(b_final_path, bytes)
             self.assertGreater(len(b_final_path), 0)
 
@@ -1664,21 +1661,21 @@ class TestNtpath(NtpathTestCase):
         # There are fast paths of these functions implemented in _osmodule.c.
         # Confirm that they are being used, and not the Python fallbacks in
         # genericpath.py.
-        self.assertTrue(os.path.splitroot is nt._path_splitroot_ex)
+        self.assertTrue(os.path.splitroot is _os._path_splitroot_ex)
         self.assertFalse(inspect.isfunction(os.path.splitroot))
-        self.assertTrue(os.path.normpath is nt._path_normpath)
+        self.assertTrue(os.path.normpath is _os._path_normpath)
         self.assertFalse(inspect.isfunction(os.path.normpath))
-        self.assertTrue(os.path.isdir is nt._path_isdir)
+        self.assertTrue(os.path.isdir is _os._path_isdir)
         self.assertFalse(inspect.isfunction(os.path.isdir))
-        self.assertTrue(os.path.isfile is nt._path_isfile)
+        self.assertTrue(os.path.isfile is _os._path_isfile)
         self.assertFalse(inspect.isfunction(os.path.isfile))
-        self.assertTrue(os.path.islink is nt._path_islink)
+        self.assertTrue(os.path.islink is _os._path_islink)
         self.assertFalse(inspect.isfunction(os.path.islink))
-        self.assertTrue(os.path.isjunction is nt._path_isjunction)
+        self.assertTrue(os.path.isjunction is _os._path_isjunction)
         self.assertFalse(inspect.isfunction(os.path.isjunction))
-        self.assertTrue(os.path.exists is nt._path_exists)
+        self.assertTrue(os.path.exists is _os._path_exists)
         self.assertFalse(inspect.isfunction(os.path.exists))
-        self.assertTrue(os.path.lexists is nt._path_lexists)
+        self.assertTrue(os.path.lexists is _os._path_lexists)
         self.assertFalse(inspect.isfunction(os.path.lexists))
 
     @unittest.skipIf(os.name != 'nt', "Dev Drives only exist on Win32")
@@ -1694,7 +1691,7 @@ class TestNtpath(NtpathTestCase):
         self.assertFalse(ntpath.isdevdrive(r"\\?\Volume{00000000-0000-0000-0000-000000000000}\\"))
         # Invalid volume raises from underlying helper
         with self.assertRaises(OSError):
-            nt._path_isdevdrive(r"\\?\Volume{00000000-0000-0000-0000-000000000000}\\")
+            _os._path_isdevdrive(r"\\?\Volume{00000000-0000-0000-0000-000000000000}\\")
 
     @unittest.skipIf(os.name == 'nt', "isdevdrive fallback only used off Win32")
     def test_isdevdrive_fallback(self):

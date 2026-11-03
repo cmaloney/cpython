@@ -481,9 +481,8 @@ class TestUnixConsoleInputHook(TestCase):
                 observed["output"] = drain()
                 return 0
 
-            with patch("_pyrepl.unix_console.posix") as mock_posix:
-                mock_posix._is_inputhook_installed.return_value = True
-                mock_posix._inputhook.side_effect = fake_hook
+            with (patch("os._is_inputhook_installed", return_value=True),
+                  patch("os._inputhook", side_effect=fake_hook)):
                 hook = console.input_hook
                 self.assertIsNotNone(hook)
                 self.assertEqual(hook(), 0)

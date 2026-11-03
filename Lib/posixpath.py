@@ -136,9 +136,10 @@ def splitdrive(p, /):
     return p[:0], p
 
 
-try:
-    from posix import _path_splitroot_ex as splitroot
-except ImportError:
+# On Windows, _os has the Windows versions of these.
+if sys.platform != 'win32':
+    from _os import _path_splitroot_ex as splitroot
+else:
     def splitroot(p, /):
         """Split a pathname into drive, root and tail.
 
@@ -338,10 +339,10 @@ def expandvars(path):
 # It should be understood that this may change the meaning of the path
 # if it contains symbolic links!
 
-try:
-    from posix import _path_normpath as normpath
+if sys.platform != 'win32':
+    from _os import _path_normpath as normpath
 
-except ImportError:
+else:
     def normpath(path):
         """Normalize path, eliminating double slashes, etc."""
         path = os.fspath(path)

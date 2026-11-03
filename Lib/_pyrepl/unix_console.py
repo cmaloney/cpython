@@ -27,7 +27,6 @@ import signal
 import struct
 import termios
 import time
-import types
 import platform
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -50,13 +49,6 @@ from .render import (
 )
 from .trace import trace, trace_text
 from .unix_eventqueue import EventQueue
-
-# declare posix optional to allow None assignment on other platforms
-posix: types.ModuleType | None
-try:
-    import posix
-except ImportError:
-    posix = None
 
 # types
 type _MoveFunc = Callable[[int, int], None]
@@ -726,7 +718,7 @@ class UnixConsole(Console):
     def input_hook(self):
         # avoid inline imports here so the repl doesn't get flooded
         # with import logging from -X importtime=2
-        if posix is not None and posix._is_inputhook_installed():
+        if os._is_inputhook_installed():
             return self.__run_input_hook
 
     def __run_input_hook(self):
@@ -737,7 +729,7 @@ class UnixConsole(Console):
         cooked.oflag = self.__svtermstate.oflag
         self.__input_fd_set(cooked)
         try:
-            return posix._inputhook()
+            return os._inputhook()
         finally:
             self.__input_fd_set(self.__rawtermstate)
 

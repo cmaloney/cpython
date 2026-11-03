@@ -11,7 +11,7 @@ if trace_filename := os.environ.get("PYREPL_TRACE"):
 
 
 if sys.platform == "emscripten":
-    from posix import _emscripten_log
+    _emscripten_log = os._emscripten_log
 
     def trace(line: str, *k: object, **kw: object) -> None:
         if "PYREPL_TRACE" not in os.environ:

@@ -1787,7 +1787,7 @@ Compiler flags
 .. envvar:: PY_BUILTIN_MODULE_CFLAGS
 
    Compiler flags to build a standard library extension module as a built-in
-   module, like the :mod:`posix` module.
+   module, like the ``_os`` module.
 
    Default: ``$(PY_STDMODULE_CFLAGS) -DPy_BUILD_CORE_BUILTIN``.
 

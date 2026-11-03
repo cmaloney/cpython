@@ -11,10 +11,6 @@ try:
 except ImportError:
     fcntl = None
 try:
-    import posix
-except ImportError:
-    posix = None
-try:
     import _winapi
 except ImportError:
     _winapi = None
@@ -51,13 +47,13 @@ else:
     _ficlone = None
 
 
-if posix and hasattr(posix, '_fcopyfile'):
+if hasattr(os, '_fcopyfile'):
     def _fcopyfile(source_fd, target_fd):
         """
         Copy a regular file content using high-performance fcopyfile(3)
         syscall (macOS).
         """
-        posix._fcopyfile(source_fd, target_fd, posix._COPYFILE_DATA)
+        os._fcopyfile(source_fd, target_fd, os._COPYFILE_DATA)
 else:
     _fcopyfile = None
 

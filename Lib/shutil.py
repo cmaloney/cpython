@@ -45,11 +45,6 @@ except ImportError:
     _ZSTD_SUPPORTED = False
 
 _WINDOWS = os.name == 'nt'
-posix = nt = None
-if os.name == 'posix':
-    import posix
-elif _WINDOWS:
-    import nt
 
 if sys.platform == 'win32':
     import _winapi
@@ -62,7 +57,7 @@ COPY_BUFSIZE = 1024 * 1024 if _WINDOWS else 256 * 1024
 _USE_CP_SENDFILE = (hasattr(os, "sendfile")
                     and sys.platform.startswith(("linux", "android", "sunos")))
 _USE_CP_COPY_FILE_RANGE = hasattr(os, "copy_file_range")
-_HAS_FCOPYFILE = posix and hasattr(posix, "_fcopyfile")  # macOS
+_HAS_FCOPYFILE = hasattr(os, "_fcopyfile")  # macOS
 
 # CMD defaults in Windows 10
 _WIN_DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC"
@@ -111,7 +106,7 @@ def _fastcopy_fcopyfile(fsrc, fdst, flags):
         raise _GiveupOnFastCopy(err)  # not a regular file
 
     try:
-        posix._fcopyfile(infd, outfd, flags)
+        os._fcopyfile(infd, outfd, flags)
     except OSError as err:
         err.filename = fsrc.name
         err.filename2 = fdst.name
@@ -332,7 +327,7 @@ def copyfile(src, dst, *, follow_symlinks=True):
                     # macOS
                     if _HAS_FCOPYFILE:
                         try:
-                            _fastcopy_fcopyfile(fsrc, fdst, posix._COPYFILE_DATA)
+                            _fastcopy_fcopyfile(fsrc, fdst, os._COPYFILE_DATA)
                             return dst
                         except _GiveupOnFastCopy:
                             pass
@@ -1489,7 +1484,7 @@ elif _WINDOWS:
         Returned values is a named tuple with attributes 'total', 'used' and
         'free', which are the amount of total, used and free space, in bytes.
         """
-        total, free = nt._getdiskusage(path)
+        total, free = os._getdiskusage(path)
         used = total - free
         return _ntuple_diskusage(total, used, free)
 

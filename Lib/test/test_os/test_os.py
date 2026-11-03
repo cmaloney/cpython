@@ -3040,14 +3040,13 @@ class TestInvalidFD(unittest.TestCase):
                 os.execve(fd, [sys.executable, "-c", "pass"], os.environ)
             self.assertIn(ctx.exception.errno, (errno.EBADF, errno.EINVAL))
 
-        if support.MS_WINDOWS:
-            import nt
-            self.assertFalse(nt._path_exists(fd))
-            self.assertFalse(nt._path_lexists(fd))
-            self.assertFalse(nt._path_isdir(fd))
-            self.assertFalse(nt._path_isfile(fd))
-            self.assertFalse(nt._path_islink(fd))
-            self.assertFalse(nt._path_isjunction(fd))
+        if hasattr(os, '_path_exists'):
+            self.assertFalse(os._path_exists(fd))
+            self.assertFalse(os._path_lexists(fd))
+            self.assertFalse(os._path_isdir(fd))
+            self.assertFalse(os._path_isfile(fd))
+            self.assertFalse(os._path_islink(fd))
+            self.assertFalse(os._path_isjunction(fd))
 
     @unittest.skipUnless(hasattr(os, 'ftruncate'), 'test needs os.ftruncate()')
     def test_ftruncate(self):

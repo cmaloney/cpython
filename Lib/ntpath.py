@@ -168,9 +168,10 @@ def splitdrive(p, /):
     return drive, root + tail
 
 
-try:
-    from nt import _path_splitroot_ex as splitroot
-except ImportError:
+# Elsewhere, _os has the POSIX versions of these.
+if sys.platform == 'win32':
+    from _os import _path_splitroot_ex as splitroot
+else:
     def splitroot(p, /):
         """Split a pathname into drive, root and tail.
 
@@ -276,7 +277,7 @@ def dirname(p, /):
 # common case: drive letter roots. The alternative which uses GetVolumePathName
 # fails if the drive letter is the result of a SUBST.
 try:
-    from nt import _getvolumepathname
+    from _os import _getvolumepathname
 except ImportError:
     _getvolumepathname = None
 def ismount(path):
@@ -470,10 +471,10 @@ def expandvars(path):
 # Normalize a path, e.g. A//B, A/./B and A/foo/../B all become A\B.
 # Previously, this function also truncated pathnames to 8+3 format,
 # but as this module is called "ntpath", that's obviously wrong!
-try:
-    from nt import _path_normpath as normpath
+if sys.platform == 'win32':
+    from _os import _path_normpath as normpath
 
-except ImportError:
+else:
     def normpath(path):
         """Normalize path, eliminating double slashes, etc."""
         path = os.fspath(path)
@@ -513,7 +514,7 @@ except ImportError:
 
 # Return an absolute path.
 try:
-    from nt import _getfullpathname
+    from _os import _getfullpathname
 
 except ImportError: # not running on Windows - mock up something sensible
     def abspath(path):
@@ -556,7 +557,7 @@ else:  # use native Windows method on Windows
         return normpath(path)
 
 try:
-    from nt import _findfirstfile, _getfinalpathname, readlink as _nt_readlink
+    from _os import _findfirstfile, _getfinalpathname, readlink as _nt_readlink
 except ImportError:
     # realpath is a no-op on systems without _getfinalpathname support.
     def realpath(path, /, *, strict=False):
@@ -881,19 +882,19 @@ try:
     # The isdir(), isfile(), islink(), exists() and lexists() implementations
     # in genericpath use os.stat(). This is overkill on Windows. Use simpler
     # builtin functions if they are available.
-    from nt import _path_isdir as isdir
-    from nt import _path_isfile as isfile
-    from nt import _path_islink as islink
-    from nt import _path_isjunction as isjunction
-    from nt import _path_exists as exists
-    from nt import _path_lexists as lexists
+    from _os import _path_isdir as isdir
+    from _os import _path_isfile as isfile
+    from _os import _path_islink as islink
+    from _os import _path_isjunction as isjunction
+    from _os import _path_exists as exists
+    from _os import _path_lexists as lexists
 except ImportError:
     # Use genericpath.* as imported above
     pass
 
 
 try:
-    from nt import _path_isdevdrive
+    from _os import _path_isdevdrive
     def isdevdrive(path):
         """Determines whether the specified path is on a Windows Dev Drive."""
         try:

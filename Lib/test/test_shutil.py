@@ -24,10 +24,6 @@ from shutil import (make_archive,
                     SameFileError, _GiveupOnFastCopy)
 import tarfile
 import zipfile
-try:
-    import posix
-except ImportError:
-    posix = None
 
 from test import support
 from test.support import os_helper, socket_helper
@@ -3681,10 +3677,10 @@ class TestZeroCopyCopyFileRange(_ZeroCopyFileLinuxTest, unittest.TestCase):
 
 @unittest.skipIf(not MACOS, 'macOS only')
 class TestZeroCopyMACOS(_ZeroCopyFileTest, unittest.TestCase):
-    PATCHPOINT = "posix._fcopyfile"
+    PATCHPOINT = "os._fcopyfile"
 
     def zerocopy_fun(self, src, dst):
-        return shutil._fastcopy_fcopyfile(src, dst, posix._COPYFILE_DATA)
+        return shutil._fastcopy_fcopyfile(src, dst, os._COPYFILE_DATA)
 
 
 class TestGetTerminalSize(unittest.TestCase):
