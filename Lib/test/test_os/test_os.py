@@ -194,6 +194,8 @@ class MiscTests(unittest.TestCase):
         # posix and nt stay builtins, importable only on their own platform.
         other = 'posix' if os.name == 'nt' else 'nt'
         self.assertIs(importlib.import_module(os.name).stat, os.stat)
+        self.assertIs(importlib.import_module(os.name),
+                      importlib.import_module('_os'))
         self.assertIn(os.name, sys.builtin_module_names)
         self.assertNotIn(other, sys.builtin_module_names)
         with self.assertRaises(ImportError):

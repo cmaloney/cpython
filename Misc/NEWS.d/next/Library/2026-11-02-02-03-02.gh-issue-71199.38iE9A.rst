@@ -1,0 +1,3 @@
+The module behind :mod:`os` is now ``_os`` on all platforms; ``posix`` and
+``nt`` stay importable as before.  Its functions and types report :mod:`os` as
+their module.

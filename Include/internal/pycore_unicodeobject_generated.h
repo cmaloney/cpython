@@ -239,6 +239,7 @@ _PyUnicode_InitStaticStrings(PyInterpreterState *interp) {
         offsetof(struct _Py_global_strings, identifiers._py__loop._ascii.ob_base),
         offsetof(struct _Py_global_strings, identifiers._py__needs_com_addref_._ascii.ob_base),
         offsetof(struct _Py_global_strings, identifiers._py__only_immortal._ascii.ob_base),
+        offsetof(struct _Py_global_strings, identifiers._py__os._ascii.ob_base),
         offsetof(struct _Py_global_strings, identifiers._py__restype_._ascii.ob_base),
         offsetof(struct _Py_global_strings, identifiers._py__showwarnmsg._ascii.ob_base),
         offsetof(struct _Py_global_strings, identifiers._py__shutdown._ascii.ob_base),

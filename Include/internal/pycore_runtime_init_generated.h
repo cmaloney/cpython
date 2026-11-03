@@ -1562,6 +1562,7 @@ extern "C" {
     INIT_ID(_loop), \
     INIT_ID(_needs_com_addref_), \
     INIT_ID(_only_immortal), \
+    INIT_ID(_os), \
     INIT_ID(_restype_), \
     INIT_ID(_showwarnmsg), \
     INIT_ID(_shutdown), \

@@ -23,6 +23,11 @@ available through the :mod:`os` interface.  Once :mod:`os` is imported, there is
 :mod:`os` provides some additional functionality, such as automatically calling
 :func:`~os.putenv` when an entry in ``os.environ`` is changed.
 
+.. versionchanged:: next
+   The module is built as ``_os`` on every platform, and ``import posix``
+   returns that module.  Its ``__name__``, and the ``__module__`` of its
+   functions and types, are ``'os'``.
+
 Errors are reported as exceptions; the usual exceptions are given for type
 errors, while errors reported by the system calls raise :exc:`OSError`.
 
