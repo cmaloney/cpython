@@ -7,12 +7,14 @@ parallelism and focus on specific implementation pieces.
   * test_bufferedio - tests file buffering
   * test_memoryio - tests BytesIO and StringIO
   * test_fileio - tests FileIO
+  * test_winconsoleio - tests WindowsConsoleIO
   * test_file - tests the file interface
+  * test_file_eintr - tests reads interrupted by signals (EINTR)
   * test_general - tests everything else in the io module
   * test_univnewlines - tests universal newline support
   * test_largefile - tests operations on a file greater than 2**32 bytes
     (only enabled with -ulargefile)
-* test_free_threading/test_io - tests thread safety of io objects
+  * test_free_threading - tests thread safety of io objects
 
 .. attention::
    When writing tests for io, it's important to test both the C and Python
