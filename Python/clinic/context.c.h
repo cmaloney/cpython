@@ -6,7 +6,51 @@ preserve
 #  include "pycore_gc.h"          // PyGC_Head
 #  include "pycore_runtime.h"     // _Py_ID()
 #endif
-#include "pycore_modsupport.h"    // _PyArg_CheckPositional()
+#include "pycore_modsupport.h"    // _PyArg_NoKeywords()
+
+static PyObject *
+context_tp_new_impl(PyTypeObject *type);
+
+static PyObject *
+context_tp_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    PyObject *return_value = NULL;
+    PyTypeObject *base_tp = &PyContext_Type;
+
+    if ((type == base_tp || type->tp_init == base_tp->tp_init) &&
+        !_PyArg_NoPositional("Context", args)) {
+        goto exit;
+    }
+    if ((type == base_tp || type->tp_init == base_tp->tp_init) &&
+        !_PyArg_NoKeywords("Context", kwargs)) {
+        goto exit;
+    }
+    return_value = context_tp_new_impl(type);
+
+exit:
+    return return_value;
+}
+
+static PyObject *
+context_tp_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+
+    assert(_PyType_CAST(type)->tp_new == context_tp_new);
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    if (!_PyArg_NoPositionalStack("Context", nargs) ||
+        !_PyArg_NoKwnames("Context", kwnames)) {
+        goto exit;
+    }
+    return_value = context_tp_new_impl(_PyType_CAST(type));
+
+exit:
+    return return_value;
+}
 
 PyDoc_STRVAR(_contextvars_Context_get__doc__,
 "get($self, key, default=None, /)\n"
@@ -345,4 +389,4 @@ token_exit(PyObject *self, PyObject *const *args, Py_ssize_t nargs)
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=488efab9f3932fbb input=a9049054013a1b77]*/
+/*[clinic end generated code: output=0a04f81faa31609d input=a9049054013a1b77]*/

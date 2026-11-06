@@ -547,14 +547,16 @@ context_check_key_type(PyObject *key)
     return 0;
 }
 
+/*[clinic input]
+@classmethod
+@vectorcall
+_contextvars.Context.__new__ as context_tp_new
+[clinic start generated code]*/
+
 static PyObject *
-context_tp_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+context_tp_new_impl(PyTypeObject *type)
+/*[clinic end generated code: output=0e12b8d24a3248a1 input=f2ae9565d721daa2]*/
 {
-    if (PyTuple_Size(args) || (kwds != NULL && PyDict_Size(kwds))) {
-        PyErr_SetString(
-            PyExc_TypeError, "Context() does not accept any arguments");
-        return NULL;
-    }
     return PyContext_New();
 }
 
@@ -845,6 +847,7 @@ PyTypeObject PyContext_Type = {
     .tp_traverse = context_tp_traverse,
     .tp_clear = context_tp_clear,
     .tp_new = context_tp_new,
+    .tp_vectorcall = context_tp_vectorcall,
     .tp_weaklistoffset = offsetof(PyContext, ctx_weakreflist),
     .tp_hash = PyObject_HashNotImplemented,
 };

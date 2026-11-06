@@ -85,11 +85,11 @@ class ContextTest(unittest.TestCase):
                 pass
 
     def test_context_new_1(self):
-        with self.assertRaisesRegex(TypeError, 'any arguments'):
+        with self.assertRaisesRegex(TypeError, 'takes no'):
             contextvars.Context(1)
-        with self.assertRaisesRegex(TypeError, 'any arguments'):
+        with self.assertRaisesRegex(TypeError, 'takes no'):
             contextvars.Context(1, a=1)
-        with self.assertRaisesRegex(TypeError, 'any arguments'):
+        with self.assertRaisesRegex(TypeError, 'takes no'):
             contextvars.Context(a=1)
         contextvars.Context(**{})
 
