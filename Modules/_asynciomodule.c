@@ -872,6 +872,7 @@ future_cancel(asyncio_state *state, FutureObj *fut, PyObject *msg)
 }
 
 /*[clinic input]
+@vectorcall
 _asyncio.Future.__init__
 
     *
@@ -893,7 +894,7 @@ This class is *almost* compatible with concurrent.futures.Future.
 
 static int
 _asyncio_Future___init___impl(FutureObj *self, PyObject *loop)
-/*[clinic end generated code: output=9ed75799eaccb5d6 input=89af317082bc0bf8]*/
+/*[clinic end generated code: output=9ed75799eaccb5d6 input=28ff6d3b6c3aa828]*/
 
 {
     return future_init(self, loop);
@@ -1734,6 +1735,7 @@ static PyType_Slot Future_slots[] = {
     {Py_tp_methods, FutureType_methods},
     {Py_tp_getset, FutureType_getsetlist},
     {Py_tp_init, _asyncio_Future___init__},
+    {Py_tp_vectorcall, _asyncio_Future_vectorcall},
     {Py_tp_new, PyType_GenericNew},
     {Py_tp_finalize, FutureObj_finalize},
 
