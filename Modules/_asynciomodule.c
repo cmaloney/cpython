@@ -2292,6 +2292,7 @@ swap_current_task(_PyThreadStateImpl *ts, PyObject *loop, PyObject *task)
 /* ----- Task */
 
 /*[clinic input]
+@vectorcall
 _asyncio.Task.__init__
 
     coro: object
@@ -2308,7 +2309,7 @@ static int
 _asyncio_Task___init___impl(TaskObj *self, PyObject *coro, PyObject *loop,
                             PyObject *name, PyObject *context,
                             int eager_start)
-/*[clinic end generated code: output=7aced2d27836f1a1 input=18e3f113a51b829d]*/
+/*[clinic end generated code: output=7aced2d27836f1a1 input=de87c52b0800ab4b]*/
 {
     if (future_init((FutureObj*)self, loop)) {
         return -1;
@@ -2954,6 +2955,7 @@ static PyType_Slot Task_slots[] = {
     {Py_tp_methods, TaskType_methods},
     {Py_tp_getset, TaskType_getsetlist},
     {Py_tp_init, _asyncio_Task___init__},
+    {Py_tp_vectorcall, _asyncio_Task_vectorcall},
     {Py_tp_new, PyType_GenericNew},
     {Py_tp_finalize, TaskObj_finalize},
 
