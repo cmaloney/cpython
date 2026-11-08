@@ -259,7 +259,63 @@ _testcapi_has_vectorcall_flag_impl(PyObject *module, PyTypeObject *type)
     return PyType_HasFeature(type, Py_TPFLAGS_HAVE_VECTORCALL);
 }
 
+/* Wrapper descriptors created by third-party code with PyDescr_NewWrapper()
+   and their own struct wrapperbase. */
+
+static PyObject *
+legacy_wrapper(PyObject *self, PyObject *args, void *wrapped)
+{
+    return Py_BuildValue("(sOO)", "legacy", self, args);
+}
+
+static PyObject *
+legacy_wrapper_kwds(PyObject *self, PyObject *args, void *wrapped,
+                    PyObject *kwds)
+{
+    return Py_BuildValue("(sOOO)", "legacy_kwds", self, args,
+                         kwds ? kwds : Py_None);
+}
+
+static struct wrapperbase legacy_wrapperbases[] = {
+    {"legacy", 0, NULL, legacy_wrapper, "legacy wrapper", 0, NULL},
+    {"legacy_kwds", 0, NULL, _Py_FUNC_CAST(wrapperfunc, legacy_wrapper_kwds),
+     "legacy wrapper with keywords", PyWrapperFlag_KEYWORDS, NULL},
+};
+
+static PyObject *
+make_legacy_wrapper(PyObject *module, PyObject *args)
+{
+    PyObject *type;
+    int keywords;
+    if (!PyArg_ParseTuple(args, "O!p", &PyType_Type, &type, &keywords)) {
+        return NULL;
+    }
+    return PyDescr_NewWrapper((PyTypeObject *)type,
+                              &legacy_wrapperbases[keywords], NULL);
+}
+
+/* Create a wrapper descriptor like 'descr' but using a copy of its
+   wrapperbase with a different doc, as Cython does for the docstrings of
+   special methods. */
+static struct wrapperbase copied_wrapperbase;
+
+static PyObject *
+copy_wrapper_with_doc(PyObject *module, PyObject *descr)
+{
+    if (!PyObject_TypeCheck(descr, &PyWrapperDescr_Type)) {
+        PyErr_SetString(PyExc_TypeError, "expected a wrapper descriptor");
+        return NULL;
+    }
+    PyWrapperDescrObject *wd = (PyWrapperDescrObject *)descr;
+    copied_wrapperbase = *wd->d_base;
+    copied_wrapperbase.doc = "copied doc";
+    return PyDescr_NewWrapper(PyDescr_TYPE(wd), &copied_wrapperbase,
+                              wd->d_wrapped);
+}
+
 static PyMethodDef TestMethods[] = {
+    {"make_legacy_wrapper", make_legacy_wrapper, METH_VARARGS},
+    {"copy_wrapper_with_doc", copy_wrapper_with_doc, METH_O},
     _TESTCAPI_PYOBJECT_FASTCALLDICT_METHODDEF
     _TESTCAPI_PYOBJECT_VECTORCALL_METHODDEF
     {"function_setvectorcall", function_setvectorcall, METH_O},

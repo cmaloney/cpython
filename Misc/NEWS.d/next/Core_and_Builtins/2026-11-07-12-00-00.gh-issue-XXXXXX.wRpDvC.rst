@@ -1,0 +1,9 @@
+Calling a slot wrapper (:class:`types.WrapperDescriptorType`), such as
+``object.__eq__(a, b)`` or ``dict.__setitem__(d, k, v)``, or a bound
+method-wrapper (:class:`types.MethodWrapperType`), such as
+``(1).__add__(2)`` or ``it.__next__()``, is now faster: both types now
+support the :ref:`vectorcall <vectorcall>` protocol and no longer create
+argument tuples. This also speeds up special methods inherited from a
+builtin type when invoked through a slot of a Python class, for example
+``==`` on a class which defines only ``__lt__``. The slot wrappers now use
+the new ``PyWrapperFlag_FASTCALL`` flag of :c:struct:`!wrapperbase`.

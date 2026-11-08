@@ -82,13 +82,16 @@ found in the dictionary of type objects.
    The type is exposed in Python as  :class:`types.WrapperDescriptorType`.
 
 
-.. `wrapperbase` & `PyWrapperFlag_KEYWORDS` show up in search and index,
-   and link here, but are only referenced in prose:
+.. `wrapperbase`, `PyWrapperFlag_KEYWORDS` & `PyWrapperFlag_FASTCALL` show up
+   in search and index, and link here, but are only referenced in prose:
 
 .. c:struct:: wrapperbase
    :no-typesetting:
 
 .. c:macro:: PyWrapperFlag_KEYWORDS
+   :no-typesetting:
+
+.. c:macro:: PyWrapperFlag_FASTCALL
    :no-typesetting:
 
 .. c:function:: PyObject* PyDescr_NewWrapper(PyTypeObject *type, struct wrapperbase *base, void *wrapped)
@@ -97,7 +100,14 @@ found in the dictionary of type objects.
 
    This function is meant for internal use only; it and
    related API (``struct wrapperbase`` and the ``PyWrapperFlag_KEYWORDS``
-   flag) are exposed publicly for backwards compatibility reasons.
+   and ``PyWrapperFlag_FASTCALL`` flags) are exposed publicly for backwards
+   compatibility reasons.
+
+   .. versionchanged:: next
+      The wrappers of the slot wrappers created by Python itself now have
+      the ``PyWrapperFlag_FASTCALL`` flag: their ``wrapper`` member is a
+      ``wrapperfunc_fast`` function, which takes the arguments as a C array
+      rather than as a tuple.
 
    See :c:func:`PyCMethod_New` for wrapping a C function.
 

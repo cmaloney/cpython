@@ -1,5 +1,6 @@
 import builtins
 import copyreg
+import functools
 import gc
 import itertools
 import math
@@ -5179,6 +5180,176 @@ class ClassPropertiesAndMethods(unittest.TestCase):
         self.assertRaises(RecursionError, str, foo)
         self.assertRaises(RecursionError, repr, foo)
 
+    def test_wrapper_descriptor_call_recursion(self):
+        # Calling a slot wrapper directly goes through its vectorcall
+        # implementation, which must guard against C recursion when the
+        # wrapped slot function dispatches back to the same wrapper.
+        class Foo:
+            pass
+        Foo.__repr__ = object.__str__
+        foo = Foo()
+        wrapper = object.__str__
+        self.assertIs(type(wrapper), types.WrapperDescriptorType)
+        with self.assertRaises(RecursionError):
+            wrapper(foo)
+        with self.assertRaises(RecursionError):
+            wrapper(*[foo])
+        with self.assertRaises(RecursionError):
+            Foo.__repr__(foo)
+        with self.assertRaises(RecursionError):
+            list(map(wrapper, [foo]))
+        with self.assertRaises(RecursionError):
+            functools.partial(wrapper, foo)()
+
+    def test_wrapper_descriptor_call_errors(self):
+        wrapper = object.__eq__
+        msg = "descriptor '__eq__' of 'object' object needs an argument"
+        with self.assertRaisesRegex(TypeError, msg):
+            wrapper()
+        with self.assertRaisesRegex(TypeError, msg):
+            wrapper(*())
+        msg = ("descriptor '__add__' requires a 'int' object "
+               "but received a 'str'")
+        with self.assertRaisesRegex(TypeError, msg):
+            int.__add__('a', 1)
+        with self.assertRaisesRegex(TypeError, msg):
+            int.__add__(*('a', 1))
+        msg = r"wrapper __eq__\(\) takes no keyword arguments"
+        with self.assertRaisesRegex(TypeError, msg):
+            wrapper(1, other=1)
+        with self.assertRaisesRegex(TypeError, msg):
+            wrapper(1, **{'other': 1})
+        # Wrappers flagged with PyWrapperFlag_KEYWORDS accept keywords.
+        self.assertEqual(type.__call__(dict, a=1), {'a': 1})
+        self.assertEqual(type.__call__(dict, **{'a': 1}), {'a': 1})
+        self.assertEqual(int.__add__(True, 1), 2)
+
+    def test_slot_wrapper_argument_errors(self):
+        # Slot wrappers and method-wrappers report the same errors whether
+        # called through vectorcall or through tp_call (type(f).__call__).
+        def tp_call(f, *args, **kwargs):
+            return type(f).__call__(f, *args, **kwargs)
+        cases = [
+            (int.__add__, (1,), r"^expected 1 argument, got 0$"),
+            (int.__add__, (1, 2, 3), r"^expected 1 argument, got 2$"),
+            ((1).__add__, (), r"^expected 1 argument, got 0$"),
+            ((1).__radd__, (1, 2), r"^expected 1 argument, got 2$"),
+            ((1).__neg__, (1,), r"^expected 0 arguments, got 1$"),
+            ((1).__hash__, (1,), r"^expected 0 arguments, got 1$"),
+            ([].__len__, (1,), r"^expected 0 arguments, got 1$"),
+            ((1).__bool__, (1,), r"^expected 0 arguments, got 1$"),
+            ([].__contains__, (), r"^expected 1 argument, got 0$"),
+            (object().__eq__, (), r"^expected 1 argument, got 0$"),
+            (iter([]).__next__, (1,), r"^expected 0 arguments, got 1$"),
+            ((2).__pow__, (), r"^expected 1 or 2 arguments, got 0$"),
+            ({}.__setitem__, (1,), r"^__setitem__ expected 2 arguments, got 1$"),
+            ({}.__delitem__, (), r"^expected 1 argument, got 0$"),
+            ([].__setitem__, (1, 2, 3),
+             r"^__setitem__ expected 2 arguments, got 3$"),
+            (object.__setattr__, (object(), 'x'),
+             r"^__setattr__ expected 2 arguments, got 1$"),
+            (object.__delattr__, (object(),),
+             r"^expected 1 argument, got 0$"),
+            (object.__setattr__, (int, 'x', 1),
+             r"^can't apply this __setattr__ to type object$"),
+            (object.__delattr__, (int, 'x'),
+             r"^can't apply this __delattr__ to type object$"),
+            (property().__get__, (), r"^__get__ expected at least 1 argument, got 0$"),
+            (property().__get__, (None, None),
+             r"^__get__\(None, None\) is invalid$"),
+            (property().__set__, (1,), r"^__set__ expected 2 arguments, got 1$"),
+            ((1).__add__, (1,), {'x': 1},
+             r"^wrapper __add__\(\) takes no keyword arguments$"),
+        ]
+        for case in cases:
+            if len(case) == 3:
+                func, args, msg = case
+                kwargs = {}
+            else:
+                func, args, kwargs, msg = case
+            for call in (lambda: func(*args, **kwargs),
+                         lambda: tp_call(func, *args, **kwargs)):
+                with self.subTest(func=func, args=args, kwargs=kwargs):
+                    with self.assertRaisesRegex(TypeError, msg):
+                        call()
+
+    @unittest.skipIf(_testcapi is None, 'need the _testcapi module')
+    def test_third_party_wrapperbase(self):
+        # Wrapper descriptors created with PyDescr_NewWrapper() and a
+        # wrapperbase using the tuple-based wrapperfunc, without and with
+        # PyWrapperFlag_KEYWORDS.
+        def tp_call(f, *args, **kwargs):
+            return type(f).__call__(f, *args, **kwargs)
+        legacy = _testcapi.make_legacy_wrapper(int, False)
+        legacy_kwds = _testcapi.make_legacy_wrapper(int, True)
+        for call in (lambda f, *a, **k: f(*a, **k), tp_call):
+            with self.subTest(call=call):
+                self.assertEqual(call(legacy, 5), ('legacy', 5, ()))
+                self.assertEqual(call(legacy, 5, 1, 2), ('legacy', 5, (1, 2)))
+                with self.assertRaisesRegex(TypeError,
+                        r"wrapper legacy\(\) takes no keyword arguments"):
+                    call(legacy, 5, x=1)
+                self.assertEqual(call(legacy_kwds, 5, 1),
+                                 ('legacy_kwds', 5, (1,), None))
+                self.assertEqual(call(legacy_kwds, 5, 1, x=2),
+                                 ('legacy_kwds', 5, (1,), {'x': 2}))
+                self.assertEqual(call(legacy.__get__(5)), ('legacy', 5, ()))
+                self.assertEqual(call(legacy.__get__(5), 1),
+                                 ('legacy', 5, (1,)))
+                self.assertEqual(call(legacy_kwds.__get__(5), x=1),
+                                 ('legacy_kwds', 5, (), {'x': 1}))
+                with self.assertRaisesRegex(TypeError, "requires a 'int'"):
+                    call(legacy, 'a')
+
+        # A copy of a core wrapperbase, as made by Cython to change the doc
+        eq = _testcapi.copy_wrapper_with_doc(int.__eq__)
+        self.assertEqual(eq.__doc__, 'copied doc')
+        self.assertIs(eq(1, 1), True)
+        self.assertIs(eq.__get__(1)(2), False)
+        self.assertIs(tp_call(eq, 1, 1), True)
+        with self.assertRaisesRegex(TypeError, r"^expected 1 argument, got 0$"):
+            eq(1)
+        with self.assertRaisesRegex(TypeError,
+                r"wrapper __eq__\(\) takes no keyword arguments"):
+            eq(1, x=1)
+
+    def test_method_wrapper_vectorcall(self):
+        Py_TPFLAGS_HAVE_VECTORCALL = 1 << 11
+        it = iter([1])
+        nxt = it.__next__
+        self.assertIsInstance(nxt, types.MethodWrapperType)
+        self.assertTrue(type(nxt).__flags__ & Py_TPFLAGS_HAVE_VECTORCALL)
+        self.assertEqual(nxt(), 1)
+        self.assertRaises(StopIteration, nxt)
+        self.assertEqual((1).__add__(2), 3)
+        self.assertEqual((1).__add__(*[2]), 3)
+        self.assertIs((1).__eq__(1), True)
+        self.assertIs((1).__eq__(''), NotImplemented)
+        d = {}
+        d.__setitem__('a', 1)
+        self.assertEqual(d, {'a': 1})
+        self.assertEqual(list(map(d.__getitem__, ['a'])), [1])
+        self.assertEqual(functools.partial(d.__contains__, 'a')(), True)
+        # Wrappers flagged with PyWrapperFlag_KEYWORDS accept keywords.
+        self.assertEqual(dict.__call__(a=1), {'a': 1})
+        self.assertEqual(type.__call__(dict, **{'a': 1}), {'a': 1})
+        class C:
+            pass
+        c = C()
+        c.__init__()
+        c.__setattr__('x', 1)
+        self.assertEqual(c.x, 1)
+        c.__delattr__('x')
+        self.assertNotHasAttr(c, 'x')
+
+        # A method-wrapper calling itself recursively raises RecursionError.
+        class Foo:
+            pass
+        Foo.__repr__ = object.__str__
+        foo = Foo()
+        with self.assertRaises(RecursionError):
+            foo.__str__()
+
     def test_mixing_slot_wrappers(self):
         class X(dict):
             __setattr__ = dict.__setitem__
@@ -5199,6 +5370,142 @@ class ClassPropertiesAndMethods(unittest.TestCase):
             a == a
         with self.assertRaises(TypeError):
             a + a
+
+    def test_inherited_richcompare_slot_wrapper(self):
+        # Defining only __lt__ makes tp_richcompare a generic slot function
+        # which calls the inherited object.__eq__/__ne__ wrapper descriptors.
+        class A:
+            def __lt__(self, other):
+                return NotImplemented
+        a, b = A(), A()
+        self.assertIs(a == a, True)
+        self.assertIs(a == b, False)
+        self.assertIs(a != a, False)
+        self.assertIs(a != b, True)
+        self.assertIs(a == 1, False)
+        self.assertIs(1 == a, False)
+        self.assertIs(a != None, True)
+        self.assertIs(A.__eq__(a, a), True)
+        self.assertIs(A.__eq__(a, b), NotImplemented)
+        self.assertIs(A.__ne__(a, b), NotImplemented)
+        with self.assertRaises(TypeError):
+            a < b
+        with self.assertRaises(TypeError):
+            a <= b
+
+        class I(int):
+            def __lt__(self, other):
+                return True
+        self.assertIs(I(1) == 1, True)
+        self.assertIs(I(1) == 1.0, True)
+        self.assertIs(1 == I(1), True)
+        self.assertIs(I(1) != 2, True)
+        self.assertIs(I(1) == "1", False)
+        self.assertIs(I(1) <= 0, False)
+        self.assertIs(I(1) > 0, True)
+
+        # A wrapper of a different comparison is called with its own operator
+        class B(int):
+            __eq__ = int.__lt__
+            def __gt__(self, other):
+                return False
+        self.assertIs(B(1) == 2, True)
+        self.assertIs(B(2) == 1, False)
+        self.assertIs(B(1) == 1, False)
+
+        # A wrapper from an unrelated type raises the same error as before
+        class C:
+            __eq__ = int.__eq__
+            def __lt__(self, other):
+                return True
+        with self.assertRaisesRegex(TypeError,
+                "descriptor '__eq__' requires a 'int' object "
+                "but received a 'C'"):
+            C() == 1
+
+        # Exceptions raised by the wrapped C function are propagated
+        class T(tuple):
+            def __lt__(self, other):
+                return True
+        class Bad:
+            def __eq__(self, other):
+                raise ZeroDivisionError
+        with self.assertRaises(ZeroDivisionError):
+            T((Bad(),)) == T((Bad(),))
+
+    def test_inherited_richcompare_slot_wrapper_recursion(self):
+        class L(list):
+            def __lt__(self, other):
+                return True
+        x, y = L(), L()
+        x.append(y)
+        y.append(x)
+        with self.assertRaises(RecursionError):
+            x == y
+        with self.assertRaises(RecursionError):
+            x != y
+
+        class R:
+            def __lt__(self, other):
+                return True
+            def __eq__(self, other):
+                return self == other
+        with self.assertRaises(RecursionError):
+            R() == R()
+
+    def test_inherited_ass_subscript_slot_wrapper(self):
+        # Defining only __delitem__ makes mp_ass_subscript a generic slot
+        # function which calls the inherited dict.__setitem__ wrapper
+        # descriptor, and vice versa.
+        class D(dict):
+            def __delitem__(self, key):
+                dict.__delitem__(self, key)
+        d = D()
+        d['a'] = 1
+        d['b'] = 2
+        self.assertEqual(d, {'a': 1, 'b': 2})
+        d['a'] += 1
+        self.assertEqual(d, {'a': 2, 'b': 2})
+        del d['a']
+        self.assertEqual(d, {'b': 2})
+        with self.assertRaises(KeyError):
+            del d['a']
+        with self.assertRaises(TypeError):
+            d[[]] = 1
+
+        class S(dict):
+            def __setitem__(self, key, value):
+                dict.__setitem__(self, key, value)
+        s = S(a=1, b=2)
+        del s['a']
+        self.assertEqual(s, {'b': 2})
+        with self.assertRaises(KeyError) as cm:
+            del s['a']
+        self.assertEqual(cm.exception.args, ('a',))
+        with self.assertRaises(TypeError):
+            del s[[]]
+
+        class L(list):
+            def __delitem__(self, key):
+                list.__delitem__(self, key)
+        l = L([1, 2, 3])
+        l[0] = 4
+        l[1:2] = [5, 6]
+        self.assertEqual(l, [4, 5, 6, 3])
+        with self.assertRaises(IndexError):
+            l[10] = 1
+        del l[0]
+        self.assertEqual(l, [5, 6, 3])
+
+        # A wrapper from an unrelated type raises the same error as before
+        class W:
+            __setitem__ = dict.__setitem__
+            def __delitem__(self, key):
+                pass
+        with self.assertRaisesRegex(TypeError,
+                "descriptor '__setitem__' requires a 'dict' object "
+                "but received a 'W'"):
+            W()['a'] = 1
 
     def test_slot_shadows_class_variable(self):
         with self.assertRaises(ValueError) as cm:

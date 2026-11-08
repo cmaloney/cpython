@@ -698,6 +698,8 @@ class TestPEP590(unittest.TestCase):
         self.assertTrue(_testcapi.MethodDescriptorDerived.__flags__ & Py_TPFLAGS_HAVE_VECTORCALL)
         self.assertFalse(_testcapi.MethodDescriptorNopGet.__flags__ & Py_TPFLAGS_HAVE_VECTORCALL)
         self.assertTrue(_testcapi.MethodDescriptor2.__flags__ & Py_TPFLAGS_HAVE_VECTORCALL)
+        self.assertTrue(type(list.append).__flags__ & Py_TPFLAGS_HAVE_VECTORCALL)
+        self.assertTrue(type(list.__add__).__flags__ & Py_TPFLAGS_HAVE_VECTORCALL)
 
         # Mutable heap types should inherit Py_TPFLAGS_HAVE_VECTORCALL,
         # but should lose it when __call__ is overridden
@@ -789,6 +791,9 @@ class TestPEP590(unittest.TestCase):
         calls = [(len, (range(42),), {}, 42),
                  (list.append, ([], 0), {}, None),
                  ([].append, (0,), {}, None),
+                 (int.__add__, (40, 2), {}, 42),
+                 (object.__init__, (object(),), {}, None),
+                 (type.__call__, (dict,), {"a":1}, {"a":1}),
                  (sum, ([36],), {"start":6}, 42),
                  (testfunction, (42,), {}, 42),
                  (testfunction_kw, (42,), {"kw":None}, 42),

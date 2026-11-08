@@ -8,6 +8,9 @@ typedef PyObject *(*wrapperfunc)(PyObject *self, PyObject *args,
 typedef PyObject *(*wrapperfunc_kwds)(PyObject *self, PyObject *args,
                                       void *wrapped, PyObject *kwds);
 
+typedef PyObject *(*wrapperfunc_fast)(PyObject *self, PyObject *const *args,
+                                      Py_ssize_t nargs, void *wrapped);
+
 struct wrapperbase {
     const char *name;
     int offset;
@@ -20,6 +23,9 @@ struct wrapperbase {
 
 /* Flags for above struct */
 #define PyWrapperFlag_KEYWORDS 1 /* wrapper function takes keyword args */
+/* wrapper function is a wrapperfunc_fast (cast to wrapperfunc) which takes
+   the positional arguments as a C array; no keyword args */
+#define PyWrapperFlag_FASTCALL 2
 
 /* Various kinds of descriptor objects */
 
@@ -55,6 +61,7 @@ typedef struct {
     PyDescr_COMMON;
     struct wrapperbase *d_base;
     void *d_wrapped; /* This can be any function pointer */
+    vectorcallfunc vectorcall;
 } PyWrapperDescrObject;
 
 PyAPI_FUNC(PyObject *) PyDescr_NewWrapper(PyTypeObject *,
