@@ -155,6 +155,19 @@ slot_tp_setattro(PyObject *self, PyObject *name, PyObject *value);
 static PyObject *
 slot_tp_call(PyObject *self, PyObject *args, PyObject *kwds);
 
+static void
+type_update_fast_slots(PyTypeObject *type);
+
+static int
+fast_init_adaptor(PyObject *self, PyObject *args, PyObject *kwds);
+
+static PyObject *
+fast_new_adaptor(PyTypeObject *type, PyObject *args, PyObject *kwds);
+
+/* Bits of PyHeapTypeObject._ht_fast.own */
+#define FAST_OWN_INIT 1
+#define FAST_OWN_NEW 2
+
 static inline PyTypeObject *
 type_from_ref(PyObject *ref)
 {
@@ -4391,6 +4404,7 @@ type_new_alloc(type_new_ctx *ctx)
     et->ht_module = NULL;
     et->_ht_tpname = NULL;
     et->ht_token = NULL;
+    memset(&et->_ht_fast, 0, sizeof(et->_ht_fast));
 
 #ifdef Py_GIL_DISABLED
     et->unique_id = _PyObject_AssignUniqueId((PyObject *)et);
@@ -5275,6 +5289,8 @@ type_from_slots_or_spec(
     Py_ssize_t itemsize = 0;
     int flags = 0;
     void *token = NULL;
+    Py_initfastfunc init_fast = NULL;
+    Py_newfastfunc new_fast = NULL;
 
     bool have_relative_members = false;
     Py_ssize_t max_relative_offset = 0;
@@ -5399,6 +5415,12 @@ type_from_slots_or_spec(
                     vectorcalloffset_member = memb;
                 }
             }
+            break;
+        case Py_tp_init_fast:
+            init_fast = (Py_initfastfunc)it.current.sl_func;
+            break;
+        case Py_tp_new_fast:
+            new_fast = (Py_newfastfunc)it.current.sl_func;
             break;
         case Py_tp_token:
             token = it.current.sl_ptr;
@@ -5675,6 +5697,8 @@ type_from_slots_or_spec(
         case Py_tp_base:
         case Py_tp_bases:
         case Py_tp_doc:
+        case Py_tp_init_fast:
+        case Py_tp_new_fast:
             /* Processed above */
             break;
         case Py_tp_members:
@@ -5700,6 +5724,26 @@ type_from_slots_or_spec(
             break;
         }
     }
+    /* "Vectorcall always" __init__ and __new__.  Given only them, the
+       public slots get adaptors from the argument tuple and keyword dict,
+       so that calling tp_init and tp_new directly keeps working. */
+    if (init_fast != NULL) {
+        if (type->tp_init == NULL) {
+            type->tp_init = fast_init_adaptor;
+        }
+        res->_ht_fast.init_for = type->tp_init;
+        res->_ht_fast.init = init_fast;
+        res->_ht_fast.own |= FAST_OWN_INIT;
+    }
+    if (new_fast != NULL) {
+        if (type->tp_new == NULL) {
+            type->tp_new = fast_new_adaptor;
+        }
+        res->_ht_fast.new_for = type->tp_new;
+        res->_ht_fast.new = new_fast;
+        res->_ht_fast.own |= FAST_OWN_NEW;
+    }
+
     if (type->tp_dealloc == NULL) {
         /* It's a heap type, so needs the heap types' dealloc.
            subtype_dealloc will call the base type's tp_dealloc, if
@@ -9630,6 +9674,9 @@ type_ready_publish(PyTypeObject *type, int fix_slots)
             // type_from_slots_or_spec().
             fixup_slot_dispatchers(type);
         }
+        if (type->tp_flags & Py_TPFLAGS_HEAPTYPE) {
+            type_update_fast_slots(type);
+        }
 
         // Set the ready flag before revealing the type since type_add_flags()
         // may only be used on types that are not yet revealed.
@@ -10501,6 +10548,11 @@ tp_new_wrapper(PyObject *self, PyObject *const *args, Py_ssize_t nargs, PyObject
                      subtype->tp_name,
                      staticbase->tp_name);
         return NULL;
+    }
+
+    Py_newfastfunc new_fast = _PyType_GetFastNew(type, type->tp_new);
+    if (new_fast != NULL) {
+        return new_fast(subtype, args + 1, nargs - 1, kwnames);
     }
 
     PyObject *args_tuple = PyTuple_FromArray(args + 1, nargs - 1);
@@ -12239,8 +12291,17 @@ update_slots_callback(PyTypeObject *type, void *data)
 
     update_callback_data_t *update_data = (update_callback_data_t *)data;
     pytype_slotdef **pp = update_data->defs;
+    int fast = 0;
     for (; *pp; pp++) {
         update_one_slot(type, *pp, NULL, NULL);
+        if ((*pp)->offset == (int)offsetof(PyTypeObject, tp_init)
+            || (*pp)->offset == (int)offsetof(PyTypeObject, tp_new))
+        {
+            fast = 1;
+        }
+    }
+    if (fast && (type->tp_flags & Py_TPFLAGS_HEAPTYPE)) {
+        type_update_fast_slots(type);
     }
     return 0;
 }
@@ -12302,6 +12363,209 @@ fixup_slot_dispatchers(PyTypeObject *type)
     if (descrs != NULL) {
         clear_slot_descrs(descrs);
     }
+}
+
+/* "Vectorcall always" __init__ and __new__ of heap types.
+
+   A heap type can give, with the provisional Py_tp_init_fast and
+   Py_tp_new_fast slots, implementations of tp_init and tp_new which take
+   the arguments as a C array and keyword names (Py_initfastfunc,
+   Py_newfastfunc), so that the interpreter does not need to build an
+   argument tuple and keyword dict to call them.  The public slots keep
+   working: if the type doesn't also give them, they are set to adaptors
+   which call the fast functions.
+
+   PyHeapTypeObject._ht_fast pairs each fast function with the public slot
+   function it is equivalent to.  It is used when the public slot of the
+   type still is that function, so it never matters for correctness when
+   the pair is stale.  A heap type which doesn't give its own fast slots
+   (e.g. a Python subclass) gets the pair of the type whose __init__ /
+   __new__ it inherits, when that type's slot function is inherited, and the
+   pairs are updated with the slots when __init__ or __new__ is assigned or
+   __bases__ changes (update_slots_callback()).
+
+   Users of the fast functions:
+   - the __new__ wrapper, tp_new_wrapper(), for Base.__new__(cls, ...) and
+     super().__new__(cls, ...).
+   Static types don't have fast slots and keep using the public slots. */
+
+/* Find the fast __init__ which fast_init_adaptor() stands for: the one of
+   the nearest type in the MRO of 'type' which gave only a fast __init__.
+   Note that the adaptor can't tell a base type's slot from the slot of a
+   subclass which also gave only a fast __init__: C code chaining to the
+   base type's __init__ must use PyType_GetSlot(base, Py_tp_init_fast). */
+static Py_initfastfunc
+find_own_fast_init(PyTypeObject *type)
+{
+    PyObject *mro = lookup_tp_mro(type);
+    assert(mro != NULL);
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(mro); i++) {
+        PyTypeObject *base = _PyType_CAST(PyTuple_GET_ITEM(mro, i));
+        if (!(base->tp_flags & Py_TPFLAGS_HEAPTYPE)) {
+            continue;
+        }
+        struct _heaptype_fast_slots *fast = &((PyHeapTypeObject *)base)->_ht_fast;
+        if ((fast->own & FAST_OWN_INIT)
+            && fast->init_for == fast_init_adaptor)
+        {
+            return fast->init;
+        }
+    }
+    return NULL;
+}
+
+static Py_newfastfunc
+find_own_fast_new(PyTypeObject *type)
+{
+    PyObject *mro = lookup_tp_mro(type);
+    assert(mro != NULL);
+    for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(mro); i++) {
+        PyTypeObject *base = _PyType_CAST(PyTuple_GET_ITEM(mro, i));
+        if (!(base->tp_flags & Py_TPFLAGS_HEAPTYPE)) {
+            continue;
+        }
+        struct _heaptype_fast_slots *fast = &((PyHeapTypeObject *)base)->_ht_fast;
+        if ((fast->own & FAST_OWN_NEW)
+            && fast->new_for == fast_new_adaptor)
+        {
+            return fast->new;
+        }
+    }
+    return NULL;
+}
+
+/* tp_init of a heap type which gave only Py_tp_init_fast. */
+static int
+fast_init_adaptor(PyObject *self, PyObject *args, PyObject *kwds)
+{
+    Py_initfastfunc init = find_own_fast_init(Py_TYPE(self));
+    if (init == NULL) {
+        PyErr_Format(PyExc_SystemError, "%s: no fast __init__ found",
+                     Py_TYPE(self)->tp_name);
+        return -1;
+    }
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *const *stack = NULL;
+    Py_ssize_t nargs = 0;
+    if (args != NULL) {
+        stack = _PyTuple_ITEMS(args);
+        nargs = PyTuple_GET_SIZE(args);
+    }
+    PyObject *kwnames = NULL;
+    if (kwds != NULL && PyDict_GET_SIZE(kwds) != 0) {
+        stack = _PyStack_UnpackDict(tstate, stack, nargs, kwds, &kwnames);
+        if (stack == NULL) {
+            return -1;
+        }
+    }
+    int res = init(self, stack, nargs, kwnames);
+    if (kwnames != NULL) {
+        _PyStack_UnpackDict_Free(stack, nargs, kwnames);
+    }
+    return res;
+}
+
+/* tp_new of a heap type which gave only Py_tp_new_fast. */
+static PyObject *
+fast_new_adaptor(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    Py_newfastfunc new = find_own_fast_new(type);
+    if (new == NULL) {
+        PyErr_Format(PyExc_SystemError, "%s: no fast __new__ found",
+                     type->tp_name);
+        return NULL;
+    }
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *const *stack = NULL;
+    Py_ssize_t nargs = 0;
+    if (args != NULL) {
+        stack = _PyTuple_ITEMS(args);
+        nargs = PyTuple_GET_SIZE(args);
+    }
+    PyObject *kwnames = NULL;
+    if (kwds != NULL && PyDict_GET_SIZE(kwds) != 0) {
+        stack = _PyStack_UnpackDict(tstate, stack, nargs, kwds, &kwnames);
+        if (stack == NULL) {
+            return NULL;
+        }
+    }
+    PyObject *res = new(type, stack, nargs, kwnames);
+    if (kwnames != NULL) {
+        _PyStack_UnpackDict_Free(stack, nargs, kwnames);
+    }
+    return res;
+}
+
+/* Look up 'name' in the MRO like update_one_slot() does. */
+static PyObject *
+lookup_fast_slot_descr(PyTypeObject *type, PyObject *name,
+                       _PyStackRef *ref)
+{
+    int res;
+#ifdef Py_GIL_DISABLED
+    res = find_slot_name_in_mro(type, name, ref);
+#else
+    res = find_name_in_mro(type, name, ref);
+#endif
+    if (res <= 0) {
+        *ref = PyStackRef_NULL;
+        return NULL;
+    }
+    return PyStackRef_AsPyObjectBorrow(*ref);
+}
+
+/* Update the fast __init__ and __new__ of the heap type 'type' after its
+   tp_init or tp_new may have changed.
+   Unless the type gave its own, they are the fast slots of the type whose
+   __init__ (or __new__) it inherits, if the tp_init (tp_new) function is
+   the one that type's fast slot is equivalent to. */
+static void
+type_update_fast_slots(PyTypeObject *type)
+{
+    assert(type->tp_flags & Py_TPFLAGS_HEAPTYPE);
+    ASSERT_WORLD_STOPPED_OR_NEW_TYPE(type);
+    PyHeapTypeObject *ht = (PyHeapTypeObject *)type;
+    struct _heaptype_fast_slots *fast = &ht->_ht_fast;
+    _PyStackRef ref;
+
+    if (!(fast->own & FAST_OWN_INIT)) {
+        fast->init_for = NULL;
+        fast->init = NULL;
+        PyObject *descr = lookup_fast_slot_descr(type, &_Py_ID(__init__), &ref);
+        if (descr != NULL && Py_IS_TYPE(descr, &PyWrapperDescr_Type)) {
+            PyWrapperDescrObject *d = (PyWrapperDescrObject *)descr;
+            if (d->d_base->offset == (int)offsetof(PyTypeObject, tp_init)
+                && d->d_wrapped == (void *)type->tp_init)
+            {
+                Py_initfastfunc init = _PyType_GetFastInit(PyDescr_TYPE(d),
+                                                           type->tp_init);
+                if (init != NULL) {
+                    fast->init_for = type->tp_init;
+                    fast->init = init;
+                }
+            }
+        }
+        PyStackRef_XCLOSE(ref);
+    }
+    if (!(fast->own & FAST_OWN_NEW)) {
+        fast->new_for = NULL;
+        fast->new = NULL;
+        PyObject *descr = lookup_fast_slot_descr(type, &_Py_ID(__new__), &ref);
+        if (descr != NULL && PyCFunction_Check(descr)
+            && PyCFunction_GET_FUNCTION(descr) == _PyCFunction_CAST(tp_new_wrapper)
+            && PyCFunction_GET_SELF(descr) != NULL
+            && PyType_Check(PyCFunction_GET_SELF(descr)))
+        {
+            PyTypeObject *owner = _PyType_CAST(PyCFunction_GET_SELF(descr));
+            Py_newfastfunc new = _PyType_GetFastNew(owner, type->tp_new);
+            if (new != NULL) {
+                fast->new_for = type->tp_new;
+                fast->new = new;
+            }
+        }
+        PyStackRef_XCLOSE(ref);
+    }
+
 }
 
 // Called when __bases__ is re-assigned.  Also clears the VALID_VERSION

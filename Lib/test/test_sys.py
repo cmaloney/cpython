@@ -1944,6 +1944,7 @@ class SizeofTest(unittest.TestCase):
                   '10P'                 # PySequenceMethods
                   '2P'                  # PyBufferProcs
                   '7P'
+                  '4Pi'                 # fast __init__ and __new__
                   '1PIP'                # Specializer cache
                   + typeid              # heap type id (free-threaded only)
                   )

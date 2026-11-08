@@ -578,7 +578,298 @@ create_heapctype_with_none_bases_slot(PyObject *self, PyObject *Py_UNUSED(ignore
 }
 
 
+/* Heap types with "vectorcall always" __init__ / __new__
+   (Py_tp_init_fast, Py_tp_new_fast).  They record which implementation
+   ran ('via': "fast" or "tuple") and the arguments it got. */
+
+typedef struct {
+    PyObject_HEAD
+    PyObject *via;
+    PyObject *args;
+    PyObject *kwargs;
+} FastSlotsObject;
+
+static int
+fastslots_record(PyObject *op, const char *via, PyObject *args,
+                 PyObject *kwargs)
+{
+    FastSlotsObject *self = (FastSlotsObject *)op;
+    PyObject *v = PyUnicode_FromString(via);
+    if (v == NULL) {
+        return -1;
+    }
+    Py_XSETREF(self->via, v);
+    Py_XSETREF(self->args, Py_NewRef(args));
+    if (kwargs == NULL) {
+        kwargs = PyDict_New();
+        if (kwargs == NULL) {
+            return -1;
+        }
+    }
+    else {
+        kwargs = PyDict_Copy(kwargs);
+        if (kwargs == NULL) {
+            return -1;
+        }
+    }
+    Py_XSETREF(self->kwargs, kwargs);
+    return 0;
+}
+
+static int
+fastslots_record_fast(PyObject *self, const char *via,
+                      PyObject *const *args, Py_ssize_t nargs,
+                      PyObject *kwnames)
+{
+    PyObject *tuple = PyTuple_FromArray(args, nargs);
+    if (tuple == NULL) {
+        return -1;
+    }
+    PyObject *kwargs = PyDict_New();
+    if (kwargs == NULL) {
+        Py_DECREF(tuple);
+        return -1;
+    }
+    for (Py_ssize_t i = 0; kwnames && i < PyTuple_GET_SIZE(kwnames); i++) {
+        if (PyDict_SetItem(kwargs, PyTuple_GET_ITEM(kwnames, i),
+                           args[nargs + i]) < 0) {
+            Py_DECREF(tuple);
+            Py_DECREF(kwargs);
+            return -1;
+        }
+    }
+    int res = fastslots_record(self, via, tuple, kwargs);
+    Py_DECREF(tuple);
+    Py_DECREF(kwargs);
+    return res;
+}
+
+/* "fail" as a keyword argument makes __init__ / __new__ raise. */
+static int
+fastslots_check_fail(PyObject *kwargs)
+{
+    if (kwargs != NULL && PyDict_Check(kwargs)) {
+        int r = PyDict_ContainsString(kwargs, "fail");
+        if (r != 0) {
+            if (r > 0) {
+                PyErr_SetString(PyExc_ValueError, "fail");
+            }
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int
+fastslots_init(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    if (fastslots_check_fail(kwargs) < 0) {
+        return -1;
+    }
+    return fastslots_record(self, "tuple", args, kwargs);
+}
+
+static int
+fastslots_init_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                    PyObject *kwnames)
+{
+    if (fastslots_record_fast(self, "fast", args, nargs, kwnames) < 0) {
+        return -1;
+    }
+    return fastslots_check_fail(((FastSlotsObject *)self)->kwargs);
+}
+
+static PyObject *
+fastslots_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    if (fastslots_check_fail(kwargs) < 0) {
+        return NULL;
+    }
+    PyObject *self = type->tp_alloc(type, 0);
+    if (self == NULL) {
+        return NULL;
+    }
+    if (fastslots_record(self, "tuple", args, kwargs) < 0) {
+        Py_DECREF(self);
+        return NULL;
+    }
+    return self;
+}
+
+static PyObject *
+fastslots_new_fast(PyTypeObject *type, PyObject *const *args,
+                   Py_ssize_t nargs, PyObject *kwnames)
+{
+    PyObject *self = type->tp_alloc(type, 0);
+    if (self == NULL) {
+        return NULL;
+    }
+    if (fastslots_record_fast(self, "fast", args, nargs, kwnames) < 0
+        || fastslots_check_fail(((FastSlotsObject *)self)->kwargs) < 0)
+    {
+        Py_DECREF(self);
+        return NULL;
+    }
+    return self;
+}
+
+static int
+fastslots_traverse(PyObject *op, visitproc visit, void *arg)
+{
+    FastSlotsObject *self = (FastSlotsObject *)op;
+    Py_VISIT(Py_TYPE(self));
+    Py_VISIT(self->via);
+    Py_VISIT(self->args);
+    Py_VISIT(self->kwargs);
+    return 0;
+}
+
+static int
+fastslots_clear(PyObject *op)
+{
+    FastSlotsObject *self = (FastSlotsObject *)op;
+    Py_CLEAR(self->via);
+    Py_CLEAR(self->args);
+    Py_CLEAR(self->kwargs);
+    return 0;
+}
+
+static void
+fastslots_dealloc(PyObject *self)
+{
+    PyTypeObject *tp = Py_TYPE(self);
+    PyObject_GC_UnTrack(self);
+    (void)fastslots_clear(self);
+    tp->tp_free(self);
+    Py_DECREF(tp);
+}
+
+static PyMemberDef fastslots_members[] = {
+    {"via", Py_T_OBJECT_EX, offsetof(FastSlotsObject, via), Py_READONLY},
+    {"args", Py_T_OBJECT_EX, offsetof(FastSlotsObject, args), Py_READONLY},
+    {"kwargs", Py_T_OBJECT_EX, offsetof(FastSlotsObject, kwargs), Py_READONLY},
+    {NULL},
+};
+
+#define FASTSLOTS_COMMON_SLOTS \
+    {Py_tp_traverse, fastslots_traverse}, \
+    {Py_tp_clear, fastslots_clear}, \
+    {Py_tp_dealloc, fastslots_dealloc}, \
+    {Py_tp_members, fastslots_members}
+
+#define FASTSLOTS_SPEC(NAME, SLOTS) {                                     \
+    .name = "_testcapi." NAME,                                            \
+    .basicsize = sizeof(FastSlotsObject),                                 \
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC, \
+    .slots = SLOTS,                                                       \
+}
+
+/* Only the fast __init__: tp_init is an adaptor. */
+static PyType_Slot FastInitOnly_slots[] = {
+    {Py_tp_new, PyType_GenericNew},
+    {Py_tp_init_fast, fastslots_init_fast},
+    FASTSLOTS_COMMON_SLOTS,
+    {0, 0},
+};
+static PyType_Spec FastInitOnly_spec = FASTSLOTS_SPEC("FastInitOnly",
+                                                      FastInitOnly_slots);
+
+/* Both tp_init and the fast __init__. */
+static PyType_Slot FastInitBoth_slots[] = {
+    {Py_tp_new, PyType_GenericNew},
+    {Py_tp_init, fastslots_init},
+    {Py_tp_init_fast, fastslots_init_fast},
+    FASTSLOTS_COMMON_SLOTS,
+    {0, 0},
+};
+static PyType_Spec FastInitBoth_spec = FASTSLOTS_SPEC("FastInitBoth",
+                                                      FastInitBoth_slots);
+
+/* Only the fast __new__: tp_new is an adaptor. */
+static PyType_Slot FastNewOnly_slots[] = {
+    {Py_tp_new_fast, fastslots_new_fast},
+    FASTSLOTS_COMMON_SLOTS,
+    {0, 0},
+};
+static PyType_Spec FastNewOnly_spec = FASTSLOTS_SPEC("FastNewOnly",
+                                                     FastNewOnly_slots);
+
+/* Both tp_new and the fast __new__. */
+static PyType_Slot FastNewBoth_slots[] = {
+    {Py_tp_new, fastslots_new},
+    {Py_tp_new_fast, fastslots_new_fast},
+    FASTSLOTS_COMMON_SLOTS,
+    {0, 0},
+};
+static PyType_Spec FastNewBoth_spec = FASTSLOTS_SPEC("FastNewBoth",
+                                                     FastNewBoth_slots);
+
+/* Neither: the tuple-based slots only. */
+static PyType_Slot FastNeither_slots[] = {
+    {Py_tp_new, PyType_GenericNew},
+    {Py_tp_init, fastslots_init},
+    FASTSLOTS_COMMON_SLOTS,
+    {0, 0},
+};
+static PyType_Spec FastNeither_spec = FASTSLOTS_SPEC("FastNeither",
+                                                     FastNeither_slots);
+
+/* Call the tp_init slot of a type directly, like C code does. */
+static PyObject *
+call_tp_init(PyObject *module, PyObject *args)
+{
+    PyTypeObject *type;
+    PyObject *self, *posargs, *kwargs = NULL;
+    if (!PyArg_ParseTuple(args, "O!OO!|O", &PyType_Type, &type, &self,
+                          &PyTuple_Type, &posargs, &kwargs)) {
+        return NULL;
+    }
+    if (kwargs == Py_None) {
+        kwargs = NULL;
+    }
+    if (type->tp_init(self, posargs, kwargs) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+/* Call the tp_new slot of a type directly. */
+static PyObject *
+call_tp_new(PyObject *module, PyObject *args)
+{
+    PyTypeObject *type, *subtype;
+    PyObject *posargs, *kwargs = NULL;
+    if (!PyArg_ParseTuple(args, "O!O!O!|O", &PyType_Type, &type,
+                          &PyType_Type, &subtype,
+                          &PyTuple_Type, &posargs, &kwargs)) {
+        return NULL;
+    }
+    if (kwargs == Py_None) {
+        kwargs = NULL;
+    }
+    return type->tp_new(subtype, posargs, kwargs);
+}
+
+/* (has fast __init__, has fast __new__, has the type's own vectorcall)
+   as seen by PyType_GetSlot(). */
+static PyObject *
+get_fast_slots(PyObject *module, PyObject *type)
+{
+    if (!PyType_Check(type)) {
+        PyErr_SetString(PyExc_TypeError, "expected a type");
+        return NULL;
+    }
+    PyTypeObject *tp = (PyTypeObject *)type;
+    return Py_BuildValue("(OOO)",
+        PyType_GetSlot(tp, Py_tp_init_fast) ? Py_True : Py_False,
+        PyType_GetSlot(tp, Py_tp_new_fast) ? Py_True : Py_False,
+        tp->tp_vectorcall ? Py_True : Py_False);
+}
+
 static PyMethodDef TestMethods[] = {
+    {"call_tp_init", call_tp_init, METH_VARARGS},
+    {"call_tp_new", call_tp_new, METH_VARARGS},
+    {"get_fast_slots", get_fast_slots, METH_O},
     {"pytype_fromspec_meta",    pytype_fromspec_meta,            METH_O},
     {"test_type_from_ephemeral_spec", test_type_from_ephemeral_spec, METH_NOARGS},
     {"create_type_from_repeated_slots",
@@ -1409,6 +1700,12 @@ _PyTestCapi_Init_Heaptype(PyObject *m) {
             return -1; \
         } \
     } while (0)
+
+    ADD("FastInitOnly", PyType_FromSpec(&FastInitOnly_spec));
+    ADD("FastInitBoth", PyType_FromSpec(&FastInitBoth_spec));
+    ADD("FastNewOnly", PyType_FromSpec(&FastNewOnly_spec));
+    ADD("FastNewBoth", PyType_FromSpec(&FastNewBoth_spec));
+    ADD("FastNeither", PyType_FromSpec(&FastNeither_spec));
 
     PyObject *HeapDocCType = PyType_FromSpec(&HeapDocCType_spec);
     ADD("HeapDocCType", HeapDocCType);

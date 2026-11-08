@@ -108,6 +108,8 @@ _PySlot_resolve_type_slot(uint16_t slot_id)
         case Py_tp_flags:
         case Py_tp_metaclass:
         case Py_tp_module:
+        case Py_tp_init_fast:
+        case Py_tp_new_fast:
             return slot_id;
         default:
             return Py_slot_invalid;
@@ -371,6 +373,12 @@ _PySlot_type_getslot(PyTypeObject *tp, uint16_t slot_id)
         case Py_mp_length:
             if (!(tp->tp_as_mapping)) return NULL;
             return (void*)tp->tp_as_mapping->mp_length;
+        case Py_tp_init_fast:
+            if (!(tp->tp_flags & Py_TPFLAGS_HEAPTYPE)) return NULL;
+            return (void*)((PyHeapTypeObject*)tp)->_ht_fast.init;
+        case Py_tp_new_fast:
+            if (!(tp->tp_flags & Py_TPFLAGS_HEAPTYPE)) return NULL;
+            return (void*)((PyHeapTypeObject*)tp)->_ht_fast.new;
     }
     _PySlot_err_bad_slot("PyType_GetSlot", slot_id);
     return NULL;
@@ -740,6 +748,8 @@ _PySlot_get_dtype(uint16_t slot_id)
         case Py_tp_module: return _PySlot_DTYPE_PTR;
         case Py_mod_abi: return _PySlot_DTYPE_PTR;
         case Py_mod_token: return _PySlot_DTYPE_PTR;
+        case Py_tp_init_fast: return _PySlot_DTYPE_FUNC;
+        case Py_tp_new_fast: return _PySlot_DTYPE_FUNC;
         default: return _PySlot_DTYPE_VOID;
     }
 }

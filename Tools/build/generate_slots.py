@@ -92,6 +92,10 @@ class SlotInfo:
             return 'allow'
 
     @functools.cached_property
+    def limited(self):
+        return self._data.get('limited', True)
+
+    @functools.cached_property
     def must_be_static(self):
         return self._data.get('must_be_static', False)
 
@@ -163,7 +167,11 @@ def write_public_header(f, slots):
         slot_id = slot.id
         if compat := compat_ids.get(slot.name):
             slot_id = f'_Py_SLOT_COMPAT_VALUE({compat}, {slot_id})'
+        if not slot.limited:
+            out(f'#ifndef Py_LIMITED_API')
         out(f'#define {slot.name} {slot_id}')
+        if not slot.limited:
+            out(f'#endif')
     out()
     out(f'#define _Py_slot_COUNT {len(slots)}')
     out(f'#endif /* _PY_HAVE_SLOTS_GENERATED_H */')

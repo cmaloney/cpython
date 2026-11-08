@@ -271,6 +271,29 @@ struct _specialization_cache {
     PyObject *init;
 };
 
+/* Provisional API: "vectorcall always" __init__ and __new__ of heap types,
+   given with the Py_tp_init_fast and Py_tp_new_fast slots.  They take the
+   arguments like METH_FASTCALL|METH_KEYWORDS functions and must behave
+   exactly like tp_init and tp_new. */
+typedef int (*Py_initfastfunc)(PyObject *self, PyObject *const *args,
+                               Py_ssize_t nargs, PyObject *kwnames);
+typedef PyObject *(*Py_newfastfunc)(PyTypeObject *type, PyObject *const *args,
+                                    Py_ssize_t nargs, PyObject *kwnames);
+
+/* Internal: the fast __init__ and __new__ of a heap type.  'init' is
+   equivalent to the tp_init function 'init_for' (and 'new' to 'new_for'):
+   the interpreter calls it instead when the slot is still 'init_for'.  They
+   come from the type's own Py_tp_init_fast/Py_tp_new_fast slots (flagged in
+   'own'), or are copied from the type in the MRO whose __init__/__new__ the
+   type inherits.  See Objects/typeobject.c. */
+struct _heaptype_fast_slots {
+    initproc init_for;
+    Py_initfastfunc init;
+    newfunc new_for;
+    Py_newfastfunc new;
+    int own;
+};
+
 /* The *real* layout of a type object when allocated on the heap */
 typedef struct _heaptypeobject {
     /* Note: there's a dependency on the order of these members
@@ -290,6 +313,7 @@ typedef struct _heaptypeobject {
     PyObject *ht_module;
     char *_ht_tpname;  // Storage for "tp_name"; see PyType_FromModuleAndSpec
     void *ht_token;  // Storage for the "Py_tp_token" slot
+    struct _heaptype_fast_slots _ht_fast;  // Py_tp_init_fast, Py_tp_new_fast
     struct _specialization_cache _spec_cache; // For use by the specializer.
 #ifdef Py_GIL_DISABLED
     Py_ssize_t unique_id;  // ID used for per-thread refcounting

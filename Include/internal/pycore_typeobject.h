@@ -123,6 +123,30 @@ extern PyObject* _Py_slot_tp_getattr_hook(PyObject *self, PyObject *name);
 
 extern int _PyType_HasSlotTpIternext(PyTypeObject *type);
 
+/* The "vectorcall always" __init__ of 'type' which is equivalent to its
+   tp_init function 'init', or NULL.  Only heap types have them (see
+   Py_tp_init_fast and PyHeapTypeObject._ht_fast). */
+static inline Py_initfastfunc
+_PyType_GetFastInit(PyTypeObject *type, initproc init)
+{
+    if (!(type->tp_flags & Py_TPFLAGS_HEAPTYPE)) {
+        return NULL;
+    }
+    struct _heaptype_fast_slots *fast = &((PyHeapTypeObject *)type)->_ht_fast;
+    return fast->init_for == init ? fast->init : NULL;
+}
+
+/* Likewise for __new__ (Py_tp_new_fast) and the tp_new function 'new'. */
+static inline Py_newfastfunc
+_PyType_GetFastNew(PyTypeObject *type, newfunc new)
+{
+    if (!(type->tp_flags & Py_TPFLAGS_HEAPTYPE)) {
+        return NULL;
+    }
+    struct _heaptype_fast_slots *fast = &((PyHeapTypeObject *)type)->_ht_fast;
+    return fast->new_for == new ? fast->new : NULL;
+}
+
 extern PyTypeObject _PyBufferWrapper_Type;
 
 PyAPI_FUNC(PyObject*) _PySuper_Lookup(PyTypeObject *su_type, PyObject *su_obj,

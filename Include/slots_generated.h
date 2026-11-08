@@ -116,6 +116,12 @@
 #define Py_tp_module 108
 #define Py_mod_abi 109
 #define Py_mod_token 110
+#ifndef Py_LIMITED_API
+#define Py_tp_init_fast 111
+#endif
+#ifndef Py_LIMITED_API
+#define Py_tp_new_fast 112
+#endif
 
-#define _Py_slot_COUNT 111
+#define _Py_slot_COUNT 113
 #endif /* _PY_HAVE_SLOTS_GENERATED_H */

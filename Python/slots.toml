@@ -834,3 +834,23 @@ duplicates = 'allow'
 name = 'Py_mod_token'
 kind = 'mod'
 dtype = 'ptr'
+
+# Provisional (not in the limited API): "vectorcall always" __init__ and
+# __new__ of heap types; see PyHeapTypeObject._ht_fast.
+[111]
+name = 'Py_tp_init_fast'
+kind = 'type'
+is_type_field = true
+table = 'ht'
+field = '_ht_fast.init'
+functype = 'Py_initfastfunc'
+limited = false
+
+[112]
+name = 'Py_tp_new_fast'
+kind = 'type'
+is_type_field = true
+table = 'ht'
+field = '_ht_fast.new'
+functype = 'Py_newfastfunc'
+limited = false
