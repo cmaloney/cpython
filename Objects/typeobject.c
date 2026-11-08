@@ -9895,7 +9895,7 @@ check_pow_args(Py_ssize_t nargs)
 
 static PyObject *
 wrap_lenfunc(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                void *wrapped)
+             void *wrapped)
 {
     lenfunc func = (lenfunc)wrapped;
     Py_ssize_t res;
@@ -9910,7 +9910,7 @@ wrap_lenfunc(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 
 static PyObject *
 wrap_inquirypred(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                    void *wrapped)
+                 void *wrapped)
 {
     inquiry func = (inquiry)wrapped;
     int res;
@@ -9925,7 +9925,7 @@ wrap_inquirypred(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 
 static PyObject *
 wrap_binaryfunc(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                   void *wrapped)
+                void *wrapped)
 {
     binaryfunc func = (binaryfunc)wrapped;
 
@@ -9936,7 +9936,7 @@ wrap_binaryfunc(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 
 static PyObject *
 wrap_binaryfunc_l(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                     void *wrapped)
+                  void *wrapped)
 {
     binaryfunc func = (binaryfunc)wrapped;
 
@@ -9947,7 +9947,7 @@ wrap_binaryfunc_l(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 
 static PyObject *
 wrap_binaryfunc_r(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                     void *wrapped)
+                  void *wrapped)
 {
     binaryfunc func = (binaryfunc)wrapped;
 
@@ -9958,7 +9958,7 @@ wrap_binaryfunc_r(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 
 static PyObject *
 wrap_ternaryfunc(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                    void *wrapped)
+                 void *wrapped)
 {
     ternaryfunc func = (ternaryfunc)wrapped;
     PyObject *third = Py_None;
@@ -9977,7 +9977,7 @@ wrap_ternaryfunc(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 
 static PyObject *
 wrap_ternaryfunc_r(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                      void *wrapped)
+                   void *wrapped)
 {
     ternaryfunc func = (ternaryfunc)wrapped;
     PyObject *third = Py_None;
@@ -9996,7 +9996,7 @@ wrap_ternaryfunc_r(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 
 static PyObject *
 wrap_unaryfunc(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                  void *wrapped)
+               void *wrapped)
 {
     unaryfunc func = (unaryfunc)wrapped;
 
@@ -10007,7 +10007,7 @@ wrap_unaryfunc(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 
 static PyObject *
 wrap_indexargfunc(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                     void *wrapped)
+                  void *wrapped)
 {
     ssizeargfunc func = (ssizeargfunc)wrapped;
     Py_ssize_t i;
@@ -10044,7 +10044,7 @@ getindex(PyObject *self, PyObject *arg)
 
 static PyObject *
 wrap_sq_item(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                void *wrapped)
+             void *wrapped)
 {
     ssizeargfunc func = (ssizeargfunc)wrapped;
     Py_ssize_t i;
@@ -10059,7 +10059,7 @@ wrap_sq_item(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 
 static PyObject *
 wrap_sq_setitem(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                   void *wrapped)
+                void *wrapped)
 {
     ssizeobjargproc func = (ssizeobjargproc)wrapped;
     Py_ssize_t i;
@@ -10078,7 +10078,7 @@ wrap_sq_setitem(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 
 static PyObject *
 wrap_sq_delitem(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                   void *wrapped)
+                void *wrapped)
 {
     ssizeobjargproc func = (ssizeobjargproc)wrapped;
     Py_ssize_t i;
@@ -10098,7 +10098,7 @@ wrap_sq_delitem(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 /* XXX objobjproc is a misnomer; should be objargpred */
 static PyObject *
 wrap_objobjproc(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                   void *wrapped)
+                void *wrapped)
 {
     objobjproc func = (objobjproc)wrapped;
     int res;
@@ -10114,7 +10114,7 @@ wrap_objobjproc(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 
 static PyObject *
 wrap_objobjargproc(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                      void *wrapped)
+                   void *wrapped)
 {
     objobjargproc func = (objobjargproc)wrapped;
     int res;
@@ -10129,7 +10129,7 @@ wrap_objobjargproc(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 
 static PyObject *
 wrap_delitem(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                void *wrapped)
+             void *wrapped)
 {
     objobjargproc func = (objobjargproc)wrapped;
     int res;
@@ -10210,7 +10210,7 @@ hackcheck(PyObject *self, setattrofunc func, const char *what)
 
 static PyObject *
 wrap_setattr(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                void *wrapped)
+             void *wrapped)
 {
     setattrofunc func = (setattrofunc)wrapped;
     int res;
@@ -10227,7 +10227,7 @@ wrap_setattr(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 
 static PyObject *
 wrap_delattr(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                void *wrapped)
+             void *wrapped)
 {
     setattrofunc func = (setattrofunc)wrapped;
     int res;
@@ -10244,7 +10244,7 @@ wrap_delattr(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 
 static PyObject *
 wrap_hashfunc(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                 void *wrapped)
+              void *wrapped)
 {
     hashfunc func = (hashfunc)wrapped;
     Py_hash_t res;
@@ -10267,7 +10267,7 @@ wrap_call(PyObject *self, PyObject *args, void *wrapped, PyObject *kwds)
 
 static PyObject *
 wrap_del(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-            void *wrapped)
+         void *wrapped)
 {
     destructor func = (destructor)wrapped;
 
@@ -10293,7 +10293,7 @@ wrap_richcmpfunc(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 #define RICHCMP_WRAPPER(NAME, OP) \
 static PyObject * \
 richcmp_##NAME(PyObject *self, PyObject *const *args, Py_ssize_t nargs, \
-                    void *wrapped) \
+               void *wrapped) \
 { \
     return wrap_richcmpfunc(self, args, nargs, wrapped, OP); \
 }
@@ -10307,7 +10307,7 @@ RICHCMP_WRAPPER(ge, Py_GE)
 
 static PyObject *
 wrap_next(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-             void *wrapped)
+          void *wrapped)
 {
     unaryfunc func = (unaryfunc)wrapped;
     PyObject *res;
@@ -10322,7 +10322,7 @@ wrap_next(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 
 static PyObject *
 wrap_descr_get(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                  void *wrapped)
+               void *wrapped)
 {
     descrgetfunc func = (descrgetfunc)wrapped;
     PyObject *obj;
@@ -10347,7 +10347,7 @@ wrap_descr_get(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 
 static PyObject *
 wrap_descr_set(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                  void *wrapped)
+               void *wrapped)
 {
     descrsetfunc func = (descrsetfunc)wrapped;
     int ret;
@@ -10362,7 +10362,7 @@ wrap_descr_set(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 
 static PyObject *
 wrap_descr_delete(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                     void *wrapped)
+                  void *wrapped)
 {
     descrsetfunc func = (descrsetfunc)wrapped;
     int ret;
@@ -10377,7 +10377,7 @@ wrap_descr_delete(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 
 static PyObject *
 wrap_buffer(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-               void *wrapped)
+            void *wrapped)
 {
     if (!_PyArg_CheckPositional("__buffer__", nargs, 1, 1)) {
         return NULL;
@@ -10398,7 +10398,7 @@ wrap_buffer(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 
 static PyObject *
 wrap_releasebuffer(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                      void *wrapped)
+                   void *wrapped)
 {
     if (!_PyArg_CheckPositional("__release_buffer__", nargs, 1, 1)) {
         return NULL;
