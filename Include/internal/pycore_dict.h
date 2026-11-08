@@ -13,6 +13,12 @@ extern "C" {
 #include "pycore_stackref.h"             // _PyStackRef
 #include "pycore_stats.h"
 
+// The fast __init__ and __new__ of dict (see _PyStaticType_SetFastSlots())
+extern int _PyDict_InitFast(PyObject *self, PyObject *const *args,
+                            Py_ssize_t nargs, PyObject *kwnames);
+extern PyObject* _PyDict_NewFast(PyTypeObject *type, PyObject *const *args,
+                                 Py_ssize_t nargs, PyObject *kwnames);
+
 // Unsafe flavor of PyDict_GetItemWithError(): no error checking
 extern PyObject* _PyDict_GetItemWithError(PyObject *dp, PyObject *key);
 

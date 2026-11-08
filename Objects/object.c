@@ -2697,6 +2697,10 @@ _PyTypes_InitTypes(PyInterpreterState *interp)
         }
     }
 
+    // Internal fast __init__ and __new__ of static types
+    _PyStaticType_SetFastSlots(interp, &PyDict_Type,
+                               _PyDict_InitFast, _PyDict_NewFast);
+
     // Cache __reduce__ from PyBaseObject_Type object
     PyObject *baseobj_dict = _PyType_GetDict(&PyBaseObject_Type);
     PyObject *baseobj_reduce = PyDict_GetItemWithError(baseobj_dict, &_Py_ID(__reduce__));

@@ -5489,35 +5489,53 @@ dict_init(PyObject *self, PyObject *args, PyObject *kwds)
     return dict_update_common(self, args, kwds, "dict");
 }
 
+/* The fast __init__ of dict (see _PyStaticType_SetFastSlots()), which takes
+   the arguments as a C array: it must behave like dict_init(). */
+int
+_PyDict_InitFast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                 PyObject *kwnames)
+{
+    if (!_PyArg_CheckPositional("dict", nargs, 0, 1)) {
+        return -1;
+    }
+    if (nargs == 1) {
+        if (dict_update_arg(self, args[0]) < 0) {
+            return -1;
+        }
+    }
+    if (kwnames != NULL) {
+        for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(kwnames); i++) {
+            PyObject *key = PyTuple_GET_ITEM(kwnames, i);  // borrowed
+            if (PyDict_SetItem(self, key, args[nargs + i]) < 0) {
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* The fast __new__ of dict: dict_new() ignores its arguments. */
+PyObject *
+_PyDict_NewFast(PyTypeObject *type, PyObject *const *Py_UNUSED(args),
+                Py_ssize_t Py_UNUSED(nargs), PyObject *Py_UNUSED(kwnames))
+{
+    return dict_new(type, NULL, NULL);
+}
+
 static PyObject *
 dict_vectorcall(PyObject *type, PyObject * const*args,
                 size_t nargsf, PyObject *kwnames)
 {
-    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
-    if (!_PyArg_CheckPositional("dict", nargs, 0, 1)) {
-        return NULL;
-    }
-
     assert(type == (PyObject *)&PyDict_Type);
     PyObject *self = PyDict_New();
     if (self == NULL) {
         return NULL;
     }
-    if (nargs == 1) {
-        if (dict_update_arg(self, args[0]) < 0) {
-            Py_DECREF(self);
-            return NULL;
-        }
-        args++;
-    }
-    if (kwnames != NULL) {
-        for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(kwnames); i++) {
-            PyObject *key = PyTuple_GET_ITEM(kwnames, i);  // borrowed
-            if (PyDict_SetItem(self, key, args[i]) < 0) {
-                Py_DECREF(self);
-                return NULL;
-            }
-        }
+    if (_PyDict_InitFast(self, args, PyVectorcall_NARGS(nargsf),
+                         kwnames) < 0)
+    {
+        Py_DECREF(self);
+        return NULL;
     }
     return self;
 }

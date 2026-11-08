@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include "pycore_abstract.h"      // _PyObject_RealIsSubclass()
 #include "pycore_ceval.h"         // _Py_EnterRecursiveCall
+#include "pycore_critical_section.h" // Py_BEGIN_CRITICAL_SECTION()
 #include "pycore_exceptions.h"    // struct _Py_exc_state
 #include "pycore_initconfig.h"
 #include "pycore_modsupport.h"    // _PyArg_NoKeywords()
@@ -53,32 +54,43 @@ PyBaseExceptionObject_CAST(PyObject *exc)
 /*
  *    BaseException
  */
+/* Create an exception of 'type' with the arguments 'args' (a new
+   reference, or NULL if building it failed). */
 static PyObject *
-BaseException_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+BaseException_alloc(PyTypeObject *type, PyObject *args)
 {
-    PyBaseExceptionObject *self;
-
-    self = (PyBaseExceptionObject *)type->tp_alloc(type, 0);
-    if (!self)
+    if (args == NULL) {
         return NULL;
+    }
+    PyBaseExceptionObject *self;
+    self = (PyBaseExceptionObject *)type->tp_alloc(type, 0);
+    if (!self) {
+        Py_DECREF(args);
+        return NULL;
+    }
     /* the dict is created on the fly in PyObject_GenericSetAttr */
     self->dict = NULL;
     self->notes = NULL;
     self->traceback = self->cause = self->context = NULL;
     self->suppress_context = 0;
-
-    if (args) {
-        self->args = Py_NewRef(args);
-        return (PyObject *)self;
-    }
-
-    self->args = PyTuple_New(0);
-    if (!self->args) {
-        Py_DECREF(self);
-        return NULL;
-    }
-
+    self->args = args;
     return (PyObject *)self;
+}
+
+static PyObject *
+BaseException_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    return BaseException_alloc(type,
+                               args ? Py_NewRef(args) : PyTuple_New(0));
+}
+
+/* The fast __new__ of BaseException (see _PyStaticType_SetFastSlots()): it
+   must behave like BaseException_new(). */
+static PyObject *
+BaseException_new_fast(PyTypeObject *type, PyObject *const *args,
+                       Py_ssize_t nargs, PyObject *Py_UNUSED(kwnames))
+{
+    return BaseException_alloc(type, PyTuple_FromArray(args, nargs));
 }
 
 static int
@@ -92,6 +104,43 @@ BaseException_init(PyObject *op, PyObject *args, PyObject *kwds)
     return 0;
 }
 
+/* The fast __init__ of BaseException: it must behave like
+   BaseException_init(), except that it doesn't get the argument tuple to
+   store.  BaseException.__new__() already stored the arguments of the
+   class call: if __init__() gets the same ones, as when the __init__() of a
+   subclass passes its arguments on to super().__init__(), keep that tuple
+   rather than building an identical one. */
+static int
+BaseException_init_fast(PyObject *op, PyObject *const *args,
+                        Py_ssize_t nargs, PyObject *kwnames)
+{
+    PyBaseExceptionObject *self = PyBaseExceptionObject_CAST(op);
+    if (kwnames != NULL && PyTuple_GET_SIZE(kwnames) != 0) {
+        /* Like _PyArg_NoKeywords() */
+        PyErr_Format(PyExc_TypeError, "%.200s() takes no keyword arguments",
+                     Py_TYPE(self)->tp_name);
+        return -1;
+    }
+    int res = 0;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    PyObject *old = self->args;
+    int same = (old != NULL && PyTuple_CheckExact(old)
+                && PyTuple_GET_SIZE(old) == nargs);
+    for (Py_ssize_t i = 0; same && i < nargs; i++) {
+        same = (PyTuple_GET_ITEM(old, i) == args[i]);
+    }
+    if (!same) {
+        PyObject *tuple = PyTuple_FromArray(args, nargs);
+        if (tuple == NULL) {
+            res = -1;
+        }
+        else {
+            Py_XSETREF(self->args, tuple);
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+    return res;
+}
 
 static PyObject *
 BaseException_vectorcall(PyObject *type_obj, PyObject * const*args,
@@ -101,28 +150,8 @@ BaseException_vectorcall(PyObject *type_obj, PyObject * const*args,
     if (!_PyArg_NoKwnames(type->tp_name, kwnames)) {
         return NULL;
     }
-
-    PyBaseExceptionObject *self;
-    self = (PyBaseExceptionObject *)type->tp_alloc(type, 0);
-    if (!self) {
-        return NULL;
-    }
-
-    // The dict is created on the fly in PyObject_GenericSetAttr()
-    self->dict = NULL;
-    self->notes = NULL;
-    self->traceback = NULL;
-    self->cause = NULL;
-    self->context = NULL;
-    self->suppress_context = 0;
-
-    self->args = PyTuple_FromArray(args, PyVectorcall_NARGS(nargsf));
-    if (!self->args) {
-        Py_DECREF(self);
-        return NULL;
-    }
-
-    return (PyObject *)self;
+    return BaseException_new_fast(type, args, PyVectorcall_NARGS(nargsf),
+                                  NULL);
 }
 
 
@@ -4555,6 +4584,10 @@ _PyExc_InitTypes(PyInterpreterState *interp)
         if (_PyStaticType_InitBuiltin(interp, exc) < 0) {
             return -1;
         }
+        _PyStaticType_SetFastSlots(
+            interp, exc,
+            exc->tp_init == BaseException_init ? BaseException_init_fast : NULL,
+            exc->tp_new == BaseException_new ? BaseException_new_fast : NULL);
         if (exc->tp_new == BaseException_new
             && exc->tp_init == BaseException_init)
         {
