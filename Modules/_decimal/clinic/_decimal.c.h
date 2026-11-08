@@ -936,20 +936,15 @@ dec_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 }
 
 static PyObject *
-dec_vectorcall(PyObject *type, PyObject *const *args,
-    size_t nargsf, PyObject *kwnames)
+dec_new_fast(PyTypeObject *type, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
 {
     PyObject *return_value = NULL;
-    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
     PyObject *value = NULL;
     PyObject *context = Py_None;
 
-    assert(_PyType_CAST(type)->tp_new == dec_new);
-    /* Make sure the type object is immutable: the generated
-     * vectorcall doesn't deal e.g. with users reassigning __init__. */
-    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
     if (kwnames != NULL || nargs > 2) {
-        return dec_new_helper(_PyType_CAST(type), args, nargs,
+        return dec_new_helper(type, args, nargs,
             kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
             NULL, kwnames);
     }
@@ -962,10 +957,14 @@ dec_vectorcall(PyObject *type, PyObject *const *args,
     }
     context = args[1];
 skip_optional:
-    return_value = dec_new_impl(_PyType_CAST(type), value, context);
+    return_value = dec_new_impl(type, value, context);
 
     return return_value;
 }
+
+#define DEC_NEW_SLOTS \
+    {Py_tp_new, dec_new}, \
+    {Py_tp_new_fast, dec_new_fast}
 
 PyDoc_STRVAR(_decimal_Context_create_decimal__doc__,
 "create_decimal($self, num=\'0\', /)\n"
@@ -6330,4 +6329,4 @@ exit:
 #ifndef _DECIMAL_CONTEXT_APPLY_METHODDEF
     #define _DECIMAL_CONTEXT_APPLY_METHODDEF
 #endif /* !defined(_DECIMAL_CONTEXT_APPLY_METHODDEF) */
-/*[clinic end generated code: output=f9ddc00f5a7335c4 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=9cde4afea2eaaee7 input=a9049054013a1b77]*/
