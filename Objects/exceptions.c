@@ -8,6 +8,8 @@
 #include <stdbool.h>
 #include "pycore_abstract.h"      // _PyObject_RealIsSubclass()
 #include "pycore_ceval.h"         // _Py_EnterRecursiveCall
+#include "pycore_critical_section.h" // Py_BEGIN_CRITICAL_SECTION()
+#include "pycore_descrobject.h"   // _Py_METH_SLOT_FAST
 #include "pycore_exceptions.h"    // struct _Py_exc_state
 #include "pycore_initconfig.h"
 #include "pycore_modsupport.h"    // _PyArg_NoKeywords()
@@ -90,6 +92,44 @@ BaseException_init(PyObject *op, PyObject *args, PyObject *kwds)
 
     Py_XSETREF(self->args, Py_NewRef(args));
     return 0;
+}
+
+/* BaseException.__init__() called with the arguments as a C array (e.g.
+   super().__init__(msg)): see _PyWrapperDescrObject.  It must behave like
+   BaseException_init(). */
+static PyObject *
+BaseException_init_fast(PyObject *op, PyObject *const *args,
+                        Py_ssize_t nargs, PyObject *kwnames)
+{
+    PyBaseExceptionObject *self = PyBaseExceptionObject_CAST(op);
+    if (kwnames != NULL && PyTuple_GET_SIZE(kwnames) != 0) {
+        PyErr_Format(PyExc_TypeError, "%.200s() takes no keyword arguments",
+                     Py_TYPE(self)->tp_name);
+        return NULL;
+    }
+    PyObject *res = Py_None;
+    Py_BEGIN_CRITICAL_SECTION(self);
+    /* BaseException.__new__() already stored the arguments of the class
+       call: if __init__() gets the same ones, as when the __init__() of a
+       subclass passes its arguments on to super().__init__(), keep that
+       tuple rather than building an identical one. */
+    PyObject *old = self->args;
+    int same = (old != NULL && PyTuple_CheckExact(old)
+                && PyTuple_GET_SIZE(old) == nargs);
+    for (Py_ssize_t i = 0; same && i < nargs; i++) {
+        same = (PyTuple_GET_ITEM(old, i) == args[i]);
+    }
+    if (!same) {
+        PyObject *tuple = PyTuple_FromArray(args, nargs);
+        if (tuple == NULL) {
+            res = NULL;
+        }
+        else {
+            Py_XSETREF(self->args, tuple);
+        }
+    }
+    Py_END_CRITICAL_SECTION();
+    return res;
 }
 
 
@@ -317,6 +357,8 @@ BaseException_add_note_impl(PyBaseExceptionObject *self, PyObject *note)
 }
 
 static PyMethodDef BaseException_methods[] = {
+    {"__init__", _PyCFunction_CAST(BaseException_init_fast),
+     METH_FASTCALL | METH_KEYWORDS | _Py_METH_SLOT_FAST},
     BASEEXCEPTION___REDUCE___METHODDEF
     BASEEXCEPTION___SETSTATE___METHODDEF
     BASEEXCEPTION_WITH_TRACEBACK_METHODDEF

@@ -121,6 +121,7 @@ As a consequence of this, split keys have a maximum size of 16.
 #include "pycore_ceval.h"         // _PyEval_GetBuiltin()
 #include "pycore_code.h"          // stats
 #include "pycore_critical_section.h" // Py_BEGIN_CRITICAL_SECTION, Py_END_CRITICAL_SECTION
+#include "pycore_descrobject.h"   // _Py_METH_SLOT_FAST
 #include "pycore_dict.h"          // export _PyDict_SizeOf()
 #include "pycore_freelist.h"      // _PyFreeListState_GET()
 #include "pycore_gc.h"            // _PyObject_GC_IS_TRACKED()
@@ -5338,7 +5339,12 @@ In either case, this is followed by: for k in F:  D[k] = F[k]");
 
 /* Forward */
 
+static PyObject *dict_init_fast(PyObject *, PyObject *const *, Py_ssize_t,
+                                PyObject *);
+
 static PyMethodDef mapp_methods[] = {
+    {"__init__", _PyCFunction_CAST(dict_init_fast),
+     METH_FASTCALL | METH_KEYWORDS | _Py_METH_SLOT_FAST},
     DICT___CONTAINS___METHODDEF
     {"__getitem__",     _PyDict_Subscript,                 METH_O | METH_COEXIST,
      getitem__doc__},
@@ -5487,6 +5493,32 @@ static int
 dict_init(PyObject *self, PyObject *args, PyObject *kwds)
 {
     return dict_update_common(self, args, kwds, "dict");
+}
+
+/* dict.__init__() called with the arguments as a C array (e.g.
+   super().__init__(a=1)): see _PyWrapperDescrObject.  It must behave like
+   dict_init(). */
+static PyObject *
+dict_init_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+               PyObject *kwnames)
+{
+    if (!_PyArg_CheckPositional("dict", nargs, 0, 1)) {
+        return NULL;
+    }
+    if (nargs == 1) {
+        if (dict_update_arg(self, args[0]) < 0) {
+            return NULL;
+        }
+    }
+    if (kwnames != NULL) {
+        for (Py_ssize_t i = 0; i < PyTuple_GET_SIZE(kwnames); i++) {
+            PyObject *key = PyTuple_GET_ITEM(kwnames, i);  // borrowed
+            if (PyDict_SetItem(self, key, args[nargs + i]) < 0) {
+                return NULL;
+            }
+        }
+    }
+    Py_RETURN_NONE;
 }
 
 static PyObject *

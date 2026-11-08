@@ -5350,6 +5350,83 @@ class ClassPropertiesAndMethods(unittest.TestCase):
         with self.assertRaises(RecursionError):
             foo.__str__()
 
+    def test_init_slot_wrapper_fast(self):
+        # Some types give the __init__ slot wrapper an implementation which
+        # takes the arguments as a C array (no argument tuple or keyword
+        # dict).  It must behave like tp_init, which subclasses inherit.
+        for cls in (dict, BaseException, ValueError):
+            with self.subTest(cls=cls):
+                init = cls.__init__
+                self.assertIs(type(init), types.WrapperDescriptorType)
+                self.assertEqual(init.__name__, '__init__')
+                self.assertIs(init, cls.__dict__.get('__init__', init))
+
+        d = {}
+        self.assertIsNone(dict.__init__(d, [(1, 2)], a=3))
+        self.assertEqual(d, {1: 2, 'a': 3})
+        d.__init__({'a': 4}, b=5)
+        self.assertEqual(d, {1: 2, 'a': 4, 'b': 5})
+        dict.__init__(d, **{'a': 6})
+        self.assertEqual(d, {1: 2, 'a': 6, 'b': 5})
+        with self.assertRaisesRegex(TypeError,
+                                    r"dict expected at most 1 argument, got 2"):
+            dict.__init__(d, 1, 2)
+        with self.assertRaisesRegex(TypeError, "keywords must be strings"):
+            dict.__init__(d, **{1: 2})
+
+        e = ValueError('a')
+        e.__init__('b', 'c')
+        self.assertEqual(e.args, ('b', 'c'))
+        BaseException.__init__(e)
+        self.assertEqual(e.args, ())
+        with self.assertRaisesRegex(TypeError,
+                                    r"ValueError\(\) takes no keyword arguments"):
+            BaseException.__init__(e, x=1)
+
+        # Subclasses defining __init__ and calling the base one.
+        class E(Exception):
+            def __init__(self, *args, **kwargs):
+                self.before = self.args
+                super().__init__(*args, **kwargs)
+        e = E('x', 1)
+        self.assertEqual(e.before, ('x', 1))
+        self.assertEqual(e.args, ('x', 1))
+        class E2(Exception):
+            def __init__(self, msg):
+                super().__init__(msg, 'extra')
+        self.assertEqual(E2('x').args, ('x', 'extra'))
+        with self.assertRaisesRegex(TypeError,
+                                    r"E\(\) takes no keyword arguments"):
+            E(x=1)
+
+        class D(dict):
+            def __init__(self, a):
+                super().__init__(a=a)
+        self.assertEqual(D(1), {'a': 1})
+
+        # Subclasses not defining __init__ inherit tp_init, not the generic
+        # slot_tp_init.
+        class D2(dict):
+            pass
+        self.assertEqual(D2([(1, 2)], a=3), {1: 2, 'a': 3})
+        self.assertIs(D2.__init__, dict.__init__)
+        from collections.abc import MutableMapping
+        class M(D2, MutableMapping):
+            pass
+        self.assertEqual(M(a=1), {'a': 1})
+
+        # Reassigning __init__.
+        class R(dict):
+            pass
+        R.__init__ = lambda self, *args, **kwargs: dict.__init__(self, z=1)
+        self.assertEqual(R(a=2), {'z': 1})
+        del R.__init__
+        self.assertEqual(R(a=2), {'a': 2})
+        class R2(dict):
+            __init__ = BaseException.__init__
+        with self.assertRaisesRegex(TypeError, "requires a 'BaseException'"):
+            R2()
+
     def test_mixing_slot_wrappers(self):
         class X(dict):
             __setattr__ = dict.__setitem__
