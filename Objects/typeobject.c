@@ -12543,111 +12543,122 @@ new_ignores_args(PyTypeObject *type)
             || type->tp_new == PyType_GenericNew);
 }
 
-/* The tp_vectorcall of the heap types which have a fast __new__ or
-   __init__: type_call() without building an argument tuple and keyword
-   dict, unless a slot which has no fast version needs them. */
-static PyObject *
-heaptype_fast_vectorcall(PyObject *callable, PyObject *const *args,
-                         size_t nargsf, PyObject *kwnames)
+/* Can tp_init be skipped?  True when there is none and for object.__init__()
+   when it doesn't check the arguments (the type has its own __new__). */
+static inline int
+init_ignores_args(PyTypeObject *type)
 {
-    PyTypeObject *type = _PyType_CAST(callable);
-    PyThreadState *tstate = _PyThreadState_GET();
-    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
-    if (kwnames != NULL && PyTuple_GET_SIZE(kwnames) == 0) {
-        kwnames = NULL;
-    }
-    Py_newfastfunc new_fast = _PyType_GetFastNew(type, type->tp_new);
-    if (type->tp_new == NULL
-        || (new_fast == NULL
-            && _PyType_GetFastInit(type, type->tp_init) == NULL))
-    {
-        /* Nothing to gain (the fast slots may have gone after __init__ or
-           __new__ was assigned), or let type_call() raise the error. */
-        return _PyObject_MakeTpCall(tstate, callable, args, nargs, kwnames);
-    }
-    if (_Py_EnterRecursiveCallTstate(tstate, " while calling a Python object")) {
-        return NULL;
-    }
+    return (type->tp_init == NULL
+            || (type->tp_init == object_init && type->tp_new != object_new));
+}
 
-    PyObject *argstuple = NULL, *kwds = NULL;
-    /* Build the argument tuple and keyword dict for a slot function without
-       a fast version (at most once). */
-#define MAKE_TUPLE_AND_DICT()                                            \
-    do {                                                                 \
-        if (argstuple == NULL) {                                         \
-            argstuple = PyTuple_FromArray(args, nargs);                  \
-            if (argstuple == NULL) {                                     \
-                goto error;                                              \
-            }                                                            \
-            if (kwnames != NULL) {                                       \
-                kwds = _PyStack_AsDict(args + nargs, kwnames);           \
-                if (kwds == NULL) {                                      \
-                    goto error;                                          \
-                }                                                        \
-            }                                                            \
-        }                                                                \
-    } while (0)
+/* Can heaptype_fast_vectorcall() call 'type' without building an argument
+   tuple and keyword dict? */
+static inline int
+type_can_call_fast(PyTypeObject *type, Py_newfastfunc new_fast,
+                   Py_initfastfunc init_fast)
+{
+    return ((new_fast != NULL || new_ignores_args(type))
+            && (init_fast != NULL || init_ignores_args(type)));
+}
 
-    PyObject *obj = NULL;
-    if (new_fast != NULL) {
-        obj = new_fast(type, args, nargs, kwnames);
-    }
-    else if (new_ignores_args(type)) {
-        obj = type->tp_new(type, (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
-    }
-    else {
-        MAKE_TUPLE_AND_DICT();
-        obj = type->tp_new(type, argstuple, kwds);
-    }
-    obj = _Py_CheckFunctionResult(tstate, callable, obj, NULL);
-    if (obj == NULL) {
-        goto error;
-    }
-
+/* The rest of heaptype_fast_vectorcall() after __new__ returned 'obj', in
+   the general case: initialize it like type_call() does. */
+static PyObject *
+fast_vectorcall_init(PyTypeObject *type, PyObject *obj,
+                     PyObject *const *args, Py_ssize_t nargs,
+                     PyObject *kwnames)
+{
     /* If the returned object is not an instance of type,
        it won't be initialized. */
     if (!PyObject_TypeCheck(obj, type)) {
-        goto done;
+        return obj;
     }
-
     PyTypeObject *itype = Py_TYPE(obj);
     initproc init = itype->tp_init;
     if (init == NULL) {
-        goto done;
+        return obj;
     }
     int res;
     Py_initfastfunc init_fast = _PyType_GetFastInit(itype, init);
     if (init_fast != NULL) {
         res = init_fast(obj, args, nargs, kwnames);
     }
-    else if (init == object_init
-             && (itype->tp_new != object_new
-                 || (nargs == 0 && kwnames == NULL)))
-    {
-        /* object_init() would do nothing */
-        goto done;
-    }
     else {
-        MAKE_TUPLE_AND_DICT();
+        PyObject *argstuple = PyTuple_FromArray(args, nargs);
+        if (argstuple == NULL) {
+            goto error;
+        }
+        PyObject *kwds = NULL;
+        if (kwnames != NULL) {
+            kwds = _PyStack_AsDict(args + nargs, kwnames);
+            if (kwds == NULL) {
+                Py_DECREF(argstuple);
+                goto error;
+            }
+        }
         res = init(obj, argstuple, kwds);
+        Py_DECREF(argstuple);
+        Py_XDECREF(kwds);
     }
-#undef MAKE_TUPLE_AND_DICT
     if (res < 0) {
-        assert(_PyErr_Occurred(tstate));
-        Py_CLEAR(obj);
+        goto error;
     }
-    else {
-        assert(!_PyErr_Occurred(tstate));
-    }
-    goto done;
+    return obj;
 
 error:
-    Py_CLEAR(obj);
-done:
-    _Py_LeaveRecursiveCallTstate(tstate);
-    Py_XDECREF(argstuple);
-    Py_XDECREF(kwds);
-    return obj;
+    Py_DECREF(obj);
+    return NULL;
+}
+
+/* The tp_vectorcall of the heap types which have a fast __new__ or
+   __init__: type_call() without building an argument tuple and keyword
+   dict.  Like the vectorcalls of specific types (and unlike
+   _PyObject_MakeTpCall()), it doesn't guard against recursion itself: it
+   only calls functions which take the arguments as a C array, or ignore
+   them. */
+static PyObject *
+heaptype_fast_vectorcall(PyObject *callable, PyObject *const *args,
+                         size_t nargsf, PyObject *kwnames)
+{
+    PyTypeObject *type = _PyType_CAST(callable);
+    assert(type->tp_flags & Py_TPFLAGS_HEAPTYPE);
+    struct _type_fast_slots *fast = &((PyHeapTypeObject *)type)->_ht_fast;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    if (kwnames != NULL && PyTuple_GET_SIZE(kwnames) == 0) {
+        kwnames = NULL;
+    }
+    newfunc new = type->tp_new;
+    initproc init = type->tp_init;
+    Py_newfastfunc new_fast = (new == fast->new_for) ? fast->new : NULL;
+    Py_initfastfunc init_fast = (init == fast->init_for) ? fast->init : NULL;
+    if (!type_can_call_fast(type, new_fast, init_fast)) {
+        /* The fast slots may have gone after __init__ or __new__ was
+           assigned. */
+        return _PyObject_MakeTpCall(_PyThreadState_GET(), callable,
+                                    args, nargs, kwnames);
+    }
+
+    PyObject *obj;
+    if (new_fast != NULL) {
+        obj = new_fast(type, args, nargs, kwnames);
+    }
+    else {
+        obj = new(type, (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
+    }
+    if (obj == NULL) {
+        return NULL;
+    }
+    /* Unless __new__ returned an instance of another type or assigned
+       __init__ or __new__, the slots checked above are still right. */
+    if (Py_IS_TYPE(obj, type) && type->tp_init == init && type->tp_new == new) {
+        if (init_fast != NULL && init_fast(obj, args, nargs, kwnames) < 0) {
+            Py_DECREF(obj);
+            return NULL;
+        }
+        return obj;
+    }
+    return fast_vectorcall_init(type, obj, args, nargs, kwnames);
 }
 
 /* Look up 'name' in the MRO like update_one_slot() does. */
@@ -12725,12 +12736,10 @@ type_update_fast_slots(PyTypeObject *type)
        vectorcall.  Once set, it isn't cleared: it falls back to type_call()
        if the fast slots go away, and the JIT may rely on tp_vectorcall
        staying non-NULL. */
-    int new_ok = (_PyType_GetFastNew(type, type->tp_new) != NULL);
-    int init_ok = (_PyType_GetFastInit(type, type->tp_init) != NULL);
-    if ((new_ok || init_ok)
-        && type->tp_new != NULL
-        && (new_ok || new_ignores_args(type))
-        && (init_ok || type->tp_init == NULL || type->tp_init == object_init)
+    Py_newfastfunc new_fast = _PyType_GetFastNew(type, type->tp_new);
+    Py_initfastfunc init_fast = _PyType_GetFastInit(type, type->tp_init);
+    if ((new_fast != NULL || init_fast != NULL)
+        && type_can_call_fast(type, new_fast, init_fast)
         && type->tp_vectorcall == NULL)
     {
         type->tp_vectorcall = heaptype_fast_vectorcall;
