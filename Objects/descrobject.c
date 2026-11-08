@@ -11,6 +11,7 @@
 #include "pycore_object_deferred.h" // _PyObject_SetDeferredRefcount()
 #include "pycore_pystate.h"       // _PyThreadState_GET()
 #include "pycore_tuple.h"         // _PyTuple_ITEMS()
+#include "pycore_typeobject.h"    // _PyType_GetFastInit()
 
 
 /*[clinic input]
@@ -566,6 +567,26 @@ wrapper_call_tuple(PyWrapperDescrObject *descr, PyObject *self,
     return result;
 }
 
+/* Call the "vectorcall always" __init__ of a heap type (see
+   Py_tp_init_fast): no argument tuple or keyword dict is built. */
+static PyObject *
+wrapper_call_init_fast(Py_initfastfunc init, PyObject *self,
+                       PyObject *const *args, Py_ssize_t nargs,
+                       PyObject *kwnames)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    if (_Py_EnterRecursiveCallTstate(tstate,
+                                     " while calling a Python object")) {
+        return NULL;
+    }
+    int res = init(self, args, nargs, kwnames);
+    _Py_LeaveRecursiveCallTstate(tstate);
+    if (res < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
 /* Vectorcall shared by wrapper_descriptor (after removing self from the
    arguments) and method-wrapper. */
 static inline PyObject *
@@ -575,6 +596,16 @@ wrapper_call(PyWrapperDescrObject *descr, PyObject *self,
     if (!(descr->d_base->flags & PyWrapperFlag_FASTCALL)
         || (kwnames != NULL && PyTuple_GET_SIZE(kwnames) != 0))
     {
+        /* __init__ of a heap type: Base.__init__(self, ...) or
+           super().__init__(...). */
+        if (descr->d_base->offset == (int)offsetof(PyTypeObject, tp_init)) {
+            Py_initfastfunc init = _PyType_GetFastInit(
+                PyDescr_TYPE(descr), (initproc)descr->d_wrapped);
+            if (init != NULL) {
+                return wrapper_call_init_fast(init, self, args, nargs,
+                                              kwnames);
+            }
+        }
         return wrapper_call_tuple(descr, self, args, nargs, kwnames);
     }
     /* The wrapped slot function may call back into a slot of 'self' which

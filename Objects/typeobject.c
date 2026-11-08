@@ -12388,6 +12388,8 @@ fixup_slot_dispatchers(PyTypeObject *type)
    Users of the fast functions:
    - heaptype_fast_vectorcall(), the tp_vectorcall of heap types with fast
      slots, which calls the class;
+   - the __init__ slot wrapper (wrapper_call() in descrobject.c), for
+     Base.__init__(self, ...) and super().__init__(...);
    - the __new__ wrapper, tp_new_wrapper(), for Base.__new__(cls, ...) and
      super().__new__(cls, ...).
    Static types don't have fast slots and keep using the public slots. */

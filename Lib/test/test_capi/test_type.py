@@ -508,3 +508,227 @@ class TypeTests(unittest.TestCase):
 
         # CRASHES type_modified(NULL)
         # CRASHES type_modified({}): argument must be a type
+
+
+class FastSlotsTests(unittest.TestCase):
+    # Heap types with the provisional "vectorcall always" __init__ and
+    # __new__ slots (Py_tp_init_fast, Py_tp_new_fast).  The test types record
+    # which implementation ran ('via': "fast" or "tuple") and its arguments.
+
+    def check(self, obj, via, args, kwargs):
+        self.assertEqual(obj.via, via)
+        self.assertEqual(obj.args, args)
+        self.assertEqual(obj.kwargs, kwargs)
+
+    def test_init_slots(self):
+        get_fast_slots = _testcapi.get_fast_slots
+        for name, has_fast, direct_via in [
+            ('FastInitOnly', True, 'fast'),  # tp_init is an adaptor
+            ('FastInitBoth', True, 'tuple'),
+            ('FastNeither', False, 'tuple'),
+        ]:
+            with self.subTest(name):
+                C = getattr(_testcapi, name)
+                via = 'fast' if has_fast else 'tuple'
+                self.assertEqual(get_fast_slots(C), (has_fast, False, has_fast))
+                self.check(C(), via, (), {})
+                self.check(C(1, 2, a=3), via, (1, 2), {'a': 3})
+                o = C()
+                C.__init__(o, 4, b=5)
+                self.check(o, via, (4,), {'b': 5})
+                o.__init__(6)
+                self.check(o, via, (6,), {})
+                # Calling tp_init directly, as C code does
+                _testcapi.call_tp_init(C, o, (7,), {'c': 8})
+                self.check(o, direct_via, (7,), {'c': 8})
+                _testcapi.call_tp_init(C, o, (9,))
+                self.check(o, direct_via, (9,), {})
+                with self.assertRaisesRegex(ValueError, 'fail'):
+                    C(fail=1)
+                with self.assertRaisesRegex(ValueError, 'fail'):
+                    C.__init__(o, fail=1)
+                with self.assertRaisesRegex(ValueError, 'fail'):
+                    _testcapi.call_tp_init(C, o, (), {'fail': 1})
+
+    def test_new_slots(self):
+        get_fast_slots = _testcapi.get_fast_slots
+        for name, direct_via in [
+            ('FastNewOnly', 'fast'),  # tp_new is an adaptor
+            ('FastNewBoth', 'tuple'),
+        ]:
+            with self.subTest(name):
+                C = getattr(_testcapi, name)
+                self.assertEqual(get_fast_slots(C), (False, True, True))
+                self.check(C(), 'fast', (), {})
+                self.check(C(1, 2, a=3), 'fast', (1, 2), {'a': 3})
+                self.check(C.__new__(C, 4, b=5), 'fast', (4,), {'b': 5})
+                o = _testcapi.call_tp_new(C, C, (6,), {'c': 7})
+                self.check(o, direct_via, (6,), {'c': 7})
+                class S(C):
+                    pass
+                o = _testcapi.call_tp_new(C, S, (8,))
+                self.assertIs(type(o), S)
+                self.check(o, direct_via, (8,), {})
+                with self.assertRaisesRegex(ValueError, 'fail'):
+                    C(fail=1)
+                with self.assertRaisesRegex(ValueError, 'fail'):
+                    C.__new__(C, fail=1)
+                with self.assertRaisesRegex(ValueError, 'fail'):
+                    _testcapi.call_tp_new(C, C, (), {'fail': 1})
+                # object.__init__() is skipped, like type_call() does
+                self.check(C(1), 'fast', (1,), {})
+                with self.assertRaisesRegex(TypeError, 'is not safe'):
+                    object.__new__(S)
+
+    def test_python_subclass(self):
+        get_fast_slots = _testcapi.get_fast_slots
+        for name in 'FastInitOnly', 'FastInitBoth':
+            with self.subTest(name):
+                C = getattr(_testcapi, name)
+
+                class Inherit(C):
+                    pass
+                self.assertEqual(get_fast_slots(Inherit), (True, False, True))
+                self.check(Inherit(1, a=2), 'fast', (1,), {'a': 2})
+
+                class Super(C):
+                    def __init__(self, *args, **kwargs):
+                        super().__init__(*args, **kwargs)
+                self.assertEqual(get_fast_slots(Super), (False, False, False))
+                self.check(Super(1, a=2), 'fast', (1,), {'a': 2})
+
+                class Explicit(C):
+                    def __init__(self, *args, **kwargs):
+                        C.__init__(self, *args, **kwargs)
+                self.check(Explicit(3, b=4), 'fast', (3,), {'b': 4})
+
+                class Grandchild(Inherit):
+                    pass
+                self.assertEqual(get_fast_slots(Grandchild), (True, False, True))
+                self.check(Grandchild(5), 'fast', (5,), {})
+
+        C = _testcapi.FastNewOnly
+
+        class NewSuper(C):
+            def __new__(cls, *args, **kwargs):
+                return super().__new__(cls, *args, **kwargs)
+        self.assertEqual(get_fast_slots(NewSuper), (False, False, False))
+        o = NewSuper(1, a=2)
+        self.assertIs(type(o), NewSuper)
+        self.check(o, 'fast', (1,), {'a': 2})
+
+    def test_assign_init(self):
+        get_fast_slots = _testcapi.get_fast_slots
+        for name in 'FastInitOnly', 'FastInitBoth':
+            with self.subTest(name):
+                C = getattr(_testcapi, name)
+
+                class S(C):
+                    pass
+                class T(S):
+                    pass
+                self.assertEqual(get_fast_slots(T), (True, False, True))
+                calls = []
+                def init(self, *args, **kwargs):
+                    calls.append(args)
+                    C.__init__(self, *args, **kwargs)
+                S.__init__ = init
+                self.assertEqual(get_fast_slots(S)[0], False)
+                self.assertEqual(get_fast_slots(T)[0], False)
+                self.check(S(1), 'fast', (1,), {})
+                self.check(T(2), 'fast', (2,), {})
+                self.assertEqual(calls, [(1,), (2,)])
+                del S.__init__
+                self.assertEqual(get_fast_slots(S), (True, False, True))
+                self.assertEqual(get_fast_slots(T), (True, False, True))
+                self.check(S(3), 'fast', (3,), {})
+                self.check(T(4), 'fast', (4,), {})
+                self.assertEqual(calls, [(1,), (2,)])
+                # The slot wrapper of another type
+                S.__init__ = _testcapi.FastNeither.__init__
+                with self.assertRaisesRegex(TypeError, 'requires'):
+                    S()
+
+    def test_assign_init_on_heap_type(self):
+        # The test types are mutable: assigning __init__ to the type giving
+        # the fast slots doesn't lose them for its slot wrapper.
+        class Base:
+            pass
+        C = _testcapi.FastInitOnly
+        S = type('S', (C,), {})
+        saved = C.__init__
+        try:
+            C.__init__ = lambda self, *args: saved(self, 'patched', *args)
+            self.check(C(1), 'fast', ('patched', 1), {})
+            self.check(S(2), 'fast', ('patched', 2), {})
+            o = C.__new__(C)
+            saved(o, 3)
+            self.check(o, 'fast', (3,), {})
+            _testcapi.call_tp_init(_testcapi.FastInitOnly, o, (4,))
+        finally:
+            C.__init__ = saved
+        self.assertEqual(_testcapi.get_fast_slots(S), (True, False, True))
+        self.check(S(5), 'fast', (5,), {})
+
+    def test_multiple_inheritance(self):
+        get_fast_slots = _testcapi.get_fast_slots
+        C = _testcapi.FastInitBoth
+
+        class Mixin:
+            def __init__(self, *args, **kwargs):
+                self.mixin = args
+                super().__init__(*args, **kwargs)
+
+        class MixinFirst(Mixin, C):
+            pass
+        self.assertEqual(get_fast_slots(MixinFirst), (False, False, False))
+        o = MixinFirst(1, a=2)
+        self.assertEqual(o.mixin, (1,))
+        self.check(o, 'fast', (1,), {'a': 2})
+
+        class Plain:
+            pass
+
+        class FastFirst(C, Plain):
+            pass
+        self.assertEqual(get_fast_slots(FastFirst), (True, False, True))
+        self.check(FastFirst(3), 'fast', (3,), {})
+
+    def test_change_bases(self):
+        get_fast_slots = _testcapi.get_fast_slots
+        C = _testcapi.FastInitBoth
+
+        class WithInit:
+            def __init__(self, *args, **kwargs):
+                self.with_init = True
+                super().__init__(*args, **kwargs)
+        class NoInit:
+            pass
+        class U(WithInit, C):
+            pass
+        class V(U):
+            pass
+        self.assertEqual(get_fast_slots(V)[0], False)
+        o = V(1)
+        self.assertTrue(o.with_init)
+        self.check(o, 'fast', (1,), {})
+        U.__bases__ = (NoInit, C)
+        self.assertEqual(get_fast_slots(U)[0], True)
+        self.assertEqual(get_fast_slots(V)[0], True)
+        o = V(2)
+        self.assertNotHasAttr(o, 'with_init')
+        self.check(o, 'fast', (2,), {})
+        U.__bases__ = (WithInit, C)
+        self.assertEqual(get_fast_slots(V)[0], False)
+        o = V(3)
+        self.assertTrue(o.with_init)
+        self.check(o, 'fast', (3,), {})
+
+    def test_reentrancy_and_gc(self):
+        # Errors from the fast slots propagate, and objects are freed.
+        import gc
+        C = _testcapi.FastInitOnly
+        for i in range(100):
+            with self.assertRaises(ValueError):
+                C(i, fail=True)
+        gc.collect()
