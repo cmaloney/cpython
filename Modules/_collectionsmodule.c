@@ -232,6 +232,14 @@ deque_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
     return (PyObject *)deque;
 }
 
+/* deque_new() ignores its arguments: deque.__init__() takes them. */
+static PyObject *
+deque_new_fast(PyTypeObject *type, PyObject *const *args, Py_ssize_t nargs,
+               PyObject *kwnames)
+{
+    return deque_new(type, NULL, NULL);
+}
+
 /*[clinic input]
 @critical_section
 _collections.deque.pop as deque_pop
@@ -1735,6 +1743,7 @@ done:
 
 /*[clinic input]
 @critical_section
+@vectorcall fast_slots
 @text_signature "([iterable[, maxlen]])"
 _collections.deque.__init__ as deque_init
 
@@ -1747,7 +1756,7 @@ A list-like sequence optimized for data accesses near its endpoints.
 
 static int
 deque_init_impl(dequeobject *deque, PyObject *iterable, PyObject *maxlenobj)
-/*[clinic end generated code: output=7084a39d71218dcd input=2b9e37af1fd73143]*/
+/*[clinic end generated code: output=7084a39d71218dcd input=d3d2aeafa1bec543]*/
 {
     Py_ssize_t maxlen = -1;
     if (maxlenobj != NULL && maxlenobj != Py_None) {
@@ -1869,9 +1878,10 @@ static PyType_Slot deque_slots[] = {
     {Py_tp_richcompare, deque_richcompare},
     {Py_tp_iter, deque_iter},
     {Py_tp_getset, deque_getset},
-    {Py_tp_init, deque_init},
+    DEQUE_INIT_SLOTS,
     {Py_tp_alloc, PyType_GenericAlloc},
     {Py_tp_new, deque_new},
+    {Py_tp_new_fast, deque_new_fast},
     {Py_tp_free, PyObject_GC_Del},
     {Py_tp_methods, deque_methods},
     {Py_tp_members, deque_members},
