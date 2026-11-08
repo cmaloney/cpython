@@ -285,6 +285,29 @@ _PyType_HasFeature(PyTypeObject *type, unsigned long feature) {
     return ((type->tp_flags) & feature) != 0;
 }
 
+// Fast inlined version of PyObject_TypeCheck(): scan the MRO of the type
+// of 'ob' without a function call.
+static inline int
+_PyObject_TypeCheck(PyObject *ob, PyTypeObject *type)
+{
+    PyTypeObject *tp = Py_TYPE(ob);
+    if (tp == type) {
+        return 1;
+    }
+    PyObject *mro = tp->tp_mro;
+    if (mro == NULL) {
+        // The type is not completely initialized yet
+        return PyType_IsSubtype(tp, type);
+    }
+    Py_ssize_t n = PyTuple_GET_SIZE(mro);
+    for (Py_ssize_t i = 0; i < n; i++) {
+        if (PyTuple_GET_ITEM(mro, i) == (PyObject *)type) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 extern PyStatus _PyObject_InitState(PyInterpreterState *interp);
 extern void _PyObject_FiniState(PyInterpreterState *interp);
 extern bool _PyRefchain_IsTraced(PyInterpreterState *interp, PyObject *obj);

@@ -81,7 +81,7 @@ wrapperdescr_repr(PyObject *descr)
 static int
 descr_check(PyDescrObject *descr, PyObject *obj)
 {
-    if (!PyObject_TypeCheck(obj, descr->d_type)) {
+    if (!_PyObject_TypeCheck(obj, descr->d_type)) {
         PyErr_Format(PyExc_TypeError,
                      "descriptor '%V' for '%.100s' objects "
                      "doesn't apply to a '%.100s' object",
@@ -219,7 +219,7 @@ static int
 descr_setcheck(PyDescrObject *descr, PyObject *obj, PyObject *value)
 {
     assert(obj != NULL);
-    if (!PyObject_TypeCheck(obj, descr->d_type)) {
+    if (!_PyObject_TypeCheck(obj, descr->d_type)) {
         PyErr_Format(PyExc_TypeError,
                      "descriptor '%V' for '%.100s' objects "
                      "doesn't apply to a '%.100s' object",
@@ -610,7 +610,7 @@ wrapperdescr_vectorcall(PyObject *_descr, PyObject *const *args,
         return NULL;
     }
     PyObject *self = args[0];
-    if (!PyObject_TypeCheck(self, PyDescr_TYPE(descr))) {
+    if (!_PyObject_TypeCheck(self, PyDescr_TYPE(descr))) {
         PyErr_Format(PyExc_TypeError,
                      "descriptor '%V' "
                      "requires a '%.100s' object "
