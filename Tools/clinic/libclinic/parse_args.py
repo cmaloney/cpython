@@ -1686,26 +1686,63 @@ class ParseArgsCodeGen:
                             finale: str) -> None:
         """Wrap parser code in the Py_tp_init_fast / Py_tp_new_fast prototype.
 
-        Also define {C_BASENAME}_SLOTS, the PyType_Slot entries of both the
-        tuple-based slot function and the fast one, for the type spec.
+        Also define:
+        - {c_basename_vectorcall}, a vectorcall of the exact type calling the
+          fast function, for static types (heap types use the generic one,
+          which handles subclasses too);
+        - {C_BASENAME}_SLOTS, the PyType_Slot entries of both the tuple-based
+          slot function and the fast one, for the spec of a heap type.
         """
         func = self.func
+        fast = func.c_basename_fast
         if func.kind is METHOD_INIT:
             prototype = PARSER_PROTOTYPE_FAST_INIT
             markers = FAST_FINALE_MARKERS_INIT
             slot, fast_slot = 'Py_tp_init', 'Py_tp_init_fast'
+            self.codegen.add_include('pycore_runtime.h', '_Py_SINGLETON()')
+            vc_body = f"""
+                PyObject *self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
+                    (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
+                if (self == NULL) {{{{
+                    return NULL;
+                }}}}
+                if ({fast}(self, args, PyVectorcall_NARGS(nargsf), kwnames) != 0) {{{{
+                    Py_DECREF(self);
+                    return NULL;
+                }}}}
+                return self;
+            """
+            check = f"_PyType_CAST(type)->tp_init == {func.c_basename}"
         else:
             prototype = PARSER_PROTOTYPE_FAST_NEW
             markers = VECTORCALL_FINALE_MARKERS_NEW
             slot, fast_slot = 'Py_tp_new', 'Py_tp_new_fast'
-        prototype = prototype.replace("{fast_basename}", func.c_basename_fast)
+            vc_body = f"""
+                return {fast}(_PyType_CAST(type), args,
+                    PyVectorcall_NARGS(nargsf), kwnames);
+            """
+            check = f"_PyType_CAST(type)->tp_new == {func.c_basename}"
+        prototype = prototype.replace("{fast_basename}", fast)
         lines = [prototype, preamble, *fields, finale]
         code = libclinic.linear_format("\n".join(lines), **markers)
+        vc_body = libclinic.normalize_snippet(vc_body, indent=4)
         code += "\n\n" + libclinic.normalize_snippet(f"""
+            static inline PyObject *
+            {func.c_basename_vectorcall}(PyObject *type, PyObject *const *args,
+                size_t nargsf, PyObject *kwnames)
+            {{{{
+                assert({check});
+                /* Make sure the type object is immutable: the generated
+                 * vectorcall doesn't deal e.g. with users reassigning __init__. */
+                assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+            {{vc_body}}
+            }}}}
+
             #define {func.c_basename.upper()}_SLOTS \\
                 {{{{{slot}, {func.c_basename}}}}}, \\
-                {{{{{fast_slot}, {func.c_basename_fast}}}}}
+                {{{{{fast_slot}, {fast}}}}}
             """)
+        code = code.replace("{vc_body}", vc_body)
         self.vectorcall_definition = code
 
     def vectorcall_body(self, *fields: str) -> None:
@@ -1720,14 +1757,11 @@ class ParseArgsCodeGen:
                 retval = "int return_value = -1;"
             else:
                 retval = "PyObject *return_value = NULL;"
-            base_tp = "{base_type_ptr}" if self.fast_slot_needs_base_tp else ""
-            preamble = libclinic.normalize_snippet(f"""
-                {{{{
-                    {retval}
-                    {base_tp}
-                    {{declarations}}
-                    {{initializers}}
-            """) + "\n"
+            lines = ["{{", f"    {retval}"]
+            if self.fast_slot_needs_base_tp:
+                lines.append("    {base_type_ptr}")
+            lines += ["    {declarations}", "    {initializers}"]
+            preamble = "\n".join(lines) + "\n"
         else:
             preamble = libclinic.normalize_snippet("""
                 {{
@@ -1823,7 +1857,7 @@ class ParseArgsCodeGen:
         parser_code.append(self._vectorcall_delegate_to_helper(
             'kwnames ? PyTuple_GET_SIZE(kwnames) : 0'))
         if self.func.vectorcall_fast_slots:
-            preamble = "{{\n"
+            preamble = "{{"
         else:
             preamble = libclinic.normalize_snippet("""
                 {{

@@ -5384,7 +5384,6 @@ fast_init_fast(PyObject *self, PyObject *const *args,
     Py_ssize_t nargs, PyObject *kwnames)
 {
     int return_value = -1;
-
     PyObject *a;
     PyObject *b = Py_None;
 
@@ -5404,6 +5403,26 @@ skip_optional:
     Py_END_CRITICAL_SECTION();
 
     return return_value;
+}
+
+static inline PyObject *
+fast_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    assert(_PyType_CAST(type)->tp_init == fast_init);
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    PyObject *self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
+        (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
+    if (self == NULL) {
+        return NULL;
+    }
+    if (fast_init_fast(self, args, PyVectorcall_NARGS(nargsf), kwnames) != 0) {
+        Py_DECREF(self);
+        return NULL;
+    }
+    return self;
 }
 
 #define FAST_INIT_SLOTS \
@@ -5481,10 +5500,29 @@ static int
 fast_init_kwonly_fast(PyObject *self, PyObject *const *args,
     Py_ssize_t nargs, PyObject *kwnames)
 {
-
     return fast_init_kwonly_helper(self, args, nargs,
         kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
         NULL, kwnames);
+}
+
+static inline PyObject *
+fast_init_kwonly_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    assert(_PyType_CAST(type)->tp_init == fast_init_kwonly);
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    PyObject *self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
+        (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
+    if (self == NULL) {
+        return NULL;
+    }
+    if (fast_init_kwonly_fast(self, args, PyVectorcall_NARGS(nargsf), kwnames) != 0) {
+        Py_DECREF(self);
+        return NULL;
+    }
+    return self;
 }
 
 #define FAST_INIT_KWONLY_SLOTS \
@@ -5549,6 +5587,18 @@ exit:
     return return_value;
 }
 
+static inline PyObject *
+fast_new_posonly_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    assert(_PyType_CAST(type)->tp_new == fast_new_posonly);
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    return fast_new_posonly_fast(_PyType_CAST(type), args,
+        PyVectorcall_NARGS(nargsf), kwnames);
+}
+
 #define FAST_NEW_POSONLY_SLOTS \
     {Py_tp_new, fast_new_posonly}, \
     {Py_tp_new_fast, fast_new_posonly_fast}
@@ -5594,7 +5644,19 @@ exit:
     return return_value;
 }
 
+static inline PyObject *
+fast_new_noargs_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    assert(_PyType_CAST(type)->tp_new == fast_new_noargs);
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    return fast_new_noargs_fast(_PyType_CAST(type), args,
+        PyVectorcall_NARGS(nargsf), kwnames);
+}
+
 #define FAST_NEW_NOARGS_SLOTS \
     {Py_tp_new, fast_new_noargs}, \
     {Py_tp_new_fast, fast_new_noargs_fast}
-/*[clinic end generated code: output=8e5202a17abdf6b6 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=433690edffa38264 input=a9049054013a1b77]*/

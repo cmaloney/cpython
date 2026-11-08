@@ -4,11 +4,11 @@ preserve
 
 #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
 #  include "pycore_gc.h"          // PyGC_Head
-#  include "pycore_runtime.h"     // _Py_ID()
 #endif
 #include "pycore_abstract.h"      // _Py_convert_optional_to_ssize_t()
 #include "pycore_critical_section.h"// Py_BEGIN_CRITICAL_SECTION()
 #include "pycore_modsupport.h"    // _PyArg_CheckPositional()
+#include "pycore_runtime.h"       // _Py_SINGLETON()
 
 PyDoc_STRVAR(_io_StringIO_getvalue__doc__,
 "getvalue($self, /)\n"
@@ -410,6 +410,26 @@ skip_optional:
     return return_value;
 }
 
+static inline PyObject *
+_io_StringIO_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    assert(_PyType_CAST(type)->tp_init == _io_StringIO___init__);
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    PyObject *self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
+        (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
+    if (self == NULL) {
+        return NULL;
+    }
+    if (_io_StringIO___init___fast(self, args, PyVectorcall_NARGS(nargsf), kwnames) != 0) {
+        Py_DECREF(self);
+        return NULL;
+    }
+    return self;
+}
+
 #define _IO_STRINGIO___INIT___SLOTS \
     {Py_tp_init, _io_StringIO___init__}, \
     {Py_tp_init_fast, _io_StringIO___init___fast}
@@ -594,4 +614,4 @@ _io_StringIO_newlines_get(PyObject *self, void *Py_UNUSED(context))
 
 #define _IO_STRINGIO_NEWLINES_GETSETDEF {"newlines", (getter)_io_StringIO_newlines_get, (setter)NULL, NULL},
 
-/*[clinic end generated code: output=78b8057f74b42a4b input=a9049054013a1b77]*/
+/*[clinic end generated code: output=5548ad64d28fc87c input=a9049054013a1b77]*/

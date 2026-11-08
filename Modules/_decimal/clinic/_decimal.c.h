@@ -962,6 +962,18 @@ skip_optional:
     return return_value;
 }
 
+static inline PyObject *
+dec_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    assert(_PyType_CAST(type)->tp_new == dec_new);
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    return dec_new_fast(_PyType_CAST(type), args,
+        PyVectorcall_NARGS(nargsf), kwnames);
+}
+
 #define DEC_NEW_SLOTS \
     {Py_tp_new, dec_new}, \
     {Py_tp_new_fast, dec_new_fast}
@@ -6329,4 +6341,4 @@ exit:
 #ifndef _DECIMAL_CONTEXT_APPLY_METHODDEF
     #define _DECIMAL_CONTEXT_APPLY_METHODDEF
 #endif /* !defined(_DECIMAL_CONTEXT_APPLY_METHODDEF) */
-/*[clinic end generated code: output=9cde4afea2eaaee7 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=b2ec1d6187ad23f8 input=a9049054013a1b77]*/
