@@ -181,36 +181,19 @@ bytearray___init__(PyObject *self, PyObject *args, PyObject *kwargs)
         kwargs, NULL);
 }
 
-static PyObject *
-bytearray_vectorcall(PyObject *type, PyObject *const *args,
-    size_t nargsf, PyObject *kwnames)
+static int
+bytearray___init___fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
 {
-    PyObject *return_value = NULL;
-    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
-    PyObject *self;
-    int _result;
+    int return_value = -1;
     PyObject *arg = NULL;
     const char *encoding = NULL;
     const char *errors = NULL;
 
-    assert(_PyType_CAST(type)->tp_init == bytearray___init__);
-    /* Make sure the type object is immutable: the generated
-     * vectorcall doesn't deal e.g. with users reassigning __init__. */
-    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
     if (kwnames != NULL || nargs > 3) {
-        self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
-            (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
-        if (self == NULL) {
-            return NULL;
-        }
-        _result = bytearray___init___helper(self, args, nargs,
+        return bytearray___init___helper(self, args, nargs,
             kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
             NULL, kwnames);
-        if (_result != 0) {
-            Py_DECREF(self);
-            return NULL;
-        }
-        return self;
     }
     if (nargs < 1) {
         goto skip_optional;
@@ -239,21 +222,35 @@ bytearray_vectorcall(PyObject *type, PyObject *const *args,
         goto exit;
     }
 skip_optional:
-    self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
-        (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
-    if (self == NULL) {
-        goto exit;
-    }
-    _result = bytearray___init___impl((PyByteArrayObject *)self, arg, encoding, errors);
-    if (_result != 0) {
-        Py_DECREF(self);
-        goto exit;
-    }
-    return_value = self;
+    return_value = bytearray___init___impl((PyByteArrayObject *)self, arg, encoding, errors);
 
 exit:
     return return_value;
 }
+
+static inline PyObject *
+bytearray_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    assert(_PyType_CAST(type)->tp_init == bytearray___init__);
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    PyObject *self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
+        (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
+    if (self == NULL) {
+        return NULL;
+    }
+    if (bytearray___init___fast(self, args, PyVectorcall_NARGS(nargsf), kwnames) != 0) {
+        Py_DECREF(self);
+        return NULL;
+    }
+    return self;
+}
+
+#define BYTEARRAY___INIT___SLOTS \
+    {Py_tp_init, bytearray___init__}, \
+    {Py_tp_init_fast, bytearray___init___fast}
 
 static PyObject *
 bytearray_repr_impl(PyObject *op);
@@ -2037,4 +2034,4 @@ bytearray_sizeof(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
     return bytearray_sizeof_impl((PyByteArrayObject *)self);
 }
-/*[clinic end generated code: output=b8e659fe4b2f770e input=a9049054013a1b77]*/
+/*[clinic end generated code: output=e090eb456469e19e input=a9049054013a1b77]*/

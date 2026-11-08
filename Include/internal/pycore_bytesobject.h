@@ -19,6 +19,10 @@ extern PyObject* _PyBytes_FormatEx(
  * reference rather than modifying its first argument in place. */
 extern PyObject* _PyBytes_Concat(PyObject *a, PyObject *b);
 
+// Register the fast __init__ and __new__ of bytearray
+// (see _PyStaticType_SetFastSlots())
+extern void _PyByteArray_InitFastSlots(PyInterpreterState *interp);
+
 extern PyObject* _PyBytes_FromHex(
     PyObject *string,
     int use_bytearray);

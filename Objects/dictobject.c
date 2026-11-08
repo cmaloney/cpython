@@ -5489,11 +5489,11 @@ dict_init(PyObject *self, PyObject *args, PyObject *kwds)
     return dict_update_common(self, args, kwds, "dict");
 }
 
-/* The fast __init__ of dict (see _PyStaticType_SetFastSlots()), which takes
-   the arguments as a C array: it must behave like dict_init(). */
-int
-_PyDict_InitFast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
-                 PyObject *kwnames)
+/* The fast __init__ of dict, which takes the arguments as a C array: it
+   must behave like dict_init(). */
+static int
+dict_init_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+               PyObject *kwnames)
 {
     if (!_PyArg_CheckPositional("dict", nargs, 0, 1)) {
         return -1;
@@ -5515,11 +5515,18 @@ _PyDict_InitFast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
 }
 
 /* The fast __new__ of dict: dict_new() ignores its arguments. */
-PyObject *
-_PyDict_NewFast(PyTypeObject *type, PyObject *const *Py_UNUSED(args),
-                Py_ssize_t Py_UNUSED(nargs), PyObject *Py_UNUSED(kwnames))
+static PyObject *
+dict_new_fast(PyTypeObject *type, PyObject *const *Py_UNUSED(args),
+              Py_ssize_t Py_UNUSED(nargs), PyObject *Py_UNUSED(kwnames))
 {
     return dict_new(type, NULL, NULL);
+}
+
+void
+_PyDict_InitFastSlots(PyInterpreterState *interp)
+{
+    _PyStaticType_SetFastSlots(interp, &PyDict_Type,
+                               dict_init_fast, dict_new_fast);
 }
 
 static PyObject *
@@ -5531,8 +5538,7 @@ dict_vectorcall(PyObject *type, PyObject * const*args,
     if (self == NULL) {
         return NULL;
     }
-    if (_PyDict_InitFast(self, args, PyVectorcall_NARGS(nargsf),
-                         kwnames) < 0)
+    if (dict_init_fast(self, args, PyVectorcall_NARGS(nargsf), kwnames) < 0)
     {
         Py_DECREF(self);
         return NULL;

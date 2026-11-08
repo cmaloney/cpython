@@ -967,8 +967,16 @@ bytearray_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
     return op;
 }
 
+/* The fast __new__ of bytearray: bytearray_new() ignores its arguments. */
+static PyObject *
+bytearray_new_fast(PyTypeObject *type, PyObject *const *Py_UNUSED(args),
+                   Py_ssize_t Py_UNUSED(nargs), PyObject *Py_UNUSED(kwnames))
+{
+    return bytearray_new(type, NULL, NULL);
+}
+
 /*[clinic input]
-@vectorcall
+@vectorcall fast_slots
 bytearray.__init__
 
     source as arg: object = NULL
@@ -980,7 +988,7 @@ bytearray.__init__
 static int
 bytearray___init___impl(PyByteArrayObject *self, PyObject *arg,
                         const char *encoding, const char *errors)
-/*[clinic end generated code: output=4ce1304649c2f8b3 input=24ddb84055f432dd]*/
+/*[clinic end generated code: output=4ce1304649c2f8b3 input=15609c08bddbed18]*/
 {
     Py_ssize_t count;
     PyObject *it;
@@ -1186,6 +1194,13 @@ slowpath:
     /* Error handling when it != NULL */
     Py_DECREF(it);
     return -1;
+}
+
+void
+_PyByteArray_InitFastSlots(PyInterpreterState *interp)
+{
+    _PyStaticType_SetFastSlots(interp, &PyByteArray_Type,
+                               bytearray___init___fast, bytearray_new_fast);
 }
 
 /*[clinic input]

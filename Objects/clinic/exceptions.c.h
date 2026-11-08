@@ -455,32 +455,38 @@ ImportError_init(PyObject *self, PyObject *args, PyObject *kwargs)
         kwargs, NULL);
 }
 
-static PyObject *
+static int
+ImportError_init_fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    return ImportError_init_helper(self, args, nargs,
+        kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+        NULL, kwnames);
+}
+
+static inline PyObject *
 ImportError_vectorcall(PyObject *type, PyObject *const *args,
     size_t nargsf, PyObject *kwnames)
 {
-    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
-    PyObject *self;
-    int _result;
-
     assert(_PyType_CAST(type)->tp_init == ImportError_init);
     /* Make sure the type object is immutable: the generated
      * vectorcall doesn't deal e.g. with users reassigning __init__. */
     assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
-    self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
+    PyObject *self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
         (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
     if (self == NULL) {
         return NULL;
     }
-    _result = ImportError_init_helper(self, args, nargs,
-        kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
-        NULL, kwnames);
-    if (_result != 0) {
+    if (ImportError_init_fast(self, args, PyVectorcall_NARGS(nargsf), kwnames) != 0) {
         Py_DECREF(self);
         return NULL;
     }
     return self;
 }
+
+#define IMPORTERROR_INIT_SLOTS \
+    {Py_tp_init, ImportError_init}, \
+    {Py_tp_init_fast, ImportError_init_fast}
 
 static int
 NameError_init_impl(PyNameErrorObject *self, PyObject *args, PyObject *name);
@@ -555,32 +561,38 @@ NameError_init(PyObject *self, PyObject *args, PyObject *kwargs)
         kwargs, NULL);
 }
 
-static PyObject *
+static int
+NameError_init_fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    return NameError_init_helper(self, args, nargs,
+        kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+        NULL, kwnames);
+}
+
+static inline PyObject *
 NameError_vectorcall(PyObject *type, PyObject *const *args,
     size_t nargsf, PyObject *kwnames)
 {
-    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
-    PyObject *self;
-    int _result;
-
     assert(_PyType_CAST(type)->tp_init == NameError_init);
     /* Make sure the type object is immutable: the generated
      * vectorcall doesn't deal e.g. with users reassigning __init__. */
     assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
-    self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
+    PyObject *self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
         (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
     if (self == NULL) {
         return NULL;
     }
-    _result = NameError_init_helper(self, args, nargs,
-        kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
-        NULL, kwnames);
-    if (_result != 0) {
+    if (NameError_init_fast(self, args, PyVectorcall_NARGS(nargsf), kwnames) != 0) {
         Py_DECREF(self);
         return NULL;
     }
     return self;
 }
+
+#define NAMEERROR_INIT_SLOTS \
+    {Py_tp_init, NameError_init}, \
+    {Py_tp_init_fast, NameError_init_fast}
 
 static int
 AttributeError_init_impl(PyAttributeErrorObject *self, PyObject *args,
@@ -663,32 +675,38 @@ AttributeError_init(PyObject *self, PyObject *args, PyObject *kwargs)
         kwargs, NULL);
 }
 
-static PyObject *
+static int
+AttributeError_init_fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    return AttributeError_init_helper(self, args, nargs,
+        kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+        NULL, kwnames);
+}
+
+static inline PyObject *
 AttributeError_vectorcall(PyObject *type, PyObject *const *args,
     size_t nargsf, PyObject *kwnames)
 {
-    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
-    PyObject *self;
-    int _result;
-
     assert(_PyType_CAST(type)->tp_init == AttributeError_init);
     /* Make sure the type object is immutable: the generated
      * vectorcall doesn't deal e.g. with users reassigning __init__. */
     assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
-    self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
+    PyObject *self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
         (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
     if (self == NULL) {
         return NULL;
     }
-    _result = AttributeError_init_helper(self, args, nargs,
-        kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
-        NULL, kwnames);
-    if (_result != 0) {
+    if (AttributeError_init_fast(self, args, PyVectorcall_NARGS(nargsf), kwnames) != 0) {
         Py_DECREF(self);
         return NULL;
     }
     return self;
 }
+
+#define ATTRIBUTEERROR_INIT_SLOTS \
+    {Py_tp_init, AttributeError_init}, \
+    {Py_tp_init_fast, AttributeError_init_fast}
 #define BASEEXCEPTION_ARGS_GETSETDEF {"args", (getter)BaseException_args_get, (setter)BaseException_args_set, NULL},
 
 #define BASEEXCEPTION___TRACEBACK___GETSETDEF {"__traceback__", (getter)BaseException___traceback___get, (setter)BaseException___traceback___set, NULL},
@@ -697,4 +715,4 @@ AttributeError_vectorcall(PyObject *type, PyObject *const *args,
 
 #define BASEEXCEPTION___CAUSE___GETSETDEF {"__cause__", (getter)BaseException___cause___get, (setter)BaseException___cause___set, NULL},
 
-/*[clinic end generated code: output=c8eaffee13bc041d input=a9049054013a1b77]*/
+/*[clinic end generated code: output=df905e22ec833cd8 input=a9049054013a1b77]*/

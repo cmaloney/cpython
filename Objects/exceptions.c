@@ -1811,7 +1811,7 @@ PyImportErrorObject_CAST(PyObject *self)
 }
 
 /*[clinic input]
-@vectorcall
+@vectorcall fast_slots
 ImportError.__init__ as ImportError_init
 
     *args: tuple
@@ -1824,7 +1824,7 @@ ImportError.__init__ as ImportError_init
 static int
 ImportError_init_impl(PyImportErrorObject *self, PyObject *args,
                       PyObject *name, PyObject *path, PyObject *name_from)
-/*[clinic end generated code: output=4917add0f9473bd2 input=4e94a3b530f9be97]*/
+/*[clinic end generated code: output=4917add0f9473bd2 input=0c6183b5034c77f7]*/
 {
     PyObject *msg = NULL;
 
@@ -2611,7 +2611,7 @@ PyNameErrorObject_CAST(PyObject *self)
 }
 
 /*[clinic input]
-@vectorcall
+@vectorcall fast_slots
 NameError.__init__ as NameError_init
 
     *args: tuple
@@ -2621,7 +2621,7 @@ NameError.__init__ as NameError_init
 
 static int
 NameError_init_impl(PyNameErrorObject *self, PyObject *args, PyObject *name)
-/*[clinic end generated code: output=f15305075d9aa272 input=2e2b7e781ae146b1]*/
+/*[clinic end generated code: output=f15305075d9aa272 input=3420f4651d287aca]*/
 {
     if (BaseException_init((PyObject *)self, args, NULL) == -1) {
         return -1;
@@ -2690,7 +2690,7 @@ PyAttributeErrorObject_CAST(PyObject *self)
 }
 
 /*[clinic input]
-@vectorcall
+@vectorcall fast_slots
 AttributeError.__init__ as AttributeError_init
 
     *args: tuple
@@ -2702,7 +2702,7 @@ AttributeError.__init__ as AttributeError_init
 static int
 AttributeError_init_impl(PyAttributeErrorObject *self, PyObject *args,
                          PyObject *name, PyObject *obj)
-/*[clinic end generated code: output=3d346f9a389f60fa input=bed43aafea47f1a0]*/
+/*[clinic end generated code: output=3d346f9a389f60fa input=f64d813a147d2a98]*/
 {
     if (BaseException_init((PyObject *)self, args, NULL) == -1) {
         return -1;
@@ -4584,24 +4584,30 @@ _PyExc_InitTypes(PyInterpreterState *interp)
         if (_PyStaticType_InitBuiltin(interp, exc) < 0) {
             return -1;
         }
-        _PyStaticType_SetFastSlots(
-            interp, exc,
-            exc->tp_init == BaseException_init ? BaseException_init_fast : NULL,
-            exc->tp_new == BaseException_new ? BaseException_new_fast : NULL);
+        Py_initfastfunc init_fast = NULL;
         if (exc->tp_new == BaseException_new
             && exc->tp_init == BaseException_init)
         {
             exc->tp_vectorcall = BaseException_vectorcall;
         }
+        if (exc->tp_init == BaseException_init) {
+            init_fast = BaseException_init_fast;
+        }
         else if (exc->tp_init == ImportError_init) {
             exc->tp_vectorcall = ImportError_vectorcall;
+            init_fast = ImportError_init_fast;
         }
         else if (exc->tp_init == NameError_init) {
             exc->tp_vectorcall = NameError_vectorcall;
+            init_fast = NameError_init_fast;
         }
         else if (exc->tp_init == AttributeError_init) {
             exc->tp_vectorcall = AttributeError_vectorcall;
+            init_fast = AttributeError_init_fast;
         }
+        _PyStaticType_SetFastSlots(
+            interp, exc, init_fast,
+            exc->tp_new == BaseException_new ? BaseException_new_fast : NULL);
     }
     return 0;
 }
