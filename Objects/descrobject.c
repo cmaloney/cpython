@@ -566,6 +566,24 @@ wrapper_call_tuple(PyWrapperDescrObject *descr, PyObject *self,
     return result;
 }
 
+/* Call the "vectorcall always" implementation of a slot taking keyword
+   arguments (see _PyWrapperDescrObject): no argument tuple or keyword dict
+   is built. */
+static PyObject *
+wrapper_call_fast(PyCFunctionFastWithKeywords fast, PyObject *self,
+                  PyObject *const *args, Py_ssize_t nargs,
+                  PyObject *kwnames)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    if (_Py_EnterRecursiveCallTstate(tstate,
+                                     " while calling a Python object")) {
+        return NULL;
+    }
+    PyObject *result = fast(self, args, nargs, kwnames);
+    _Py_LeaveRecursiveCallTstate(tstate);
+    return result;
+}
+
 /* Vectorcall shared by wrapper_descriptor (after removing self from the
    arguments) and method-wrapper. */
 static inline PyObject *
@@ -575,6 +593,11 @@ wrapper_call(PyWrapperDescrObject *descr, PyObject *self,
     if (!(descr->d_base->flags & PyWrapperFlag_FASTCALL)
         || (kwnames != NULL && PyTuple_GET_SIZE(kwnames) != 0))
     {
+        PyCFunctionFastWithKeywords fast =
+            ((_PyWrapperDescrObject *)descr)->d_fast;
+        if (fast != NULL) {
+            return wrapper_call_fast(fast, self, args, nargs, kwnames);
+        }
         return wrapper_call_tuple(descr, self, args, nargs, kwnames);
     }
     /* The wrapped slot function may call back into a slot of 'self' which
@@ -927,7 +950,7 @@ PyTypeObject PyGetSetDescr_Type = {
 PyTypeObject PyWrapperDescr_Type = {
     PyVarObject_HEAD_INIT(&PyType_Type, 0)
     "wrapper_descriptor",
-    sizeof(PyWrapperDescrObject),
+    sizeof(_PyWrapperDescrObject),
     0,
     descr_dealloc,                              /* tp_dealloc */
     offsetof(PyWrapperDescrObject, vectorcall), /* tp_vectorcall_offset */
@@ -1081,8 +1104,35 @@ PyDescr_NewWrapper(PyTypeObject *type, struct wrapperbase *base, void *wrapped)
         descr->d_base = base;
         descr->d_wrapped = wrapped;
         descr->vectorcall = wrapperdescr_vectorcall;
+        ((_PyWrapperDescrObject *)descr)->d_fast = NULL;
     }
     return (PyObject *)descr;
+}
+
+/* Set the "vectorcall always" implementation of the slot wrapper 'descr'
+   which 'type' defines, from a tp_methods entry with _Py_METH_SLOT_FAST.
+   Only slots whose wrapper takes keyword arguments (tp_init, tp_call) are
+   supported: the other wrappers already take a C array (see
+   PyWrapperFlag_FASTCALL). */
+int
+_PyDescr_SetWrapperFast(PyObject *descr, PyTypeObject *type,
+                        PyMethodDef *meth)
+{
+    if (meth->ml_flags != (METH_FASTCALL | METH_KEYWORDS | _Py_METH_SLOT_FAST)
+        || descr == NULL
+        || !Py_IS_TYPE(descr, &PyWrapperDescr_Type)
+        || PyDescr_TYPE(descr) != type
+        || !(((PyWrapperDescrObject *)descr)->d_base->flags
+             & PyWrapperFlag_KEYWORDS))
+    {
+        PyErr_Format(PyExc_SystemError,
+                     "%s.%s: invalid _Py_METH_SLOT_FAST method",
+                     type->tp_name, meth->ml_name);
+        return -1;
+    }
+    ((_PyWrapperDescrObject *)descr)->d_fast =
+        _PyCFunctionFastWithKeywords_CAST(meth->ml_meth);
+    return 0;
 }
 
 int

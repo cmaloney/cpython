@@ -8588,6 +8588,18 @@ type_add_method(PyTypeObject *type, PyMethodDef *meth)
 {
     PyObject *descr;
     int isdescr = 1;
+    if (meth->ml_flags & _Py_METH_SLOT_FAST) {
+        /* Not a method: the "vectorcall always" implementation of the slot
+           wrapper of the same name, which add_operators() added. */
+        PyObject *wrapper;
+        if (PyDict_GetItemStringRef(lookup_tp_dict(type), meth->ml_name,
+                                    &wrapper) < 0) {
+            return -1;
+        }
+        int res = _PyDescr_SetWrapperFast(wrapper, type, meth);
+        Py_XDECREF(wrapper);
+        return res;
+    }
     if (meth->ml_flags & METH_CLASS) {
         if (meth->ml_flags & METH_STATIC) {
             PyErr_SetString(PyExc_ValueError,

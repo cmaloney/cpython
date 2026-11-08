@@ -1763,7 +1763,7 @@ class SizeofTest(unittest.TestCase):
         import collections
         check(collections.defaultdict.default_factory, size('3PP'))
         # wrapper_descriptor (descriptor object)
-        check(int.__add__, size('3P3P'))
+        check(int.__add__, size('3P4P'))
         # method-wrapper (descriptor object)
         check({}.__iter__, size('3P'))
         # empty dict
