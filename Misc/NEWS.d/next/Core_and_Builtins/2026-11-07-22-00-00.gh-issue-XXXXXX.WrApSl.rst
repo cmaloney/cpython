@@ -1,0 +1,8 @@
+Speed up special method calls on classes which inherit some special methods
+from a builtin type. For example, ``==`` on a class which defines only
+:meth:`~object.__lt__`, item assignment on a :class:`dict` subclass which
+defines only :meth:`~object.__delitem__` (such as
+:class:`collections.Counter`), and :func:`next` on a class whose
+:meth:`~iterator.__next__` is the bound ``__next__`` of another iterator (as
+in :func:`xml.etree.ElementTree.iterparse`) now call the inherited C
+implementation directly instead of going through its slot wrapper.

@@ -1341,6 +1341,86 @@ class TestCase(unittest.TestCase):
                 self.assertEqual(f.line[f.colno - indent : f.end_colno - indent],
                                  expected)
 
+    def test_next_is_bound_method_wrapper(self):
+        # A class whose __next__ is the bound __next__ of
+        # another iterator (a "method-wrapper"), as used by
+        # xml.etree.ElementTree.iterparse().
+        def make(it):
+            class Wrapper:
+                __next__ = it.__next__
+                def __iter__(self):
+                    return self
+            self.assertEqual(type(Wrapper.__dict__['__next__']).__name__,
+                             'method-wrapper')
+            return Wrapper()
+
+        def gen(result):
+            yield 1
+            yield 2
+            return result
+
+        # Exhaustion in a for loop, list() and next() with a default.
+        self.assertEqual(list(make(gen(None))), [1, 2])
+        self.assertEqual([x for x in make(iter([1, 2, 3]))], [1, 2, 3])
+        w = make(iter(range(1)))
+        self.assertEqual(next(w), 0)
+        self.assertIs(next(w, None), None)
+        self.assertRaises(StopIteration, next, w)
+        self.assertRaises(StopIteration, next, w)
+
+        # The generator's return value is preserved by next() and
+        # by "yield from".
+        for value in (None, 42, (1, 2)):
+            with self.subTest(value=value):
+                w = make(gen(value))
+                self.assertEqual(next(w), 1)
+                self.assertEqual(next(w), 2)
+                with self.assertRaises(StopIteration) as cm:
+                    next(w)
+                self.assertEqual(cm.exception.value, value)
+
+                def delegate():
+                    result = yield from make(gen(value))
+                    return result
+                d = delegate()
+                self.assertEqual(next(d), 1)
+                self.assertEqual(next(d), 2)
+                with self.assertRaises(StopIteration) as cm:
+                    next(d)
+                self.assertEqual(cm.exception.value, value)
+
+        # Exceptions raised by the underlying iterator propagate.
+        def bad():
+            yield 1
+            raise ZeroDivisionError
+        w = make(bad())
+        self.assertEqual(next(w), 1)
+        self.assertRaises(ZeroDivisionError, next, w)
+        self.assertRaises(StopIteration, next, w)
+        self.assertRaises(ZeroDivisionError, list, make(bad()))
+
+        # Method-wrappers of other slots are called normally.
+        class Other:
+            __next__ = (1).__neg__
+        self.assertEqual(next(Other()), -1)
+        class NeedsArg:
+            __next__ = (1).__add__
+        self.assertRaises(TypeError, next, NeedsArg())
+
+    def test_next_is_bound_method_wrapper_recursion(self):
+        # A purely C-level cycle through a method-wrapper __next__ must
+        # raise RecursionError, not crash.
+        class Cycle:
+            def __iter__(self):
+                return self
+            def __next__(self):
+                raise StopIteration
+        c = Cycle()
+        m = map(None.__eq__, c)
+        Cycle.__next__ = m.__next__
+        self.assertRaises(RecursionError, next, c)
+        self.assertRaises(RecursionError, list, m)
+
 
 
 if __name__ == "__main__":

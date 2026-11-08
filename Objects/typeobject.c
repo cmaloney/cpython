@@ -3,6 +3,7 @@
 #include "Python.h"
 #include "pycore_abstract.h"      // _PySequence_IterSearch()
 #include "pycore_call.h"          // _PyObject_VectorcallTstate()
+#include "pycore_ceval.h"         // _Py_EnterRecursiveCallTstate()
 #include "pycore_code.h"          // CO_FAST_FREE
 #include "pycore_descrobject.h"   // _PyMember_GetOffset()
 #include "pycore_dict.h"          // _PyDict_KeysSize()
@@ -10566,6 +10567,57 @@ add_tp_new_wrapper(PyTypeObject *type)
 /* Slot wrappers that call the corresponding __foo__ slot.  See comments
    below at override_slots() for more explanation. */
 
+/* Fast path for slot functions which find an inherited wrapper_descriptor.
+
+   A slot shared by several dunders (tp_richcompare, mp_ass_subscript, ...)
+   becomes a generic slot_* function as soon as one of those dunders is
+   defined in Python.  The other dunders then usually resolve to a
+   wrapper_descriptor of a builtin base class (e.g. object.__eq__ or
+   dict.__setitem__).  Calling it through wrapperdescr_call() builds two
+   argument tuples, so instead call the wrapped C function directly.
+
+   If 'descr' is a wrapper_descriptor using the wrapper function 'wrapper'
+   and 'self' is an instance of the descriptor's type, return the wrapped C
+   function.  Otherwise, return NULL and the caller must use a regular call.
+   Checking 'wrapper' ensures that the wrapped function has the expected
+   signature and receives the same arguments as the wrapper would pass.
+
+   The caller must hold a strong reference to 'descr' for the duration of the
+   call and must wrap the call with wrapped_slot_enter() and
+   wrapped_slot_leave() to keep the recursion check and the result check
+   done by _PyObject_MakeTpCall(). */
+static inline void *
+wrapperdescr_get_wrapped(PyObject *descr, wrapperfunc wrapper, PyObject *self)
+{
+    if (!Py_IS_TYPE(descr, &PyWrapperDescr_Type)) {
+        return NULL;
+    }
+    PyWrapperDescrObject *wd = (PyWrapperDescrObject *)descr;
+    if (wd->d_base->wrapper != wrapper) {
+        return NULL;
+    }
+    /* Same check as wrapperdescr_call(); on failure, the regular call
+       raises the TypeError. */
+    if (!PyObject_TypeCheck(self, PyDescr_TYPE(wd))) {
+        return NULL;
+    }
+    return wd->d_wrapped;
+}
+
+static inline int
+wrapped_slot_enter(PyThreadState *tstate)
+{
+    /* Same message as _PyObject_MakeTpCall() */
+    return _Py_EnterRecursiveCallTstate(tstate, " while calling a Python object");
+}
+
+static inline PyObject *
+wrapped_slot_leave(PyThreadState *tstate, PyObject *descr, PyObject *result)
+{
+    _Py_LeaveRecursiveCallTstate(tstate);
+    return _Py_CheckFunctionResult(tstate, descr, result, NULL);
+}
+
 #define SLOT0(FUNCNAME, DUNDER) \
 static PyObject * \
 FUNCNAME(PyObject *self) \
@@ -10762,18 +10814,42 @@ SLOT1(slot_mp_subscript, __getitem__, PyObject *)
 static int
 slot_mp_ass_subscript(PyObject *self, PyObject *key, PyObject *value)
 {
-    PyObject *stack[3];
-    PyObject *res;
-
-    stack[0] = self;
-    stack[1] = key;
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *name;
+    wrapperfunc wrapper;
     if (value == NULL) {
-        res = vectorcall_method(&_Py_ID(__delitem__), stack, 2);
+        name = &_Py_ID(__delitem__);
+        wrapper = wrap_delitem;
     }
     else {
-        stack[2] = value;
-        res = vectorcall_method(&_Py_ID(__setitem__), stack, 3);
+        name = &_Py_ID(__setitem__);
+        wrapper = wrap_objobjargproc;
     }
+
+    PyObject *res = NULL;
+    _PyCStackRef cref;
+    _PyThreadState_PushCStackRef(tstate, &cref);
+    int unbound = lookup_method(self, name, &cref.ref);
+    if (unbound >= 0) {
+        PyObject *func = PyStackRef_AsPyObjectBorrow(cref.ref);
+        objobjargproc wrapped = (objobjargproc)wrapperdescr_get_wrapped(
+            func, wrapper, self);
+        if (wrapped != NULL) {
+            /* Equivalent of wrap_objobjargproc() and wrap_delitem() */
+            if (wrapped_slot_enter(tstate) == 0) {
+                int r = wrapped(self, key, value);
+                /* Py_None is immortal: no incref needed */
+                res = (r == -1 && _PyErr_Occurred(tstate)) ? NULL : Py_None;
+                res = wrapped_slot_leave(tstate, func, res);
+            }
+        }
+        else {
+            PyObject *stack[3] = {self, key, value};
+            res = vectorcall_unbound(tstate, unbound, func, stack,
+                                     value == NULL ? 2 : 3);
+        }
+    }
+    _PyThreadState_PopCStackRef(tstate, &cref);
 
     if (res == NULL)
         return -1;
@@ -11113,12 +11189,42 @@ static PyObject *name_op[] = {
     &_Py_ID(__ge__),
 };
 
+static wrapperfunc richcmp_wrappers[] = {
+    richcmp_lt,
+    richcmp_le,
+    richcmp_eq,
+    richcmp_ne,
+    richcmp_gt,
+    richcmp_ge,
+};
+
 static PyObject *
 slot_tp_richcompare(PyObject *self, PyObject *other, int op)
 {
-    PyObject *res = _PyObject_MaybeCallSpecialOneArg(self, name_op[op], other);
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *res = NULL;
+    _PyCStackRef cref;
+    _PyThreadState_PushCStackRef(tstate, &cref);
+    int unbound = lookup_maybe_method(self, name_op[op], &cref.ref);
+    PyObject *func = PyStackRef_AsPyObjectBorrow(cref.ref);
+    if (func != NULL) {
+        richcmpfunc wrapped = (richcmpfunc)wrapperdescr_get_wrapped(
+            func, richcmp_wrappers[op], self);
+        if (wrapped != NULL) {
+            /* Equivalent of wrap_richcmpfunc() */
+            if (wrapped_slot_enter(tstate) == 0) {
+                res = wrapped(self, other, op);
+                res = wrapped_slot_leave(tstate, func, res);
+            }
+        }
+        else {
+            PyObject *args[] = {self, other};
+            res = vectorcall_unbound(tstate, unbound, func, args, 2);
+        }
+    }
+    _PyThreadState_PopCStackRef(tstate, &cref);
     if (res == NULL) {
-        if (PyErr_Occurred()) {
+        if (_PyErr_Occurred(tstate)) {
             return NULL;
         }
         Py_RETURN_NOTIMPLEMENTED;
@@ -11162,8 +11268,44 @@ slot_tp_iter(PyObject *self)
 static PyObject *
 slot_tp_iternext(PyObject *self)
 {
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *res = NULL;
+    _PyCStackRef cref;
+    _PyThreadState_PushCStackRef(tstate, &cref);
+    int unbound = lookup_method(self, &_Py_ID(__next__), &cref.ref);
+    if (unbound < 0) {
+        goto done;
+    }
+    PyObject *func = PyStackRef_AsPyObjectBorrow(cref.ref);
+    if (!unbound && Py_IS_TYPE(func, &_PyMethodWrapper_Type)) {
+        /* __next__ is the bound __next__ of another iterator, as in
+           "__next__ = gen.__next__".  Call its tp_iternext directly rather
+           than going through wrap_next(), which would turn exhaustion
+           (NULL without an exception) into a StopIteration that our caller
+           then has to catch.  Returning NULL without an exception is valid
+           for tp_iternext; a StopIteration set by the wrapped function
+           (e.g. one carrying a generator's return value) is passed
+           through unchanged. */
+        _PyMethodWrapperObject *wp = (_PyMethodWrapperObject *)func;
+        if (wp->descr->d_base->wrapper == wrap_next) {
+            iternextfunc next = (iternextfunc)wp->descr->d_wrapped;
+            if (wrapped_slot_enter(tstate) == 0) {
+                res = next(wp->self);
+                if (res != NULL) {
+                    res = wrapped_slot_leave(tstate, func, res);
+                }
+                else {
+                    _Py_LeaveRecursiveCallTstate(tstate);
+                }
+            }
+            goto done;
+        }
+    }
     PyObject *stack[1] = {self};
-    return vectorcall_method(&_Py_ID(__next__), stack, 1);
+    res = vectorcall_unbound(tstate, unbound, func, stack, 1);
+done:
+    _PyThreadState_PopCStackRef(tstate, &cref);
+    return res;
 }
 
 int

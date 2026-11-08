@@ -5200,6 +5200,142 @@ class ClassPropertiesAndMethods(unittest.TestCase):
         with self.assertRaises(TypeError):
             a + a
 
+    def test_inherited_richcompare_slot_wrapper(self):
+        # Defining only __lt__ makes tp_richcompare a generic slot function
+        # which calls the inherited object.__eq__/__ne__ wrapper descriptors.
+        class A:
+            def __lt__(self, other):
+                return NotImplemented
+        a, b = A(), A()
+        self.assertIs(a == a, True)
+        self.assertIs(a == b, False)
+        self.assertIs(a != a, False)
+        self.assertIs(a != b, True)
+        self.assertIs(a == 1, False)
+        self.assertIs(1 == a, False)
+        self.assertIs(a != None, True)
+        self.assertIs(A.__eq__(a, a), True)
+        self.assertIs(A.__eq__(a, b), NotImplemented)
+        self.assertIs(A.__ne__(a, b), NotImplemented)
+        with self.assertRaises(TypeError):
+            a < b
+        with self.assertRaises(TypeError):
+            a <= b
+
+        class I(int):
+            def __lt__(self, other):
+                return True
+        self.assertIs(I(1) == 1, True)
+        self.assertIs(I(1) == 1.0, True)
+        self.assertIs(1 == I(1), True)
+        self.assertIs(I(1) != 2, True)
+        self.assertIs(I(1) == "1", False)
+        self.assertIs(I(1) <= 0, False)
+        self.assertIs(I(1) > 0, True)
+
+        # A wrapper of a different comparison is called with its own operator
+        class B(int):
+            __eq__ = int.__lt__
+            def __gt__(self, other):
+                return False
+        self.assertIs(B(1) == 2, True)
+        self.assertIs(B(2) == 1, False)
+        self.assertIs(B(1) == 1, False)
+
+        # A wrapper from an unrelated type raises the same error as before
+        class C:
+            __eq__ = int.__eq__
+            def __lt__(self, other):
+                return True
+        with self.assertRaisesRegex(TypeError,
+                "descriptor '__eq__' requires a 'int' object "
+                "but received a 'C'"):
+            C() == 1
+
+        # Exceptions raised by the wrapped C function are propagated
+        class T(tuple):
+            def __lt__(self, other):
+                return True
+        class Bad:
+            def __eq__(self, other):
+                raise ZeroDivisionError
+        with self.assertRaises(ZeroDivisionError):
+            T((Bad(),)) == T((Bad(),))
+
+    def test_inherited_richcompare_slot_wrapper_recursion(self):
+        class L(list):
+            def __lt__(self, other):
+                return True
+        x, y = L(), L()
+        x.append(y)
+        y.append(x)
+        with self.assertRaises(RecursionError):
+            x == y
+        with self.assertRaises(RecursionError):
+            x != y
+
+        class R:
+            def __lt__(self, other):
+                return True
+            def __eq__(self, other):
+                return self == other
+        with self.assertRaises(RecursionError):
+            R() == R()
+
+    def test_inherited_ass_subscript_slot_wrapper(self):
+        # Defining only __delitem__ makes mp_ass_subscript a generic slot
+        # function which calls the inherited dict.__setitem__ wrapper
+        # descriptor, and vice versa.
+        class D(dict):
+            def __delitem__(self, key):
+                dict.__delitem__(self, key)
+        d = D()
+        d['a'] = 1
+        d['b'] = 2
+        self.assertEqual(d, {'a': 1, 'b': 2})
+        d['a'] += 1
+        self.assertEqual(d, {'a': 2, 'b': 2})
+        del d['a']
+        self.assertEqual(d, {'b': 2})
+        with self.assertRaises(KeyError):
+            del d['a']
+        with self.assertRaises(TypeError):
+            d[[]] = 1
+
+        class S(dict):
+            def __setitem__(self, key, value):
+                dict.__setitem__(self, key, value)
+        s = S(a=1, b=2)
+        del s['a']
+        self.assertEqual(s, {'b': 2})
+        with self.assertRaises(KeyError) as cm:
+            del s['a']
+        self.assertEqual(cm.exception.args, ('a',))
+        with self.assertRaises(TypeError):
+            del s[[]]
+
+        class L(list):
+            def __delitem__(self, key):
+                list.__delitem__(self, key)
+        l = L([1, 2, 3])
+        l[0] = 4
+        l[1:2] = [5, 6]
+        self.assertEqual(l, [4, 5, 6, 3])
+        with self.assertRaises(IndexError):
+            l[10] = 1
+        del l[0]
+        self.assertEqual(l, [5, 6, 3])
+
+        # A wrapper from an unrelated type raises the same error as before
+        class W:
+            __setitem__ = dict.__setitem__
+            def __delitem__(self, key):
+                pass
+        with self.assertRaisesRegex(TypeError,
+                "descriptor '__setitem__' requires a 'dict' object "
+                "but received a 'W'"):
+            W()['a'] = 1
+
     def test_slot_shadows_class_variable(self):
         with self.assertRaises(ValueError) as cm:
             class X:

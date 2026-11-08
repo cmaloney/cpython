@@ -1321,11 +1321,7 @@ mappingproxy_new_impl(PyTypeObject *type, PyObject *mapping)
 /* This has no reason to be in this file except that adding new files is a
    bit of a pain */
 
-typedef struct {
-    PyObject_HEAD
-    PyWrapperDescrObject *descr;
-    PyObject *self;
-} wrapperobject;
+typedef _PyMethodWrapperObject wrapperobject;
 
 #define Wrapper_Check(v) Py_IS_TYPE(v, &_PyMethodWrapper_Type)
 

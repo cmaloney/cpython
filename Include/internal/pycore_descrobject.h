@@ -22,6 +22,13 @@ typedef propertyobject _PyPropertyObject;
 
 extern PyTypeObject _PyMethodWrapper_Type;
 
+// A slot wrapper bound to an instance ("method-wrapper"), e.g. gen.__next__.
+typedef struct {
+    PyObject_HEAD
+    PyWrapperDescrObject *descr;
+    PyObject *self;
+} _PyMethodWrapperObject;
+
 extern void *_PyMember_GetOffset(PyObject *, PyMemberDef *);
 
 #ifdef __cplusplus
