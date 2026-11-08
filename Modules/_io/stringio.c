@@ -708,8 +708,11 @@ stringio_dealloc(PyObject *op)
     Py_DECREF(tp);
 }
 
+/* Only given as the fast __new__ (Py_tp_new_fast): it ignores the
+   arguments, which StringIO.__init__() takes. */
 static PyObject *
-stringio_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+stringio_new(PyTypeObject *type, PyObject *const *args, Py_ssize_t nargs,
+             PyObject *kwnames)
 {
     stringio *self;
 
@@ -731,6 +734,7 @@ stringio_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 }
 
 /*[clinic input]
+@vectorcall fast_slots
 _io.StringIO.__init__
     initial_value as value: object(c_default="NULL") = ''
     newline as newline_obj: object(c_default="NULL") = '\n'
@@ -744,7 +748,7 @@ argument is like the one of TextIOWrapper's constructor.
 static int
 _io_StringIO___init___impl(stringio *self, PyObject *value,
                            PyObject *newline_obj)
-/*[clinic end generated code: output=a421ea023b22ef4e input=cee2d9181b2577a3]*/
+/*[clinic end generated code: output=a421ea023b22ef4e input=92d0ce72e2a62d86]*/
 {
     const char *newline = "\n";
     Py_ssize_t value_len;
@@ -1153,8 +1157,8 @@ static PyType_Slot stringio_slots[] = {
     {Py_tp_methods, stringio_methods},
     {Py_tp_members, stringio_members},
     {Py_tp_getset, stringio_getset},
-    {Py_tp_init, _io_StringIO___init__},
-    {Py_tp_new, stringio_new},
+    _IO_STRINGIO___INIT___SLOTS,
+    {Py_tp_new_fast, stringio_new},
     {0, NULL},
 };
 

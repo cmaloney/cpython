@@ -1095,8 +1095,11 @@ bytesio_dealloc(PyObject *op)
     Py_DECREF(tp);
 }
 
+/* Only given as the fast __new__ (Py_tp_new_fast): it ignores the
+   arguments, which BytesIO.__init__() takes. */
 static PyObject *
-bytesio_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+bytesio_new(PyTypeObject *type, PyObject *const *args, Py_ssize_t nargs,
+            PyObject *kwnames)
 {
     bytesio *self;
 
@@ -1119,6 +1122,7 @@ bytesio_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 
 /*[clinic input]
 @critical_section
+@vectorcall fast_slots
 _io.BytesIO.__init__
     initial_bytes as initvalue: object(c_default="NULL") = b''
 
@@ -1127,7 +1131,7 @@ Buffered I/O implementation using an in-memory bytes buffer.
 
 static int
 _io_BytesIO___init___impl(bytesio *self, PyObject *initvalue)
-/*[clinic end generated code: output=65c0c51e24c5b621 input=3da5a74ee4c4f1ac]*/
+/*[clinic end generated code: output=65c0c51e24c5b621 input=630f7be07c12f54a]*/
 {
     if (FT_ATOMIC_LOAD_SSIZE_RELAXED(self->exports) > 0) {
         PyErr_SetString(PyExc_BufferError,
@@ -1254,8 +1258,8 @@ static PyType_Slot bytesio_slots[] = {
     {Py_tp_methods, bytesio_methods},
     {Py_tp_members, bytesio_members},
     {Py_tp_getset, bytesio_getsetlist},
-    {Py_tp_init, _io_BytesIO___init__},
-    {Py_tp_new, bytesio_new},
+    _IO_BYTESIO___INIT___SLOTS,
+    {Py_tp_new_fast, bytesio_new},
     {0, NULL},
 };
 

@@ -716,7 +716,8 @@ static int
 _io_BytesIO___init___impl(bytesio *self, PyObject *initvalue);
 
 static int
-_io_BytesIO___init__(PyObject *self, PyObject *args, PyObject *kwargs)
+_io_BytesIO___init___helper(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames)
 {
     int return_value = -1;
     #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
@@ -748,11 +749,10 @@ _io_BytesIO___init__(PyObject *self, PyObject *args, PyObject *kwargs)
     #undef KWTUPLE
     PyObject *argsbuf[1];
     PyObject * const *fastargs;
-    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
-    Py_ssize_t noptargs = nargs + (kwargs ? PyDict_GET_SIZE(kwargs) : 0) - 0;
+    Py_ssize_t noptargs = nargs + nkw - 0;
     PyObject *initvalue = NULL;
 
-    fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser,
+    fastargs = _PyArg_UnpackKeywords(args, nargs, kwargs, kwnames, &_parser,
             /*minpos*/ 0, /*maxpos*/ 1, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
     if (!fastargs) {
         goto exit;
@@ -769,6 +769,43 @@ skip_optional_pos:
 exit:
     return return_value;
 }
+
+static int
+_io_BytesIO___init__(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    return _io_BytesIO___init___helper(self, _PyTuple_CAST(args)->ob_item,
+        PyTuple_GET_SIZE(args),
+        kwargs ? PyDict_GET_SIZE(kwargs) : 0,
+        kwargs, NULL);
+}
+
+static int
+_io_BytesIO___init___fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    int return_value = -1;
+    PyObject *initvalue = NULL;
+
+    if (kwnames != NULL || nargs > 1) {
+        return _io_BytesIO___init___helper(self, args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames);
+    }
+    if (nargs < 1) {
+        goto skip_optional;
+    }
+    initvalue = args[0];
+skip_optional:
+    Py_BEGIN_CRITICAL_SECTION(self);
+    return_value = _io_BytesIO___init___impl((bytesio *)self, initvalue);
+    Py_END_CRITICAL_SECTION();
+
+    return return_value;
+}
+
+#define _IO_BYTESIO___INIT___SLOTS \
+    {Py_tp_init, _io_BytesIO___init__}, \
+    {Py_tp_init_fast, _io_BytesIO___init___fast}
 
 PyDoc_STRVAR(_io_BytesIO___sizeof____doc__,
 "__sizeof__($self, /)\n"
@@ -795,4 +832,4 @@ _io_BytesIO___sizeof__(PyObject *self, PyObject *Py_UNUSED(ignored))
 }
 #define _IO_BYTESIO_CLOSED_GETSETDEF {"closed", (getter)_io_BytesIO_closed_get, (setter)NULL, _io_BytesIO_closed__doc__},
 
-/*[clinic end generated code: output=a2bc96c358d6e240 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=46f1e8feb16bf262 input=a9049054013a1b77]*/

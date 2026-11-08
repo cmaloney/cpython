@@ -315,7 +315,8 @@ _io_StringIO___init___impl(stringio *self, PyObject *value,
                            PyObject *newline_obj);
 
 static int
-_io_StringIO___init__(PyObject *self, PyObject *args, PyObject *kwargs)
+_io_StringIO___init___helper(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames)
 {
     int return_value = -1;
     #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
@@ -347,12 +348,11 @@ _io_StringIO___init__(PyObject *self, PyObject *args, PyObject *kwargs)
     #undef KWTUPLE
     PyObject *argsbuf[2];
     PyObject * const *fastargs;
-    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
-    Py_ssize_t noptargs = nargs + (kwargs ? PyDict_GET_SIZE(kwargs) : 0) - 0;
+    Py_ssize_t noptargs = nargs + nkw - 0;
     PyObject *value = NULL;
     PyObject *newline_obj = NULL;
 
-    fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser,
+    fastargs = _PyArg_UnpackKeywords(args, nargs, kwargs, kwnames, &_parser,
             /*minpos*/ 0, /*maxpos*/ 2, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
     if (!fastargs) {
         goto exit;
@@ -373,6 +373,46 @@ skip_optional_pos:
 exit:
     return return_value;
 }
+
+static int
+_io_StringIO___init__(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    return _io_StringIO___init___helper(self, _PyTuple_CAST(args)->ob_item,
+        PyTuple_GET_SIZE(args),
+        kwargs ? PyDict_GET_SIZE(kwargs) : 0,
+        kwargs, NULL);
+}
+
+static int
+_io_StringIO___init___fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    int return_value = -1;
+    PyObject *value = NULL;
+    PyObject *newline_obj = NULL;
+
+    if (kwnames != NULL || nargs > 2) {
+        return _io_StringIO___init___helper(self, args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames);
+    }
+    if (nargs < 1) {
+        goto skip_optional;
+    }
+    value = args[0];
+    if (nargs < 2) {
+        goto skip_optional;
+    }
+    newline_obj = args[1];
+skip_optional:
+    return_value = _io_StringIO___init___impl((stringio *)self, value, newline_obj);
+
+    return return_value;
+}
+
+#define _IO_STRINGIO___INIT___SLOTS \
+    {Py_tp_init, _io_StringIO___init__}, \
+    {Py_tp_init_fast, _io_StringIO___init___fast}
 
 PyDoc_STRVAR(_io_StringIO_readable__doc__,
 "readable($self, /)\n"
@@ -554,4 +594,4 @@ _io_StringIO_newlines_get(PyObject *self, void *Py_UNUSED(context))
 
 #define _IO_STRINGIO_NEWLINES_GETSETDEF {"newlines", (getter)_io_StringIO_newlines_get, (setter)NULL, NULL},
 
-/*[clinic end generated code: output=38a0385529d9cbef input=a9049054013a1b77]*/
+/*[clinic end generated code: output=78b8057f74b42a4b input=a9049054013a1b77]*/
