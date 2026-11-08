@@ -17,6 +17,7 @@ import weakref
 from copy import deepcopy
 from contextlib import redirect_stdout
 from test import support
+from test.support import import_helper
 from test.support.script_helper import assert_python_ok
 
 try:
@@ -5354,7 +5355,8 @@ class ClassPropertiesAndMethods(unittest.TestCase):
         # Some types give the __init__ slot wrapper an implementation which
         # takes the arguments as a C array (no argument tuple or keyword
         # dict).  It must behave like tp_init, which subclasses inherit.
-        for cls in (dict, BaseException, ValueError):
+        for cls in (dict, BaseException, ValueError, bytearray,
+                    AttributeError, ImportError, NameError):
             with self.subTest(cls=cls):
                 init = cls.__init__
                 self.assertIs(type(init), types.WrapperDescriptorType)
@@ -5374,6 +5376,12 @@ class ClassPropertiesAndMethods(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "keywords must be strings"):
             dict.__init__(d, **{1: 2})
 
+        b = bytearray()
+        bytearray.__init__(b, 'ab', encoding='ascii')
+        self.assertEqual(b, b'ab')
+        with self.assertRaisesRegex(TypeError, "unexpected keyword argument"):
+            bytearray.__init__(b, x=1)
+
         e = ValueError('a')
         e.__init__('b', 'c')
         self.assertEqual(e.args, ('b', 'c'))
@@ -5382,6 +5390,10 @@ class ClassPropertiesAndMethods(unittest.TestCase):
         with self.assertRaisesRegex(TypeError,
                                     r"ValueError\(\) takes no keyword arguments"):
             BaseException.__init__(e, x=1)
+
+        e = AttributeError()
+        AttributeError.__init__(e, 'm', name='n', obj=1)
+        self.assertEqual((e.args, e.name, e.obj), (('m',), 'n', 1))
 
         # Subclasses defining __init__ and calling the base one.
         class E(Exception):
@@ -5423,9 +5435,21 @@ class ClassPropertiesAndMethods(unittest.TestCase):
         del R.__init__
         self.assertEqual(R(a=2), {'a': 2})
         class R2(dict):
-            __init__ = BaseException.__init__
-        with self.assertRaisesRegex(TypeError, "requires a 'BaseException'"):
+            __init__ = bytearray.__init__
+        with self.assertRaisesRegex(TypeError, "requires a 'bytearray'"):
             R2()
+
+    @support.cpython_only
+    def test_init_slot_wrapper_fast_heap_type(self):
+        _testclinic = import_helper.import_module('_testclinic')
+        VcInit = _testclinic.VcInit
+        self.assertIs(type(VcInit.__init__), types.WrapperDescriptorType)
+        o = VcInit(1)
+        self.assertIsNone(VcInit.__init__(o, 1, b=2))
+        self.assertIsNone(o.__init__(1))
+        with self.assertRaisesRegex(TypeError,
+                                    r"takes at least 1 positional argument"):
+            VcInit.__init__(o)
 
     def test_mixing_slot_wrappers(self):
         class X(dict):

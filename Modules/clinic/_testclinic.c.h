@@ -5133,6 +5133,21 @@ exit:
 }
 
 static PyObject *
+vc_posorkw_init_fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    if (vc_posorkw_init_helper(self, args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames) != 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+#define VC_POSORKW_INIT_FAST_METHODDEF    \
+    {"__init__", _PyCFunction_CAST(vc_posorkw_init_fast), METH_FASTCALL|METH_KEYWORDS|_Py_METH_SLOT_FAST},
+
+static PyObject *
 vc_base_new_impl(PyTypeObject *type, PyObject *a, PyObject *b);
 
 static PyObject *
@@ -5309,4 +5324,4 @@ vc_kwonly_vectorcall(PyObject *type, PyObject *const *args,
         kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
         NULL, kwnames);
 }
-/*[clinic end generated code: output=b54b37db716469cd input=a9049054013a1b77]*/
+/*[clinic end generated code: output=d996a0102410a20f input=a9049054013a1b77]*/

@@ -6,6 +6,7 @@
 #include "pycore_bytesobject.h"
 #include "pycore_ceval.h"         // _PyEval_GetBuiltin()
 #include "pycore_critical_section.h"
+#include "pycore_descrobject.h"   // _Py_METH_SLOT_FAST
 #include "pycore_object.h"        // _PyObject_GC_UNTRACK()
 #include "pycore_strhex.h"        // _Py_strhex_with_sep()
 #include "pycore_long.h"          // _PyLong_FromUnsignedChar()
@@ -2870,6 +2871,7 @@ static PyBufferProcs bytearray_as_buffer = {
 };
 
 static PyMethodDef bytearray_methods[] = {
+    BYTEARRAY___INIT___FAST_METHODDEF
     {"__alloc__", bytearray_alloc, METH_NOARGS, alloc_doc},
     BYTEARRAY_REDUCE_METHODDEF
     BYTEARRAY_REDUCE_EX_METHODDEF

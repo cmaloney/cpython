@@ -256,6 +256,21 @@ exit:
 }
 
 static PyObject *
+bytearray___init___fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    if (bytearray___init___helper(self, args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames) != 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+#define BYTEARRAY___INIT___FAST_METHODDEF    \
+    {"__init__", _PyCFunction_CAST(bytearray___init___fast), METH_FASTCALL|METH_KEYWORDS|_Py_METH_SLOT_FAST},
+
+static PyObject *
 bytearray_repr_impl(PyObject *op);
 
 static PyObject *
@@ -2037,4 +2052,4 @@ bytearray_sizeof(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
     return bytearray_sizeof_impl((PyByteArrayObject *)self);
 }
-/*[clinic end generated code: output=b8e659fe4b2f770e input=a9049054013a1b77]*/
+/*[clinic end generated code: output=300cd409f81a8ee9 input=a9049054013a1b77]*/

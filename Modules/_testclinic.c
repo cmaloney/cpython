@@ -6,6 +6,7 @@
 #undef NDEBUG
 
 #include "Python.h"
+#include "pycore_descrobject.h"   // _Py_METH_SLOT_FAST
 #include "pycore_object.h"        // _PyObject_IsFreed()
 
 
@@ -2554,9 +2555,15 @@ vc_posorkw_init_impl(PyObject *self, PyObject *a, PyObject *b)
     return 0;
 }
 
+static PyMethodDef VcInit_methods[] = {
+    VC_POSORKW_INIT_FAST_METHODDEF
+    {NULL, NULL, 0, NULL},
+};
+
 /* Heap type: the generated vectorcall can't name the type object. */
 static PyType_Slot VcInit_slots[] = {
     {Py_tp_new, PyType_GenericNew},
+    {Py_tp_methods, VcInit_methods},
     {Py_tp_init, vc_posorkw_init},
     {Py_tp_vectorcall, vc_posorkw_vectorcall},
     {0, NULL},

@@ -2015,6 +2015,7 @@ static PyMemberDef ImportError_members[] = {
 };
 
 static PyMethodDef ImportError_methods[] = {
+    IMPORTERROR_INIT_FAST_METHODDEF
     {"__reduce__", ImportError_reduce, METH_NOARGS},
     {NULL}
 };
@@ -2676,6 +2677,7 @@ static PyMemberDef NameError_members[] = {
 };
 
 static PyMethodDef NameError_methods[] = {
+        NAMEERROR_INIT_FAST_METHODDEF
         {NULL}  /* Sentinel */
 };
 
@@ -2864,6 +2866,7 @@ static PyMemberDef AttributeError_members[] = {
 };
 
 static PyMethodDef AttributeError_methods[] = {
+    ATTRIBUTEERROR_INIT_FAST_METHODDEF
     {"__getstate__", AttributeError_getstate, METH_NOARGS},
     {"__reduce__", AttributeError_reduce, METH_NOARGS },
     {NULL}

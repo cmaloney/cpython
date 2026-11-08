@@ -482,6 +482,21 @@ ImportError_vectorcall(PyObject *type, PyObject *const *args,
     return self;
 }
 
+static PyObject *
+ImportError_init_fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    if (ImportError_init_helper(self, args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames) != 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+#define IMPORTERROR_INIT_FAST_METHODDEF    \
+    {"__init__", _PyCFunction_CAST(ImportError_init_fast), METH_FASTCALL|METH_KEYWORDS|_Py_METH_SLOT_FAST},
+
 static int
 NameError_init_impl(PyNameErrorObject *self, PyObject *args, PyObject *name);
 
@@ -581,6 +596,21 @@ NameError_vectorcall(PyObject *type, PyObject *const *args,
     }
     return self;
 }
+
+static PyObject *
+NameError_init_fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    if (NameError_init_helper(self, args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames) != 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+#define NAMEERROR_INIT_FAST_METHODDEF    \
+    {"__init__", _PyCFunction_CAST(NameError_init_fast), METH_FASTCALL|METH_KEYWORDS|_Py_METH_SLOT_FAST},
 
 static int
 AttributeError_init_impl(PyAttributeErrorObject *self, PyObject *args,
@@ -689,6 +719,21 @@ AttributeError_vectorcall(PyObject *type, PyObject *const *args,
     }
     return self;
 }
+
+static PyObject *
+AttributeError_init_fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    if (AttributeError_init_helper(self, args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames) != 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+#define ATTRIBUTEERROR_INIT_FAST_METHODDEF    \
+    {"__init__", _PyCFunction_CAST(AttributeError_init_fast), METH_FASTCALL|METH_KEYWORDS|_Py_METH_SLOT_FAST},
 #define BASEEXCEPTION_ARGS_GETSETDEF {"args", (getter)BaseException_args_get, (setter)BaseException_args_set, NULL},
 
 #define BASEEXCEPTION___TRACEBACK___GETSETDEF {"__traceback__", (getter)BaseException___traceback___get, (setter)BaseException___traceback___set, NULL},
@@ -697,4 +742,4 @@ AttributeError_vectorcall(PyObject *type, PyObject *const *args,
 
 #define BASEEXCEPTION___CAUSE___GETSETDEF {"__cause__", (getter)BaseException___cause___get, (setter)BaseException___cause___set, NULL},
 
-/*[clinic end generated code: output=c8eaffee13bc041d input=a9049054013a1b77]*/
+/*[clinic end generated code: output=d942abf0375292cf input=a9049054013a1b77]*/

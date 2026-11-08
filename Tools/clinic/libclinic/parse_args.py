@@ -1768,6 +1768,35 @@ class ParseArgsCodeGen:
             """, indent=4))
         self.vectorcall_body(*parser_code)
 
+    def init_fast(self) -> None:
+        """Generate the "vectorcall always" implementation of __init__.
+
+        Explicit calls of __init__ (e.g. super().__init__(...)) go through
+        the slot wrapper, which calls tp_init with an argument tuple and a
+        keyword dict.  Generate a METH_FASTCALL|METH_KEYWORDS function, and
+        a {C_BASENAME}_FAST_METHODDEF entry for tp_methods, which the slot
+        wrapper calls instead (see _PyWrapperDescrObject), sharing the
+        {c_basename}_helper parser.
+        """
+        # The file using {C_BASENAME}_FAST_METHODDEF must include
+        # pycore_descrobject.h for _Py_METH_SLOT_FAST.
+        self.vectorcall_definition += "\n\n" + libclinic.normalize_snippet("""
+            static PyObject *
+            {c_basename}_fast(PyObject *self, PyObject *const *args,
+                Py_ssize_t nargs, PyObject *kwnames)
+            {{
+                if ({c_basename}_helper(self, args, nargs,
+                        kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+                        NULL, kwnames) != 0) {{
+                    return NULL;
+                }}
+                Py_RETURN_NONE;
+            }}
+
+            #define {c_basename_upper}_FAST_METHODDEF    \\
+                {{"__init__", _PyCFunction_CAST({c_basename}_fast), METH_FASTCALL|METH_KEYWORDS|_Py_METH_SLOT_FAST}},
+            """).replace("{c_basename_upper}", self.func.c_basename.upper())
+
     def parse_vectorcall(self) -> None:
         """Generate the vectorcall entry point for __new__ / __init__.
 
@@ -1834,5 +1863,7 @@ class ParseArgsCodeGen:
         # Generate vectorcall function if requested
         if self.func.vectorcall:
             self.parse_vectorcall()
+            if self.func.kind is METHOD_INIT and self.parser_helper:
+                self.init_fast()
 
         return self.create_template_dict()

@@ -5635,6 +5635,163 @@ Test_setter_first_with_docstr_get_impl(TestObj *self)
 /*[clinic end generated code: output=e93e3e68b0473d74 input=10af4e43b3cb34dc]*/
 
 /*[clinic input]
+@vectorcall
+Test.__init__ as Test_vc_kw_init
+    a: object
+    b: object = None
+
+Vectorcall init method with keywords.
+
+It also gets an implementation for the __init__ slot wrapper.
+[clinic start generated code]*/
+
+PyDoc_STRVAR(Test_vc_kw_init__doc__,
+"Test(a, b=None)\n"
+"--\n"
+"\n"
+"Vectorcall init method with keywords.\n"
+"\n"
+"It also gets an implementation for the __init__ slot wrapper.");
+
+static int
+Test_vc_kw_init_impl(TestObj *self, PyObject *a, PyObject *b);
+
+static int
+Test_vc_kw_init_helper(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames)
+{
+    int return_value = -1;
+    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
+
+    #define NUM_KEYWORDS 2
+    static struct {
+        PyGC_Head _this_is_not_used;
+        PyObject_VAR_HEAD
+        Py_hash_t ob_hash;
+        PyObject *ob_item[NUM_KEYWORDS];
+    } _kwtuple = {
+        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
+        .ob_hash = -1,
+        .ob_item = { _Py_LATIN1_CHR('a'), _Py_LATIN1_CHR('b'), },
+    };
+    #undef NUM_KEYWORDS
+    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
+
+    #else  // !Py_BUILD_CORE
+    #  define KWTUPLE NULL
+    #endif  // !Py_BUILD_CORE
+
+    static const char * const _keywords[] = {"a", "b", NULL};
+    static _PyArg_Parser _parser = {
+        .keywords = _keywords,
+        .fname = "Test",
+        .kwtuple = KWTUPLE,
+    };
+    #undef KWTUPLE
+    PyObject *argsbuf[2];
+    PyObject * const *fastargs;
+    Py_ssize_t noptargs = nargs + nkw - 1;
+    PyObject *a;
+    PyObject *b = Py_None;
+
+    fastargs = _PyArg_UnpackKeywords(args, nargs, kwargs, kwnames, &_parser,
+            /*minpos*/ 1, /*maxpos*/ 2, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
+    if (!fastargs) {
+        goto exit;
+    }
+    a = fastargs[0];
+    if (!noptargs) {
+        goto skip_optional_pos;
+    }
+    b = fastargs[1];
+skip_optional_pos:
+    return_value = Test_vc_kw_init_impl((TestObj *)self, a, b);
+
+exit:
+    return return_value;
+}
+
+static int
+Test_vc_kw_init(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    return Test_vc_kw_init_helper(self, _PyTuple_CAST(args)->ob_item,
+        PyTuple_GET_SIZE(args),
+        kwargs ? PyDict_GET_SIZE(kwargs) : 0,
+        kwargs, NULL);
+}
+
+static PyObject *
+Test_vc_kw_vectorcall(PyObject *type, PyObject *const *args,
+    size_t nargsf, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+    PyObject *self;
+    int _result;
+    PyObject *a;
+    PyObject *b = Py_None;
+
+    assert(_PyType_CAST(type)->tp_init == Test_vc_kw_init);
+    /* Make sure the type object is immutable: the generated
+     * vectorcall doesn't deal e.g. with users reassigning __init__. */
+    assert(PyType_HasFeature(_PyType_CAST(type), Py_TPFLAGS_IMMUTABLETYPE));
+    if (kwnames != NULL || nargs < 1 || nargs > 2) {
+        self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
+            (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
+        if (self == NULL) {
+            return NULL;
+        }
+        _result = Test_vc_kw_init_helper(self, args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames);
+        if (_result != 0) {
+            Py_DECREF(self);
+            return NULL;
+        }
+        return self;
+    }
+    a = args[0];
+    if (nargs < 2) {
+        goto skip_optional;
+    }
+    b = args[1];
+skip_optional:
+    self = _PyType_CAST(type)->tp_new(_PyType_CAST(type),
+        (PyObject *)&_Py_SINGLETON(tuple_empty), NULL);
+    if (self == NULL) {
+        goto exit;
+    }
+    _result = Test_vc_kw_init_impl((TestObj *)self, a, b);
+    if (_result != 0) {
+        Py_DECREF(self);
+        goto exit;
+    }
+    return_value = self;
+
+exit:
+    return return_value;
+}
+
+static PyObject *
+Test_vc_kw_init_fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    if (Test_vc_kw_init_helper(self, args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames) != 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+#define TEST_VC_KW_INIT_FAST_METHODDEF    \
+    {"__init__", _PyCFunction_CAST(Test_vc_kw_init_fast), METH_FASTCALL|METH_KEYWORDS|_Py_METH_SLOT_FAST},
+
+static int
+Test_vc_kw_init_impl(TestObj *self, PyObject *a, PyObject *b)
+/*[clinic end generated code: output=ec228f5dfc353b7b input=6de82dc7fec3e5d0]*/
+
+/*[clinic input]
 dump buffer
 [clinic start generated code]*/
 #define TEST_SETTABLE_GETSETDEF {"settable", (getter)NULL, (setter)Test_settable_set, NULL},
