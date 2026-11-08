@@ -5309,4 +5309,292 @@ vc_kwonly_vectorcall(PyObject *type, PyObject *const *args,
         kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
         NULL, kwnames);
 }
-/*[clinic end generated code: output=b54b37db716469cd input=a9049054013a1b77]*/
+
+static int
+fast_init_impl(PyObject *self, PyObject *a, PyObject *b);
+
+static int
+fast_init_helper(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames)
+{
+    int return_value = -1;
+    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
+
+    #define NUM_KEYWORDS 1
+    static struct {
+        PyGC_Head _this_is_not_used;
+        PyObject_VAR_HEAD
+        Py_hash_t ob_hash;
+        PyObject *ob_item[NUM_KEYWORDS];
+    } _kwtuple = {
+        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
+        .ob_hash = -1,
+        .ob_item = { _Py_LATIN1_CHR('b'), },
+    };
+    #undef NUM_KEYWORDS
+    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
+
+    #else  // !Py_BUILD_CORE
+    #  define KWTUPLE NULL
+    #endif  // !Py_BUILD_CORE
+
+    static const char * const _keywords[] = {"", "b", NULL};
+    static _PyArg_Parser _parser = {
+        .keywords = _keywords,
+        .fname = "FastInit",
+        .kwtuple = KWTUPLE,
+    };
+    #undef KWTUPLE
+    PyObject *argsbuf[2];
+    PyObject * const *fastargs;
+    Py_ssize_t noptargs = nargs + nkw - 1;
+    PyObject *a;
+    PyObject *b = Py_None;
+
+    fastargs = _PyArg_UnpackKeywords(args, nargs, kwargs, kwnames, &_parser,
+            /*minpos*/ 1, /*maxpos*/ 2, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
+    if (!fastargs) {
+        goto exit;
+    }
+    a = fastargs[0];
+    if (!noptargs) {
+        goto skip_optional_pos;
+    }
+    b = fastargs[1];
+skip_optional_pos:
+    Py_BEGIN_CRITICAL_SECTION(self);
+    return_value = fast_init_impl(self, a, b);
+    Py_END_CRITICAL_SECTION();
+
+exit:
+    return return_value;
+}
+
+static int
+fast_init(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    return fast_init_helper(self, _PyTuple_CAST(args)->ob_item,
+        PyTuple_GET_SIZE(args),
+        kwargs ? PyDict_GET_SIZE(kwargs) : 0,
+        kwargs, NULL);
+}
+
+static int
+fast_init_fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    int return_value = -1;
+
+    PyObject *a;
+    PyObject *b = Py_None;
+
+    if (kwnames != NULL || nargs < 1 || nargs > 2) {
+        return fast_init_helper(self, args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames);
+    }
+    a = args[0];
+    if (nargs < 2) {
+        goto skip_optional;
+    }
+    b = args[1];
+skip_optional:
+    Py_BEGIN_CRITICAL_SECTION(self);
+    return_value = fast_init_impl((PyObject *)self, a, b);
+    Py_END_CRITICAL_SECTION();
+
+    return return_value;
+}
+
+#define FAST_INIT_SLOTS \
+    {Py_tp_init, fast_init}, \
+    {Py_tp_init_fast, fast_init_fast}
+
+static int
+fast_init_kwonly_impl(PyObject *self, PyObject *a, PyObject *b);
+
+static int
+fast_init_kwonly_helper(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, Py_ssize_t nkw, PyObject *kwargs, PyObject *kwnames)
+{
+    int return_value = -1;
+    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
+
+    #define NUM_KEYWORDS 2
+    static struct {
+        PyGC_Head _this_is_not_used;
+        PyObject_VAR_HEAD
+        Py_hash_t ob_hash;
+        PyObject *ob_item[NUM_KEYWORDS];
+    } _kwtuple = {
+        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
+        .ob_hash = -1,
+        .ob_item = { _Py_LATIN1_CHR('a'), _Py_LATIN1_CHR('b'), },
+    };
+    #undef NUM_KEYWORDS
+    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
+
+    #else  // !Py_BUILD_CORE
+    #  define KWTUPLE NULL
+    #endif  // !Py_BUILD_CORE
+
+    static const char * const _keywords[] = {"a", "b", NULL};
+    static _PyArg_Parser _parser = {
+        .keywords = _keywords,
+        .fname = "FastInitKwOnly",
+        .kwtuple = KWTUPLE,
+    };
+    #undef KWTUPLE
+    PyObject *argsbuf[2];
+    PyObject * const *fastargs;
+    Py_ssize_t noptargs = nargs + nkw - 1;
+    PyObject *a;
+    PyObject *b = Py_None;
+
+    fastargs = _PyArg_UnpackKeywords(args, nargs, kwargs, kwnames, &_parser,
+            /*minpos*/ 1, /*maxpos*/ 1, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
+    if (!fastargs) {
+        goto exit;
+    }
+    a = fastargs[0];
+    if (!noptargs) {
+        goto skip_optional_kwonly;
+    }
+    b = fastargs[1];
+skip_optional_kwonly:
+    return_value = fast_init_kwonly_impl(self, a, b);
+
+exit:
+    return return_value;
+}
+
+static int
+fast_init_kwonly(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    return fast_init_kwonly_helper(self, _PyTuple_CAST(args)->ob_item,
+        PyTuple_GET_SIZE(args),
+        kwargs ? PyDict_GET_SIZE(kwargs) : 0,
+        kwargs, NULL);
+}
+
+static int
+fast_init_kwonly_fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+
+    return fast_init_kwonly_helper(self, args, nargs,
+        kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+        NULL, kwnames);
+}
+
+#define FAST_INIT_KWONLY_SLOTS \
+    {Py_tp_init, fast_init_kwonly}, \
+    {Py_tp_init_fast, fast_init_kwonly_fast}
+
+static PyObject *
+fast_new_posonly_impl(PyTypeObject *type, PyObject *a, PyObject *b);
+
+static PyObject *
+fast_new_posonly(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    PyObject *return_value = NULL;
+    PyTypeObject *base_tp = FastNewPosOnly_Type;
+    PyObject *a;
+    PyObject *b = Py_None;
+
+    if ((type == base_tp || type->tp_init == base_tp->tp_init) &&
+        !_PyArg_NoKeywords("FastNewPosOnly", kwargs)) {
+        goto exit;
+    }
+    if (!_PyArg_CheckPositional("FastNewPosOnly", PyTuple_GET_SIZE(args), 1, 2)) {
+        goto exit;
+    }
+    a = PyTuple_GET_ITEM(args, 0);
+    if (PyTuple_GET_SIZE(args) < 2) {
+        goto skip_optional;
+    }
+    b = PyTuple_GET_ITEM(args, 1);
+skip_optional:
+    return_value = fast_new_posonly_impl(type, a, b);
+
+exit:
+    return return_value;
+}
+
+static PyObject *
+fast_new_posonly_fast(PyTypeObject *type, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    PyTypeObject *base_tp = FastNewPosOnly_Type;
+    PyObject *a;
+    PyObject *b = Py_None;
+
+    if ((type == base_tp || type->tp_init == base_tp->tp_init) &&
+        !_PyArg_NoKwnames("FastNewPosOnly", kwnames)) {
+        goto exit;
+    }
+    if (!_PyArg_CheckPositional("FastNewPosOnly", nargs, 1, 2)) {
+        goto exit;
+    }
+    a = args[0];
+    if (nargs < 2) {
+        goto skip_optional;
+    }
+    b = args[1];
+skip_optional:
+    return_value = fast_new_posonly_impl(type, a, b);
+
+exit:
+    return return_value;
+}
+
+#define FAST_NEW_POSONLY_SLOTS \
+    {Py_tp_new, fast_new_posonly}, \
+    {Py_tp_new_fast, fast_new_posonly_fast}
+
+static PyObject *
+fast_new_noargs_impl(PyTypeObject *type);
+
+static PyObject *
+fast_new_noargs(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    PyObject *return_value = NULL;
+    PyTypeObject *base_tp = FastNewNoArgs_Type;
+
+    if ((type == base_tp || type->tp_init == base_tp->tp_init) &&
+        !_PyArg_NoPositional("FastNewNoArgs", args)) {
+        goto exit;
+    }
+    if ((type == base_tp || type->tp_init == base_tp->tp_init) &&
+        !_PyArg_NoKeywords("FastNewNoArgs", kwargs)) {
+        goto exit;
+    }
+    return_value = fast_new_noargs_impl(type);
+
+exit:
+    return return_value;
+}
+
+static PyObject *
+fast_new_noargs_fast(PyTypeObject *type, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    PyObject *return_value = NULL;
+    PyTypeObject *base_tp = FastNewNoArgs_Type;
+
+    if ((type == base_tp || type->tp_init == base_tp->tp_init) &&
+        (!_PyArg_NoPositionalStack("FastNewNoArgs", nargs) ||
+         !_PyArg_NoKwnames("FastNewNoArgs", kwnames))) {
+        goto exit;
+    }
+    return_value = fast_new_noargs_impl(type);
+
+exit:
+    return return_value;
+}
+
+#define FAST_NEW_NOARGS_SLOTS \
+    {Py_tp_new, fast_new_noargs}, \
+    {Py_tp_new_fast, fast_new_noargs_fast}
+/*[clinic end generated code: output=8e5202a17abdf6b6 input=a9049054013a1b77]*/

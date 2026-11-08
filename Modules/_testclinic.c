@@ -26,6 +26,10 @@ custom_converter(PyObject *obj, custom_t *val)
 static PyTypeObject VcNew_Type;
 static PyTypeObject VcNewBase_Type;
 static PyTypeObject VcKwOnly_Type;
+/* For the subclass checks of the @vectorcall fast_slots __new__ parsers
+ * which reject arguments (not isolated: this is a test). */
+static PyTypeObject *FastNewPosOnly_Type;
+static PyTypeObject *FastNewNoArgs_Type;
 #include "clinic/_testclinic.c.h"
 
 
@@ -2634,6 +2638,170 @@ static PyTypeObject VcKwOnly_Type = {
 
 
 
+/* @vectorcall fast_slots test types: heap types with the "vectorcall
+ * always" __init__ / __new__ (Py_tp_init_fast, Py_tp_new_fast) which
+ * Argument Clinic generates.  The impls store the arguments as the 'a' and
+ * 'b' attributes. */
+
+static int
+fast_store_ab(PyObject *self, PyObject *a, PyObject *b)
+{
+    if (PyObject_SetAttrString(self, "a", a) < 0) {
+        return -1;
+    }
+    return PyObject_SetAttrString(self, "b", b);
+}
+
+static PyObject *
+fast_new_store_ab(PyTypeObject *type, PyObject *a, PyObject *b)
+{
+    PyObject *self = type->tp_alloc(type, 0);
+    if (self == NULL) {
+        return NULL;
+    }
+    if (fast_store_ab(self, a, b) < 0) {
+        Py_DECREF(self);
+        return NULL;
+    }
+    return self;
+}
+
+/*[clinic input]
+class _testclinic.FastInit "PyObject *" ""
+@vectorcall fast_slots
+@critical_section
+_testclinic.FastInit.__init__ as fast_init
+    a: object
+    /
+    b: object = None
+[clinic start generated code]*/
+
+static int
+fast_init_impl(PyObject *self, PyObject *a, PyObject *b)
+/*[clinic end generated code: output=68177b63106f325d input=81e5607c3a1c4a69]*/
+{
+    return fast_store_ab(self, a, b);
+}
+
+/*[clinic input]
+class _testclinic.FastInitKwOnly "PyObject *" ""
+@vectorcall fast_slots
+_testclinic.FastInitKwOnly.__init__ as fast_init_kwonly
+    a: object
+    *
+    b: object = None
+[clinic start generated code]*/
+
+static int
+fast_init_kwonly_impl(PyObject *self, PyObject *a, PyObject *b)
+/*[clinic end generated code: output=7a4257669181efcb input=675ba0f222df5fc9]*/
+{
+    return fast_store_ab(self, a, b);
+}
+
+/*[clinic input]
+class _testclinic.FastNewPosOnly "PyObject *" "FastNewPosOnly_Type"
+@classmethod
+@vectorcall fast_slots
+_testclinic.FastNewPosOnly.__new__ as fast_new_posonly
+    a: object
+    b: object = None
+    /
+[clinic start generated code]*/
+
+static PyObject *
+fast_new_posonly_impl(PyTypeObject *type, PyObject *a, PyObject *b)
+/*[clinic end generated code: output=9be543b518ad1e55 input=aa6ccdcd4be930a0]*/
+{
+    return fast_new_store_ab(type, a, b);
+}
+
+/*[clinic input]
+class _testclinic.FastNewNoArgs "PyObject *" "FastNewNoArgs_Type"
+@classmethod
+@vectorcall fast_slots
+_testclinic.FastNewNoArgs.__new__ as fast_new_noargs
+[clinic start generated code]*/
+
+static PyObject *
+fast_new_noargs_impl(PyTypeObject *type)
+/*[clinic end generated code: output=8cef7323d45ac59f input=c18cff9321d0a54e]*/
+{
+    return fast_new_store_ab(type, Py_None, Py_None);
+}
+
+
+#define FAST_TYPE_SPEC(NAME, SLOTS) {                                     \
+    .name = "_testclinic." NAME,                                          \
+    .basicsize = sizeof(PyObject),                                        \
+    .flags = (Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE                    \
+              | Py_TPFLAGS_MANAGED_DICT | Py_TPFLAGS_HAVE_GC),            \
+    .slots = SLOTS,                                                       \
+}
+
+static int
+fast_type_traverse(PyObject *self, visitproc visit, void *arg)
+{
+    Py_VISIT(Py_TYPE(self));
+    return PyObject_VisitManagedDict(self, visit, arg);
+}
+
+static int
+fast_type_clear(PyObject *self)
+{
+    PyObject_ClearManagedDict(self);
+    return 0;
+}
+
+static void
+fast_type_dealloc(PyObject *self)
+{
+    PyTypeObject *tp = Py_TYPE(self);
+    PyObject_GC_UnTrack(self);
+    PyObject_ClearManagedDict(self);
+    tp->tp_free(self);
+    Py_DECREF(tp);
+}
+
+#define FAST_TYPE_COMMON_SLOTS                                            \
+    {Py_tp_traverse, fast_type_traverse},                                 \
+    {Py_tp_clear, fast_type_clear},                                       \
+    {Py_tp_dealloc, fast_type_dealloc}
+
+static PyType_Slot FastInit_slots[] = {
+    {Py_tp_new, PyType_GenericNew},
+    FAST_INIT_SLOTS,
+    FAST_TYPE_COMMON_SLOTS,
+    {0, NULL},
+};
+static PyType_Spec FastInit_spec = FAST_TYPE_SPEC("FastInit", FastInit_slots);
+
+static PyType_Slot FastInitKwOnly_slots[] = {
+    {Py_tp_new, PyType_GenericNew},
+    FAST_INIT_KWONLY_SLOTS,
+    FAST_TYPE_COMMON_SLOTS,
+    {0, NULL},
+};
+static PyType_Spec FastInitKwOnly_spec = FAST_TYPE_SPEC("FastInitKwOnly",
+                                                        FastInitKwOnly_slots);
+
+static PyType_Slot FastNewPosOnly_slots[] = {
+    FAST_NEW_POSONLY_SLOTS,
+    FAST_TYPE_COMMON_SLOTS,
+    {0, NULL},
+};
+static PyType_Spec FastNewPosOnly_spec = FAST_TYPE_SPEC("FastNewPosOnly",
+                                                        FastNewPosOnly_slots);
+
+static PyType_Slot FastNewNoArgs_slots[] = {
+    FAST_NEW_NOARGS_SLOTS,
+    FAST_TYPE_COMMON_SLOTS,
+    {0, NULL},
+};
+static PyType_Spec FastNewNoArgs_spec = FAST_TYPE_SPEC("FastNewNoArgs",
+                                                       FastNewNoArgs_slots);
+
+
 /*[clinic input]
 output push
 destination kwarg new file '{dirname}/clinic/_testclinic_kwds.c.h'
@@ -2886,6 +3054,27 @@ PyInit__testclinic(void)
     }
     if (PyModule_Add(m, "VcInit",
                      PyType_FromModuleAndSpec(m, &VcInit_spec, NULL)) < 0) {
+        goto error;
+    }
+    if (PyModule_Add(m, "FastInit",
+                     PyType_FromModuleAndSpec(m, &FastInit_spec, NULL)) < 0
+        || PyModule_Add(m, "FastInitKwOnly",
+                        PyType_FromModuleAndSpec(m, &FastInitKwOnly_spec,
+                                                 NULL)) < 0
+        || PyModule_Add(m, "FastNewPosOnly",
+                        PyType_FromModuleAndSpec(m, &FastNewPosOnly_spec,
+                                                 NULL)) < 0
+        || PyModule_Add(m, "FastNewNoArgs",
+                        PyType_FromModuleAndSpec(m, &FastNewNoArgs_spec,
+                                                 NULL)) < 0)
+    {
+        goto error;
+    }
+    FastNewPosOnly_Type = (PyTypeObject *)PyObject_GetAttrString(
+        m, "FastNewPosOnly");
+    FastNewNoArgs_Type = (PyTypeObject *)PyObject_GetAttrString(
+        m, "FastNewNoArgs");
+    if (FastNewPosOnly_Type == NULL || FastNewNoArgs_Type == NULL) {
         goto error;
     }
     if (PyModule_AddType(m, &VcNewBase_Type) < 0) {

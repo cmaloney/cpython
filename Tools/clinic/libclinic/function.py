@@ -160,6 +160,9 @@ class Function:
     # Line on which the docstring starts (`None` if there is no docstring).
     docstring_line_number: int | None = None
     vectorcall: bool = False
+    # @vectorcall fast_slots: generate the "vectorcall always" Py_tp_init_fast
+    # or Py_tp_new_fast function of a heap type, not a type vectorcall.
+    vectorcall_fast_slots: bool = False
     # The type slot which the function implements (kind is SLOT).
     slot: SlotSpec | None = None
 
@@ -203,6 +206,11 @@ class Function:
                 name = name.removesuffix(suffix)
                 break
         return f'{name}_vectorcall'
+
+    @functools.cached_property
+    def c_basename_fast(self) -> str:
+        """C function name for the Py_tp_init_fast / Py_tp_new_fast slot."""
+        return f'{self.c_basename}_fast'
 
     @functools.cached_property
     def fulldisplayname(self) -> str:

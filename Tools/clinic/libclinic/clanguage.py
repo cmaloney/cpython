@@ -439,7 +439,16 @@ class CLanguage(Language):
         template_dict['impl_arguments'] = ", ".join(data.impl_arguments)
 
         # First vectorcall argument depends on method.
-        if f.vectorcall and f.cls:
+        if f.vectorcall and f.cls and f.vectorcall_fast_slots:
+            # The fast slot functions get self (or type) as a parameter.
+            self_name = template_dict['self_name']
+            if f.kind is METHOD_INIT:
+                vc_first = f"({f.cls.typedef}){self_name}"
+            else:
+                vc_first = self_name
+            vc_impl_args = [vc_first] + data.impl_arguments[1:]
+            template_dict['vectorcall_impl_arguments'] = ", ".join(vc_impl_args)
+        elif f.vectorcall and f.cls:
             if f.kind is METHOD_INIT:
                 vc_first = f"({f.cls.typedef})self"
             elif f.kind is METHOD_NEW:

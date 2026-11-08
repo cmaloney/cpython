@@ -126,6 +126,17 @@ PARSER_PROTOTYPE_VECTORCALL: Final[str] = libclinic.normalize_snippet("""
     {vc_basename}(PyObject *type, PyObject *const *args,
         size_t nargsf, PyObject *kwnames)
 """)
+# @vectorcall fast_slots: the Py_tp_init_fast / Py_tp_new_fast functions.
+PARSER_PROTOTYPE_FAST_INIT: Final[str] = libclinic.normalize_snippet("""
+    static int
+    {fast_basename}(PyObject *{self_name}, PyObject *const *args,
+        Py_ssize_t nargs, PyObject *kwnames)
+""")
+PARSER_PROTOTYPE_FAST_NEW: Final[str] = libclinic.normalize_snippet("""
+    static PyObject *
+    {fast_basename}(PyTypeObject *{self_name}, PyObject *const *args,
+        Py_ssize_t nargs, PyObject *kwnames)
+""")
 PARSER_PROTOTYPE_DEF_CLASS: Final[str] = libclinic.normalize_snippet("""
     static PyObject *
     {c_basename}({self_type}{self_name}, PyTypeObject *{defining_class_name}, PyObject *const *args, Py_ssize_t nargs, PyObject *kwnames)
@@ -277,6 +288,16 @@ VECTORCALL_FINALE_MARKERS_INIT: Final[dict[str, str]] = {
 }
 
 
+# The fast __init__ gets self and returns the int result of the impl.
+FAST_FINALE_MARKERS_INIT: Final[dict[str, str]] = {
+    "init_declarations": "",
+    "self_alloc": "",
+    "impl_call":
+        "{return_value} = {c_basename}_impl({vectorcall_impl_arguments});",
+    "init_result_check": "",
+}
+
+
 class ParseArgsCodeGen:
     func: Function
     codegen: CodeGen
@@ -292,6 +313,10 @@ class ParseArgsCodeGen:
 
     # Use METH_FASTCALL calling convention?
     fastcall: bool
+
+    # @vectorcall fast_slots: does the fast slot function check for
+    # subclasses like the tuple-based parser ({self_type_check})?
+    fast_slot_needs_base_tp: bool
 
     # Declaration of the return variable (ex: "int return_value;")
     return_value_declaration: str
@@ -1603,6 +1628,10 @@ class ParseArgsCodeGen:
         the parser this vectorcall shadows.
         """
         func = self.func
+        if func.vectorcall_fast_slots:
+            # The interpreter only calls the fast slots in place of the
+            # tp_init / tp_new function they are paired with.
+            return []
         if func.kind is METHOD_INIT:
             check = f"_PyType_CAST(type)->tp_init == {func.c_basename}"
         elif func.kind is METHOD_NEW:
@@ -1638,6 +1667,9 @@ class ParseArgsCodeGen:
     def _assemble_vectorcall(self, preamble: str, fields: tuple[str, ...],
                              finale: str) -> None:
         """Wrap parser code in the vectorcall prototype."""
+        if self.func.vectorcall_fast_slots:
+            self._assemble_fast_slot(preamble, fields, finale)
+            return
         prototype = PARSER_PROTOTYPE_VECTORCALL.replace(
             "{vc_basename}", self.func.c_basename_vectorcall)
         lines = [prototype, preamble, *fields, finale]
@@ -1650,6 +1682,32 @@ class ParseArgsCodeGen:
         code = libclinic.linear_format("\n".join(lines), **markers)
         self.vectorcall_definition = code
 
+    def _assemble_fast_slot(self, preamble: str, fields: tuple[str, ...],
+                            finale: str) -> None:
+        """Wrap parser code in the Py_tp_init_fast / Py_tp_new_fast prototype.
+
+        Also define {C_BASENAME}_SLOTS, the PyType_Slot entries of both the
+        tuple-based slot function and the fast one, for the type spec.
+        """
+        func = self.func
+        if func.kind is METHOD_INIT:
+            prototype = PARSER_PROTOTYPE_FAST_INIT
+            markers = FAST_FINALE_MARKERS_INIT
+            slot, fast_slot = 'Py_tp_init', 'Py_tp_init_fast'
+        else:
+            prototype = PARSER_PROTOTYPE_FAST_NEW
+            markers = VECTORCALL_FINALE_MARKERS_NEW
+            slot, fast_slot = 'Py_tp_new', 'Py_tp_new_fast'
+        prototype = prototype.replace("{fast_basename}", func.c_basename_fast)
+        lines = [prototype, preamble, *fields, finale]
+        code = libclinic.linear_format("\n".join(lines), **markers)
+        code += "\n\n" + libclinic.normalize_snippet(f"""
+            #define {func.c_basename.upper()}_SLOTS \\
+                {{{{{slot}, {func.c_basename}}}}}, \\
+                {{{{{fast_slot}, {func.c_basename_fast}}}}}
+            """)
+        self.vectorcall_definition = code
+
     def vectorcall_body(self, *fields: str) -> None:
         """Assemble a vectorcall function that parses inline and calls the impl.
 
@@ -1657,14 +1715,28 @@ class ParseArgsCodeGen:
         finale calls {c_basename}_impl before running the exit/cleanup
         block.
         """
-        preamble = libclinic.normalize_snippet("""
-            {{
-                PyObject *return_value = NULL;
-                Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
-                {init_declarations}
-                {declarations}
-                {initializers}
-        """) + "\n"
+        if self.func.vectorcall_fast_slots:
+            if self.func.kind is METHOD_INIT:
+                retval = "int return_value = -1;"
+            else:
+                retval = "PyObject *return_value = NULL;"
+            base_tp = "{base_type_ptr}" if self.fast_slot_needs_base_tp else ""
+            preamble = libclinic.normalize_snippet(f"""
+                {{{{
+                    {retval}
+                    {base_tp}
+                    {{declarations}}
+                    {{initializers}}
+            """) + "\n"
+        else:
+            preamble = libclinic.normalize_snippet("""
+                {{
+                    PyObject *return_value = NULL;
+                    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+                    {init_declarations}
+                    {declarations}
+                    {initializers}
+            """) + "\n"
         self._assemble_vectorcall(preamble, fields, PARSER_FINALE_SKELETON)
 
     def parse_vectorcall_pos_only(self) -> None:
@@ -1672,14 +1744,28 @@ class ParseArgsCodeGen:
         parser_code = self._vectorcall_type_check()
         self.codegen.add_include('pycore_modsupport.h',
                                  '_PyArg_NoKwnames()')
-        parser_code.append(libclinic.normalize_snippet("""
-            if (!_PyArg_NoKwnames("{name}", kwnames)) {{
+        check = self._fast_slot_subclass_check()
+        parser_code.append(libclinic.normalize_snippet(f"""
+            if ({check}!_PyArg_NoKwnames("{{name}}", kwnames)) {{{{
                 goto exit;
-            }}
+            }}}}
             """, indent=4))
 
         parser_code.extend(self._vectorcall_positional())
         self.vectorcall_body(*parser_code)
+
+    def _fast_slot_subclass_check(self) -> str:
+        """The {self_type_check} prefix of the argument checks, if any.
+
+        Unlike the type vectorcall, which only calls the exact type, the fast
+        slots also create and initialize instances of subclasses, for which
+        the tuple-based __new__ (__init__) doesn't reject arguments when the
+        subclass overrides __init__ (__new__).
+        """
+        if not self.func.vectorcall_fast_slots:
+            return ""
+        self.fast_slot_needs_base_tp = True
+        return "{self_type_check}"
 
     def _vectorcall_guarded_delegate(self, condition: str, nkw: str) -> str:
         """Emit `if (condition) { <delegate to helper> }`."""
@@ -1696,6 +1782,12 @@ class ParseArgsCodeGen:
 
         nkw: Number of keyword arguments.
         """
+        if self.func.vectorcall_fast_slots:
+            return libclinic.normalize_snippet(f"""
+                return {{c_basename}}_helper({{self_name}}, args, nargs,
+                    {nkw},
+                    NULL, kwnames);
+            """, indent=4)
         if self.func.kind is METHOD_INIT:
             receiver = "self"
             bind_result = "_result = "
@@ -1730,11 +1822,14 @@ class ParseArgsCodeGen:
         parser_code = self._vectorcall_type_check()
         parser_code.append(self._vectorcall_delegate_to_helper(
             'kwnames ? PyTuple_GET_SIZE(kwnames) : 0'))
-        preamble = libclinic.normalize_snippet("""
-            {{
-                Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
-                {init_declarations}
-        """) + "\n"
+        if self.func.vectorcall_fast_slots:
+            preamble = "{{\n"
+        else:
+            preamble = libclinic.normalize_snippet("""
+                {{
+                    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+                    {init_declarations}
+            """) + "\n"
         self._assemble_vectorcall(preamble, tuple(parser_code), "}}")
 
     def parse_vectorcall_pos_or_kw(self) -> None:
@@ -1760,12 +1855,23 @@ class ParseArgsCodeGen:
         parser_code = self._vectorcall_type_check()
         self.codegen.add_include('pycore_modsupport.h',
                                  '_PyArg_NoPositionalStack()')
-        parser_code.append(libclinic.normalize_snippet("""
-            if (!_PyArg_NoPositionalStack("{name}", nargs) ||
-                !_PyArg_NoKwnames("{name}", kwnames)) {{
-                goto exit;
-            }}
-            """, indent=4))
+        check = self._fast_slot_subclass_check()
+        if check:
+            # Like the tuple-based parser: a subclass may override the
+            # other one of __new__ and __init__ to take arguments.
+            parser_code.append(libclinic.normalize_snippet(f"""
+                if ({check}(!_PyArg_NoPositionalStack("{{name}}", nargs) ||
+                     !_PyArg_NoKwnames("{{name}}", kwnames))) {{{{
+                    goto exit;
+                }}}}
+                """, indent=4))
+        else:
+            parser_code.append(libclinic.normalize_snippet("""
+                if (!_PyArg_NoPositionalStack("{name}", nargs) ||
+                    !_PyArg_NoKwnames("{name}", kwnames)) {{
+                    goto exit;
+                }}
+                """, indent=4))
         self.vectorcall_body(*parser_code)
 
     def parse_vectorcall(self) -> None:
@@ -1801,6 +1907,7 @@ class ParseArgsCodeGen:
         self.impl_prototype = None
         self.impl_definition = IMPL_DEFINITION_PROTOTYPE
         self.vectorcall_definition = ""
+        self.fast_slot_needs_base_tp = False
 
         # parser_body_fields remembers the fields passed in to the
         # previous call to parser_body. this is used for an awful hack.

@@ -305,6 +305,7 @@ class DSLParser:
         self.target_critical_section = []
         self.disable_fastcall = False
         self.vectorcall: bool = False
+        self.vectorcall_fast_slots: bool = False
         self.slot = None
         self.permit_long_summary = False
         self.permit_long_docstring_body = False
@@ -482,10 +483,17 @@ class DSLParser:
             fail("Can't set @staticmethod, function is not a normal callable")
         self.kind = STATIC_METHOD
 
-    def at_vectorcall(self) -> None:
+    def at_vectorcall(self, *args: str) -> None:
         if self.vectorcall:
             fail("Called @vectorcall twice!")
         self.vectorcall = True
+        for arg in args:
+            if arg == 'fast_slots':
+                # Generate the Py_tp_init_fast / Py_tp_new_fast functions
+                # of a heap type instead of a type vectorcall.
+                self.vectorcall_fast_slots = True
+            else:
+                fail(f"@vectorcall: unknown argument {arg!r}")
 
     def at_coexist(self) -> None:
         if self.coexist:
@@ -788,6 +796,7 @@ class DSLParser:
             forced_text_signature=self.forced_text_signature,
             line_number=self.line_number,
             vectorcall=self.vectorcall,
+            vectorcall_fast_slots=self.vectorcall_fast_slots,
             slot=self.slot,
         )
         self.add_function(func)

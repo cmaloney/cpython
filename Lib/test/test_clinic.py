@@ -5,7 +5,7 @@
 from functools import partial
 from test import support, test_tools
 from test.support import force_not_colorized_test_class
-from test.support import os_helper
+from test.support import import_helper, os_helper
 from test.support.os_helper import TESTFN, unlink, rmtree
 from textwrap import dedent
 from unittest import TestCase
@@ -3519,8 +3519,8 @@ class ClinicParserTest(TestCase):
                                    function_index=2)
         self.assertTrue(func.vectorcall)
 
-    def test_vectorcall_takes_no_arguments(self):
-        err = "at_vectorcall() takes 1 positional argument but 2 were given"
+    def test_vectorcall_unknown_argument(self):
+        err = "@vectorcall: unknown argument 'bogus=True'"
         block = """
             module m
             class Foo "FooObject *" "Foo_Type"
@@ -3528,6 +3528,20 @@ class ClinicParserTest(TestCase):
             Foo.__init__
         """
         self.expect_failure(block, err, lineno=2)
+
+    def test_vectorcall_fast_slots(self):
+        block = """
+            module m
+            class Foo "FooObject *" ""
+            @vectorcall fast_slots
+            Foo.__init__
+                x: object = NULL
+        """
+        func = self.parse_function(block, signatures_in_block=3,
+                                   function_index=2)
+        self.assertTrue(func.vectorcall)
+        self.assertTrue(func.vectorcall_fast_slots)
+        self.assertEqual(func.c_basename_fast, 'Foo___init___fast')
 
     def test_vectorcall_without_type_object(self):
         # Heap types have no C pointer to name, so the type object is optional.
@@ -5759,6 +5773,105 @@ class ClinicFunctionalTest(unittest.TestCase):
         kwds = {'y': 'y', 'z': 'z'}
         self.assertEqual(ac_tester.kwds_with_pos_only_and_stararg(1, 2, 'lobster', 'thermidor', y='y', z='z'), (1, 2, args, kwds))
         self.assertEqual(ac_tester.kwds_with_pos_only_and_stararg(1, 2, *args, **kwds), (1, 2, args, kwds))
+
+
+@unittest.skipIf(ac_tester is None, "_testclinic is missing")
+class FastSlotsFunctionalTest(unittest.TestCase):
+    """Runtime tests for the @vectorcall fast_slots heap types.
+
+    The fast __init__ / __new__ (Py_tp_init_fast, Py_tp_new_fast) must
+    behave like the tuple-based tp_init / tp_new, including errors.
+    """
+
+    CALLS = [((), {}), ((1,), {}), ((1, 2), {}), ((1, 2, 3), {}),
+             ((), {'a': 1}), ((1,), {'b': 2}), ((), {'a': 1, 'b': 2}),
+             ((1,), {'a': 1}), ((1,), {'c': 3}), ((1, 2), {'b': 2})]
+
+    def outcome(self, func, *args, **kwargs):
+        try:
+            obj = func(*args, **kwargs)
+        except TypeError as exc:
+            return ('error', str(exc))
+        return ('ok', getattr(obj, 'a', None), getattr(obj, 'b', None))
+
+    def test_fast_init(self):
+        _testcapi = import_helper.import_module('_testcapi')
+        for name in 'FastInit', 'FastInitKwOnly':
+            C = getattr(ac_tester, name)
+            self.assertEqual(_testcapi.get_fast_slots(C), (True, False, True))
+            for args, kwargs in self.CALLS:
+                with self.subTest(name, args=args, kwargs=kwargs):
+                    def via_tuple(*args, **kwargs):
+                        obj = C.__new__(C)
+                        _testcapi.call_tp_init(C, obj, args, kwargs)
+                        return obj
+                    def via_wrapper(*args, **kwargs):
+                        obj = C.__new__(C)
+                        C.__init__(obj, *args, **kwargs)
+                        return obj
+                    expected = self.outcome(via_tuple, *args, **kwargs)
+                    self.assertEqual(self.outcome(C, *args, **kwargs),
+                                     expected)
+                    self.assertEqual(self.outcome(via_wrapper, *args, **kwargs),
+                                     expected)
+
+    def test_fast_new(self):
+        _testcapi = import_helper.import_module('_testcapi')
+        for name in 'FastNewPosOnly', 'FastNewNoArgs':
+            C = getattr(ac_tester, name)
+            self.assertEqual(_testcapi.get_fast_slots(C), (False, True, True))
+            for args, kwargs in self.CALLS:
+                with self.subTest(name, args=args, kwargs=kwargs):
+                    def via_tuple(*args, **kwargs):
+                        return _testcapi.call_tp_new(C, C, args, kwargs)
+                    def via_wrapper(*args, **kwargs):
+                        return C.__new__(C, *args, **kwargs)
+                    expected = self.outcome(via_tuple, *args, **kwargs)
+                    self.assertEqual(self.outcome(C, *args, **kwargs),
+                                     expected)
+                    self.assertEqual(self.outcome(via_wrapper, *args, **kwargs),
+                                     expected)
+
+    def test_fast_new_subclass_overriding_init(self):
+        # The tuple-based __new__ doesn't reject the arguments for a
+        # subclass with its own __init__, nor does the fast one.
+        _testcapi = import_helper.import_module('_testcapi')
+        for name in 'FastNewPosOnly', 'FastNewNoArgs':
+            C = getattr(ac_tester, name)
+            class Sub(C):
+                def __new__(cls, *args, **kwargs):
+                    return super().__new__(cls, *args[:1], **kwargs)
+                def __init__(self, *args, **kwargs):
+                    self.init_args = (args, kwargs)
+            class Sub2(C):
+                def __init__(self, *args, **kwargs):
+                    self.init_args = (args, kwargs)
+            for S in Sub, Sub2:
+                with self.subTest(name, S=S):
+                    if name == 'FastNewPosOnly':
+                        obj = S(1, k=2)
+                        self.assertEqual(obj.a, 1)
+                        self.assertEqual(obj.init_args, ((1,), {'k': 2}))
+                    obj = S(k=2) if name == 'FastNewNoArgs' else S(1)
+                    self.assertIsInstance(obj, S)
+                    self.assertEqual(
+                        self.outcome(_testcapi.call_tp_new, C, S, (1,),
+                                     {'k': 2})[0],
+                        self.outcome(C.__new__, S, 1, k=2)[0])
+
+    def test_fast_init_subclass(self):
+        C = ac_tester.FastInit
+        class Inherit(C):
+            pass
+        class Super(C):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+        for S in Inherit, Super:
+            with self.subTest(S=S):
+                obj = S(1, b=2)
+                self.assertEqual((obj.a, obj.b), (1, 2))
+                with self.assertRaises(TypeError):
+                    S(a=1)
 
 
 @unittest.skipIf(ac_tester is None, "_testclinic is missing")
