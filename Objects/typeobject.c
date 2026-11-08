@@ -260,6 +260,31 @@ _PyStaticType_GetState(PyInterpreterState *interp, PyTypeObject *self)
     return managed_static_type_state_get(interp, self);
 }
 
+struct _type_fast_slots *
+_PyStaticType_GetFastSlots(PyTypeObject *self)
+{
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    return &_PyStaticType_GetState(interp, self)->fast;
+}
+
+void
+_PyStaticType_SetFastSlots(PyInterpreterState *interp, PyTypeObject *self,
+                           Py_initfastfunc init, Py_newfastfunc new)
+{
+    assert(self->tp_flags & _Py_TPFLAGS_STATIC_BUILTIN);
+    struct _type_fast_slots *fast = &_PyStaticType_GetState(interp, self)->fast;
+    if (init != NULL) {
+        assert(self->tp_init != NULL);
+        fast->init_for = self->tp_init;
+        fast->init = init;
+    }
+    if (new != NULL) {
+        assert(self->tp_new != NULL);
+        fast->new_for = self->tp_new;
+        fast->new = new;
+    }
+}
+
 /* Set the type's per-interpreter state. */
 static void
 managed_static_type_state_init(PyInterpreterState *interp, PyTypeObject *self,
@@ -352,6 +377,7 @@ managed_static_type_state_clear(PyInterpreterState *interp, PyTypeObject *self,
 
     assert(state->type != NULL);
     state->type = NULL;
+    memset(&state->fast, 0, sizeof(state->fast));
     assert(state->tp_weaklist == NULL);  // It was already cleared out.
 
     (void)_Py_atomic_add_int64(
@@ -12366,7 +12392,7 @@ fixup_slot_dispatchers(PyTypeObject *type)
     }
 }
 
-/* "Vectorcall always" __init__ and __new__ of heap types.
+/* "Vectorcall always" __init__ and __new__.
 
    A heap type can give, with the provisional Py_tp_init_fast and
    Py_tp_new_fast slots, implementations of tp_init and tp_new which take
@@ -12374,16 +12400,21 @@ fixup_slot_dispatchers(PyTypeObject *type)
    Py_newfastfunc), so that the interpreter does not need to build an
    argument tuple and keyword dict to call them.  The public slots keep
    working: if the type doesn't also give them, they are set to adaptors
-   which call the fast functions.
+   which call the fast functions.  Static builtin types register theirs with
+   the internal _PyStaticType_SetFastSlots() (there is no public API for
+   static types).
 
-   PyHeapTypeObject._ht_fast pairs each fast function with the public slot
-   function it is equivalent to.  It is used when the public slot of the
-   type still is that function, so it never matters for correctness when
-   the pair is stale.  A heap type which doesn't give its own fast slots
-   (e.g. a Python subclass) gets the pair of the type whose __init__ /
-   __new__ it inherits, when that type's slot function is inherited, and the
-   pairs are updated with the slots when __init__ or __new__ is assigned or
-   __bases__ changes (update_slots_callback()).
+   struct _type_fast_slots pairs each fast function with the public slot
+   function it is equivalent to; _PyType_GetFastInit() and
+   _PyType_GetFastNew() find it for heap types (PyHeapTypeObject._ht_fast)
+   and static builtin types (their per-interpreter state) alike.  It is used
+   when the public slot of the type still is that function, so it never
+   matters for correctness when the pair is stale.  A heap type which
+   doesn't give its own fast slots (e.g. a Python subclass) gets the pair of
+   the type whose __init__ / __new__ it inherits, when that type's slot
+   function is inherited, and the pairs are updated with the slots when
+   __init__ or __new__ is assigned or __bases__ changes
+   (update_slots_callback()).  Static types can't change.
 
    Users of the fast functions:
    - heaptype_fast_vectorcall(), the tp_vectorcall of heap types with fast
@@ -12392,7 +12423,7 @@ fixup_slot_dispatchers(PyTypeObject *type)
      Base.__init__(self, ...) and super().__init__(...);
    - the __new__ wrapper, tp_new_wrapper(), for Base.__new__(cls, ...) and
      super().__new__(cls, ...).
-   Static types don't have fast slots and keep using the public slots. */
+   Calling a static type itself uses its own tp_vectorcall, if any. */
 
 /* Find the fast __init__ which fast_init_adaptor() stands for: the one of
    the nearest type in the MRO of 'type' which gave only a fast __init__.
@@ -12409,7 +12440,7 @@ find_own_fast_init(PyTypeObject *type)
         if (!(base->tp_flags & Py_TPFLAGS_HEAPTYPE)) {
             continue;
         }
-        struct _heaptype_fast_slots *fast = &((PyHeapTypeObject *)base)->_ht_fast;
+        struct _type_fast_slots *fast = &((PyHeapTypeObject *)base)->_ht_fast;
         if ((fast->own & FAST_OWN_INIT)
             && fast->init_for == fast_init_adaptor)
         {
@@ -12429,7 +12460,7 @@ find_own_fast_new(PyTypeObject *type)
         if (!(base->tp_flags & Py_TPFLAGS_HEAPTYPE)) {
             continue;
         }
-        struct _heaptype_fast_slots *fast = &((PyHeapTypeObject *)base)->_ht_fast;
+        struct _type_fast_slots *fast = &((PyHeapTypeObject *)base)->_ht_fast;
         if ((fast->own & FAST_OWN_NEW)
             && fast->new_for == fast_new_adaptor)
         {
@@ -12648,7 +12679,7 @@ type_update_fast_slots(PyTypeObject *type)
     assert(type->tp_flags & Py_TPFLAGS_HEAPTYPE);
     ASSERT_WORLD_STOPPED_OR_NEW_TYPE(type);
     PyHeapTypeObject *ht = (PyHeapTypeObject *)type;
-    struct _heaptype_fast_slots *fast = &ht->_ht_fast;
+    struct _type_fast_slots *fast = &ht->_ht_fast;
     _PyStackRef ref;
 
     if (!(fast->own & FAST_OWN_INIT)) {

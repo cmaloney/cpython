@@ -123,28 +123,48 @@ extern PyObject* _Py_slot_tp_getattr_hook(PyObject *self, PyObject *name);
 
 extern int _PyType_HasSlotTpIternext(PyTypeObject *type);
 
-/* The "vectorcall always" __init__ of 'type' which is equivalent to its
-   tp_init function 'init', or NULL.  Only heap types have them (see
-   Py_tp_init_fast and PyHeapTypeObject._ht_fast). */
+/* The fast __init__ and __new__ of static builtin types (internal, there is
+   no public API for them): register them after _PyStaticType_InitBuiltin(),
+   in each interpreter.  'init' must behave exactly like the type's tp_init
+   (and 'new' like its tp_new); either can be NULL. */
+extern void _PyStaticType_SetFastSlots(
+    PyInterpreterState *interp,
+    PyTypeObject *type,
+    Py_initfastfunc init,
+    Py_newfastfunc new);
+
+extern struct _type_fast_slots *_PyStaticType_GetFastSlots(PyTypeObject *type);
+
+/* Where the fast __init__ and __new__ of 'type' are stored, or NULL. */
+static inline struct _type_fast_slots *
+_PyType_GetFastSlots(PyTypeObject *type)
+{
+    if (type->tp_flags & Py_TPFLAGS_HEAPTYPE) {
+        return &((PyHeapTypeObject *)type)->_ht_fast;
+    }
+    if (type->tp_flags & _Py_TPFLAGS_STATIC_BUILTIN) {
+        return _PyStaticType_GetFastSlots(type);
+    }
+    return NULL;
+}
+
+/* The "vectorcall always" __init__ of 'type' which is equivalent to the
+   tp_init function 'init', or NULL.  Heap types get them with the
+   Py_tp_init_fast slot or inherit them, static builtin types with
+   _PyStaticType_SetFastSlots(). */
 static inline Py_initfastfunc
 _PyType_GetFastInit(PyTypeObject *type, initproc init)
 {
-    if (!(type->tp_flags & Py_TPFLAGS_HEAPTYPE)) {
-        return NULL;
-    }
-    struct _heaptype_fast_slots *fast = &((PyHeapTypeObject *)type)->_ht_fast;
-    return fast->init_for == init ? fast->init : NULL;
+    struct _type_fast_slots *fast = _PyType_GetFastSlots(type);
+    return (fast != NULL && fast->init_for == init) ? fast->init : NULL;
 }
 
-/* Likewise for __new__ (Py_tp_new_fast) and the tp_new function 'new'. */
+/* Likewise for __new__ and the tp_new function 'new'. */
 static inline Py_newfastfunc
 _PyType_GetFastNew(PyTypeObject *type, newfunc new)
 {
-    if (!(type->tp_flags & Py_TPFLAGS_HEAPTYPE)) {
-        return NULL;
-    }
-    struct _heaptype_fast_slots *fast = &((PyHeapTypeObject *)type)->_ht_fast;
-    return fast->new_for == new ? fast->new : NULL;
+    struct _type_fast_slots *fast = _PyType_GetFastSlots(type);
+    return (fast != NULL && fast->new_for == new) ? fast->new : NULL;
 }
 
 extern PyTypeObject _PyBufferWrapper_Type;

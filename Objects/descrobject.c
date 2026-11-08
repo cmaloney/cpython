@@ -567,8 +567,8 @@ wrapper_call_tuple(PyWrapperDescrObject *descr, PyObject *self,
     return result;
 }
 
-/* Call the "vectorcall always" __init__ of a heap type (see
-   Py_tp_init_fast): no argument tuple or keyword dict is built. */
+/* Call the "vectorcall always" __init__ of a type (see Py_tp_init_fast and
+   _PyType_GetFastInit()): no argument tuple or keyword dict is built. */
 static PyObject *
 wrapper_call_init_fast(Py_initfastfunc init, PyObject *self,
                        PyObject *const *args, Py_ssize_t nargs,
@@ -596,8 +596,8 @@ wrapper_call(PyWrapperDescrObject *descr, PyObject *self,
     if (!(descr->d_base->flags & PyWrapperFlag_FASTCALL)
         || (kwnames != NULL && PyTuple_GET_SIZE(kwnames) != 0))
     {
-        /* __init__ of a heap type: Base.__init__(self, ...) or
-           super().__init__(...). */
+        /* __init__ of a type with a fast __init__: Base.__init__(self, ...)
+           or super().__init__(...). */
         if (descr->d_base->offset == (int)offsetof(PyTypeObject, tp_init)) {
             Py_initfastfunc init = _PyType_GetFastInit(
                 PyDescr_TYPE(descr), (initproc)descr->d_wrapped);

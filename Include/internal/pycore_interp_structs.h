@@ -578,6 +578,10 @@ typedef struct {
        For static builtin types the cache must be per-interpreter
        because tp_dict and the values it stores are per-interpreter. */
     void *_tp_cache;
+    /* Internal fast __init__ and __new__ of static builtin types, set with
+       _PyStaticType_SetFastSlots().  The functions are the same in all
+       interpreters, but storing them here needs no synchronization. */
+    struct _type_fast_slots fast;
 } managed_static_type_state;
 
 #define TYPE_VERSION_CACHE_SIZE (1<<12)  /* Must be a power of 2 */
