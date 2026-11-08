@@ -1,0 +1,3 @@
+Speed up :func:`super` attribute lookups such as ``super().__init__()`` by
+using the type attribute cache when the remaining MRO is that of the next
+class, which is always the case with single inheritance.

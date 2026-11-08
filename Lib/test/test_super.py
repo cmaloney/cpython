@@ -609,6 +609,131 @@ class TestSuper(unittest.TestCase):
         self.assertIs(u.__thisclass__, C)
         self.assertIs(u.__self_class__, E)
 
+    def test_lookup_after_class_changes(self):
+        # super() lookups must notice changes to the classes after the
+        # start class, including between repeated calls of the same code.
+        class A:
+            def m(self):
+                return 'A'
+        class B(A):
+            pass
+        class C(B):
+            def m(self):
+                return super().m()
+        c = C()
+        for _ in range(10):
+            self.assertEqual(c.m(), 'A')
+        B.m = lambda self: 'B'
+        for _ in range(10):
+            self.assertEqual(c.m(), 'B')
+        del B.m
+        del A.m
+        for _ in range(10):
+            with self.assertRaises(AttributeError):
+                c.m()
+        class D:
+            def m(self):
+                return 'D'
+        B.__bases__ = (D,)
+        for _ in range(10):
+            self.assertEqual(c.m(), 'D')
+
+    def test_lookup_diamond(self):
+        class A:
+            def m(self):
+                return ['A']
+        class B(A):
+            def m(self):
+                return ['B'] + super().m()
+        class C(A):
+            def m(self):
+                return ['C'] + super().m()
+        class D(B, C):
+            def m(self):
+                return ['D'] + super().m()
+        for _ in range(10):
+            self.assertEqual(D().m(), ['D', 'B', 'C', 'A'])
+            self.assertEqual(B().m(), ['B', 'A'])
+        C.m = lambda self: ['C2'] + super(C, self).m()
+        for _ in range(10):
+            self.assertEqual(D().m(), ['D', 'B', 'C2', 'A'])
+
+    def test_lookup_custom_mro(self):
+        # The MRO of the class after the start class may differ from the
+        # rest of the MRO of the instance's class.
+        class Y:
+            def m(self):
+                return 'Y'
+        class W:
+            def m(self):
+                return 'W'
+        class Meta(type):
+            def mro(cls):
+                if cls.__name__ == 'X':
+                    return (cls, Y, object)
+                if cls.__name__ == 'Z':
+                    return (cls, X, object)
+                if cls.__name__ == 'Z2':
+                    return (cls, X, W, object)
+                return type.mro(cls)
+        class X(metaclass=Meta):
+            pass
+        class Z(X):
+            pass
+        class Z2(X, W):
+            pass
+        self.assertEqual(X.__mro__, (X, Y, object))
+        self.assertEqual(X().m(), 'Y')
+        self.assertEqual(Z.__mro__, (Z, X, object))
+        self.assertEqual(Z2.__mro__, (Z2, X, W, object))
+        for _ in range(10):
+            with self.assertRaises(AttributeError):
+                super(Z, Z()).m
+            self.assertEqual(super(Z2, Z2()).m(), 'W')
+            self.assertEqual(super(X, Z2()).m(), 'W')
+
+    def test_lookup_classmethod_and_type(self):
+        class A:
+            @classmethod
+            def cm(cls):
+                return ('A', cls)
+        class B(A):
+            @classmethod
+            def cm(cls):
+                return super().cm()
+        class C(B):
+            pass
+        for _ in range(10):
+            self.assertEqual(B.cm(), ('A', B))
+            self.assertEqual(C.cm(), ('A', C))
+            self.assertEqual(C().cm(), ('A', C))
+        class Meta(type):
+            def m(cls):
+                return 'Meta'
+        class SubMeta(Meta):
+            def m(cls):
+                return super().m()
+        class K(metaclass=SubMeta):
+            pass
+        for _ in range(10):
+            self.assertEqual(K.m(), 'Meta')
+            self.assertEqual(super(SubMeta, K).m(), 'Meta')
+            self.assertEqual(super(type, int).__repr__(), object.__repr__(int))
+
+    def test_lookup_non_interned_name(self):
+        class A:
+            def method(self):
+                return 'A'
+        class B(A):
+            pass
+        name = ''.join(['meth', 'od'])
+        class S(str):
+            pass
+        for n in (name, S('method')):
+            self.assertEqual(getattr(super(B, B()), n)(), 'A')
+            with self.assertRaises(AttributeError):
+                getattr(super(B, B()), n + 'x')
+
 
 if __name__ == "__main__":
     unittest.main()

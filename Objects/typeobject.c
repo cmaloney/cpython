@@ -12729,12 +12729,6 @@ _PySuper_LookupDescr(PyTypeObject *su_type, PyTypeObject *su_obj_type, PyObject 
     if (mro == NULL)
         return NULL;
 
-    /* Keep a strong reference to mro because su_obj_type->tp_mro can be
-       replaced during PyDict_GetItemRef(dict, name, &res). */
-    PyThreadState *tstate = _PyThreadState_GET();
-    _PyCStackRef mro_ref;
-    _PyThreadState_PushCStackRefNew(tstate, &mro_ref, mro);
-
     assert(PyTuple_Check(mro));
     n = PyTuple_GET_SIZE(mro);
 
@@ -12745,9 +12739,37 @@ _PySuper_LookupDescr(PyTypeObject *su_type, PyTypeObject *su_obj_type, PyObject 
     }
     i++;  /* skip su->type (if any)  */
     if (i >= n) {
-        _PyThreadState_PopCStackRef(tstate, &mro_ref);
         return NULL;
     }
+
+    /* If the MRO of the next class is exactly the rest of su_obj_type's MRO
+       (always the case with single inheritance), the result is the same as
+       a regular lookup on that class, which can use the type cache. */
+    PyTypeObject *next = _PyType_CAST(PyTuple_GET_ITEM(mro, i));
+    PyObject *next_mro = lookup_tp_mro(next);
+    if (MCACHE_CACHEABLE_NAME(name) && next_mro != NULL &&
+        PyTuple_GET_SIZE(next_mro) == n - i)
+    {
+        Py_ssize_t j = 0;
+        while (j < n - i &&
+               PyTuple_GET_ITEM(next_mro, j) == PyTuple_GET_ITEM(mro, i + j)) {
+            j++;
+        }
+        if (j == n - i) {
+            /* The lookup can run arbitrary code which could replace
+               su_obj_type->tp_mro, the only owner of the reference. */
+            Py_INCREF(next);
+            res = _PyType_LookupRef(next, name);
+            Py_DECREF(next);
+            return res;
+        }
+    }
+
+    /* Keep a strong reference to mro because su_obj_type->tp_mro can be
+       replaced during PyDict_GetItemRef(dict, name, &res). */
+    PyThreadState *tstate = _PyThreadState_GET();
+    _PyCStackRef mro_ref;
+    _PyThreadState_PushCStackRefNew(tstate, &mro_ref, mro);
 
     do {
         PyObject *obj = PyTuple_GET_ITEM(mro, i);
