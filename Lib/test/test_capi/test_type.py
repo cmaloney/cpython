@@ -732,3 +732,179 @@ class FastSlotsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 C(i, fail=True)
         gc.collect()
+
+
+class StaticFastSlotsTests(unittest.TestCase):
+    # Static builtin types with internal fast __init__ and __new__ (see
+    # _PyStaticType_SetFastSlots()): the fast paths must behave like the
+    # tuple-based slots.
+
+    def check_dict_subclass(self, D):
+        self.assertEqual(D(), {})
+        self.assertEqual(D({1: 2}, a=3), {1: 2, 'a': 3})
+        self.assertEqual(D([(1, 2)]), {1: 2})
+        with self.assertRaisesRegex(TypeError, 'at most 1 argument, got 2'):
+            D(1, 2)
+        self.assertIs(type(D()), D)
+
+    def test_dict(self):
+        class D(dict):
+            pass
+        class DInit(dict):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+        class DSetitem(dict):
+            def __setitem__(self, key, value):
+                raise AssertionError
+        for cls in (D, DInit, DSetitem):
+            with self.subTest(cls=cls):
+                self.check_dict_subclass(cls)
+        d = {}
+        dict.__init__(d, {1: 2}, a=3)
+        self.assertEqual(d, {1: 2, 'a': 3})
+
+    def test_exceptions(self):
+        class E(Exception):
+            pass
+        class EInit(Exception):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+        for cls in (E, EInit):
+            with self.subTest(cls=cls):
+                self.assertEqual(cls('a', 1).args, ('a', 1))
+                self.assertEqual(cls().args, ())
+                with self.assertRaisesRegex(TypeError,
+                                            'takes no keyword arguments'):
+                    cls(a=1)
+        class I(ImportError):
+            pass
+        class IInit(ImportError):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+        for cls in (I, IInit):
+            with self.subTest(cls=cls):
+                e = cls('m', name='n', path='p')
+                self.assertEqual((e.args, e.name, e.path), (('m',), 'n', 'p'))
+                with self.assertRaisesRegex(TypeError, "keyword argument 'x'"):
+                    cls(x=1)
+        class A(AttributeError):
+            pass
+        e = A('x', name='n', obj=1)
+        self.assertEqual((e.args, e.name, e.obj), (('x',), 'n', 1))
+        class N(NameError):
+            pass
+        self.assertEqual(N('x', name='n').name, 'n')
+
+    def test_exception_args(self):
+        # The fast __init__ keeps the tuple stored by __new__ when it gets
+        # the same arguments, and replaces it otherwise.
+        class E(Exception):
+            def __init__(self, *args):
+                self.stored = self.args
+                super().__init__(*args)
+        e = E('a', 'b')
+        self.assertEqual(e.args, ('a', 'b'))
+        self.assertIs(e.args, e.stored)
+        Exception.__init__(e, 'c')
+        self.assertEqual(e.args, ('c',))
+        class F(Exception):
+            def __init__(self, *args):
+                super().__init__(*args[1:])
+        self.assertEqual(F('a', 'b').args, ('b',))
+
+    def test_bytearray(self):
+        class B(bytearray):
+            pass
+        class BInit(bytearray):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+        for cls in (B, BInit):
+            with self.subTest(cls=cls):
+                self.assertEqual(cls(b'ab'), b'ab')
+                self.assertEqual(cls('x', 'ascii'), b'x')
+                self.assertEqual(cls(source=b'q'), b'q')
+                with self.assertRaises(TypeError):
+                    cls('x')
+
+    def test_assign(self):
+        class D(dict):
+            pass
+        self.assertEqual(D(a=1), {'a': 1})
+        D.__init__ = lambda self, *args, **kwargs: dict.__init__(self, z=9)
+        self.assertEqual(D(a=1), {'z': 9})
+        del D.__init__
+        self.assertEqual(D(a=1), {'a': 1})
+        D.__new__ = lambda cls, *args, **kwargs: [1]
+        self.assertEqual(D(a=1), [1])
+        del D.__new__
+        self.assertEqual(D(a=1), {'a': 1})
+
+        class E(Exception):
+            pass
+        E.__init__ = lambda self, *args: Exception.__init__(self, 'r')
+        self.assertEqual(E('a').args, ('r',))
+        del E.__init__
+        self.assertEqual(E('a').args, ('a',))
+
+    def test_new_returns_other_type(self):
+        class D(dict):
+            def __new__(cls, *args, **kwargs):
+                return dict.__new__(Sub)
+        class Sub(D):
+            def __init__(self, *args, **kwargs):
+                super().__init__(sub=1)
+        class Other(dict):
+            pass
+        class NotSub(dict):
+            def __new__(cls, *args, **kwargs):
+                return dict.__new__(Other)
+        self.assertEqual(D(a=1), {'sub': 1})
+        self.assertEqual(NotSub(a=1), {})
+        self.assertIs(type(NotSub(a=1)), Other)
+
+    def test_static_change_bases(self):
+        class P1(dict):
+            pass
+        class P2(dict):
+            def __init__(self, *args, **kwargs):
+                dict.__init__(self, p2=1)
+        class C(P1):
+            pass
+        self.assertEqual(C(a=1), {'a': 1})
+        C.__bases__ = (P2,)
+        self.assertEqual(C(a=1), {'p2': 1})
+        C.__bases__ = (P1,)
+        self.assertEqual(C(a=1), {'a': 1})
+
+    def test_subinterpreters(self):
+        # The fast slots of static types are stored per interpreter.
+        interpreters = import_helper.import_module('concurrent.interpreters')
+        import threading
+        code = '''if True:
+            class D(dict):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+            class E(ImportError):
+                pass
+            class B(bytearray):
+                pass
+            for i in range(1000):
+                assert D([(1, 2)], a=i) == {1: 2, 'a': i}
+                e = E('m', name='n')
+                assert (e.args, e.name) == (('m',), 'n')
+                assert B(b'ab') == b'ab'
+            '''
+        interps = [interpreters.create() for _ in range(3)]
+        try:
+            threads = [threading.Thread(target=interp.exec, args=(code,))
+                       for interp in interps]
+            for t in threads:
+                t.start()
+            exec(code, {})
+            for t in threads:
+                t.join()
+            for interp in interps:
+                interp.exec(code)
+        finally:
+            for interp in interps:
+                interp.close()
