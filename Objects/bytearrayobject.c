@@ -1700,6 +1700,85 @@ bytearray_take_bytes_impl(PyByteArrayObject *self, PyObject *n)
 }
 
 
+/* Specialty forms for bytes(x) and bytearray(x).
+
+   The caller must have proven that arg is expiring: it holds the only
+   reference, nothing can observe arg after this returns, and it will drop that
+   reference itself.  arg is left valid (empty, or with one extra reference for
+   the caller to drop) so the caller's cleanup doesn't change.
+
+   Returns a new reference on success.  Returns NULL with no exception set if
+   this form doesn't apply, in which case the caller uses the generic path, and
+   NULL with an exception set on failure. */
+/* An adopted buffer belongs to whoever adopted it, so charge it to this line
+   rather than the one that made the temporary, as a copy would be. */
+static inline void
+retrace_adopted_bytes(PyObject *bytes)
+{
+    if (_Py_atomic_load_int_relaxed(&_PyRuntime.tracemalloc.config.tracing)) {
+        (void)PyTraceMalloc_Track(0, (uintptr_t)bytes,
+                                  _PyBytesObject_SIZE + PyBytes_GET_SIZE(bytes));
+    }
+}
+
+PyObject *
+_PyBytes_FromExpiringArg(PyObject *arg)
+{
+    /* Empty and one-byte results must stay the shared singletons, which the
+       generic path returns. */
+    if (!PyByteArray_CheckExact(arg) || PyByteArray_GET_SIZE(arg) < 2) {
+        return NULL;
+    }
+    PyByteArrayObject *ba = _PyByteArray_CAST(arg);
+    PyObject *res = NULL;
+    Py_BEGIN_CRITICAL_SECTION(arg);
+    if (ba->ob_exports == 0) {
+        res = bytearray_take_bytes_impl(ba, Py_None);
+    }
+    Py_END_CRITICAL_SECTION();
+    if (res != NULL) {
+        retrace_adopted_bytes(res);
+    }
+    return res;
+}
+
+PyObject *
+_PyByteArray_FromExpiringArg(PyObject *arg)
+{
+    PyObject *bytes;
+    if (PyBytes_CheckExact(arg)) {
+        if (_PyBytes_GET_CACHED_HASH((PyBytesObject *)arg) != -1) {
+            return NULL;
+        }
+        bytes = arg;
+    }
+    else {
+        bytes = _PyBytes_FromExpiringArg(arg);
+        if (bytes == NULL) {
+            return NULL;
+        }
+    }
+    PyObject *op = PyType_GenericAlloc(&PyByteArray_Type, 0);
+    if (op == NULL) {
+        if (bytes != arg) {
+            Py_DECREF(bytes);
+        }
+        return NULL;
+    }
+    PyByteArrayObject *self = _PyByteArray_CAST(op);
+    self->ob_exports = 0;
+    self->ob_bytes_object = bytes;
+    /* Reinit before taking a reference: it asserts bytes is uniquely
+       referenced. */
+    bytearray_reinit_from_bytes(self, PyBytes_GET_SIZE(bytes));
+    if (bytes == arg) {
+        Py_INCREF(arg);  /* The caller drops its own reference. */
+        retrace_adopted_bytes(arg);
+    }
+    return op;
+}
+
+
 /*[clinic input]
 @permit_long_summary
 @critical_section
@@ -2991,6 +3070,24 @@ Construct a mutable bytearray object from:\n\
 
 static PyObject *bytearray_iter(PyObject *seq);
 
+/* bytearray(temporary bytes or bytearray) takes its buffer instead of copying it.
+   Everything else goes straight to the generated parser. */
+static PyObject *
+bytearray_vectorcall_adopting(PyObject *type, PyObject *const *args,
+                              size_t nargsf, PyObject *kwnames)
+{
+    if (PyVectorcall_NARGS(nargsf) == 1 && kwnames == NULL
+        && (PyBytes_CheckExact(args[0]) || PyByteArray_CheckExact(args[0]))
+        && _PyEval_CallArgIsExpiring(type, args, 1, 0))
+    {
+        PyObject *res = _PyByteArray_FromExpiringArg(args[0]);
+        if (res != NULL || PyErr_Occurred()) {
+            return res;
+        }
+    }
+    return bytearray_vectorcall(type, args, nargsf, kwnames);
+}
+
 PyTypeObject PyByteArray_Type = {
     PyVarObject_HEAD_INIT(&PyType_Type, 0)
     "bytearray",
@@ -3032,7 +3129,7 @@ PyTypeObject PyByteArray_Type = {
     PyType_GenericAlloc,                /* tp_alloc */
     bytearray_new,                      /* tp_new */
     PyObject_Free,                      /* tp_free */
-    .tp_vectorcall = bytearray_vectorcall,
+    .tp_vectorcall = bytearray_vectorcall_adopting,
     .tp_version_tag = _Py_TYPE_VERSION_BYTEARRAY,
 };
 

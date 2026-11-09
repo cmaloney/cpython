@@ -863,6 +863,73 @@ _Py_CallBuiltinClass_StackRef(
     return res;
 }
 
+static inline int
+stackref_is(_PyStackRef ref, PyObject *op)
+{
+    return !PyStackRef_IsTaggedInt(ref) && PyStackRef_AsPyObjectBorrow(ref) == op;
+}
+
+/* Answers "is this C function the direct callee of the CALL the current Python
+   frame is executing, and will that CALL drop args[index] when it returns?"
+   without the interpreter passing anything: it reads the in-flight instruction
+   and the operand stack, so calls that never ask pay nothing.
+
+   True only if args[index] has one reference and an operand stack slot of the
+   in-flight CALL owns it, in which case only code that received it from this
+   CALL can reach it.  A C function that forwards its argument to another
+   callable holds it borrowed; matching the callable and the whole argument
+   vector against the stack rules that out.
+
+   What this cannot see is a callable calling itself from C with the same
+   arguments, so a caller must ask on entry, before anything else runs, and must
+   only act on an exact type whose generic path can't run arbitrary code.
+
+   C_RETURN and C_RAISE report the first argument after the callee returns, so a
+   code object with tools watching CALL is refused.  The opcode alone can't say:
+   a callback returning DISABLE de-instruments the instruction while it is running,
+   but its tool stays in active_monitors.  _co_monitoring alone is too broad: it is
+   allocated for all code run after any monitoring change, even with no events. */
+int
+_PyEval_CallArgIsExpiring(PyObject *callable, PyObject *const *args,
+                          Py_ssize_t nargs, Py_ssize_t index)
+{
+    assert(0 <= index && index < nargs);
+    PyObject *op = args[index];
+    if (!_PyObject_IsUniquelyReferenced(op)) {
+        return 0;
+    }
+    _PyInterpreterFrame *frame = _PyThreadState_GET()->current_frame;
+    /* Refuses a thread's base frame, which has no instructions: a C function can
+       run with no Python frame at all (atexit, a new thread, a subinterpreter). */
+    if (frame == NULL || frame->owner == FRAME_OWNED_BY_INTERPRETER) {
+        return 0;
+    }
+    _Py_CODEUNIT *instr = frame->instr_ptr;
+    /* With EXTENDED_ARG, op.arg matching nargs by accident is rejected below: the
+       self_or_null slot checked there would really be an argument, never NULL. */
+    if (_PyOpcode_Deopt[instr->op.code] != CALL || instr->op.arg != nargs) {
+        return 0;
+    }
+    _PyStackRef *slots = frame->stackpointer - nargs;
+    if (slots - 2 < _PyFrame_Stackbase(frame)
+        || !PyStackRef_IsNull(slots[-1])
+        || !stackref_is(slots[-2], callable))
+    {
+        return 0;
+    }
+    for (Py_ssize_t i = 0; i < nargs; i++) {
+        if (!stackref_is(slots[i], args[i])) {
+            return 0;
+        }
+    }
+    if (!PyStackRef_IsHeapSafe(slots[index])) {
+        return 0;
+    }
+    _PyCoMonitoringData *monitoring = _PyFrame_GetCode(frame)->_co_monitoring;
+    return monitoring == NULL
+           || monitoring->active_monitors.tools[PY_MONITORING_EVENT_CALL] == 0;
+}
+
 PyObject *
 _Py_BuildString_StackRefSteal(
     _PyStackRef *arguments,

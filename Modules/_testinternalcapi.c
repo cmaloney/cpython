@@ -3607,10 +3607,57 @@ static PyMethodDef module_functions[] = {
 
 /* initialization function */
 
+/* ExpiringProbe(x) reports what _PyEval_CallArgIsExpiring() says.  A list asks
+   it to call itself from C first: with the same args if the list is empty (the
+   case the check documents it can't see), otherwise with a new argument that only
+   this C frame holds. */
+static PyObject *
+expiring_probe_vectorcall(PyObject *type, PyObject *const *args,
+                          size_t nargsf, PyObject *kwnames)
+{
+    static int forwarding;
+    assert(PyVectorcall_NARGS(nargsf) == 1 && kwnames == NULL);
+    if (forwarding || !PyList_CheckExact(args[0])) {
+        return PyBool_FromLong(_PyEval_CallArgIsExpiring(type, args, 1, 0));
+    }
+    PyObject *new_arg = NULL;
+    if (PyList_GET_SIZE(args[0]) != 0) {
+        new_arg = PyByteArray_FromStringAndSize("abc", 3);
+        if (new_arg == NULL) {
+            return NULL;
+        }
+    }
+    forwarding = 1;
+    PyObject *res = PyObject_Vectorcall(type, new_arg ? &new_arg : args, 1, NULL);
+    forwarding = 0;
+    Py_XDECREF(new_arg);
+    return res;
+}
+
+static int
+expiring_add_probe(PyObject *module)
+{
+    static PyType_Slot slots[] = {
+        {Py_tp_vectorcall, (void *)expiring_probe_vectorcall}, {0, NULL}};
+    static PyType_Spec spec = {
+        .name = "_testinternalcapi.ExpiringProbe",
+        .basicsize = sizeof(PyObject),
+        .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_IMMUTABLETYPE,
+        .slots = slots};
+    PyObject *tp = PyType_FromSpec(&spec);
+    int res = tp == NULL ? -1 : PyModule_AddType(module, (PyTypeObject *)tp);
+    Py_XDECREF(tp);
+    return res;
+}
+
 static int
 module_exec(PyObject *module)
 {
     PyInterpreterState *interp = PyInterpreterState_Get();
+
+    if (expiring_add_probe(module) < 0) {
+        return 1;
+    }
 
     if (_PyTestInternalCapi_Init_Lock(module) < 0) {
         return 1;

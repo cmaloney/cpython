@@ -19,6 +19,11 @@ extern PyObject* _PyBytes_FormatEx(
  * reference rather than modifying its first argument in place. */
 extern PyObject* _PyBytes_Concat(PyObject *a, PyObject *b);
 
+/* Specialty forms of bytes(arg) and bytearray(arg) for an expiring arg.
+   See Objects/bytearrayobject.c. */
+extern PyObject* _PyBytes_FromExpiringArg(PyObject *arg);
+extern PyObject* _PyByteArray_FromExpiringArg(PyObject *arg);
+
 extern PyObject* _PyBytes_FromHex(
     PyObject *string,
     int use_bytearray);

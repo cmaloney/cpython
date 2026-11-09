@@ -256,6 +256,12 @@ static inline void _Py_LeaveRecursiveCall(void)  {
 
 extern _PyInterpreterFrame* _PyEval_GetFrame(void);
 
+/* Is args[index] about to be dropped by the CALL that is calling callable?
+   See the comment in Python/ceval.c for what a caller must guarantee. */
+PyAPI_FUNC(int) _PyEval_CallArgIsExpiring(PyObject *callable,
+                                          PyObject *const *args,
+                                          Py_ssize_t nargs, Py_ssize_t index);
+
 extern PyObject * _PyEval_GetGlobalsFromRunningMain(PyThreadState *);
 extern int _PyEval_EnsureBuiltins(
     PyThreadState *,

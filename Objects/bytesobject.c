@@ -3278,6 +3278,24 @@ bytes_dealloc(PyObject *op)
 #endif
 
 
+/* bytes(temporary bytearray) takes its buffer instead of copying it.  Everything
+   else goes straight to the generated parser. */
+static PyObject *
+bytes_vectorcall_adopting(PyObject *type, PyObject *const *args,
+                          size_t nargsf, PyObject *kwnames)
+{
+    if (PyVectorcall_NARGS(nargsf) == 1 && kwnames == NULL
+        && PyByteArray_CheckExact(args[0])
+        && _PyEval_CallArgIsExpiring(type, args, 1, 0))
+    {
+        PyObject *res = _PyBytes_FromExpiringArg(args[0]);
+        if (res != NULL || PyErr_Occurred()) {
+            return res;
+        }
+    }
+    return bytes_vectorcall(type, args, nargsf, kwnames);
+}
+
 PyTypeObject PyBytes_Type = {
     PyVarObject_HEAD_INIT(&PyType_Type, 0)
     "bytes",
@@ -3324,7 +3342,7 @@ PyTypeObject PyBytes_Type = {
     bytes_type_alloc,                           /* tp_alloc */
     bytes_new,                                  /* tp_new */
     PyObject_Free,                              /* tp_free */
-    .tp_vectorcall = bytes_vectorcall,
+    .tp_vectorcall = bytes_vectorcall_adopting,
     .tp_version_tag = _Py_TYPE_VERSION_BYTES,
     ._tp_iteritem = bytes_iteritem,
 };
