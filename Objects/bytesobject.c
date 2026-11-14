@@ -237,18 +237,6 @@ static char*
 bytes_fromformat(PyBytesWriter *writer, Py_ssize_t writer_pos,
                  const char *format, va_list vargs)
 {
-    /* Longest 64-bit formatted numbers:
-       - "18446744073709551615\0" (21 bytes)
-       - "-9223372036854775808\0" (21 bytes)
-       Decimal takes the most space (it isn't enough for octal.)
-
-       Longest 64-bit pointer representation:
-       "0xffffffffffffffff\0" (19 bytes).
-
-       Longest 64-bit "%p" with "0x" prefix: len(hex(2**64-1)+'\0') = 19.
-    */
-    char buffer[21];
-
     char *s = (char*)PyBytesWriter_GetData(writer) + writer_pos;
 
 #define WRITE_BYTES(str, len_expr) \
@@ -263,6 +251,20 @@ bytes_fromformat(PyBytesWriter *writer, Py_ssize_t writer_pos,
         } \
         memcpy(s, (str), _len); \
         s += _len; \
+    } while (0)
+
+    /* Format an integer with the same code as bytes % int. */
+#define WRITE_INT(obj_expr, base, alternate) \
+    do { \
+        PyObject *_obj = (obj_expr); \
+        if (_obj == NULL) { \
+            return NULL; \
+        } \
+        s = _PyLong_FormatBytesWriter(writer, s, _obj, (base), (alternate)); \
+        Py_DECREF(_obj); \
+        if (s == NULL) { \
+            return NULL; \
+        } \
     } while (0)
 
     for (const char *f = format; *f; f++) {
@@ -323,43 +325,35 @@ bytes_fromformat(PyBytesWriter *writer, Py_ssize_t writer_pos,
         }
 
         case 'd':
+        case 'i':
             if (longflag) {
-                len = sprintf(buffer, "%ld", va_arg(vargs, long));
+                WRITE_INT(PyLong_FromLong(va_arg(vargs, long)), 10, 0);
             }
             else if (size_tflag) {
-                len = sprintf(buffer, "%zd", va_arg(vargs, Py_ssize_t));
+                WRITE_INT(PyLong_FromSsize_t(va_arg(vargs, Py_ssize_t)), 10, 0);
             }
             else {
-                len = sprintf(buffer, "%d", va_arg(vargs, int));
+                WRITE_INT(PyLong_FromLong(va_arg(vargs, int)), 10, 0);
             }
-            assert(1 <= len && len < (Py_ssize_t)sizeof(buffer));
-            WRITE_BYTES(buffer, len);
             break;
 
         case 'u':
             if (longflag) {
-                len = sprintf(buffer, "%lu", va_arg(vargs, unsigned long));
+                WRITE_INT(PyLong_FromUnsignedLong(va_arg(vargs, unsigned long)),
+                          10, 0);
             }
             else if (size_tflag) {
-                len = sprintf(buffer, "%zu", va_arg(vargs, size_t));
+                WRITE_INT(PyLong_FromSize_t(va_arg(vargs, size_t)), 10, 0);
             }
             else {
-                len = sprintf(buffer, "%u", va_arg(vargs, unsigned int));
+                WRITE_INT(PyLong_FromUnsignedLong(va_arg(vargs, unsigned int)),
+                          10, 0);
             }
-            assert(1 <= len && len < (Py_ssize_t)sizeof(buffer));
-            WRITE_BYTES(buffer, len);
-            break;
-
-        case 'i':
-            len = sprintf(buffer, "%i", va_arg(vargs, int));
-            assert(1 <= len && len < (Py_ssize_t)sizeof(buffer));
-            WRITE_BYTES(buffer, len);
             break;
 
         case 'x':
-            len = sprintf(buffer, "%x", va_arg(vargs, int));
-            assert(1 <= len && len < (Py_ssize_t)sizeof(buffer));
-            WRITE_BYTES(buffer, len);
+            WRITE_INT(PyLong_FromUnsignedLong((unsigned int)va_arg(vargs, int)),
+                      16, 0);
             break;
 
         case 's':
@@ -382,19 +376,7 @@ bytes_fromformat(PyBytesWriter *writer, Py_ssize_t writer_pos,
         }
 
         case 'p':
-            len = sprintf(buffer, "%p", va_arg(vargs, void*));
-            assert(1 <= len && len < (Py_ssize_t)sizeof(buffer));
-            /* %p is ill-defined:  ensure leading 0x. */
-            if (buffer[1] == 'X') {
-                buffer[1] = 'x';
-            }
-            else if (buffer[1] != 'x') {
-                memmove(buffer + 2, buffer, len + 1);
-                buffer[0] = '0';
-                buffer[1] = 'x';
-                len += 2;
-            }
-            WRITE_BYTES(buffer, len);
+            WRITE_INT(PyLong_FromVoidPtr(va_arg(vargs, void*)), 16, 1);
             break;
 
         case '%':
@@ -414,6 +396,7 @@ bytes_fromformat(PyBytesWriter *writer, Py_ssize_t writer_pos,
 
     return s;
 
+#undef WRITE_INT
 #undef WRITE_BYTES
 }
 
