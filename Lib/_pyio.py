@@ -679,12 +679,9 @@ class BufferedIOBase(IOBase):
         If the argument is omitted, None, or negative, reads and
         returns all data until EOF.
 
-        If the argument is positive, and the underlying raw stream is
-        not 'interactive', multiple raw reads may be issued to satisfy
-        the byte count (unless EOF is reached first).  But for
-        interactive raw streams (XXX and for pipes?), at most one raw
-        read will be issued, and a short result does not imply that
-        EOF is imminent.
+        If the argument is positive, partial reads of the underlying
+        raw stream are retried until size bytes are read or EOF is
+        reached.
 
         Returns an empty bytes array on EOF.
 
@@ -694,7 +691,7 @@ class BufferedIOBase(IOBase):
         self._unsupported("read")
 
     def read1(self, size=-1):
-        """Read up to size bytes with at most one read() system call,
+        """Read up to size bytes, returning as soon as any are available,
         where size is an int.
         """
         self._unsupported("read1")
@@ -702,8 +699,8 @@ class BufferedIOBase(IOBase):
     def readinto(self, b):
         """Read bytes into a pre-allocated bytes-like object b.
 
-        Like read(), this may issue multiple reads to the underlying raw
-        stream, unless the latter is 'interactive'.
+        Like read(), partial reads of the underlying raw stream are
+        retried.
 
         Returns an int representing the number of bytes read (0 for EOF).
 
@@ -714,7 +711,7 @@ class BufferedIOBase(IOBase):
         return self._readinto(b, read1=False)
 
     def readinto1(self, b):
-        """Read bytes into buffer *b*, using at most one system call
+        """Read bytes into buffer *b*, returning as soon as any are available.
 
         Returns an int representing the number of bytes read (0 for EOF).
 
@@ -1171,7 +1168,7 @@ class BufferedReader(_BufferedIOMixin):
         return self._read_buf[self._read_pos:]
 
     def read1(self, size=-1):
-        """Reads up to size bytes, with at most one read() system call."""
+        """Reads up to size bytes, returning as soon as any are available."""
         # Returns up to size bytes.  If at least one byte is buffered, we
         # only return buffered bytes.  Otherwise, we do one raw read.
         self._checkClosed("read of closed file")
@@ -1190,7 +1187,7 @@ class BufferedReader(_BufferedIOMixin):
     # similar to the io implementation (which implements the methods for
     # performance reasons).
     def _readinto(self, buf, read1):
-        """Read data into *buf* with at most one system call."""
+        """Read data into *buf*; with read1, return once any data is read."""
 
         self._checkClosed("readinto of closed file")
 
@@ -1702,12 +1699,11 @@ class FileIO(RawIOBase):
     def read(self, size=None):
         """Read at most size bytes, returned as bytes.
 
-        If size is less than 0, read all bytes in the file making
-        multiple read calls. See ``FileIO.readall``.
+        If size is less than 0, read all bytes until EOF.
 
-        Attempts to make only one system call, retrying only per
-        PEP 475 (EINTR). This means less data may be returned than
-        requested.
+        Fewer than size bytes may be returned, even when more are
+        available. Reads interrupted by a signal are retried (see
+        PEP 475).
 
         In non-blocking mode, returns None if no data is available.
         Return an empty bytes object at EOF.
@@ -1779,7 +1775,8 @@ class FileIO(RawIOBase):
     def write(self, b):
         """Write bytes b to file, return number written.
 
-        Only makes one system call, so not all of the data may be written.
+        Fewer than ``len(b)`` bytes may be written. Writes
+        interrupted by a signal are retried (see PEP 475).
         The number of bytes actually written is returned.  In non-blocking
         mode, returns None if the write would block.
         """

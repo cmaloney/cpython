@@ -149,12 +149,8 @@ Read and return up to n bytes.
 If the size argument is omitted, None, or negative, read and
 return all data until EOF.
 
-If the size argument is positive, and the underlying raw stream is
-not 'interactive', multiple raw reads may be issued to satisfy
-the byte count (unless EOF is reached first).
-However, for interactive raw streams (as well as sockets and pipes),
-at most one raw read will be issued, and a short result does not
-imply that EOF is imminent.
+If the size argument is positive, partial reads of the underlying
+raw stream are retried until size bytes are read or EOF is reached.
 
 Return an empty bytes object on EOF.
 
@@ -165,21 +161,20 @@ mode and no data is available at the moment.
 static PyObject *
 _io__BufferedIOBase_read_impl(PyObject *self, PyTypeObject *cls,
                               int Py_UNUSED(size))
-/*[clinic end generated code: output=aceb2765587b0a29 input=824f6f910465e61a]*/
+/*[clinic end generated code: output=aceb2765587b0a29 input=6e480a4ba0657620]*/
 {
     _PyIO_State *state = get_io_state_by_cls(cls);
     return bufferediobase_unsupported(state, "read");
 }
 
 /*[clinic input]
-@permit_long_summary
 _io._BufferedIOBase.read1
 
     cls: defining_class
     size: int(unused=True) = -1
     /
 
-Read and return up to size bytes, with at most one read() call to the underlying raw stream.
+Read and return up to size bytes, as soon as any are available.
 
 Return an empty bytes object on EOF.
 A short result does not imply that EOF is imminent.
@@ -188,7 +183,7 @@ A short result does not imply that EOF is imminent.
 static PyObject *
 _io__BufferedIOBase_read1_impl(PyObject *self, PyTypeObject *cls,
                                int Py_UNUSED(size))
-/*[clinic end generated code: output=2e7fc62972487eaa input=1e76df255063afd6]*/
+/*[clinic end generated code: output=2e7fc62972487eaa input=2f4170a66e86a4a3]*/
 {
     _PyIO_State *state = get_io_state_by_cls(cls);
     return bufferediobase_unsupported(state, "read1");

@@ -307,11 +307,10 @@ PyDoc_STRVAR(_io_FileIO_read__doc__,
 "\n"
 "Read at most size bytes, returned as bytes.\n"
 "\n"
-"If size is less than 0, read all bytes in the file making multiple\n"
-"read calls.  See ``FileIO.readall``.\n"
+"If size is less than 0, read all bytes until EOF.\n"
 "\n"
-"Attempts to make only one system call, retrying only per PEP 475\n"
-"(EINTR).  This means less data may be returned than requested.\n"
+"Fewer than size bytes may be returned, even when more are available.\n"
+"Reads interrupted by a signal are retried (see PEP 475).\n"
 "\n"
 "In non-blocking mode, returns None if no data is available.  Return\n"
 "an empty bytes object at EOF.");
@@ -353,7 +352,8 @@ PyDoc_STRVAR(_io_FileIO_write__doc__,
 "\n"
 "Write buffer b to file, return number of bytes written.\n"
 "\n"
-"Only makes one system call, so not all of the data may be written.\n"
+"Fewer than ``len(b)`` bytes may be written. Writes interrupted by a\n"
+"signal are retried (see PEP 475).\n"
 "The number of bytes actually written is returned.  In non-blocking\n"
 "mode, returns None if the write would block.");
 
@@ -621,4 +621,4 @@ exit:
 
 #define _IO_FILEIO__BLKSIZE_GETSETDEF {"_blksize", (getter)_io_FileIO__blksize_get, (setter)NULL, _io_FileIO__blksize__doc__},
 
-/*[clinic end generated code: output=b8d6d338bfd0a58f input=a9049054013a1b77]*/
+/*[clinic end generated code: output=5b3db4730846ff69 input=a9049054013a1b77]*/
