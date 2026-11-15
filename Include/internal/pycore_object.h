@@ -664,6 +664,36 @@ _PyObject_SetMaybeWeakref(PyObject *op)
 extern PyAPI_FUNC(int) _PyObject_ResurrectEndSlow(PyObject *op);
 #endif
 
+// Py_REF_ATOMIC_SWAP() replaces a slot that other threads may also replace,
+// and Py_REF_ATOMIC_INC() returns a new reference to the slot's value (or
+// NULL) while they do. The old value is decref'd immediately, so every reader
+// of the slot must use Py_REF_ATOMIC_INC().
+static inline void
+_Py_RefAtomicSwap(PyObject **dst, PyObject *src)
+{
+#ifdef Py_GIL_DISABLED
+    if (src != NULL) {
+        _PyObject_SetMaybeWeakref(src);  // for _Py_XGetRef()
+    }
+    Py_XDECREF(_Py_atomic_exchange_ptr(dst, src));
+#else
+    Py_XSETREF(*dst, src);
+#endif
+}
+
+static inline PyObject *
+_Py_RefAtomicInc(PyObject **src)
+{
+#ifdef Py_GIL_DISABLED
+    return _Py_XGetRef(src);
+#else
+    return Py_XNewRef(*src);
+#endif
+}
+
+#define Py_REF_ATOMIC_SWAP(dst, src) _Py_RefAtomicSwap(&(dst), (src))
+#define Py_REF_ATOMIC_INC(src) _Py_RefAtomicInc(&(src))
+
 // Temporarily resurrects an object during deallocation. The refcount is set
 // to one.
 static inline void
