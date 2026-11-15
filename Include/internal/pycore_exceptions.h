@@ -26,7 +26,6 @@ struct _Py_exc_state {
     // (codeset, LC_MESSAGES, {code: message}), or None if not built yet,
     // see strerror_ensure_cache()
     PyObject *strerror_cache;
-    PyMutex strerror_lock;
     PyBaseExceptionObject *memerrors_freelist;
     int memerrors_numfree;
 #ifdef Py_GIL_DISABLED

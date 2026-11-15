@@ -5,7 +5,7 @@
 #include "pycore_import.h"        // _PyImport_GetModules()
 #include "pycore_interpframe.h"   // _PyFrame_GetCode()
 #include "pycore_long.h"          // _PyLong_GetZero()
-#include "pycore_object.h"        // _Py_XGetRef()
+#include "pycore_object.h"        // Py_REF_ATOMIC_INC()
 #include "pycore_pyatomic_ft_wrappers.h" // FT_ATOMIC_LOAD_SSIZE_ACQUIRE()
 #include "pycore_pylifecycle.h"   // _Py_IsInterpreterFinalizing()
 #include "pycore_pystate.h"       // _PyThreadState_GET()
@@ -346,20 +346,7 @@ update_state_ref(PyObject **ptr, PyObject *value)
     if (FT_ATOMIC_LOAD_PTR_ACQUIRE(*ptr) == value) {
         return;
     }
-    PyUnstable_EnableTryIncRef(value);
-    PyObject *old = _Py_atomic_exchange_ptr(ptr, Py_NewRef(value));
-    Py_XDECREF(old);
-}
-
-/* Return a new reference to the warnings state field '*ptr'. */
-static PyObject *
-get_state_ref(PyObject **ptr)
-{
-#ifdef Py_GIL_DISABLED
-    return _Py_XGetRef(ptr);
-#else
-    return Py_XNewRef(*ptr);
-#endif
+    Py_REF_ATOMIC_SWAP(*ptr, Py_NewRef(value));
 }
 
 // Returns a new reference to the list.
@@ -371,7 +358,7 @@ get_warnings_filters(PyInterpreterState *interp)
     if (warnings_filters == NULL) {
         if (PyErr_Occurred())
             return NULL;
-        warnings_filters = get_state_ref(&st->filters);
+        warnings_filters = Py_REF_ATOMIC_INC(st->filters);
     }
     else {
         update_state_ref(&st->filters, warnings_filters);
@@ -435,7 +422,7 @@ get_once_registry(PyInterpreterState *interp)
     if (registry == NULL) {
         if (PyErr_Occurred())
             return NULL;
-        registry = get_state_ref(&st->once_registry);
+        registry = Py_REF_ATOMIC_INC(st->once_registry);
         assert(registry != NULL);
         return registry;
     }
@@ -464,7 +451,7 @@ get_default_action(PyInterpreterState *interp)
         if (PyErr_Occurred()) {
             return NULL;
         }
-        default_action = get_state_ref(&st->default_action);
+        default_action = Py_REF_ATOMIC_INC(st->default_action);
         assert(default_action != NULL);
         return default_action;
     }

@@ -228,6 +228,12 @@ _PyCallIter_NewEx(PyObject *callable, PyObject *sentinel, PyObject *stop_exc)
     it->it_callable = Py_NewRef(callable);
     it->it_sentinel = Py_XNewRef(sentinel);
     it->it_stop_exc = Py_NewRef(stop_exc);
+    // Read with Py_REF_ATOMIC_INC().
+    PyUnstable_EnableTryIncRef(callable);
+    if (sentinel != NULL) {
+        PyUnstable_EnableTryIncRef(sentinel);
+    }
+    PyUnstable_EnableTryIncRef(stop_exc);
     _PyObject_GC_TRACK(it);
     return (PyObject *)it;
 }
@@ -242,29 +248,11 @@ PyCallIter_New(PyObject *callable, PyObject *sentinel)
 // on an iterator that is in use, is not supported: the values produced are
 // unspecified, but the interpreter must not crash.
 
-static inline PyObject *
-calliter_swap(PyObject **field, PyObject *value)
-{
-#ifdef Py_GIL_DISABLED
-    return _Py_atomic_exchange_ptr(field, value);
-#else
-    PyObject *old = *field;
-    *field = value;
-    return old;
-#endif
-}
-
-static inline PyObject *
-calliter_load(PyObject **field)
-{
-    return Py_XNewRef(FT_ATOMIC_LOAD_PTR_ACQUIRE(*field));
-}
-
 static void
 calliter_exhaust(calliterobject *it)
 {
-    _PyObject_XDecRefDelayed(calliter_swap(&it->it_callable, NULL));
-    _PyObject_XDecRefDelayed(calliter_swap(&it->it_sentinel, NULL));
+    Py_REF_ATOMIC_SWAP(it->it_callable, NULL);
+    Py_REF_ATOMIC_SWAP(it->it_sentinel, NULL);
 }
 
 static void
@@ -294,7 +282,7 @@ calliter_iternext(PyObject *op)
     calliterobject *it = (calliterobject*)op;
     PyObject *callable, *sentinel, *stop_exc, *result;
 
-    callable = calliter_load(&it->it_callable);
+    callable = Py_REF_ATOMIC_INC(it->it_callable);
     if (callable == NULL) {
         return NULL;
     }
@@ -305,7 +293,7 @@ calliter_iternext(PyObject *op)
     if (result != NULL &&
         FT_ATOMIC_LOAD_PTR_RELAXED(it->it_callable) != NULL)
     {
-        sentinel = calliter_load(&it->it_sentinel);
+        sentinel = Py_REF_ATOMIC_INC(it->it_sentinel);
         if (sentinel == NULL) {
             return result; /* Common case, fast path */
         }
@@ -321,7 +309,7 @@ calliter_iternext(PyObject *op)
         }
     }
     else if (result == NULL) {
-        stop_exc = calliter_load(&it->it_stop_exc);
+        stop_exc = Py_REF_ATOMIC_INC(it->it_stop_exc);
         if (PyErr_ExceptionMatches(stop_exc)) {
             PyErr_Clear();
             calliter_exhaust(it);
@@ -348,9 +336,9 @@ calliter_reduce(PyObject *op, PyObject *Py_UNUSED(ignored))
      * call must be before access of iterator pointers.
      * see issue #101765 */
 
-    PyObject *callable = calliter_load(&it->it_callable);
-    PyObject *sentinel = calliter_load(&it->it_sentinel);
-    PyObject *stop_exc = calliter_load(&it->it_stop_exc);
+    PyObject *callable = Py_REF_ATOMIC_INC(it->it_callable);
+    PyObject *sentinel = Py_REF_ATOMIC_INC(it->it_sentinel);
+    PyObject *stop_exc = Py_REF_ATOMIC_INC(it->it_stop_exc);
     PyObject *res;
     if (callable == NULL) {
         res = Py_BuildValue("N(())", iter);
@@ -393,9 +381,8 @@ calliter_setstate(PyObject *op, PyObject *state)
     if (FT_ATOMIC_LOAD_PTR_RELAXED(it->it_callable) != NULL) {
         PyObject *value = PyTuple_GET_SIZE(sentinel) ?
                           Py_NewRef(PyTuple_GET_ITEM(sentinel, 0)) : NULL;
-        _PyObject_XDecRefDelayed(calliter_swap(&it->it_sentinel, value));
-        _PyObject_XDecRefDelayed(calliter_swap(&it->it_stop_exc,
-                                               Py_NewRef(stop_exc)));
+        Py_REF_ATOMIC_SWAP(it->it_sentinel, value);
+        Py_REF_ATOMIC_SWAP(it->it_stop_exc, Py_NewRef(stop_exc));
     }
     Py_RETURN_NONE;
 

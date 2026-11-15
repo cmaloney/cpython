@@ -2,6 +2,7 @@
 #include "pycore_fileutils.h"     // fileutils definitions
 #include "pycore_runtime.h"       // _PyRuntime
 #include "pycore_pystate.h"       // _Py_AssertHoldsTstate()
+#include "pycore_object.h"        // Py_REF_ATOMIC_INC()
 #include "pycore_unicodeobject.h" // _Py_MAX_UNICODE
 #include "osdefs.h"               // SEP
 
@@ -3419,11 +3420,7 @@ strerror_ensure_cache(struct _Py_exc_state *state)
         messages = "";
     }
 #endif
-    // Py_SETREF() isn't atomic.
-    PyObject *cache;
-    Py_BEGIN_CRITICAL_SECTION_MUTEX(&state->strerror_lock);
-    cache = Py_NewRef(state->strerror_cache);
-    Py_END_CRITICAL_SECTION();
+    PyObject *cache = Py_REF_ATOMIC_INC(state->strerror_cache);
     if (cache != Py_None
         && strcmp(PyBytes_AS_STRING(PyTuple_GET_ITEM(cache, 0)), codeset) == 0
         && strcmp(PyBytes_AS_STRING(PyTuple_GET_ITEM(cache, 1)), messages) == 0)
@@ -3445,9 +3442,7 @@ strerror_ensure_cache(struct _Py_exc_state *state)
         Py_DECREF(cache);
         return NULL;
     }
-    Py_BEGIN_CRITICAL_SECTION_MUTEX(&state->strerror_lock);
-    Py_SETREF(state->strerror_cache, Py_NewRef(cache));
-    Py_END_CRITICAL_SECTION();
+    Py_REF_ATOMIC_SWAP(state->strerror_cache, Py_NewRef(cache));
     return cache;
 }
 
