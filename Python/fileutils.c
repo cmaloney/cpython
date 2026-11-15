@@ -3309,9 +3309,8 @@ _Py_IsValidFD(int fd)
 //
 // On success, return a Unicode string. On error, set an exception and return
 // NULL.
-PyObject*
-_Py_strerror(int code)
-/*[clinic end generated code: output=baebf09fa02a78f2 input=75a8673d97915a91]*/
+static PyObject *
+_Py_strerror_uncached(int code)
 {
     const char *errors = "surrogateescape";
 
@@ -3395,4 +3394,107 @@ _Py_strerror(int code)
     }
     return PyUnicode_DecodeLocale(message, errors);
 #endif
+}
+
+
+// Return a strong reference to the tuple (codeset, LC_MESSAGES,
+// {code: message}) of the current locale, replacing it if the locale changed.
+static PyObject *
+strerror_ensure_cache(struct _Py_exc_state *state)
+{
+    // C code can change the locale without calling Python locale.setlocale().
+    // Messages depend on LC_MESSAGES (language) and the LC_CTYPE codeset
+    // (decoding). Windows has neither, and _Py_FORCE_UTF8_LOCALE ignores the
+    // codeset, see _Py_GetLocaleEncoding().
+#if defined(_Py_FORCE_UTF8_LOCALE) || defined(MS_WINDOWS)
+    const char *codeset = "";
+    const char *messages = "";
+#else
+    const char *codeset = nl_langinfo(CODESET);
+    const char *messages = setlocale(LC_MESSAGES, NULL);
+    if (codeset == NULL) {
+        codeset = "";
+    }
+    if (messages == NULL) {
+        messages = "";
+    }
+#endif
+    // Py_SETREF() isn't atomic.
+    PyObject *cache;
+    Py_BEGIN_CRITICAL_SECTION_MUTEX(&state->strerror_lock);
+    cache = Py_NewRef(state->strerror_cache);
+    Py_END_CRITICAL_SECTION();
+    if (cache != Py_None
+        && strcmp(PyBytes_AS_STRING(PyTuple_GET_ITEM(cache, 0)), codeset) == 0
+        && strcmp(PyBytes_AS_STRING(PyTuple_GET_ITEM(cache, 1)), messages) == 0)
+    {
+        return cache;
+    }
+    Py_DECREF(cache);
+    cache = PyTuple_New(3);
+    if (cache == NULL) {
+        return NULL;
+    }
+    PyTuple_SET_ITEM(cache, 0, PyBytes_FromString(codeset));
+    PyTuple_SET_ITEM(cache, 1, PyBytes_FromString(messages));
+    PyTuple_SET_ITEM(cache, 2, PyDict_New());
+    if (PyTuple_GET_ITEM(cache, 0) == NULL
+        || PyTuple_GET_ITEM(cache, 1) == NULL
+        || PyTuple_GET_ITEM(cache, 2) == NULL)
+    {
+        Py_DECREF(cache);
+        return NULL;
+    }
+    Py_BEGIN_CRITICAL_SECTION_MUTEX(&state->strerror_lock);
+    Py_SETREF(state->strerror_cache, Py_NewRef(cache));
+    Py_END_CRITICAL_SECTION();
+    return cache;
+}
+
+// _Py_strerror_uncached() with the messages cached per locale: decoding is a
+// large part of the cost of raising OSError.
+PyObject*
+_Py_strerror(int code)
+{
+    struct _Py_exc_state *state = &_PyInterpreterState_GET()->exc_state;
+    PyObject *cache = strerror_ensure_cache(state);
+    if (cache == NULL) {
+        return NULL;
+    }
+    PyObject *dict = PyTuple_GET_ITEM(cache, 2);
+    PyObject *key = PyLong_FromLong(code);
+    if (key == NULL) {
+        Py_DECREF(cache);
+        return NULL;
+    }
+    PyObject *message;
+    if (PyDict_GetItemRef(dict, key, &message) == 0) {
+        message = _Py_strerror_uncached(code);
+        if (message != NULL) {
+            // os.strerror() takes any int: bound the cache by dropping the
+            // oldest messages. Can't delete while iterating.
+            if (PyDict_GET_SIZE(dict) >= 256) {
+                PyObject *oldest[50];
+                Py_ssize_t n = 0, pos = 0;
+                PyObject *k;
+                Py_BEGIN_CRITICAL_SECTION(dict);
+                while (n < 50 && PyDict_Next(dict, &pos, &k, NULL)) {
+                    oldest[n++] = Py_NewRef(k);
+                }
+                Py_END_CRITICAL_SECTION();
+                for (Py_ssize_t i = 0; i < n; i++) {
+                    // int keys can't fail; another thread may have
+                    // removed it already.
+                    (void)PyDict_Pop(dict, oldest[i], NULL);
+                    Py_DECREF(oldest[i]);
+                }
+            }
+            if (PyDict_SetItem(dict, key, message) < 0) {
+                Py_CLEAR(message);
+            }
+        }
+    }
+    Py_DECREF(key);
+    Py_DECREF(cache);
+    return message;
 }

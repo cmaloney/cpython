@@ -1,10 +1,12 @@
 import builtins
+import locale
 import os
 import select
 import socket
 import unittest
 import errno
 from errno import EEXIST
+from test.support import cpython_only, is_android
 
 
 class SubOSError(OSError):
@@ -135,6 +137,31 @@ class AttributesTest(unittest.TestCase):
         self.assertEqual(e.filename, "foo.txt")
         if os.name == "nt":
             self.assertEqual(e.winerror, None)
+
+    @cpython_only
+    @unittest.skipIf(os.name == "nt", "POSIX-specific test")
+    def test_strerror_cached(self):
+        message = os.strerror(errno.ENOENT)
+        self.assertIs(os.strerror(errno.ENOENT), message)
+        with self.assertRaises(FileNotFoundError) as cm:
+            open("some_hopefully_non_existing_file")
+        self.assertIs(cm.exception.strerror, message)
+        # Android ignores the locale (_Py_FORCE_UTF8_LOCALE).
+        if not hasattr(locale, "LC_MESSAGES") or is_android:
+            return
+        old = locale.setlocale(locale.LC_MESSAGES)
+        self.addCleanup(locale.setlocale, locale.LC_MESSAGES, old)
+        locale.setlocale(locale.LC_MESSAGES, "C")
+        message = os.strerror(errno.ENOENT)
+        for name in ("C.UTF-8", "C.utf8", "en_US.UTF-8"):
+            try:
+                name = locale.setlocale(locale.LC_MESSAGES, name)
+            except locale.Error:
+                continue
+            # musl (and WASI) has no C.UTF-8 LC_MESSAGES: it's still "C".
+            if name != "C":
+                self.assertIsNot(os.strerror(errno.ENOENT), message)
+                break
 
     @unittest.skipUnless(os.name == "nt", "Windows-specific test")
     def test_errno_translation(self):
