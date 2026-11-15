@@ -3463,8 +3463,8 @@ strerror_ensure_cache(struct _Py_exc_state *state)
 // os.strerror() takes any int, lets not cache INT_MAX.
 #define STRERROR_CACHE_MAX 5000
 
-// _Py_strerror_uncached() with the messages cached per locale: decoding is a
-// large part of the cost of raising OSError.
+// Convert errno to string.
+// Cache results to lower cost of raising OSError.
 PyObject*
 _Py_strerror(int code)
 {
