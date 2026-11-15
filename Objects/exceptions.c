@@ -4597,7 +4597,7 @@ PyStatus
 _PyExc_InitState(PyInterpreterState *interp)
 {
     struct _Py_exc_state *state = &interp->exc_state;
-    state->strerror_cache = Py_None;
+    Py_REF_ATOMIC_SWAP(state->strerror_cache, Py_None);
 
 #define ADD_ERRNO(TYPE, CODE) \
     do { \
@@ -4705,7 +4705,7 @@ _PyExc_Fini(PyInterpreterState *interp)
     free_preallocated_memerrors(state);
     Py_CLEAR(state->errnomap);
     // Not NULL: _Py_strerror() can still run after this.
-    Py_XSETREF(state->strerror_cache, Py_None);
+    Py_REF_ATOMIC_SWAP(state->strerror_cache, Py_None);
 
     _PyExc_FiniTypes(interp);
 }

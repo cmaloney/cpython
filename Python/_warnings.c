@@ -141,27 +141,24 @@ _PyWarnings_InitState(PyInterpreterState *interp)
     WarningsState *st = &interp->warnings;
 
     if (st->filters == NULL) {
-        st->filters = init_filters(interp);
+        Py_REF_ATOMIC_SWAP(st->filters, init_filters(interp));
         if (st->filters == NULL) {
             return -1;
         }
-        PyUnstable_EnableTryIncRef(st->filters);
     }
 
     if (st->once_registry == NULL) {
-        st->once_registry = PyDict_New();
+        Py_REF_ATOMIC_SWAP(st->once_registry, PyDict_New());
         if (st->once_registry == NULL) {
             return -1;
         }
-        PyUnstable_EnableTryIncRef(st->once_registry);
     }
 
     if (st->default_action == NULL) {
-        st->default_action = PyUnicode_FromString("default");
+        Py_REF_ATOMIC_SWAP(st->default_action, PyUnicode_FromString("default"));
         if (st->default_action == NULL) {
             return -1;
         }
-        PyUnstable_EnableTryIncRef(st->default_action);
     }
 
     if (st->context == NULL) {

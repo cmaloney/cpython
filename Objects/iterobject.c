@@ -225,15 +225,12 @@ _PyCallIter_NewEx(PyObject *callable, PyObject *sentinel, PyObject *stop_exc)
     it = PyObject_GC_New(calliterobject, &PyCallIter_Type);
     if (it == NULL)
         return NULL;
-    it->it_callable = Py_NewRef(callable);
-    it->it_sentinel = Py_XNewRef(sentinel);
-    it->it_stop_exc = Py_NewRef(stop_exc);
-    // Read with Py_REF_ATOMIC_INC().
-    PyUnstable_EnableTryIncRef(callable);
-    if (sentinel != NULL) {
-        PyUnstable_EnableTryIncRef(sentinel);
-    }
-    PyUnstable_EnableTryIncRef(stop_exc);
+    it->it_callable = NULL;
+    it->it_sentinel = NULL;
+    it->it_stop_exc = NULL;
+    Py_REF_ATOMIC_SWAP(it->it_callable, Py_NewRef(callable));
+    Py_REF_ATOMIC_SWAP(it->it_sentinel, Py_XNewRef(sentinel));
+    Py_REF_ATOMIC_SWAP(it->it_stop_exc, Py_NewRef(stop_exc));
     _PyObject_GC_TRACK(it);
     return (PyObject *)it;
 }
