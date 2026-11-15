@@ -666,8 +666,10 @@ extern PyAPI_FUNC(int) _PyObject_ResurrectEndSlow(PyObject *op);
 
 // Py_REF_ATOMIC_SWAP() replaces a slot that other threads may also replace,
 // and Py_REF_ATOMIC_INC() returns a new reference to the slot's value (or
-// NULL) while they do. The old value is decref'd immediately, so every reader
-// of the slot must use Py_REF_ATOMIC_INC().
+// NULL) while they do. The old value is decref'd immediately. Every store to
+// the slot, including the first into a NULL slot, must use
+// Py_REF_ATOMIC_SWAP() and every read Py_REF_ATOMIC_INC(); only dealloc and
+// finalization, when no other thread can see the slot, may use plain ones.
 static inline void
 _Py_RefAtomicSwap(PyObject **dst, PyObject *src)
 {
