@@ -109,15 +109,12 @@ PyDoc_STRVAR(_io__BufferedIOBase_read__doc__,
 "\n"
 "Read and return up to n bytes.\n"
 "\n"
-"If the size argument is omitted, None, or negative, read and\n"
+"If the size argument is omitted, None, or -1, read and\n"
 "return all data until EOF.\n"
 "\n"
-"If the size argument is positive, and the underlying raw stream is\n"
-"not \'interactive\', multiple raw reads may be issued to satisfy\n"
-"the byte count (unless EOF is reached first).\n"
-"However, for interactive raw streams (as well as sockets and pipes),\n"
-"at most one raw read will be issued, and a short result does not\n"
-"imply that EOF is imminent.\n"
+"If the size argument is positive, partial reads of the underlying\n"
+"raw stream are retried. Reading stops when size bytes are read, EOF\n"
+"is reached, or a non-blocking raw stream would block.\n"
 "\n"
 "Return an empty bytes object on EOF.\n"
 "\n"
@@ -161,7 +158,7 @@ PyDoc_STRVAR(_io__BufferedIOBase_read1__doc__,
 "read1($self, size=-1, /)\n"
 "--\n"
 "\n"
-"Read and return up to size bytes, with at most one read() call to the underlying raw stream.\n"
+"Read and return up to size bytes, as soon as any are available.\n"
 "\n"
 "Return an empty bytes object on EOF.\n"
 "A short result does not imply that EOF is imminent.");
@@ -1441,4 +1438,4 @@ exit:
 
 #define _IO_BUFFEREDRWPAIR_CLOSED_GETSETDEF {"closed", (getter)_io_BufferedRWPair_closed_get, (setter)NULL, NULL},
 
-/*[clinic end generated code: output=d9e1eb0efa4a2431 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=186b7427ccc418c6 input=a9049054013a1b77]*/

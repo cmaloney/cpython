@@ -164,13 +164,11 @@ _io__IOBase_truncate_impl(PyObject *self, PyTypeObject *cls,
 _io._IOBase.flush
 
 Flush write buffers, if applicable.
-
-This is not implemented for read-only and non-blocking streams.
 [clinic start generated code]*/
 
 static PyObject *
 _io__IOBase_flush_impl(PyObject *self)
-/*[clinic end generated code: output=7cef4b4d54656a3b input=773be121abe270aa]*/
+/*[clinic end generated code: output=7cef4b4d54656a3b input=db2a6e7429ceabfc]*/
 {
     /* XXX Should this return the number of bytes written??? */
     int closed = iobase_is_closed(self);

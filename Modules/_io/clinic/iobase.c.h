@@ -126,9 +126,7 @@ PyDoc_STRVAR(_io__IOBase_flush__doc__,
 "flush($self, /)\n"
 "--\n"
 "\n"
-"Flush write buffers, if applicable.\n"
-"\n"
-"This is not implemented for read-only and non-blocking streams.");
+"Flush write buffers, if applicable.");
 
 #define _IO__IOBASE_FLUSH_METHODDEF    \
     {"flush", (PyCFunction)_io__IOBase_flush, METH_NOARGS, _io__IOBase_flush__doc__},
@@ -573,4 +571,4 @@ PyDoc_STRVAR(_io__RawIOBase_write__doc__,
     {"write", (PyCFunction)_io__RawIOBase_write, METH_O, _io__RawIOBase_write__doc__},
 #define _IO__IOBASE_CLOSED_GETSETDEF {"closed", (getter)_io__IOBase_closed_get, (setter)NULL, _io__IOBase_closed__doc__},
 
-/*[clinic end generated code: output=fd729b0ef2ad52b8 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=7c6ce26ca8d45e1e input=a9049054013a1b77]*/

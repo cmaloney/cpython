@@ -363,8 +363,7 @@ I/O base classes
 
    .. method:: flush()
 
-      Flush the write buffers of the stream if applicable.  This does nothing
-      for read-only and non-blocking streams.
+      Flush the write buffers of the stream if applicable.
 
    .. method:: isatty()
 
@@ -458,6 +457,9 @@ I/O base classes
       :meth:`~IOBase.close` method.
 
 
+Raw file I/O
+^^^^^^^^^^^^
+
 .. class:: RawIOBase
 
    Base class for raw binary streams.  It inherits from :class:`IOBase`.
@@ -473,13 +475,11 @@ I/O base classes
    .. method:: read(size=-1, /)
 
       Read up to *size* bytes from the object and return them.  As a convenience,
-      if *size* is unspecified or -1, all bytes until EOF are returned.
+      if *size* is omitted or -1, all bytes until EOF are returned.
 
-      Attempts to make only one system call but will retry if interrupted and
-      the signal handler does not raise an exception (see :pep:`475` for the
-      rationale). This means fewer than *size* bytes may be returned if the
-      operating system call returns fewer than *size* bytes.
-
+      Partial reads are not retried, so a non-empty result may be shorter than
+      *size* bytes even when the stream has more data. Reads interrupted by a
+      signal are retried (see :pep:`475`).
       If 0 bytes are returned, and *size* was not 0, this indicates end of file.
       If the object is in non-blocking mode and no bytes are available,
       ``None`` is returned.
@@ -493,8 +493,9 @@ I/O base classes
       calls to the stream if necessary.
 
       If ``0`` bytes are returned this indicates end of file. If the object is in
-      non-blocking mode and the underlying :meth:`read` returns ``None``
-      indicating no bytes are available, ``None`` is returned.
+      non-blocking mode, reading stops when the underlying :meth:`read` returns
+      ``None``. The bytes read so far are returned, or ``None`` if no bytes
+      were read.
 
    .. method:: readinto(b, /)
 
@@ -502,21 +503,30 @@ I/O base classes
       :term:`bytes-like object` *b*, and return the
       number of bytes read.  For example, *b* might be a :class:`bytearray`.
 
+      Partial reads are not retried, so a non-zero result may be less than
+      ``len(b)`` even when the stream has more data. Reads interrupted by a
+      signal are retried (see :pep:`475`).
       If ``0`` is returned and ``len(b)`` is not ``0``, this indicates end of file. If
       the object is in non-blocking mode and no bytes are available, ``None`` is
       returned.
+
+      Implementations should behave like :func:`os.readinto`.
 
    .. method:: write(b, /)
 
       Write the given :term:`bytes-like object`, *b*, to the
       underlying raw stream, and return the number of
-      bytes written.  This can be less than the length of *b* in
-      bytes, depending on specifics of the underlying raw
-      stream, and especially if it is in non-blocking mode.  ``None`` is
-      returned if the raw stream is set not to block and no single byte could
-      be readily written to it.  The caller may release or mutate *b* after
-      this method returns, so the implementation should only access *b*
-      during the method call.
+      bytes written.
+
+      Partial writes are not retried, so fewer than ``len(b)`` bytes may be
+      written, especially in non-blocking mode. Writes interrupted by a
+      signal are retried (see :pep:`475`).
+      If the object is in non-blocking mode and no bytes can be written,
+      ``None`` is returned.
+
+      Implementations should behave like :func:`os.write`. The caller may
+      release or mutate *b* after this method returns, so the implementation
+      should only access *b* during the method call.
 
       .. warning::
 
@@ -526,9 +536,6 @@ I/O base classes
          write calls until all unwritten bytes are written. High-level I/O
          objects like :ref:`binary-io` and :ref:`text-io` implement retry behavior.
 
-
-Raw file I/O
-^^^^^^^^^^^^
 
 .. class:: FileIO(name, mode='r', closefd=True, opener=None)
 
@@ -572,8 +579,9 @@ Raw file I/O
       :class:`FileIO` is a low-level I/O object and members, such as
       :meth:`~RawIOBase.read` and :meth:`~RawIOBase.write`, need to have their
       return values checked explicitly in a retry loop to implement "write all"
-      and "read at least" behavior. High-level I/O objects :ref:`binary-io` and
-      :ref:`text-io` implement retry behavior.
+      and "read at least" behavior. Interrupted system calls are retried (see
+      :pep:`475`), but partial reads and writes are not. High-level I/O objects
+      :ref:`binary-io` and :ref:`text-io` implement retry behavior.
 
    .. versionchanged:: 3.3
       The *opener* parameter was added.
@@ -646,16 +654,15 @@ than raw I/O does.
 
    .. method:: read(size=-1, /)
 
-      Read and return up to *size* bytes. If the argument is omitted, ``None``,
-      or negative read as much as possible.
+      Read and return up to *size* bytes. If *size* is omitted, ``None``,
+      or ``-1``, read as much as possible.
 
       Fewer bytes may be returned than requested. An empty :class:`bytes` object
-      is returned if the stream is already at EOF. More than one read may be
-      made and calls may be retried if specific errors are encountered, see
-      :meth:`os.read` and :pep:`475` for more details. Less than size bytes
-      being returned does not imply that EOF is imminent.
+      is returned if the stream is already at EOF. Partial reads of the raw
+      stream are retried. Fewer than *size* bytes are returned only at EOF, or
+      when a non-blocking raw stream has no more data.
 
-      When reading as much as possible the default implementation will use
+      When reading as much as possible :class:`BufferedReader` will use
       ``raw.readall`` if available (which should implement
       :meth:`RawIOBase.readall`), otherwise will read in a loop until read
       returns ``None``, an empty :class:`bytes`, or a non-retryable error. For
@@ -672,14 +679,20 @@ than raw I/O does.
 
       Read and return up to *size* bytes, calling :meth:`~RawIOBase.readinto`
       which may retry if :py:const:`~errno.EINTR` is encountered per
-      :pep:`475`. If *size* is ``-1`` or not provided, the implementation will
+      :pep:`475`. If *size* is omitted or ``-1``, the implementation will
       choose an arbitrary value for *size*.
+
+      Unlike :meth:`read`, partial reads of the raw stream are not retried, so
+      a non-empty result may be shorter than *size* bytes even when the stream
+      has more data. An empty :class:`bytes` object is returned at EOF.
 
       .. note::
 
-         When the underlying raw stream is non-blocking, implementations may
-         either raise :exc:`BlockingIOError` or return ``None`` if no data is
-         available. :mod:`!io` implementations return ``None``.
+         When the underlying raw stream is non-blocking and no data is
+         available, implementations may raise :exc:`BlockingIOError`, return
+         ``None``, or return an empty :class:`bytes` object. :mod:`!io`
+         implementations return an empty :class:`bytes` object, which cannot
+         be told apart from EOF.
 
    .. method:: readinto(b, /)
 
@@ -687,21 +700,33 @@ than raw I/O does.
       :term:`bytes-like object` *b* and return the number of bytes read.
       For example, *b* might be a :class:`bytearray`.
 
-      Like :meth:`read`, multiple reads may be issued to the underlying raw
-      stream, unless the latter is interactive.
+      Fewer bytes may be read than ``len(b)``. ``0`` is returned if the stream
+      is already at EOF. Partial reads of the raw stream are retried. Fewer
+      than ``len(b)`` bytes are read only at EOF, or when a non-blocking raw
+      stream has no more data. The default implementation uses :meth:`read`.
 
-      A :exc:`BlockingIOError` is raised if the underlying raw stream is in non
-      blocking-mode, and has no data available at the moment.
+      .. note::
+
+         When the underlying raw stream is non-blocking, implementations may
+         either raise :exc:`BlockingIOError` or return ``None`` if no data is
+         available. :mod:`!io` implementations return ``None``.
 
    .. method:: readinto1(b, /)
 
       Read bytes into a pre-allocated, writable
-      :term:`bytes-like object` *b*, using at most one call to
-      the underlying raw stream's :meth:`~RawIOBase.read` (or
-      :meth:`~RawIOBase.readinto`) method. Return the number of bytes read.
+      :term:`bytes-like object` *b*, calling :meth:`~RawIOBase.readinto` which
+      may retry if :py:const:`~errno.EINTR` is encountered per :pep:`475`.
+      Return the number of bytes read.
 
-      A :exc:`BlockingIOError` is raised if the underlying raw stream is in non
-      blocking-mode, and has no data available at the moment.
+      Partial reads of the raw stream are not retried, so a non-zero result
+      may be less than ``len(b)`` even when the stream has more data. ``0`` is
+      returned at EOF. The default implementation uses :meth:`read1`.
+
+      .. note::
+
+         When the underlying raw stream is non-blocking, implementations may
+         either raise :exc:`BlockingIOError` or return ``None`` if no data is
+         available. :mod:`!io` implementations return ``None``.
 
       .. versionadded:: 3.5
 
@@ -712,11 +737,12 @@ than raw I/O does.
       the write fails an :exc:`OSError` will be raised).  Depending on the
       actual implementation, these bytes may be readily written to the
       underlying stream, or held in a buffer for performance and latency
-      reasons.
+      reasons. Partial writes to the raw stream are retried.
 
-      When in non-blocking mode, a :exc:`BlockingIOError` is raised if the
-      data needed to be written to the raw stream but it couldn't accept
-      all the data without blocking.
+      When in non-blocking mode, a :exc:`BlockingIOError` is raised if the raw
+      stream blocks and the rest of *b* does not fit in the buffer. Its
+      :attr:`~BlockingIOError.characters_written` attribute is the number of
+      bytes of *b* that were written or buffered.
 
       The caller may release or mutate *b* after this method returns,
       so the implementation should only access *b* during the method call.
@@ -789,8 +815,8 @@ than raw I/O does.
 
 .. class:: BufferedReader(raw, buffer_size=DEFAULT_BUFFER_SIZE)
 
-   A buffered binary stream providing higher-level access to a readable, non
-   seekable :class:`RawIOBase` raw binary stream.  It inherits from
+   A buffered binary stream providing higher-level access to a readable,
+   optionally seekable :class:`RawIOBase` raw binary stream. It inherits from
    :class:`BufferedIOBase`.
 
    When reading data from this object, a larger amount of data may be
@@ -823,8 +849,8 @@ than raw I/O does.
 
 .. class:: BufferedWriter(raw, buffer_size=DEFAULT_BUFFER_SIZE)
 
-   A buffered binary stream providing higher-level access to a writeable, non
-   seekable :class:`RawIOBase` raw binary stream.  It inherits from
+   A buffered binary stream providing higher-level access to a writeable,
+   optionally seekable :class:`RawIOBase` raw binary stream. It inherits from
    :class:`BufferedIOBase`.
 
    When writing to this object, data is normally placed into an internal
@@ -833,7 +859,7 @@ than raw I/O does.
 
    * when the buffer gets too small for all pending data;
    * when :meth:`flush` is called;
-   * when a :meth:`~IOBase.seek` is requested (for :class:`BufferedRandom` objects);
+   * when a :meth:`~IOBase.seek` is requested;
    * when the :class:`BufferedWriter` object is closed or destroyed.
 
    The constructor creates a :class:`BufferedWriter` for the given writeable
@@ -845,15 +871,16 @@ than raw I/O does.
 
    .. method:: flush()
 
-      Force bytes held in the buffer into the raw stream.  A
-      :exc:`BlockingIOError` should be raised if the raw stream blocks.
+      Force bytes held in the buffer into the raw stream. Partial writes are
+      retried. A :exc:`BlockingIOError` is raised if the raw stream blocks.
 
    .. method:: write(b, /)
 
       Write the :term:`bytes-like object`, *b*, and return the
       number of bytes written.  When in non-blocking mode, a
       :exc:`BlockingIOError` with :attr:`BlockingIOError.characters_written` set
-      is raised if the buffer needs to be written out but the raw stream blocks.
+      is raised if the raw stream blocks and the rest of *b* does not fit in
+      the buffer.
 
 
 .. class:: BufferedRandom(raw, buffer_size=DEFAULT_BUFFER_SIZE)

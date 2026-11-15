@@ -872,11 +872,11 @@ _io.FileIO.read
 
 Read at most size bytes, returned as bytes.
 
-If size is less than 0, read all bytes in the file making multiple
-read calls.  See ``FileIO.readall``.
+If size is less than 0, read all bytes until EOF.
 
-Attempts to make only one system call, retrying only per PEP 475
-(EINTR).  This means less data may be returned than requested.
+A non-empty result may be shorter than size bytes, even when the
+file has more data. Reads interrupted by a signal are retried (see
+PEP 475).
 
 In non-blocking mode, returns None if no data is available.  Return
 an empty bytes object at EOF.
@@ -884,7 +884,7 @@ an empty bytes object at EOF.
 
 static PyObject *
 _io_FileIO_read_impl(fileio *self, PyTypeObject *cls, Py_ssize_t size)
-/*[clinic end generated code: output=bbd749c7c224143e input=c7baa3b440af9337]*/
+/*[clinic end generated code: output=bbd749c7c224143e input=e78e0c9d10887ab6]*/
 {
     if (self->fd < 0)
         return err_closed();
@@ -929,14 +929,15 @@ _io.FileIO.write
 
 Write buffer b to file, return number of bytes written.
 
-Only makes one system call, so not all of the data may be written.
+Fewer than ``len(b)`` bytes may be written. Writes interrupted by a
+signal are retried (see PEP 475).
 The number of bytes actually written is returned.  In non-blocking
 mode, returns None if the write would block.
 [clinic start generated code]*/
 
 static PyObject *
 _io_FileIO_write_impl(fileio *self, PyTypeObject *cls, Py_buffer *b)
-/*[clinic end generated code: output=927e25be80f3b77b input=233f1f70f9e8b09e]*/
+/*[clinic end generated code: output=927e25be80f3b77b input=7d64ea0f75101e3c]*/
 {
     Py_ssize_t n;
     int err;
