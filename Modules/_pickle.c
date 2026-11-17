@@ -983,7 +983,9 @@ static int
 _Pickler_ClearBuffer(PicklerObject *self)
 {
     PyBytesWriter_Discard(self->writer);
-    self->writer = PyBytesWriter_Create(WRITE_BUF_SIZE);
+    /* Start in the writer's small buffer: small pickles are copied out of
+       it without ever allocating WRITE_BUF_SIZE. */
+    self->writer = PyBytesWriter_Create(255);
     if (self->writer == NULL)
         return -1;
     self->output_len = 0;
@@ -1113,7 +1115,8 @@ _Pickler_Write(PicklerObject *self, const char *s, Py_ssize_t data_len)
             PyErr_NoMemory();
             return -1;
         }
-        if (PyBytesWriter_Resize(self->writer, required / 2 * 3) < 0)
+        if (PyBytesWriter_Resize(self->writer,
+                                 Py_MAX(required / 2 * 3, WRITE_BUF_SIZE)) < 0)
             return -1;
     }
     buffer = _PyBytesWriter_GetData(self->writer);
@@ -1138,6 +1141,20 @@ _Pickler_Write(PicklerObject *self, const char *s, Py_ssize_t data_len)
     }
     self->output_len += data_len;
     return data_len;
+}
+
+/* Write the decimal digits of an int.  The writer size is the space
+   available, so growing it by the number of digits keeps room for them. */
+static int
+_Pickler_WriteDecimal(PicklerObject *self, PyObject *obj)
+{
+    char *p = _PyBytesWriter_GetData(self->writer) + self->output_len;
+    p = _PyLong_FormatBytesWriter(self->writer, p, obj, 10, 0);
+    if (p == NULL) {
+        return -1;
+    }
+    self->output_len = p - _PyBytesWriter_GetData(self->writer);
+    return 0;
 }
 
 static PicklerObject *
@@ -1913,13 +1930,19 @@ memo_get(PickleState *st, PicklerObject *self, PyObject *key)
     Py_ssize_t idx = MEMO_INDEX(*value);   /* mask off the weak-only flag bit */
 
     if (!self->bin) {
-        /* Protocol 0 has no framing: append straight to the buffer. */
-        (void)PyBytesWriter_Resize(self->writer, self->output_len);
-        if (PyBytesWriter_Format(self->writer, "%c%zd\n", GET, idx) < 0) {
+        pdata[0] = GET;
+        PyObject *index = PyLong_FromSsize_t(idx);
+        if (index == NULL) {
             return -1;
         }
-        self->output_len = _PyBytesWriter_GetSize(self->writer);
-        return 0;
+        int err = (_Pickler_Write(self, pdata, 1) < 0 ||
+                   _Pickler_WriteDecimal(self, index) < 0);
+        Py_DECREF(index);
+        if (err) {
+            return -1;
+        }
+        pdata[0] = '\n';
+        len = 1;
     }
     else {
         if (idx < 256) {
@@ -1972,13 +1995,19 @@ memo_put(PickleState *st, PicklerObject *self, PyObject *obj)
         return 0;
     }
     else if (!self->bin) {
-        /* Protocol 0 has no framing: append straight to the buffer. */
-        (void)PyBytesWriter_Resize(self->writer, self->output_len);
-        if (PyBytesWriter_Format(self->writer, "%c%zd\n", PUT, idx) < 0) {
+        pdata[0] = PUT;
+        PyObject *index = PyLong_FromSsize_t(idx);
+        if (index == NULL) {
             return -1;
         }
-        self->output_len = _PyBytesWriter_GetSize(self->writer);
-        return 0;
+        int err = (_Pickler_Write(self, pdata, 1) < 0 ||
+                   _Pickler_WriteDecimal(self, index) < 0);
+        Py_DECREF(index);
+        if (err) {
+            return -1;
+        }
+        pdata[0] = '\n';
+        len = 1;
     }
     else {
         if (idx < 256) {
@@ -2475,27 +2504,16 @@ save_long(PicklerObject *self, PyObject *obj)
             goto error;
     }
     else {
-        /* proto < 2: append the repr and newline straight to the buffer
-           (no framing before protocol 4).  This is quadratic-time (in the
-           number of digits), in both directions.  LONG adds a trailing 'L'
-           to the repr, for compatibility with Python 2.x. */
-        PyBytesWriter *writer = self->writer;
-        if (PyBytesWriter_Resize(writer,
-                                 self->output_len + (int32 ? 2 : 3)) < 0) {
+        /* proto < 2: write the repr and newline.  This is quadratic-time (in
+           the number of digits), in both directions.  LONG adds a trailing
+           'L' to the repr, for compatibility with Python 2.x. */
+        const char op = int32 ? INT : LONG;
+        const char *end = int32 ? "\n" : "L\n";
+
+        if (_Pickler_Write(self, &op, 1) < 0 ||
+            _Pickler_WriteDecimal(self, obj) < 0 ||
+            _Pickler_Write(self, end, strlen(end)) < 0)
             goto error;
-        }
-        char *p = _PyBytesWriter_GetData(writer) + self->output_len;
-        *p++ = int32 ? INT : LONG;
-        p = _PyLong_FormatBytesWriter(writer, p, obj, 10, 0);
-        if (p == NULL) {
-            goto error;
-        }
-        if (!int32) {
-            *p++ = 'L';
-        }
-        *p++ = '\n';
-        self->output_len = _PyBytesWriter_GetSize(writer);
-        assert(p == _PyBytesWriter_GetData(writer) + self->output_len);
     }
 
     if (0) {

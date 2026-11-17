@@ -566,8 +566,7 @@ if has_c_implementation:
             check = self.check_sizeof
             check(p, basesize +
                 MT_size + 8 * ME_size +  # Minimal memo table size.
-                struct.calcsize('256sPn2i') +  # PyBytesWriter
-                sys.getsizeof(b'x'*4096))  # Minimal write buffer size.
+                struct.calcsize('256sPn2i'))  # Empty write buffer.
             for i in range(6):
                 p.dump(chr(i))
             check(p, basesize +
