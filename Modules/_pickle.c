@@ -630,14 +630,12 @@ typedef struct PicklerObject {
                                    functions and classes*/
 
     PyObject *write;            /* write() method of the output stream. */
-    PyObject *output_buffer;    /* Write into a local bytearray buffer before
-                                   flushing to the stream. */
-    Py_ssize_t output_len;      /* Length of output_buffer. */
-    Py_ssize_t max_output_len;  /* Allocation size of output_buffer. */
+    PyBytesWriter *writer;      /* Write into a local buffer before flushing
+                                   to the stream. */
     int proto;                  /* Pickle protocol number, >= 0 */
     int bin;                    /* Boolean, true if proto > 0 */
     int framing;                /* True when framing is enabled, proto >= 4 */
-    Py_ssize_t frame_start;     /* Position in output_buffer where the
+    Py_ssize_t frame_start;     /* Position in writer where the
                                    current frame begins. -1 if there
                                    is no frame currently open. */
 
@@ -982,11 +980,12 @@ PyMemoTable_Set(PyMemoTable *self, PyObject *key, Py_ssize_t value)
 static int
 _Pickler_ClearBuffer(PicklerObject *self)
 {
-    Py_XSETREF(self->output_buffer,
-              PyBytes_FromStringAndSize(NULL, self->max_output_len));
-    if (self->output_buffer == NULL)
+    PyBytesWriter_Discard(self->writer);
+    self->writer = PyBytesWriter_Create(WRITE_BUF_SIZE);
+    if (self->writer == NULL)
         return -1;
-    self->output_len = 0;
+    /* Keep the allocation; the size is the number of bytes written. */
+    (void)PyBytesWriter_Resize(self->writer, 0);
     self->frame_start = -1;
     return 0;
 }
@@ -1014,15 +1013,18 @@ _Pickler_CommitFrame(PicklerObject *self)
 
     if (!self->framing || self->frame_start == -1)
         return 0;
-    frame_len = self->output_len - self->frame_start - FRAME_HEADER_SIZE;
-    qdata = PyBytes_AS_STRING(self->output_buffer) + self->frame_start;
+    frame_len = _PyBytesWriter_GetSize(self->writer)
+                - self->frame_start - FRAME_HEADER_SIZE;
+    qdata = _PyBytesWriter_GetData(self->writer) + self->frame_start;
     if (frame_len >= FRAME_SIZE_MIN) {
         qdata[0] = FRAME;
         _write_size64(qdata + 1, frame_len);
     }
     else {
         memmove(qdata, qdata + FRAME_HEADER_SIZE, frame_len);
-        self->output_len -= FRAME_HEADER_SIZE;
+        if (PyBytesWriter_Grow(self->writer, -FRAME_HEADER_SIZE) < 0) {
+            return -1;
+        }
     }
     self->frame_start = -1;
     return 0;
@@ -1031,18 +1033,14 @@ _Pickler_CommitFrame(PicklerObject *self)
 static PyObject *
 _Pickler_GetString(PicklerObject *self)
 {
-    PyObject *output_buffer = self->output_buffer;
-
-    assert(self->output_buffer != NULL);
+    assert(self->writer != NULL);
 
     if (_Pickler_CommitFrame(self))
         return NULL;
 
-    self->output_buffer = NULL;
-    /* Resize down to exact size */
-    if (_PyBytes_Resize(&output_buffer, self->output_len) < 0)
-        return NULL;
-    return output_buffer;
+    PyObject *output = PyBytesWriter_Finish(self->writer);
+    self->writer = NULL;
+    return output;
 }
 
 static int
@@ -1070,7 +1068,8 @@ _Pickler_OpcodeBoundary(PicklerObject *self)
     if (!self->framing || self->frame_start == -1) {
         return 0;
     }
-    frame_len = self->output_len - self->frame_start - FRAME_HEADER_SIZE;
+    frame_len = _PyBytesWriter_GetSize(self->writer)
+                - self->frame_start - FRAME_HEADER_SIZE;
     if (frame_len >= FRAME_SIZE_TARGET) {
         if(_Pickler_CommitFrame(self)) {
             return -1;
@@ -1097,7 +1096,7 @@ _Pickler_OpcodeBoundary(PicklerObject *self)
 static Py_ssize_t
 _Pickler_Write(PicklerObject *self, const char *s, Py_ssize_t data_len)
 {
-    Py_ssize_t i, n, required;
+    Py_ssize_t i, n;
     char *buffer;
     int need_new_frame;
 
@@ -1109,38 +1108,29 @@ _Pickler_Write(PicklerObject *self, const char *s, Py_ssize_t data_len)
     else
         n = data_len;
 
-    required = self->output_len + n;
-    if (required > self->max_output_len) {
-        /* Make place in buffer for the pickle chunk */
-        if (self->output_len >= PY_SSIZE_T_MAX / 2 - n) {
-            PyErr_NoMemory();
-            return -1;
-        }
-        self->max_output_len = (self->output_len + n) / 2 * 3;
-        if (_PyBytes_Resize(&self->output_buffer, self->max_output_len) < 0)
-            return -1;
-    }
-    buffer = PyBytes_AS_STRING(self->output_buffer);
+    Py_ssize_t pos = _PyBytesWriter_GetSize(self->writer);
+    /* Make place in buffer for the pickle chunk */
+    if (PyBytesWriter_Grow(self->writer, n) < 0)
+        return -1;
+    buffer = _PyBytesWriter_GetData(self->writer) + pos;
     if (need_new_frame) {
         /* Setup new frame */
-        Py_ssize_t frame_start = self->output_len;
-        self->frame_start = frame_start;
+        self->frame_start = pos;
         for (i = 0; i < FRAME_HEADER_SIZE; i++) {
             /* Write an invalid value, for debugging */
-            buffer[frame_start + i] = 0xFE;
+            buffer[i] = 0xFE;
         }
-        self->output_len += FRAME_HEADER_SIZE;
+        buffer += FRAME_HEADER_SIZE;
     }
     if (data_len < 8) {
         /* This is faster than memcpy when the string is short. */
         for (i = 0; i < data_len; i++) {
-            buffer[self->output_len + i] = s[i];
+            buffer[i] = s[i];
         }
     }
     else {
-        memcpy(buffer + self->output_len, s, data_len);
+        memcpy(buffer, s, data_len);
     }
-    self->output_len += data_len;
     return data_len;
 }
 
@@ -1152,15 +1142,10 @@ _Pickler_New(PickleState *st)
         return NULL;
     }
 
-    const Py_ssize_t max_output_len = WRITE_BUF_SIZE;
-    PyObject *output_buffer = PyBytes_FromStringAndSize(NULL, max_output_len);
-    if (output_buffer == NULL) {
-        goto error;
-    }
-
     PicklerObject *self = PyObject_GC_New(PicklerObject, st->Pickler_Type);
     if (self == NULL) {
-        goto error;
+        PyMem_Free(memo);
+        return NULL;
     }
 
     self->memo = memo;
@@ -1169,9 +1154,7 @@ _Pickler_New(PickleState *st)
     self->dispatch_table = NULL;
     self->reducer_override = NULL;
     self->write = NULL;
-    self->output_buffer = output_buffer;
-    self->output_len = 0;
-    self->max_output_len = max_output_len;
+    self->writer = NULL;
     self->proto = 0;
     self->bin = 0;
     self->framing = 0;
@@ -1186,12 +1169,11 @@ _Pickler_New(PickleState *st)
     self->weak_only_count = 0;
 
     PyObject_GC_Track(self);
+    if (_Pickler_ClearBuffer(self) < 0) {
+        Py_DECREF(self);
+        return NULL;
+    }
     return self;
-
-error:
-    PyMem_Free(memo);
-    Py_XDECREF(output_buffer);
-    return NULL;
 }
 
 static int
@@ -1914,7 +1896,7 @@ static int
 memo_get(PickleState *st, PicklerObject *self, PyObject *key)
 {
     Py_ssize_t *value;
-    char pdata[30];
+    char pdata[5];
     Py_ssize_t len;
 
     value = PyMemoTable_Get(self->memo, key);
@@ -1925,10 +1907,8 @@ memo_get(PickleState *st, PicklerObject *self, PyObject *key)
     Py_ssize_t idx = MEMO_INDEX(*value);   /* mask off the weak-only flag bit */
 
     if (!self->bin) {
-        pdata[0] = GET;
-        PyOS_snprintf(pdata + 1, sizeof(pdata) - 1,
-                      "%zd\n", idx);
-        len = strlen(pdata);
+        /* Protocol 0 has no framing: format straight into the buffer. */
+        return PyBytesWriter_Format(self->writer, "%c%zd\n", GET, idx);
     }
     else {
         if (idx < 256) {
@@ -1962,7 +1942,7 @@ memo_get(PickleState *st, PicklerObject *self, PyObject *key)
 static int
 memo_put(PickleState *st, PicklerObject *self, PyObject *obj)
 {
-    char pdata[30];
+    char pdata[5];
     Py_ssize_t len;
     Py_ssize_t idx;
 
@@ -1981,10 +1961,8 @@ memo_put(PickleState *st, PicklerObject *self, PyObject *obj)
         return 0;
     }
     else if (!self->bin) {
-        pdata[0] = PUT;
-        PyOS_snprintf(pdata + 1, sizeof(pdata) - 1,
-                      "%zd\n", idx);
-        len = strlen(pdata);
+        /* Protocol 0 has no framing: format straight into the buffer. */
+        return PyBytesWriter_Format(self->writer, "%c%zd\n", PUT, idx);
     }
     else {
         if (idx < 256) {
@@ -2360,8 +2338,9 @@ save_long(PicklerObject *self, PyObject *obj)
     int status = 0;
 
     val= PyLong_AsLongAndOverflow(obj, &overflow);
-    if (!overflow && (sizeof(long) <= 4 ||
-            (val <= 0x7fffffffL && val >= (-0x7fffffffL - 1))))
+    int int32 = (!overflow && (sizeof(long) <= 4 ||
+            (val <= 0x7fffffffL && val >= (-0x7fffffffL - 1))));
+    if (int32 && self->bin)
     {
         /* result fits in a signed 4-byte integer.
 
@@ -2372,31 +2351,25 @@ save_long(PicklerObject *self, PyObject *obj)
            so MSVC happily warns us about it.  However, that result would have
            been fine because we guard for sizeof(long) <= 4 which turns the
            condition true in that particular case. */
-        char pdata[32];
+        char pdata[5];
         Py_ssize_t len = 0;
 
-        if (self->bin) {
-            pdata[1] = (unsigned char)(val & 0xff);
-            pdata[2] = (unsigned char)((val >> 8) & 0xff);
-            pdata[3] = (unsigned char)((val >> 16) & 0xff);
-            pdata[4] = (unsigned char)((val >> 24) & 0xff);
+        pdata[1] = (unsigned char)(val & 0xff);
+        pdata[2] = (unsigned char)((val >> 8) & 0xff);
+        pdata[3] = (unsigned char)((val >> 16) & 0xff);
+        pdata[4] = (unsigned char)((val >> 24) & 0xff);
 
-            if ((pdata[4] != 0) || (pdata[3] != 0)) {
-                pdata[0] = BININT;
-                len = 5;
-            }
-            else if (pdata[2] != 0) {
-                pdata[0] = BININT2;
-                len = 3;
-            }
-            else {
-                pdata[0] = BININT1;
-                len = 2;
-            }
+        if ((pdata[4] != 0) || (pdata[3] != 0)) {
+            pdata[0] = BININT;
+            len = 5;
+        }
+        else if (pdata[2] != 0) {
+            pdata[0] = BININT2;
+            len = 3;
         }
         else {
-            sprintf(pdata, "%c%ld\n", INT,  val);
-            len = strlen(pdata);
+            pdata[0] = BININT1;
+            len = 2;
         }
         if (_Pickler_Write(self, pdata, len) < 0)
             return -1;
@@ -2486,25 +2459,27 @@ save_long(PicklerObject *self, PyObject *obj)
             goto error;
     }
     else {
-        const char long_op = LONG;
-        const char *string;
-
-        /* proto < 2: write the repr and newline.  This is quadratic-time (in
-           the number of digits), in both directions.  We add a trailing 'L'
+        /* proto < 2: write the repr and newline straight into the buffer
+           (no framing before protocol 4).  This is quadratic-time (in the
+           number of digits), in both directions.  LONG adds a trailing 'L'
            to the repr, for compatibility with Python 2.x. */
-
-        repr = PyObject_Repr(obj);
-        if (repr == NULL)
+        PyBytesWriter *writer = self->writer;
+        Py_ssize_t pos = _PyBytesWriter_GetSize(writer);
+        if (PyBytesWriter_Grow(writer, int32 ? 2 : 3) < 0) {
             goto error;
-
-        string = PyUnicode_AsUTF8AndSize(repr, &size);
-        if (string == NULL)
+        }
+        char *p = _PyBytesWriter_GetData(writer) + pos;
+        *p++ = int32 ? INT : LONG;
+        p = _PyLong_FormatBytesWriter(writer, p, obj, 10, 0);
+        if (p == NULL) {
             goto error;
-
-        if (_Pickler_Write(self, &long_op, 1) < 0 ||
-            _Pickler_Write(self, string, size) < 0 ||
-            _Pickler_Write(self, "L\n", 2) < 0)
-            goto error;
+        }
+        if (!int32) {
+            *p++ = 'L';
+        }
+        *p++ = '\n';
+        assert(p == _PyBytesWriter_GetData(writer)
+                    + _PyBytesWriter_GetSize(writer));
     }
 
     if (0) {
@@ -2561,7 +2536,7 @@ done:
 /* Perform direct write of the header and payload of the binary object.
 
    The large contiguous data is written directly into the underlying file
-   object, bypassing the output_buffer of the Pickler.  We intentionally
+   object, bypassing the buffer of the Pickler.  We intentionally
    do not insert a protocol 4 frame opcode to make it possible to optimize
    file.read calls in the loader.
  */
@@ -2575,7 +2550,7 @@ _Pickler_write_bytes(PicklerObject *self,
     int framing = self->framing;
 
     if (bypass_buffer) {
-        assert(self->output_buffer != NULL);
+        assert(self->writer != NULL);
         /* Commit the previous frame. */
         if (_Pickler_CommitFrame(self)) {
             return -1;
@@ -5201,12 +5176,15 @@ _pickle_Pickler___sizeof___impl(PicklerObject *self)
         res += sizeof(PyMemoTable);
         res += self->memo->mt_allocated * sizeof(PyMemoEntry);
     }
-    if (self->output_buffer != NULL) {
-        size_t s = _PySys_GetSizeOf(self->output_buffer);
-        if (s == (size_t)-1) {
-            return -1;
+    if (self->writer != NULL) {
+        res += sizeof(PyBytesWriter);
+        if (self->writer->obj != NULL) {
+            size_t s = _PySys_GetSizeOf(self->writer->obj);
+            if (s == (size_t)-1) {
+                return -1;
+            }
+            res += s;
         }
-        res += s;
     }
     return res;
 }
@@ -5224,7 +5202,8 @@ static int
 Pickler_clear(PyObject *op)
 {
     PicklerObject *self = PicklerObject_CAST(op);
-    Py_CLEAR(self->output_buffer);
+    PyBytesWriter_Discard(self->writer);
+    self->writer = NULL;
     Py_CLEAR(self->write);
     Py_CLEAR(self->persistent_id);
     Py_CLEAR(self->persistent_id_attr);
@@ -5339,21 +5318,15 @@ _pickle_Pickler___init___impl(PicklerObject *self, PyObject *file,
     if (_Pickler_SetBufferCallback(self, buffer_callback) < 0) {
         goto error;
     }
-    /* memo and output_buffer may have already been created in _Pickler_New */
+    /* memo may have already been created in _Pickler_New */
     if (self->memo == NULL) {
         self->memo = PyMemoTable_New();
         if (self->memo == NULL) {
             goto error;
         }
     }
-    self->output_len = 0;
-    if (self->output_buffer == NULL) {
-        self->max_output_len = WRITE_BUF_SIZE;
-        self->output_buffer = PyBytes_FromStringAndSize(NULL,
-                                                        self->max_output_len);
-        if (self->output_buffer == NULL) {
-            goto error;
-        }
+    if (_Pickler_ClearBuffer(self) < 0) {
+        goto error;
     }
 
     self->fast = 0;

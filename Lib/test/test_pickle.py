@@ -558,7 +558,7 @@ if has_c_implementation:
         check_sizeof = support.check_sizeof
 
         def test_pickler(self):
-            basesize = support.calcobjsize('7P2n3i2n4i2P1n')
+            basesize = support.calcobjsize('7P3i2n4i2P1n')
             p = _pickle.Pickler(io.BytesIO())
             self.assertEqual(object.__sizeof__(p), basesize)
             MT_size = struct.calcsize('3nP0n')
@@ -566,6 +566,7 @@ if has_c_implementation:
             check = self.check_sizeof
             check(p, basesize +
                 MT_size + 8 * ME_size +  # Minimal memo table size.
+                struct.calcsize('256sPn2i') +  # PyBytesWriter
                 sys.getsizeof(b'x'*4096))  # Minimal write buffer size.
             for i in range(6):
                 p.dump(chr(i))

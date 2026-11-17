@@ -135,7 +135,8 @@ extern int _PyLong_FormatWriter(
     int base,
     int alternate);
 
-extern char* _PyLong_FormatBytesWriter(
+// Export for '_pickle' shared extension
+PyAPI_FUNC(char*) _PyLong_FormatBytesWriter(
     PyBytesWriter *writer,
     char *str,
     PyObject *obj,
