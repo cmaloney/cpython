@@ -155,6 +155,15 @@ long_normalize(PyLongObject *v)
 # define MAX_LONG_DIGITS ((INT64_MAX-1) / PyLong_SHIFT)
 #endif
 
+/* The freelist holds blocks of at least sizeof(PyLongObject) bytes: the
+   padding after ob_digit[0] can make room for more than one digit. */
+static inline int
+long_fits_freelist(Py_ssize_t ndigits)
+{
+    return (offsetof(PyLongObject, long_value.ob_digit) +
+            ndigits*sizeof(digit)) <= sizeof(PyLongObject);
+}
+
 static PyLongObject *
 long_alloc(Py_ssize_t size)
 {
@@ -169,17 +178,19 @@ long_alloc(Py_ssize_t size)
      * assume that there is always at least one digit present. */
     Py_ssize_t ndigits = size ? size : 1;
 
-    if (ndigits == 1) {
+    /* Number of bytes needed is: offsetof(PyLongObject, ob_digit) +
+    sizeof(digit)*size.  Previous incarnations of this code used
+    sizeof() instead of the offsetof, but this risks being
+    incorrect in the presence of padding between the header
+    and the digits. */
+    size_t nbytes = (offsetof(PyLongObject, long_value.ob_digit) +
+                     ndigits*sizeof(digit));
+    if (long_fits_freelist(ndigits)) {
+        nbytes = sizeof(PyLongObject);
         result = (PyLongObject *)_Py_FREELIST_POP(PyLongObject, ints);
     }
     if (result == NULL) {
-        /* Number of bytes needed is: offsetof(PyLongObject, ob_digit) +
-        sizeof(digit)*size.  Previous incarnations of this code used
-        sizeof() instead of the offsetof, but this risks being
-        incorrect in the presence of padding between the header
-        and the digits. */
-        result = PyObject_Malloc(offsetof(PyLongObject, long_value.ob_digit) +
-                                ndigits*sizeof(digit));
+        result = PyObject_Malloc(nbytes);
         if (!result) {
             PyErr_NoMemory();
             return NULL;
@@ -3638,7 +3649,7 @@ _PyLong_ExactDealloc(PyObject *self)
         _Py_SetImmortal(self);
         return;
     }
-    if (_PyLong_IsCompact((PyLongObject *)self)) {
+    if (long_fits_freelist(_PyLong_DigitCount((PyLongObject *)self))) {
         _Py_FREELIST_FREE(ints, self, PyObject_Free);
         return;
     }
@@ -3658,7 +3669,9 @@ long_dealloc(PyObject *self)
         _Py_SetImmortal(self);
         return;
     }
-    if (PyLong_CheckExact(self) && _PyLong_IsCompact((PyLongObject *)self)) {
+    if (PyLong_CheckExact(self)
+        && long_fits_freelist(_PyLong_DigitCount((PyLongObject *)self)))
+    {
         _Py_FREELIST_FREE(ints, self, PyObject_Free);
         return;
     }
