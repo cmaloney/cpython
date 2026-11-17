@@ -632,6 +632,7 @@ typedef struct PicklerObject {
     PyObject *write;            /* write() method of the output stream. */
     PyBytesWriter *writer;      /* Write into a local buffer before flushing
                                    to the stream. */
+    char *output_data;          /* Data of writer, cached for _Pickler_Write. */
     Py_ssize_t output_len;      /* Bytes written to writer. */
     Py_ssize_t max_output_len;  /* Allocation size of writer. */
     int proto;                  /* Pickle protocol number, >= 0 */
@@ -989,6 +990,7 @@ _Pickler_ClearBuffer(PicklerObject *self)
     self->writer = PyBytesWriter_Create(self->max_output_len);
     if (self->writer == NULL)
         return -1;
+    self->output_data = PyBytesWriter_GetData(self->writer);
     self->output_len = 0;
     self->frame_start = -1;
     return 0;
@@ -1018,7 +1020,7 @@ _Pickler_CommitFrame(PicklerObject *self)
     if (!self->framing || self->frame_start == -1)
         return 0;
     frame_len = self->output_len - self->frame_start - FRAME_HEADER_SIZE;
-    qdata = _PyBytesWriter_GetData(self->writer) + self->frame_start;
+    qdata = self->output_data + self->frame_start;
     if (frame_len >= FRAME_SIZE_MIN) {
         qdata[0] = FRAME;
         _write_size64(qdata + 1, frame_len);
@@ -1119,9 +1121,10 @@ _Pickler_Write(PicklerObject *self, const char *s, Py_ssize_t data_len)
         Py_ssize_t size = Py_MAX(required / 2 * 3, WRITE_BUF_SIZE);
         if (PyBytesWriter_Resize(self->writer, size) < 0)
             return -1;
+        self->output_data = PyBytesWriter_GetData(self->writer);
         self->max_output_len = size;
     }
-    buffer = _PyBytesWriter_GetData(self->writer);
+    buffer = self->output_data;
     if (need_new_frame) {
         /* Setup new frame */
         Py_ssize_t frame_start = self->output_len;
@@ -1150,12 +1153,14 @@ _Pickler_Write(PicklerObject *self, const char *s, Py_ssize_t data_len)
 static int
 _Pickler_WriteDecimal(PicklerObject *self, PyObject *obj)
 {
-    char *p = _PyBytesWriter_GetData(self->writer) + self->output_len;
+    char *p = self->output_data + self->output_len;
     p = _PyLong_FormatBytesWriter(self->writer, p, obj, 10, 0);
+    /* The writer may have moved its data, even on error. */
+    self->output_data = PyBytesWriter_GetData(self->writer);
     if (p == NULL) {
         return -1;
     }
-    self->output_len = p - _PyBytesWriter_GetData(self->writer);
+    self->output_len = p - self->output_data;
     return 0;
 }
 
