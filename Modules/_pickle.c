@@ -1096,6 +1096,26 @@ _Pickler_OpcodeBoundary(PicklerObject *self)
     return 0;
 }
 
+/* Out of line so that _Pickler_Write() stays small enough to inline. */
+static Py_NO_INLINE int
+_Pickler_GrowBuffer(PicklerObject *self, Py_ssize_t n)
+{
+    PyBytesWriter *writer = self->output_buffer;
+    if (self->output_len >= PY_SSIZE_T_MAX / 2 - n) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    /* The writer overallocates by a quarter: 1.5x in total, all used. */
+    Py_ssize_t size = Py_MAX((self->output_len + n) / 5 * 6, WRITE_BUF_SIZE);
+    if (PyBytesWriter_Resize(writer, size) < 0) {
+        return -1;
+    }
+    self->max_output_len = PyBytes_GET_SIZE(writer->obj);
+    (void)PyBytesWriter_Resize(writer, self->max_output_len);
+    self->output_data = _PyBytesWriter_GetData(writer);
+    return 0;
+}
+
 static Py_ssize_t
 _Pickler_Write(PicklerObject *self, const char *s, Py_ssize_t data_len)
 {
@@ -1114,18 +1134,8 @@ _Pickler_Write(PicklerObject *self, const char *s, Py_ssize_t data_len)
     required = self->output_len + n;
     if (required > self->max_output_len) {
         /* Make place in buffer for the pickle chunk */
-        if (self->output_len >= PY_SSIZE_T_MAX / 2 - n) {
-            PyErr_NoMemory();
+        if (_Pickler_GrowBuffer(self, n) < 0)
             return -1;
-        }
-        PyBytesWriter *writer = self->output_buffer;
-        /* The writer overallocates by a quarter: 1.5x in total, all used. */
-        if (PyBytesWriter_Resize(writer, Py_MAX(required / 5 * 6,
-                                                WRITE_BUF_SIZE)) < 0)
-            return -1;
-        self->max_output_len = PyBytes_GET_SIZE(writer->obj);
-        (void)PyBytesWriter_Resize(writer, self->max_output_len);
-        self->output_data = _PyBytesWriter_GetData(writer);
     }
     buffer = self->output_data;
     if (need_new_frame) {
