@@ -565,8 +565,7 @@ if has_c_implementation:
             ME_size = struct.calcsize('Pn0P')
             check = self.check_sizeof
             check(p, basesize +
-                MT_size + 8 * ME_size +  # Minimal memo table size.
-                struct.calcsize('256sPn2i'))  # Empty write buffer.
+                MT_size + 8 * ME_size)  # Minimal memo table size.
             for i in range(6):
                 p.dump(chr(i))
             check(p, basesize +

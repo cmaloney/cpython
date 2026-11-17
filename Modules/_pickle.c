@@ -630,15 +630,15 @@ typedef struct PicklerObject {
                                    functions and classes*/
 
     PyObject *write;            /* write() method of the output stream. */
-    PyBytesWriter *writer;      /* Write into a local buffer before flushing
-                                   to the stream. */
-    char *output_data;          /* Data of writer, cached for _Pickler_Write. */
-    Py_ssize_t output_len;      /* Bytes written to writer. */
-    Py_ssize_t max_output_len;  /* Allocation size of writer. */
+    PyBytesWriter *output_buffer; /* Write into a local buffer before
+                                   flushing to the stream. */
+    char *output_data;          /* Data of output_buffer. */
+    Py_ssize_t output_len;      /* Length of output_buffer. */
+    Py_ssize_t max_output_len;  /* Allocation size of output_buffer. */
     int proto;                  /* Pickle protocol number, >= 0 */
     int bin;                    /* Boolean, true if proto > 0 */
     int framing;                /* True when framing is enabled, proto >= 4 */
-    Py_ssize_t frame_start;     /* Position in writer where the
+    Py_ssize_t frame_start;     /* Position in output_buffer where the
                                    current frame begins. -1 if there
                                    is no frame currently open. */
 
@@ -983,14 +983,14 @@ PyMemoTable_Set(PyMemoTable *self, PyObject *key, Py_ssize_t value)
 static int
 _Pickler_ClearBuffer(PicklerObject *self)
 {
-    PyBytesWriter_Discard(self->writer);
-    /* A new Pickler starts in the writer's small buffer: small pickles are
+    PyBytesWriter_Discard(self->output_buffer);
+    /* Start in the writer's small buffer (255 bytes): small pickles are
        copied out of it without ever allocating WRITE_BUF_SIZE. */
     self->max_output_len = Py_MAX(self->max_output_len, 255);
-    self->writer = PyBytesWriter_Create(self->max_output_len);
-    if (self->writer == NULL)
+    self->output_buffer = PyBytesWriter_Create(self->max_output_len);
+    if (self->output_buffer == NULL)
         return -1;
-    self->output_data = PyBytesWriter_GetData(self->writer);
+    self->output_data = _PyBytesWriter_GetData(self->output_buffer);
     self->output_len = 0;
     self->frame_start = -1;
     return 0;
@@ -1036,14 +1036,14 @@ _Pickler_CommitFrame(PicklerObject *self)
 static PyObject *
 _Pickler_GetString(PicklerObject *self)
 {
-    assert(self->writer != NULL);
+    assert(self->output_buffer != NULL);
 
     if (_Pickler_CommitFrame(self))
         return NULL;
 
-    PyObject *output = PyBytesWriter_FinishWithSize(self->writer,
+    PyObject *output = PyBytesWriter_FinishWithSize(self->output_buffer,
                                                     self->output_len);
-    self->writer = NULL;
+    self->output_buffer = NULL;
     return output;
 }
 
@@ -1118,11 +1118,13 @@ _Pickler_Write(PicklerObject *self, const char *s, Py_ssize_t data_len)
             PyErr_NoMemory();
             return -1;
         }
-        Py_ssize_t size = Py_MAX(required / 2 * 3, WRITE_BUF_SIZE);
-        if (PyBytesWriter_Resize(self->writer, size) < 0)
+        PyBytesWriter *writer = self->output_buffer;
+        if (PyBytesWriter_Resize(writer, Py_MAX(required, WRITE_BUF_SIZE)) < 0)
             return -1;
-        self->output_data = PyBytesWriter_GetData(self->writer);
-        self->max_output_len = size;
+        /* Use the writer's overallocation too. */
+        self->max_output_len = PyBytes_GET_SIZE(writer->obj);
+        (void)PyBytesWriter_Resize(writer, self->max_output_len);
+        self->output_data = _PyBytesWriter_GetData(writer);
     }
     buffer = self->output_data;
     if (need_new_frame) {
@@ -1148,20 +1150,23 @@ _Pickler_Write(PicklerObject *self, const char *s, Py_ssize_t data_len)
     return data_len;
 }
 
-/* Write the decimal digits of an int.  The writer size is at least
-   max_output_len, so growing it by the number of digits keeps room for them. */
+/* Write the decimal digits of an int. */
 static int
 _Pickler_WriteDecimal(PicklerObject *self, PyObject *obj)
 {
+    PyBytesWriter *writer = self->output_buffer;
+    /* _PyLong_FormatBytesWriter() grows the writer by the number of digits:
+       make its size the bytes written while it does. */
+    (void)PyBytesWriter_Resize(writer, self->output_len);
     char *p = self->output_data + self->output_len;
-    p = _PyLong_FormatBytesWriter(self->writer, p, obj, 10, 0);
-    /* The writer may have moved its data, even on error. */
-    self->output_data = PyBytesWriter_GetData(self->writer);
+    p = _PyLong_FormatBytesWriter(writer, p, obj, 10, 0);
     if (p == NULL) {
         return -1;
     }
+    self->output_data = _PyBytesWriter_GetData(writer);
     self->output_len = p - self->output_data;
-    return 0;
+    self->max_output_len = Py_MAX(self->max_output_len, self->output_len);
+    return PyBytesWriter_Resize(writer, self->max_output_len);
 }
 
 static PicklerObject *
@@ -1172,10 +1177,15 @@ _Pickler_New(PickleState *st)
         return NULL;
     }
 
+    const Py_ssize_t max_output_len = 255;
+    PyBytesWriter *output_buffer = PyBytesWriter_Create(max_output_len);
+    if (output_buffer == NULL) {
+        goto error;
+    }
+
     PicklerObject *self = PyObject_GC_New(PicklerObject, st->Pickler_Type);
     if (self == NULL) {
-        PyMem_Free(memo);
-        return NULL;
+        goto error;
     }
 
     self->memo = memo;
@@ -1184,8 +1194,10 @@ _Pickler_New(PickleState *st)
     self->dispatch_table = NULL;
     self->reducer_override = NULL;
     self->write = NULL;
-    self->writer = NULL;
-    self->max_output_len = 0;
+    self->output_buffer = output_buffer;
+    self->output_data = _PyBytesWriter_GetData(output_buffer);
+    self->output_len = 0;
+    self->max_output_len = max_output_len;
     self->proto = 0;
     self->bin = 0;
     self->framing = 0;
@@ -1200,11 +1212,12 @@ _Pickler_New(PickleState *st)
     self->weak_only_count = 0;
 
     PyObject_GC_Track(self);
-    if (_Pickler_ClearBuffer(self) < 0) {
-        Py_DECREF(self);
-        return NULL;
-    }
     return self;
+
+error:
+    PyMem_Free(memo);
+    PyBytesWriter_Discard(output_buffer);
+    return NULL;
 }
 
 static int
@@ -2579,7 +2592,7 @@ done:
 /* Perform direct write of the header and payload of the binary object.
 
    The large contiguous data is written directly into the underlying file
-   object, bypassing the buffer of the Pickler.  We intentionally
+   object, bypassing the output_buffer of the Pickler.  We intentionally
    do not insert a protocol 4 frame opcode to make it possible to optimize
    file.read calls in the loader.
  */
@@ -2593,7 +2606,7 @@ _Pickler_write_bytes(PicklerObject *self,
     int framing = self->framing;
 
     if (bypass_buffer) {
-        assert(self->writer != NULL);
+        assert(self->output_buffer != NULL);
         /* Commit the previous frame. */
         if (_Pickler_CommitFrame(self)) {
             return -1;
@@ -5219,10 +5232,10 @@ _pickle_Pickler___sizeof___impl(PicklerObject *self)
         res += sizeof(PyMemoTable);
         res += self->memo->mt_allocated * sizeof(PyMemoEntry);
     }
-    if (self->writer != NULL) {
+    if (self->output_buffer != NULL) {
         res += sizeof(PyBytesWriter);
-        if (self->writer->obj != NULL) {
-            size_t s = _PySys_GetSizeOf(self->writer->obj);
+        if (self->output_buffer->obj != NULL) {
+            size_t s = _PySys_GetSizeOf(self->output_buffer->obj);
             if (s == (size_t)-1) {
                 return -1;
             }
@@ -5245,8 +5258,8 @@ static int
 Pickler_clear(PyObject *op)
 {
     PicklerObject *self = PicklerObject_CAST(op);
-    PyBytesWriter_Discard(self->writer);
-    self->writer = NULL;
+    PyBytesWriter_Discard(self->output_buffer);
+    self->output_buffer = NULL;
     Py_CLEAR(self->write);
     Py_CLEAR(self->persistent_id);
     Py_CLEAR(self->persistent_id_attr);
@@ -5367,9 +5380,6 @@ _pickle_Pickler___init___impl(PicklerObject *self, PyObject *file,
         if (self->memo == NULL) {
             goto error;
         }
-    }
-    if (_Pickler_ClearBuffer(self) < 0) {
-        goto error;
     }
 
     self->fast = 0;
