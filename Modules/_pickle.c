@@ -1922,6 +1922,22 @@ _Unpickler_SetBuffers(UnpicklerObject *self, PyObject *buffers)
     return 0;
 }
 
+/* Write a protocol 0 GET or PUT.  Kept out of line so that memo_get() and
+   memo_put() stay small enough to inline. */
+static int
+memo_write_text(PicklerObject *self, char op, Py_ssize_t idx)
+{
+    PyObject *index = PyLong_FromSsize_t(idx);
+    if (index == NULL) {
+        return -1;
+    }
+    int err = (_Pickler_Write(self, &op, 1) < 0 ||
+               _Pickler_WriteDecimal(self, index) < 0 ||
+               _Pickler_Write(self, "\n", 1) < 0);
+    Py_DECREF(index);
+    return err ? -1 : 0;
+}
+
 /* Generate a GET opcode for an object stored in the memo. */
 static int
 memo_get(PickleState *st, PicklerObject *self, PyObject *key)
@@ -1938,19 +1954,7 @@ memo_get(PickleState *st, PicklerObject *self, PyObject *key)
     Py_ssize_t idx = MEMO_INDEX(*value);   /* mask off the weak-only flag bit */
 
     if (!self->bin) {
-        pdata[0] = GET;
-        PyObject *index = PyLong_FromSsize_t(idx);
-        if (index == NULL) {
-            return -1;
-        }
-        int err = (_Pickler_Write(self, pdata, 1) < 0 ||
-                   _Pickler_WriteDecimal(self, index) < 0);
-        Py_DECREF(index);
-        if (err) {
-            return -1;
-        }
-        pdata[0] = '\n';
-        len = 1;
+        return memo_write_text(self, GET, idx);
     }
     else {
         if (idx < 256) {
@@ -2003,19 +2007,7 @@ memo_put(PickleState *st, PicklerObject *self, PyObject *obj)
         return 0;
     }
     else if (!self->bin) {
-        pdata[0] = PUT;
-        PyObject *index = PyLong_FromSsize_t(idx);
-        if (index == NULL) {
-            return -1;
-        }
-        int err = (_Pickler_Write(self, pdata, 1) < 0 ||
-                   _Pickler_WriteDecimal(self, index) < 0);
-        Py_DECREF(index);
-        if (err) {
-            return -1;
-        }
-        pdata[0] = '\n';
-        len = 1;
+        return memo_write_text(self, PUT, idx);
     }
     else {
         if (idx < 256) {
