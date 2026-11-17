@@ -299,6 +299,13 @@ INITIALIZER = textwrap.dedent(rf'''
 #######################################
 # compound type declarations
 
+# Balanced parentheses.  Regular expressions cannot match arbitrary
+# nesting, so this supports a fixed (but generous) depth.
+NESTED_PARENS = r'(?: [(] [^()]* [)] )'
+for _ in range(7):
+    NESTED_PARENS = rf'(?: [(] (?: [^()] | {NESTED_PARENS} )* [)] )'
+del _
+
 STRUCT_MEMBER_DECL = textwrap.dedent(rf'''
     (?:
         # inline compound type decl
@@ -340,7 +347,13 @@ STRUCT_MEMBER_DECL = textwrap.dedent(rf'''
                     # This is actually a "constant expression".
                     \d+
                     |
-                    [^'",}}]+
+                    # Commas are allowed inside parentheses, e.g. in
+                    # glibc's static_assert() fallback with offsetof().
+                    (?:
+                        [^'",}}()]
+                        |
+                        {NESTED_PARENS}
+                     )+
                  )
              )?
             \s*
