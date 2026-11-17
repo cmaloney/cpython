@@ -631,9 +631,9 @@ typedef struct PicklerObject {
 
     PyObject *write;            /* write() method of the output stream. */
     PyBytesWriter *writer;      /* Write into a local buffer before flushing
-                                   to the stream.  Its size is the space
-                                   available, not the bytes written. */
+                                   to the stream. */
     Py_ssize_t output_len;      /* Bytes written to writer. */
+    Py_ssize_t max_output_len;  /* Allocation size of writer. */
     int proto;                  /* Pickle protocol number, >= 0 */
     int bin;                    /* Boolean, true if proto > 0 */
     int framing;                /* True when framing is enabled, proto >= 4 */
@@ -983,9 +983,10 @@ static int
 _Pickler_ClearBuffer(PicklerObject *self)
 {
     PyBytesWriter_Discard(self->writer);
-    /* Start in the writer's small buffer: small pickles are copied out of
-       it without ever allocating WRITE_BUF_SIZE. */
-    self->writer = PyBytesWriter_Create(255);
+    /* A new Pickler starts in the writer's small buffer: small pickles are
+       copied out of it without ever allocating WRITE_BUF_SIZE. */
+    self->max_output_len = Py_MAX(self->max_output_len, 255);
+    self->writer = PyBytesWriter_Create(self->max_output_len);
     if (self->writer == NULL)
         return -1;
     self->output_len = 0;
@@ -1109,15 +1110,16 @@ _Pickler_Write(PicklerObject *self, const char *s, Py_ssize_t data_len)
         n = data_len;
 
     required = self->output_len + n;
-    if (required > _PyBytesWriter_GetSize(self->writer)) {
+    if (required > self->max_output_len) {
         /* Make place in buffer for the pickle chunk */
         if (self->output_len >= PY_SSIZE_T_MAX / 2 - n) {
             PyErr_NoMemory();
             return -1;
         }
-        if (PyBytesWriter_Resize(self->writer,
-                                 Py_MAX(required / 2 * 3, WRITE_BUF_SIZE)) < 0)
+        Py_ssize_t size = Py_MAX(required / 2 * 3, WRITE_BUF_SIZE);
+        if (PyBytesWriter_Resize(self->writer, size) < 0)
             return -1;
+        self->max_output_len = size;
     }
     buffer = _PyBytesWriter_GetData(self->writer);
     if (need_new_frame) {
@@ -1143,8 +1145,8 @@ _Pickler_Write(PicklerObject *self, const char *s, Py_ssize_t data_len)
     return data_len;
 }
 
-/* Write the decimal digits of an int.  The writer size is the space
-   available, so growing it by the number of digits keeps room for them. */
+/* Write the decimal digits of an int.  The writer size is at least
+   max_output_len, so growing it by the number of digits keeps room for them. */
 static int
 _Pickler_WriteDecimal(PicklerObject *self, PyObject *obj)
 {
@@ -1178,6 +1180,7 @@ _Pickler_New(PickleState *st)
     self->reducer_override = NULL;
     self->write = NULL;
     self->writer = NULL;
+    self->max_output_len = 0;
     self->proto = 0;
     self->bin = 0;
     self->framing = 0;
