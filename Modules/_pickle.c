@@ -1119,9 +1119,10 @@ _Pickler_Write(PicklerObject *self, const char *s, Py_ssize_t data_len)
             return -1;
         }
         PyBytesWriter *writer = self->output_buffer;
-        if (PyBytesWriter_Resize(writer, Py_MAX(required, WRITE_BUF_SIZE)) < 0)
+        /* The writer overallocates by a quarter: 1.5x in total, all used. */
+        if (PyBytesWriter_Resize(writer, Py_MAX(required / 5 * 6,
+                                                WRITE_BUF_SIZE)) < 0)
             return -1;
-        /* Use the writer's overallocation too. */
         self->max_output_len = PyBytes_GET_SIZE(writer->obj);
         (void)PyBytesWriter_Resize(writer, self->max_output_len);
         self->output_data = _PyBytesWriter_GetData(writer);
