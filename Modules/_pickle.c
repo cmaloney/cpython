@@ -1922,7 +1922,7 @@ static int
 memo_get(PickleState *st, PicklerObject *self, PyObject *key)
 {
     Py_ssize_t *value;
-    char pdata[5];
+    char pdata[30];
     Py_ssize_t len;
 
     value = PyMemoTable_Get(self->memo, key);
@@ -1979,7 +1979,7 @@ memo_get(PickleState *st, PicklerObject *self, PyObject *key)
 static int
 memo_put(PickleState *st, PicklerObject *self, PyObject *obj)
 {
-    char pdata[5];
+    char pdata[30];
     Py_ssize_t len;
     Py_ssize_t idx;
 
@@ -2386,9 +2386,8 @@ save_long(PicklerObject *self, PyObject *obj)
     int status = 0;
 
     val= PyLong_AsLongAndOverflow(obj, &overflow);
-    int int32 = (!overflow && (sizeof(long) <= 4 ||
-            (val <= 0x7fffffffL && val >= (-0x7fffffffL - 1))));
-    if (int32 && self->bin)
+    if (!overflow && (sizeof(long) <= 4 ||
+            (val <= 0x7fffffffL && val >= (-0x7fffffffL - 1))))
     {
         /* result fits in a signed 4-byte integer.
 
@@ -2399,25 +2398,35 @@ save_long(PicklerObject *self, PyObject *obj)
            so MSVC happily warns us about it.  However, that result would have
            been fine because we guard for sizeof(long) <= 4 which turns the
            condition true in that particular case. */
-        char pdata[5];
+        char pdata[32];
         Py_ssize_t len = 0;
 
-        pdata[1] = (unsigned char)(val & 0xff);
-        pdata[2] = (unsigned char)((val >> 8) & 0xff);
-        pdata[3] = (unsigned char)((val >> 16) & 0xff);
-        pdata[4] = (unsigned char)((val >> 24) & 0xff);
+        if (self->bin) {
+            pdata[1] = (unsigned char)(val & 0xff);
+            pdata[2] = (unsigned char)((val >> 8) & 0xff);
+            pdata[3] = (unsigned char)((val >> 16) & 0xff);
+            pdata[4] = (unsigned char)((val >> 24) & 0xff);
 
-        if ((pdata[4] != 0) || (pdata[3] != 0)) {
-            pdata[0] = BININT;
-            len = 5;
-        }
-        else if (pdata[2] != 0) {
-            pdata[0] = BININT2;
-            len = 3;
+            if ((pdata[4] != 0) || (pdata[3] != 0)) {
+                pdata[0] = BININT;
+                len = 5;
+            }
+            else if (pdata[2] != 0) {
+                pdata[0] = BININT2;
+                len = 3;
+            }
+            else {
+                pdata[0] = BININT1;
+                len = 2;
+            }
         }
         else {
-            pdata[0] = BININT1;
-            len = 2;
+            pdata[0] = INT;
+            if (_Pickler_Write(self, pdata, 1) < 0 ||
+                _Pickler_WriteDecimal(self, obj) < 0)
+                return -1;
+            pdata[0] = '\n';
+            len = 1;
         }
         if (_Pickler_Write(self, pdata, len) < 0)
             return -1;
@@ -2507,15 +2516,15 @@ save_long(PicklerObject *self, PyObject *obj)
             goto error;
     }
     else {
-        /* proto < 2: write the repr and newline.  This is quadratic-time (in
-           the number of digits), in both directions.  LONG adds a trailing
-           'L' to the repr, for compatibility with Python 2.x. */
-        const char op = int32 ? INT : LONG;
-        const char *end = int32 ? "\n" : "L\n";
+        const char long_op = LONG;
 
-        if (_Pickler_Write(self, &op, 1) < 0 ||
+        /* proto < 2: write the repr and newline.  This is quadratic-time (in
+           the number of digits), in both directions.  We add a trailing 'L'
+           to the repr, for compatibility with Python 2.x. */
+
+        if (_Pickler_Write(self, &long_op, 1) < 0 ||
             _Pickler_WriteDecimal(self, obj) < 0 ||
-            _Pickler_Write(self, end, strlen(end)) < 0)
+            _Pickler_Write(self, "L\n", 2) < 0)
             goto error;
     }
 
