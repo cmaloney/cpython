@@ -1,0 +1,4 @@
+Fix data loss when a C :class:`io.BufferedRWPair` was garbage collected
+without being closed and its reader and writer shared a raw stream or file
+descriptor, as with :meth:`socket.socket.makefile` in ``'rwb'`` mode.  The
+buffered data is now flushed before the reader is closed.

@@ -2330,6 +2330,12 @@ bufferedrwpair_dealloc(PyObject *op)
 {
     rwpair *self = rwpair_CAST(op);
     PyTypeObject *tp = Py_TYPE(self);
+    /* Close the pair, which flushes and closes the writer before closing the
+       reader.  Otherwise the reader's destructor can close a raw stream it
+       shares with the writer before the writer has flushed. */
+    if (_PyIOBase_finalize(op) < 0) {
+        return;
+    }
     _PyObject_GC_UNTRACK(self);
     FT_CLEAR_WEAKREFS(op, self->weakreflist);
     (void)bufferedrwpair_clear(op);

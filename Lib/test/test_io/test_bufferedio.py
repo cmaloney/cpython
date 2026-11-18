@@ -1,4 +1,5 @@
 import array
+import os
 import pickle
 import random
 import sys
@@ -1217,6 +1218,58 @@ class BufferedRWPairTest:
         ref = weakref.ref(brw)
         brw = None
         ref = None # Shouldn't segfault.
+
+    def test_flush_on_dealloc_shared_raw(self):
+        # The same raw stream is used for reading and writing, like
+        # socket.makefile("rwb"). Closing the reader must not prevent the
+        # writer from flushing.
+        raw = self.MockRawIO()
+        pair = self.tp(raw, raw)
+        pair.write(b"abc")
+        with support.catch_unraisable_exception() as cm:
+            pair = None
+            support.gc_collect()
+            self.assertIsNone(cm.unraisable)
+        self.assertEqual(raw._write_stack, [b"abc"])
+        self.assertTrue(raw.closed)
+
+    def test_flush_on_dealloc_shared_fd(self):
+        # The reader and writer are distinct raw streams sharing one file
+        # descriptor which the reader owns.
+        self.addCleanup(os_helper.unlink, os_helper.TESTFN)
+        fd = os.open(os_helper.TESTFN, os.O_RDWR | os.O_CREAT | os.O_TRUNC)
+        try:
+            reader = self.FileIO(fd, "rb")
+        except:
+            os.close(fd)
+            raise
+        pair = self.tp(reader, self.FileIO(fd, "wb", closefd=False))
+        reader = None
+        pair.write(b"abc")
+        with support.catch_unraisable_exception() as cm:
+            pair = None
+            support.gc_collect()
+            self.assertIsNone(cm.unraisable)
+        with open(os_helper.TESTFN, "rb") as f:
+            self.assertEqual(f.read(), b"abc")
+
+    def test_close_error_on_dealloc(self):
+        # The pair's close() is what runs when it is deallocated.
+        def writer_close():
+            writer_non_existing
+        reader = self.MockRawIO()
+        writer = self.MockRawIO()
+        writer.close = writer_close
+        pair = self.tp(reader, writer)
+        with support.catch_unraisable_exception() as cm:
+            pair = None
+            support.gc_collect()
+            self.assertEqual(cm.unraisable.exc_type, NameError)
+            self.assertTrue(reader.closed)
+            # Silence the BufferedWriter destructor error
+            writer.close = lambda: None
+            writer = None
+            support.gc_collect()
 
 class CBufferedRWPairTest(BufferedRWPairTest, CTestCase):
     tp = io.BufferedRWPair
