@@ -11,7 +11,9 @@ import weakref
 from collections import deque, UserList
 from itertools import cycle, count
 from test import support
-from test.support import check_sanitizer, os_helper, threading_helper
+from test.support import (
+    check_sanitizer, os_helper, threading_helper, warnings_helper
+)
 from .utils import byteslike, CTestCase, PyTestCase
 
 
@@ -1247,8 +1249,9 @@ class BufferedRWPairTest:
         reader = None
         pair.write(b"abc")
         with support.catch_unraisable_exception() as cm:
-            pair = None
-            support.gc_collect()
+            with self.assertWarns(ResourceWarning):
+                pair = None
+                support.gc_collect()
             self.assertIsNone(cm.unraisable)
         with open(os_helper.TESTFN, "rb") as f:
             self.assertEqual(f.read(), b"abc")
@@ -1269,6 +1272,69 @@ class BufferedRWPairTest:
             # Silence the BufferedWriter destructor error
             writer.close = lambda: None
             writer = None
+            support.gc_collect()
+
+    def check_warn_on_dealloc(self, make_raws, expected):
+        r, w = os.pipe()
+        try:
+            reader, writer = make_raws(r, w)
+        except:
+            os.close(r)
+            os.close(w)
+            raise
+        pair = self.tp(reader, writer)
+        reader = writer = None
+        pair_repr = repr(pair)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            pair = None
+            support.gc_collect()
+        self.assertEqual([str(w.message) for w in caught],
+                         [f"unclosed file {pair_repr}"] * expected)
+        for w in caught:
+            self.assertIs(w.category, ResourceWarning)
+
+    def test_warn_on_dealloc(self):
+        # One warning for each raw stream that owns a file descriptor.
+        self.check_warn_on_dealloc(
+            lambda r, w: (self.FileIO(r, "rb"), self.FileIO(w, "wb")), 2)
+
+    def test_warn_on_dealloc_shared_raw(self):
+        def make_raws(r, w):
+            os.close(r)
+            raw = self.FileIO(w, "wb")
+            raw.readable = lambda: True
+            return raw, raw
+        self.check_warn_on_dealloc(make_raws, 1)
+
+    def test_warn_on_dealloc_textio(self):
+        r, w = os.pipe()
+        try:
+            reader = self.FileIO(r, "rb")
+        except:
+            os.close(r)
+            os.close(w)
+            raise
+        try:
+            writer = self.FileIO(w, "wb")
+        except:
+            reader.close()
+            os.close(w)
+            raise
+        text = self.TextIOWrapper(self.tp(reader, writer), encoding="ascii")
+        reader = writer = None
+        text_repr = repr(text)
+        with self.assertWarns(ResourceWarning) as cm:
+            text = None
+            support.gc_collect()
+        self.assertEqual(str(cm.warning), f"unclosed file {text_repr}")
+
+    def test_no_warn_on_dealloc_closed(self):
+        r, w = os.pipe()
+        pair = self.tp(self.FileIO(r, "rb"), self.FileIO(w, "wb"))
+        pair.close()
+        with warnings_helper.check_no_resource_warning(self):
+            pair = None
             support.gc_collect()
 
 class CBufferedRWPairTest(BufferedRWPairTest, CTestCase):

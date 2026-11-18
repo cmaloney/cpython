@@ -2252,6 +2252,8 @@ typedef struct {
     buffered *writer;
     PyObject *dict;
     PyObject *weakreflist;
+    /* Set while the pair is closed by its own finalizer */
+    char finalizing;
 } rwpair;
 
 #define rwpair_CAST(op) ((rwpair *)(op))
@@ -2333,6 +2335,7 @@ bufferedrwpair_dealloc(PyObject *op)
     /* Close the pair, which flushes and closes the writer before closing the
        reader.  Otherwise the reader's destructor can close a raw stream it
        shares with the writer before the writer has flushed. */
+    self->finalizing = 1;
     if (_PyIOBase_finalize(op) < 0) {
         return;
     }
@@ -2472,6 +2475,46 @@ _io_BufferedRWPair_writable_impl(rwpair *self)
     return _forward_call(self->writer, &_Py_ID(writable), NULL);
 }
 
+/* Because this can call arbitrary code, it shouldn't be called when
+   the refcount is 0 (that is, not directly from tp_dealloc unless
+   the refcount has been temporarily re-incremented). */
+/*[clinic input]
+_io.BufferedRWPair._dealloc_warn
+
+    source: object
+    /
+
+[clinic start generated code]*/
+
+static PyObject *
+_io_BufferedRWPair__dealloc_warn_impl(rwpair *self, PyObject *source)
+/*[clinic end generated code: output=c11503976cd2ffd8 input=9a6b9c837bfc037b]*/
+{
+    buffered *reader = self->reader;
+    buffered *writer = self->writer;
+    PyObject *r;
+    if (reader != NULL) {
+        r = _io__Buffered__dealloc_warn_impl(reader, source);
+        if (r) {
+            Py_DECREF(r);
+        }
+        else {
+            PyErr_Clear();
+        }
+    }
+    /* Warn once if the same raw stream is used for reading and writing. */
+    if (writer != NULL && (reader == NULL || writer->raw != reader->raw)) {
+        r = _io__Buffered__dealloc_warn_impl(writer, source);
+        if (r) {
+            Py_DECREF(r);
+        }
+        else {
+            PyErr_Clear();
+        }
+    }
+    Py_RETURN_NONE;
+}
+
 /*[clinic input]
 _io.BufferedRWPair.close
 [clinic start generated code]*/
@@ -2481,6 +2524,16 @@ _io_BufferedRWPair_close_impl(rwpair *self)
 /*[clinic end generated code: output=5924ba5ecc78752a input=4087d69f2d8fc368]*/
 {
     PyObject *exc = NULL;
+    if (self->finalizing) {
+        PyObject *r = _io_BufferedRWPair__dealloc_warn_impl(self,
+                                                             (PyObject *)self);
+        if (r) {
+            Py_DECREF(r);
+        }
+        else {
+            PyErr_Clear();
+        }
+    }
     PyObject *ret = _forward_call(self->writer, &_Py_ID(close), NULL);
     if (ret == NULL) {
         exc = PyErr_GetRaisedException();
@@ -2751,6 +2804,7 @@ static PyMethodDef bufferedrwpair_methods[] = {
     _IO_BUFFEREDRWPAIR_WRITABLE_METHODDEF
 
     _IO_BUFFEREDRWPAIR_CLOSE_METHODDEF
+    _IO_BUFFEREDRWPAIR__DEALLOC_WARN_METHODDEF
     _IO_BUFFEREDRWPAIR_ISATTY_METHODDEF
 
     {NULL, NULL}
@@ -2759,6 +2813,7 @@ static PyMethodDef bufferedrwpair_methods[] = {
 static PyMemberDef bufferedrwpair_members[] = {
     {"__weaklistoffset__", Py_T_PYSSIZET, offsetof(rwpair, weakreflist), Py_READONLY},
     {"__dictoffset__", Py_T_PYSSIZET, offsetof(rwpair, dict), Py_READONLY},
+    {"_finalizing", Py_T_BOOL, offsetof(rwpair, finalizing), 0},
     {NULL}
 };
 

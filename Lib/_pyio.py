@@ -1425,6 +1425,12 @@ class BufferedRWPair(BufferedIOBase):
     def isatty(self):
         return self.reader.isatty() or self.writer.isatty()
 
+    def _dealloc_warn(self, source):
+        self.reader._dealloc_warn(source)
+        # Warn once if the same raw stream is used for reading and writing.
+        if self.writer.raw is not self.reader.raw:
+            self.writer._dealloc_warn(source)
+
     @property
     def closed(self):
         return self.writer.closed

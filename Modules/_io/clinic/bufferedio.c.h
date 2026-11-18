@@ -1311,6 +1311,27 @@ _io_BufferedRWPair_writable(PyObject *self, PyObject *Py_UNUSED(ignored))
     return _io_BufferedRWPair_writable_impl((rwpair *)self);
 }
 
+PyDoc_STRVAR(_io_BufferedRWPair__dealloc_warn__doc__,
+"_dealloc_warn($self, source, /)\n"
+"--\n"
+"\n");
+
+#define _IO_BUFFEREDRWPAIR__DEALLOC_WARN_METHODDEF    \
+    {"_dealloc_warn", (PyCFunction)_io_BufferedRWPair__dealloc_warn, METH_O, _io_BufferedRWPair__dealloc_warn__doc__},
+
+static PyObject *
+_io_BufferedRWPair__dealloc_warn_impl(rwpair *self, PyObject *source);
+
+static PyObject *
+_io_BufferedRWPair__dealloc_warn(PyObject *self, PyObject *source)
+{
+    PyObject *return_value = NULL;
+
+    return_value = _io_BufferedRWPair__dealloc_warn_impl((rwpair *)self, source);
+
+    return return_value;
+}
+
 PyDoc_STRVAR(_io_BufferedRWPair_close__doc__,
 "close($self, /)\n"
 "--\n"
@@ -1441,4 +1462,4 @@ exit:
 
 #define _IO_BUFFEREDRWPAIR_CLOSED_GETSETDEF {"closed", (getter)_io_BufferedRWPair_closed_get, (setter)NULL, NULL},
 
-/*[clinic end generated code: output=d9e1eb0efa4a2431 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=dc424ba7d72abff6 input=a9049054013a1b77]*/

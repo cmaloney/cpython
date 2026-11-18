@@ -1,0 +1,3 @@
+:class:`io.BufferedRWPair` now emits a :exc:`ResourceWarning` naming the pair
+when it is garbage collected without being closed and one of its raw streams
+would warn, such as a :class:`io.FileIO` which owns its file descriptor.
