@@ -5202,19 +5202,22 @@ class ClassPropertiesAndMethods(unittest.TestCase):
         self.assertRaises(RecursionError, str, foo)
         self.assertRaises(RecursionError, repr, foo)
 
-    def test_slot_wrapper_holds_self(self):
+    def test_slot_wrapper_holds_arguments(self):
         # cmp_to_key() does not own the objects which it passes
         class L(list):
             pass
         class Evil:
             def __eq__(evil, other):
-                k.obj = None
-                self.assertIsNotNone(wr())
+                k1.obj = k2.obj = None
+                self.assertIsNotNone(wr1())
+                self.assertIsNotNone(wr2())
                 return True
         K = functools.cmp_to_key(list.__eq__)
-        k = K(L([Evil()]))
-        wr = weakref.ref(k.obj)
-        k < K([1])
+        k1 = K(L([Evil()]))
+        k2 = K(L([1]))
+        wr1 = weakref.ref(k1.obj)
+        wr2 = weakref.ref(k2.obj)
+        k1 < k2
 
     def test_mixing_slot_wrappers(self):
         class X(dict):

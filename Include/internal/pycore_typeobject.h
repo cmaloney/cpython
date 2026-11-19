@@ -102,6 +102,10 @@ extern int _PyType_HasSubclasses(PyTypeObject *);
 // Export for _testinternalcapi extension.
 PyAPI_FUNC(PyObject *) _PyType_GetSlotWrapperNames(void);
 
+// The array variant of base->wrapper, or NULL
+extern _Py_wrapperfunc_fast _PyType_GetFastWrapper(
+    const struct wrapperbase *base);
+
 // PyType_Ready() must be called if _PyType_IsReady() is false.
 // See also the Py_TPFLAGS_READY flag.
 static inline int

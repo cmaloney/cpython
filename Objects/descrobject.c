@@ -11,6 +11,7 @@
 #include "pycore_object_deferred.h" // _PyObject_SetDeferredRefcount()
 #include "pycore_pystate.h"       // _PyThreadState_GET()
 #include "pycore_tuple.h"         // _PyTuple_ITEMS()
+#include "pycore_typeobject.h"    // _PyType_GetFastWrapper()
 
 
 /*[clinic input]
@@ -564,16 +565,31 @@ _PyWrapperDescr_Vectorcall(PyObject *_descr, PyObject *const *args,
         return NULL;
     }
 
-    PyObject *argstuple = PyTuple_FromArray(args + 1, nargs - 1);
-    if (argstuple == NULL) {
-        return NULL;
-    }
     /* _PyObject_MakeTpCall() passes the array of its caller, which may not
-       own 'self' */
+       own 'self' and the arguments */
     Py_INCREF(self);
-    result = wrapperdescr_raw_call(descr, self, argstuple, kwds);
+    args++;
+    nargs--;
+    _Py_wrapperfunc_fast fast = _PyType_GetFastWrapper(descr->d_base);
+    PyObject *held[2];  /* no array variant takes more arguments */
+    if (fast != NULL && kwds == NULL && nargs <= 2) {
+        for (Py_ssize_t i = 0; i < nargs; i++) {
+            held[i] = Py_NewRef(args[i]);
+        }
+        result = fast(self, held, nargs, descr->d_wrapped);
+        for (Py_ssize_t i = 0; i < nargs; i++) {
+            Py_DECREF(held[i]);
+        }
+    }
+    else {
+        result = NULL;
+        PyObject *argstuple = PyTuple_FromArray(args, nargs);
+        if (argstuple != NULL) {
+            result = wrapperdescr_raw_call(descr, self, argstuple, kwds);
+            Py_DECREF(argstuple);
+        }
+    }
     Py_DECREF(self);
-    Py_DECREF(argstuple);
     return result;
 }
 

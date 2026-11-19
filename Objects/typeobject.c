@@ -9855,39 +9855,28 @@ remove_all_subclasses(PyTypeObject *type, PyObject *bases)
 }
 
 static int
-check_num_args(PyObject *ob, int n)
+check_num_args(Py_ssize_t nargs, int n)
 {
-    if (!PyTuple_CheckExact(ob)) {
-        PyErr_SetString(PyExc_SystemError,
-            "PyArg_UnpackTuple() argument list is not a tuple");
-        return 0;
-    }
-    if (n == PyTuple_GET_SIZE(ob))
+    if (n == nargs)
         return 1;
     PyErr_Format(
         PyExc_TypeError,
-        "expected %d argument%s, got %zd", n, n == 1 ? "" : "s", PyTuple_GET_SIZE(ob));
+        "expected %d argument%s, got %zd", n, n == 1 ? "" : "s", nargs);
     return 0;
 }
 
 static Py_ssize_t
-check_pow_args(PyObject *ob)
+check_pow_args(Py_ssize_t size)
 {
     // Returns the argument count on success or `-1` on error.
     int min = 1;
     int max = 2;
-    if (!PyTuple_CheckExact(ob)) {
-        PyErr_SetString(PyExc_SystemError,
-            "PyArg_UnpackTuple() argument list is not a tuple");
-        return -1;
-    }
-    Py_ssize_t size = PyTuple_GET_SIZE(ob);
     if (size >= min && size <= max) {
         return size;
     }
     PyErr_Format(
         PyExc_TypeError,
-        "expected %d or %d arguments, got %zd", min, max, PyTuple_GET_SIZE(ob));
+        "expected %d or %d arguments, got %zd", min, max, size);
     return -1;
 }
 
@@ -9899,13 +9888,33 @@ check_pow_args(PyObject *ob)
    Most tables have only one entry; the tables for binary operators have two
    entries, one regular and one with reversed arguments. */
 
-static PyObject *
-wrap_lenfunc(PyObject *self, PyObject *args, void *wrapped)
+/* Define the slot wrapper NAME##_fast, which takes its arguments as an array,
+   and before it the wrapperfunc NAME, which takes them as a tuple: it is what
+   struct wrapperbase holds and what code outside of this file can call.
+   CHECK is the check on the tuple which the wrapper always did. */
+#define SLOT_WRAPPER(NAME, CHECK) \
+static PyObject *NAME##_fast(PyObject *, PyObject *const *, Py_ssize_t, void *); \
+static PyObject * \
+NAME(PyObject *self, PyObject *args, void *wrapped) \
+{ \
+    if (!CHECK(args)) { \
+        PyErr_SetString(PyExc_SystemError, \
+            "PyArg_UnpackTuple() argument list is not a tuple"); \
+        return NULL; \
+    } \
+    return NAME##_fast(self, _PyTuple_ITEMS(args), PyTuple_GET_SIZE(args), \
+                       wrapped); \
+} \
+static PyObject * \
+NAME##_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs, \
+            void *wrapped)
+
+SLOT_WRAPPER(wrap_lenfunc, PyTuple_CheckExact)
 {
     lenfunc func = (lenfunc)wrapped;
     Py_ssize_t res;
 
-    if (!check_num_args(args, 0))
+    if (!check_num_args(nargs, 0))
         return NULL;
     res = (*func)(self);
     if (res == -1 && PyErr_Occurred())
@@ -9913,13 +9922,12 @@ wrap_lenfunc(PyObject *self, PyObject *args, void *wrapped)
     return PyLong_FromSsize_t(res);
 }
 
-static PyObject *
-wrap_inquirypred(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_inquirypred, PyTuple_CheckExact)
 {
     inquiry func = (inquiry)wrapped;
     int res;
 
-    if (!check_num_args(args, 0))
+    if (!check_num_args(nargs, 0))
         return NULL;
     res = (*func)(self);
     if (res == -1 && PyErr_Occurred())
@@ -9927,44 +9935,40 @@ wrap_inquirypred(PyObject *self, PyObject *args, void *wrapped)
     return PyBool_FromLong((long)res);
 }
 
-static PyObject *
-wrap_binaryfunc(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_binaryfunc, PyTuple_CheckExact)
 {
     binaryfunc func = (binaryfunc)wrapped;
     PyObject *other;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    other = PyTuple_GET_ITEM(args, 0);
+    other = args[0];
     return (*func)(self, other);
 }
 
-static PyObject *
-wrap_binaryfunc_l(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_binaryfunc_l, PyTuple_CheckExact)
 {
     binaryfunc func = (binaryfunc)wrapped;
     PyObject *other;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    other = PyTuple_GET_ITEM(args, 0);
+    other = args[0];
     return (*func)(self, other);
 }
 
-static PyObject *
-wrap_binaryfunc_r(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_binaryfunc_r, PyTuple_CheckExact)
 {
     binaryfunc func = (binaryfunc)wrapped;
     PyObject *other;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    other = PyTuple_GET_ITEM(args, 0);
+    other = args[0];
     return (*func)(other, self);
 }
 
-static PyObject *
-wrap_ternaryfunc(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_ternaryfunc, PyTuple_CheckExact)
 {
     ternaryfunc func = (ternaryfunc)wrapped;
     PyObject *other;
@@ -9972,20 +9976,19 @@ wrap_ternaryfunc(PyObject *self, PyObject *args, void *wrapped)
 
     /* Note: This wrapper only works for __pow__() */
 
-    Py_ssize_t size = check_pow_args(args);
+    Py_ssize_t size = check_pow_args(nargs);
     if (size == -1) {
         return NULL;
     }
-    other = PyTuple_GET_ITEM(args, 0);
+    other = args[0];
     if (size == 2) {
-       third = PyTuple_GET_ITEM(args, 1);
+       third = args[1];
     }
 
     return (*func)(self, other, third);
 }
 
-static PyObject *
-wrap_ternaryfunc_r(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_ternaryfunc_r, PyTuple_CheckExact)
 {
     ternaryfunc func = (ternaryfunc)wrapped;
     PyObject *other;
@@ -9993,38 +9996,36 @@ wrap_ternaryfunc_r(PyObject *self, PyObject *args, void *wrapped)
 
     /* Note: This wrapper only works for __rpow__() */
 
-    Py_ssize_t size = check_pow_args(args);
+    Py_ssize_t size = check_pow_args(nargs);
     if (size == -1) {
         return NULL;
     }
-    other = PyTuple_GET_ITEM(args, 0);
+    other = args[0];
     if (size == 2) {
-       third = PyTuple_GET_ITEM(args, 1);
+       third = args[1];
     }
 
     return (*func)(other, self, third);
 }
 
-static PyObject *
-wrap_unaryfunc(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_unaryfunc, PyTuple_CheckExact)
 {
     unaryfunc func = (unaryfunc)wrapped;
 
-    if (!check_num_args(args, 0))
+    if (!check_num_args(nargs, 0))
         return NULL;
     return (*func)(self);
 }
 
-static PyObject *
-wrap_indexargfunc(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_indexargfunc, PyTuple_CheckExact)
 {
     ssizeargfunc func = (ssizeargfunc)wrapped;
     PyObject* o;
     Py_ssize_t i;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    o = PyTuple_GET_ITEM(args, 0);
+    o = args[0];
     i = PyNumber_AsSsize_t(o, PyExc_OverflowError);
     if (i == -1 && PyErr_Occurred())
         return NULL;
@@ -10053,35 +10054,36 @@ getindex(PyObject *self, PyObject *arg)
     return i;
 }
 
-static PyObject *
-wrap_sq_item(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_sq_item, PyTuple_Check)
 {
     ssizeargfunc func = (ssizeargfunc)wrapped;
     PyObject *arg;
     Py_ssize_t i;
 
-    if (PyTuple_GET_SIZE(args) == 1) {
-        arg = PyTuple_GET_ITEM(args, 0);
+    if (nargs == 1) {
+        arg = args[0];
         i = getindex(self, arg);
         if (i == -1 && PyErr_Occurred())
             return NULL;
         return (*func)(self, i);
     }
-    check_num_args(args, 1);
+    check_num_args(nargs, 1);
     assert(PyErr_Occurred());
     return NULL;
 }
 
-static PyObject *
-wrap_sq_setitem(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_sq_setitem, PyTuple_Check)
 {
     ssizeobjargproc func = (ssizeobjargproc)wrapped;
     Py_ssize_t i;
     int res;
     PyObject *arg, *value;
 
-    if (!PyArg_UnpackTuple(args, "__setitem__", 2, 2, &arg, &value))
+    if (!_PyArg_CheckPositional("__setitem__", nargs, 2, 2)) {
         return NULL;
+    }
+    arg = args[0];
+    value = args[1];
     i = getindex(self, arg);
     if (i == -1 && PyErr_Occurred())
         return NULL;
@@ -10091,17 +10093,16 @@ wrap_sq_setitem(PyObject *self, PyObject *args, void *wrapped)
     Py_RETURN_NONE;
 }
 
-static PyObject *
-wrap_sq_delitem(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_sq_delitem, PyTuple_CheckExact)
 {
     ssizeobjargproc func = (ssizeobjargproc)wrapped;
     Py_ssize_t i;
     int res;
     PyObject *arg;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    arg = PyTuple_GET_ITEM(args, 0);
+    arg = args[0];
     i = getindex(self, arg);
     if (i == -1 && PyErr_Occurred())
         return NULL;
@@ -10112,16 +10113,15 @@ wrap_sq_delitem(PyObject *self, PyObject *args, void *wrapped)
 }
 
 /* XXX objobjproc is a misnomer; should be objargpred */
-static PyObject *
-wrap_objobjproc(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_objobjproc, PyTuple_CheckExact)
 {
     objobjproc func = (objobjproc)wrapped;
     int res;
     PyObject *value;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    value = PyTuple_GET_ITEM(args, 0);
+    value = args[0];
     res = (*func)(self, value);
     if (res == -1 && PyErr_Occurred())
         return NULL;
@@ -10129,31 +10129,32 @@ wrap_objobjproc(PyObject *self, PyObject *args, void *wrapped)
         return PyBool_FromLong(res);
 }
 
-static PyObject *
-wrap_objobjargproc(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_objobjargproc, PyTuple_Check)
 {
     objobjargproc func = (objobjargproc)wrapped;
     int res;
     PyObject *key, *value;
 
-    if (!PyArg_UnpackTuple(args, "__setitem__", 2, 2, &key, &value))
+    if (!_PyArg_CheckPositional("__setitem__", nargs, 2, 2)) {
         return NULL;
+    }
+    key = args[0];
+    value = args[1];
     res = (*func)(self, key, value);
     if (res == -1 && PyErr_Occurred())
         return NULL;
     Py_RETURN_NONE;
 }
 
-static PyObject *
-wrap_delitem(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_delitem, PyTuple_CheckExact)
 {
     objobjargproc func = (objobjargproc)wrapped;
     int res;
     PyObject *key;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    key = PyTuple_GET_ITEM(args, 0);
+    key = args[0];
     res = (*func)(self, key, NULL);
     if (res == -1 && PyErr_Occurred())
         return NULL;
@@ -10226,15 +10227,17 @@ hackcheck(PyObject *self, setattrofunc func, const char *what)
     return res;
 }
 
-static PyObject *
-wrap_setattr(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_setattr, PyTuple_Check)
 {
     setattrofunc func = (setattrofunc)wrapped;
     int res;
     PyObject *name, *value;
 
-    if (!PyArg_UnpackTuple(args, "__setattr__", 2, 2, &name, &value))
+    if (!_PyArg_CheckPositional("__setattr__", nargs, 2, 2)) {
         return NULL;
+    }
+    name = args[0];
+    value = args[1];
     if (!hackcheck(self, func, "__setattr__"))
         return NULL;
     res = (*func)(self, name, value);
@@ -10243,16 +10246,15 @@ wrap_setattr(PyObject *self, PyObject *args, void *wrapped)
     Py_RETURN_NONE;
 }
 
-static PyObject *
-wrap_delattr(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_delattr, PyTuple_CheckExact)
 {
     setattrofunc func = (setattrofunc)wrapped;
     int res;
     PyObject *name;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    name = PyTuple_GET_ITEM(args, 0);
+    name = args[0];
     if (!hackcheck(self, func, "__delattr__"))
         return NULL;
     res = (*func)(self, name, NULL);
@@ -10261,13 +10263,12 @@ wrap_delattr(PyObject *self, PyObject *args, void *wrapped)
     Py_RETURN_NONE;
 }
 
-static PyObject *
-wrap_hashfunc(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_hashfunc, PyTuple_CheckExact)
 {
     hashfunc func = (hashfunc)wrapped;
     Py_hash_t res;
 
-    if (!check_num_args(args, 0))
+    if (!check_num_args(nargs, 0))
         return NULL;
     res = (*func)(self);
     if (res == -1 && PyErr_Occurred())
@@ -10283,12 +10284,11 @@ wrap_call(PyObject *self, PyObject *args, void *wrapped, PyObject *kwds)
     return (*func)(self, args, kwds);
 }
 
-static PyObject *
-wrap_del(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_del, PyTuple_CheckExact)
 {
     destructor func = (destructor)wrapped;
 
-    if (!check_num_args(args, 0))
+    if (!check_num_args(nargs, 0))
         return NULL;
 
     (*func)(self);
@@ -10296,23 +10296,23 @@ wrap_del(PyObject *self, PyObject *args, void *wrapped)
 }
 
 static PyObject *
-wrap_richcmpfunc(PyObject *self, PyObject *args, void *wrapped, int op)
+wrap_richcmpfunc(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                 void *wrapped, int op)
 {
     richcmpfunc func = (richcmpfunc)wrapped;
     PyObject *other;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    other = PyTuple_GET_ITEM(args, 0);
+    other = args[0];
     return (*func)(self, other, op);
 }
 
 #undef RICHCMP_WRAPPER
 #define RICHCMP_WRAPPER(NAME, OP) \
-static PyObject * \
-richcmp_##NAME(PyObject *self, PyObject *args, void *wrapped) \
+SLOT_WRAPPER(richcmp_##NAME, PyTuple_CheckExact) \
 { \
-    return wrap_richcmpfunc(self, args, wrapped, OP); \
+    return wrap_richcmpfunc(self, args, nargs, wrapped, OP); \
 }
 
 RICHCMP_WRAPPER(lt, Py_LT)
@@ -10322,13 +10322,12 @@ RICHCMP_WRAPPER(ne, Py_NE)
 RICHCMP_WRAPPER(gt, Py_GT)
 RICHCMP_WRAPPER(ge, Py_GE)
 
-static PyObject *
-wrap_next(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_next, PyTuple_CheckExact)
 {
     unaryfunc func = (unaryfunc)wrapped;
     PyObject *res;
 
-    if (!check_num_args(args, 0))
+    if (!check_num_args(nargs, 0))
         return NULL;
     res = (*func)(self);
     if (res == NULL && !PyErr_Occurred())
@@ -10336,14 +10335,13 @@ wrap_next(PyObject *self, PyObject *args, void *wrapped)
     return res;
 }
 
-static PyObject *
-wrap_descr_get(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_descr_get, PyTuple_Check)
 {
     descrgetfunc func = (descrgetfunc)wrapped;
     PyObject *obj;
     PyObject *type = NULL;
 
-    if (!PyArg_UnpackTuple(args, "__get__", 1, 2, &obj, &type))
+    if (!_PyArg_UnpackStack(args, nargs, "__get__", 1, 2, &obj, &type))
         return NULL;
     if (obj == Py_None)
         obj = NULL;
@@ -10357,45 +10355,44 @@ wrap_descr_get(PyObject *self, PyObject *args, void *wrapped)
     return (*func)(self, obj, type);
 }
 
-static PyObject *
-wrap_descr_set(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_descr_set, PyTuple_Check)
 {
     descrsetfunc func = (descrsetfunc)wrapped;
     PyObject *obj, *value;
     int ret;
 
-    if (!PyArg_UnpackTuple(args, "__set__", 2, 2, &obj, &value))
+    if (!_PyArg_CheckPositional("__set__", nargs, 2, 2)) {
         return NULL;
+    }
+    obj = args[0];
+    value = args[1];
     ret = (*func)(self, obj, value);
     if (ret < 0)
         return NULL;
     Py_RETURN_NONE;
 }
 
-static PyObject *
-wrap_descr_delete(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_descr_delete, PyTuple_CheckExact)
 {
     descrsetfunc func = (descrsetfunc)wrapped;
     PyObject *obj;
     int ret;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    obj = PyTuple_GET_ITEM(args, 0);
+    obj = args[0];
     ret = (*func)(self, obj, NULL);
     if (ret < 0)
         return NULL;
     Py_RETURN_NONE;
 }
 
-static PyObject *
-wrap_buffer(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_buffer, PyTuple_Check)
 {
-    PyObject *arg = NULL;
-
-    if (!PyArg_UnpackTuple(args, "__buffer__", 1, 1, &arg)) {
+    if (!_PyArg_CheckPositional("__buffer__", nargs, 1, 1)) {
         return NULL;
     }
+    PyObject *arg = args[0];
     Py_ssize_t flags = PyNumber_AsSsize_t(arg, PyExc_OverflowError);
     if (flags == -1 && PyErr_Occurred()) {
         return NULL;
@@ -10410,13 +10407,12 @@ wrap_buffer(PyObject *self, PyObject *args, void *wrapped)
                                         (getbufferproc)wrapped);
 }
 
-static PyObject *
-wrap_releasebuffer(PyObject *self, PyObject *args, void *wrapped)
+SLOT_WRAPPER(wrap_releasebuffer, PyTuple_Check)
 {
-    PyObject *arg = NULL;
-    if (!PyArg_UnpackTuple(args, "__release_buffer__", 1, 1, &arg)) {
+    if (!_PyArg_CheckPositional("__release_buffer__", nargs, 1, 1)) {
         return NULL;
     }
+    PyObject *arg = args[0];
     if (!PyMemoryView_Check(arg)) {
         PyErr_SetString(PyExc_TypeError,
                         "expected a memoryview object");
@@ -11591,14 +11587,15 @@ an all-zero entry.
 #undef RBINSLOT
 
 #define TPSLOT(NAME, SLOT, FUNCTION, WRAPPER, DOC) \
-    {#NAME, offsetof(PyTypeObject, SLOT), (void *)(FUNCTION), WRAPPER, \
-     PyDoc_STR(DOC), .name_strobj = &_Py_ID(NAME)}
+    {{#NAME, offsetof(PyTypeObject, SLOT), (void *)(FUNCTION), WRAPPER, \
+      PyDoc_STR(DOC), .name_strobj = &_Py_ID(NAME)}, WRAPPER##_fast}
+/* No array variant of the wrapper */
 #define FLSLOT(NAME, SLOT, FUNCTION, WRAPPER, DOC, FLAGS) \
-    {#NAME, offsetof(PyTypeObject, SLOT), (void *)(FUNCTION), WRAPPER, \
-     PyDoc_STR(DOC), FLAGS, .name_strobj = &_Py_ID(NAME) }
+    {{#NAME, offsetof(PyTypeObject, SLOT), (void *)(FUNCTION), WRAPPER, \
+      PyDoc_STR(DOC), FLAGS, .name_strobj = &_Py_ID(NAME) }}
 #define ETSLOT(NAME, SLOT, FUNCTION, WRAPPER, DOC) \
-    {#NAME, offsetof(PyHeapTypeObject, SLOT), (void *)(FUNCTION), WRAPPER, \
-     PyDoc_STR(DOC), .name_strobj = &_Py_ID(NAME) }
+    {{#NAME, offsetof(PyHeapTypeObject, SLOT), (void *)(FUNCTION), WRAPPER, \
+      PyDoc_STR(DOC), .name_strobj = &_Py_ID(NAME) }, WRAPPER##_fast}
 #define BUFSLOT(NAME, SLOT, FUNCTION, WRAPPER, DOC) \
     ETSLOT(NAME, as_buffer.SLOT, FUNCTION, WRAPPER, DOC)
 #define AMSLOT(NAME, SLOT, FUNCTION, WRAPPER, DOC) \
@@ -11629,10 +11626,10 @@ an all-zero entry.
            #NAME "($self, value, /)\n--\n\n" DOC)
 
 static pytype_slotdef slotdefs[] = {
-    TPSLOT(__getattribute__, tp_getattr, NULL, NULL, ""),
-    TPSLOT(__getattr__, tp_getattr, NULL, NULL, ""),
-    TPSLOT(__setattr__, tp_setattr, NULL, NULL, ""),
-    TPSLOT(__delattr__, tp_setattr, NULL, NULL, ""),
+    FLSLOT(__getattribute__, tp_getattr, NULL, NULL, "", 0),
+    FLSLOT(__getattr__, tp_getattr, NULL, NULL, "", 0),
+    FLSLOT(__setattr__, tp_setattr, NULL, NULL, "", 0),
+    FLSLOT(__delattr__, tp_setattr, NULL, NULL, "", 0),
     TPSLOT(__repr__, tp_repr, slot_tp_repr, wrap_unaryfunc,
            "__repr__($self, /)\n--\n\nReturn repr(self)."),
     TPSLOT(__hash__, tp_hash, slot_tp_hash, wrap_hashfunc,
@@ -11646,8 +11643,8 @@ static pytype_slotdef slotdefs[] = {
     TPSLOT(__getattribute__, tp_getattro, _Py_slot_tp_getattr_hook,
            wrap_binaryfunc,
            "__getattribute__($self, name, /)\n--\n\nReturn getattr(self, name)."),
-    TPSLOT(__getattr__, tp_getattro, _Py_slot_tp_getattr_hook, NULL,
-           "__getattr__($self, name, /)\n--\n\nImplement getattr(self, name)."),
+    FLSLOT(__getattr__, tp_getattro, _Py_slot_tp_getattr_hook, NULL,
+           "__getattr__($self, name, /)\n--\n\nImplement getattr(self, name).", 0),
     TPSLOT(__setattr__, tp_setattro, slot_tp_setattro, wrap_setattr,
            "__setattr__($self, name, value, /)\n--\n\nImplement setattr(self, name, value)."),
     TPSLOT(__delattr__, tp_setattro, slot_tp_setattro, wrap_delattr,
@@ -11680,10 +11677,10 @@ static pytype_slotdef slotdefs[] = {
            "__init__($self, /, *args, **kwargs)\n--\n\n"
            "Initialize self.  See help(type(self)) for accurate signature.",
            PyWrapperFlag_KEYWORDS),
-    TPSLOT(__new__, tp_new, slot_tp_new, NULL,
+    FLSLOT(__new__, tp_new, slot_tp_new, NULL,
            "__new__(type, /, *args, **kwargs)\n--\n\n"
-           "Create and return new object.  See help(type) for accurate signature."),
-    TPSLOT(__del__, tp_finalize, slot_tp_finalize, (wrapperfunc)wrap_del,
+           "Create and return new object.  See help(type) for accurate signature.", 0),
+    TPSLOT(__del__, tp_finalize, slot_tp_finalize, wrap_del,
            "__del__($self, /)\n--\n\n"
            "Called when the instance is about to be destroyed."),
 
@@ -11824,13 +11821,25 @@ static pytype_slotdef slotdefs[] = {
            wrap_indexargfunc,
            "__imul__($self, value, /)\n--\n\nImplement self*=value."),
 
-    {NULL}
+    {{NULL}}
 };
 
 /* Stores the number of times where slotdefs has elements with same name.
    This counter precalculated by _PyType_InitSlotDefs() when the main
    interpreter starts. */
 static uint8_t slotdefs_dups[Py_ARRAY_LENGTH(slotdefs)][1 + MAX_EQUIV];
+
+/* Return the array variant of the wrapper of 'base', or NULL if it has none:
+   only wrapper descriptors created from slotdefs have one. */
+_Py_wrapperfunc_fast
+_PyType_GetFastWrapper(const struct wrapperbase *base)
+{
+    uintptr_t offset = (uintptr_t)base - (uintptr_t)slotdefs;
+    if (offset >= sizeof(slotdefs)) {
+        return NULL;
+    }
+    return ((const pytype_slotdef *)base)->fast;
+}
 
 /* Open-addressing hash table: slot name -> index of the first slotdef with
    that name (slotdefs_dups[] lists the others).  Entry 0 means "empty".
@@ -11846,7 +11855,7 @@ slotname_probe(PyObject *key, Py_hash_t hash)
 {
     size_t i = (size_t)hash & (SLOTNAME_TABLE_SIZE - 1);
     while (slotname_table[i] != 0) {
-        PyObject *name = slotdefs[slotname_table[i] - 1].name_strobj;
+        PyObject *name = slotdefs[slotname_table[i] - 1].base.name_strobj;
         if (name == key
             || (PyUnstable_Unicode_GET_CACHED_HASH(name) == hash
                 && _PyUnicode_Equal(name, key))) {
@@ -11864,8 +11873,8 @@ init_slotname_table(void)
     slotname_table_initialized = true;
 #endif
     memset(slotname_table, 0, sizeof(slotname_table));
-    for (size_t idx = 0; slotdefs[idx].name != NULL; idx++) {
-        PyObject *name = slotdefs[idx].name_strobj;
+    for (size_t idx = 0; slotdefs[idx].base.name != NULL; idx++) {
+        PyObject *name = slotdefs[idx].base.name_strobj;
         /* Computes and caches the hash of name_strobj if not done yet. */
         Py_hash_t hash = _PyObject_HashDictKey(name);
         size_t i = slotname_probe(name, hash);
@@ -11950,7 +11959,7 @@ clear_slot_descrs(PyObject **descrs)
 
 /* Scan the dicts along the MRO once and set descrs[i] to a strong reference
    to what find_name_in_mro() (find_slot_name_in_mro() in the free-threaded
-   build) would return for slotdefs[i].name, or NULL.  Dicts with keys that
+   build) would return for slotdefs[i].base.name, or NULL.  Dicts with keys that
    are not exact str are not scanned.
    Return -1 (descrs[] all NULL) if some dict cannot be scanned. */
 static int
@@ -12097,13 +12106,13 @@ update_one_slot(PyTypeObject *type, pytype_slotdef *p, pytype_slotdef **next_p,
     // Set to 1 if the generic wrapper is necessary
     int use_generic = 0;
 
-    int offset = p->offset;
+    int offset = p->base.offset;
     void **ptr = slotptr(type, offset);
 
     if (ptr == NULL) {
         do {
             ++p;
-        } while (p->offset == offset);
+        } while (p->base.offset == offset);
         if (next_p != NULL) {
             *next_p = p;
         }
@@ -12122,10 +12131,10 @@ update_one_slot(PyTypeObject *type, pytype_slotdef *p, pytype_slotdef **next_p,
         }
         else {
 #ifdef Py_GIL_DISABLED
-            res = find_slot_name_in_mro(type, p->name_strobj, &descr_ref);
+            res = find_slot_name_in_mro(type, p->base.name_strobj, &descr_ref);
 #else
             /* Use faster uncached lookup as we won't get any cache hits during type setup. */
-            res = find_name_in_mro(type, p->name_strobj, &descr_ref);
+            res = find_name_in_mro(type, p->base.name_strobj, &descr_ref);
 #endif
         }
         if (res <= 0) {
@@ -12136,14 +12145,14 @@ update_one_slot(PyTypeObject *type, pytype_slotdef *p, pytype_slotdef **next_p,
         }
         descr = PyStackRef_AsPyObjectBorrow(descr_ref);
         if (Py_IS_TYPE(descr, &PyWrapperDescr_Type) &&
-            ((PyWrapperDescrObject *)descr)->d_base->name_strobj == p->name_strobj) {
+            ((PyWrapperDescrObject *)descr)->d_base->name_strobj == p->base.name_strobj) {
             void **tptr;
             size_t index = (p - slotdefs);
             if (slotdefs_dups[index][0] > 1) {
                 tptr = NULL;
                 for (size_t i = 1; i <= slotdefs_dups[index][0]; i++) {
                     pytype_slotdef *q = &slotdefs[slotdefs_dups[index][i]];
-                    void **qptr = slotptr(type, q->offset);
+                    void **qptr = slotptr(type, q->base.offset);
                     if (qptr == NULL || *qptr == NULL)
                         continue;
                     if (tptr != NULL) {
@@ -12158,10 +12167,10 @@ update_one_slot(PyTypeObject *type, pytype_slotdef *p, pytype_slotdef **next_p,
             }
 
             if (tptr == NULL || tptr == ptr)
-                generic = p->function;
+                generic = p->base.function;
             d = (PyWrapperDescrObject *)descr;
             if ((specific == NULL || specific == d->d_wrapped) &&
-                d->d_base->wrapper == p->wrapper &&
+                d->d_base->wrapper == p->base.wrapper &&
                 is_subtype_with_mro(lookup_tp_mro(type), type, PyDescr_TYPE(d)))
             {
                 specific = d->d_wrapped;
@@ -12214,15 +12223,15 @@ update_one_slot(PyTypeObject *type, pytype_slotdef *p, pytype_slotdef **next_p,
                 generic = *ptr;
             }
             else {
-                generic = p->function;
+                generic = p->base.function;
             }
-            if (p->function == slot_tp_call) {
+            if (p->base.function == slot_tp_call) {
                 /* A generic __call__ is incompatible with vectorcall */
                 type_clear_flags(type, Py_TPFLAGS_HAVE_VECTORCALL);
             }
         }
         PyStackRef_CLOSE(descr_ref);
-    } while ((++p)->offset == offset);
+    } while ((++p)->base.offset == offset);
 
     void *slot_value;
     if (specific && !use_generic) {
@@ -12277,8 +12286,8 @@ update_slot(PyTypeObject *type, PyObject *name)
     pp = ptrs;
     for (uint8_t k = 1; k <= dups[0]; k++) {
         p = &slotdefs[dups[k]];
-        offset = p->offset;
-        while (p > slotdefs && (p-1)->offset == offset)
+        offset = p->base.offset;
+        while (p > slotdefs && (p-1)->base.offset == offset)
             --p;
         *pp++ = p;
     }
@@ -12305,7 +12314,7 @@ fixup_slot_dispatchers(PyTypeObject *type)
     if (collect_slot_descrs(type, descrs_buf) < 0) {
         descrs = NULL;
     }
-    for (pytype_slotdef *p = slotdefs; p->name; ) {
+    for (pytype_slotdef *p = slotdefs; p->base.name; ) {
         update_one_slot(type, p, &p, descrs);
     }
     if (descrs != NULL) {
@@ -12319,9 +12328,9 @@ static void
 update_all_slots(PyTypeObject* type)
 {
     types_stop_world();
-    for (pytype_slotdef *p = slotdefs; p->name; p++) {
+    for (pytype_slotdef *p = slotdefs; p->base.name; p++) {
         /* update_slot returns int but can't actually fail in this case*/
-        update_slot(type, p->name_strobj);
+        update_slot(type, p->base.name_strobj);
     }
     types_start_world();
     // Invalidate the version tags after the slots are updated, while
@@ -12340,9 +12349,9 @@ _PyType_InitSlotDefs(PyInterpreterState *interp)
     /* Group the slotdefs by name: slotdefs_dups[i] lists the indices of
        all slotdefs with the same name as slotdefs[i], in slotdefs order. */
     memset(slotdefs_dups, 0, sizeof(slotdefs_dups));
-    for (Py_ssize_t idx = 0; slotdefs[idx].name_strobj != NULL; idx++) {
+    for (Py_ssize_t idx = 0; slotdefs[idx].base.name_strobj != NULL; idx++) {
         assert(idx < 255);
-        PyObject *name = slotdefs[idx].name_strobj;
+        PyObject *name = slotdefs[idx].base.name_strobj;
         Py_ssize_t first = slotname_lookup(name, _PyObject_HashDictKey(name));
         assert(first >= 0 && first <= idx);
         uint8_t *data = slotdefs_dups[first];
@@ -12350,8 +12359,8 @@ _PyType_InitSlotDefs(PyInterpreterState *interp)
         assert(data[0] < MAX_EQUIV);
         data[data[0]] = (uint8_t)idx;
     }
-    for (Py_ssize_t idx = 0; slotdefs[idx].name_strobj != NULL; idx++) {
-        PyObject *name = slotdefs[idx].name_strobj;
+    for (Py_ssize_t idx = 0; slotdefs[idx].base.name_strobj != NULL; idx++) {
+        PyObject *name = slotdefs[idx].base.name_strobj;
         Py_ssize_t first = slotname_lookup(name, _PyObject_HashDictKey(name));
         if (first != idx) {
             memcpy(slotdefs_dups[idx], slotdefs_dups[first],
@@ -12370,11 +12379,11 @@ _PyType_GetSlotWrapperNames(void)
     if (names == NULL) {
         return NULL;
     }
-    assert(slotdefs[len].name == NULL);
+    assert(slotdefs[len].base.name == NULL);
     for (size_t i = 0; i < len; i++) {
         pytype_slotdef *slotdef = &slotdefs[i];
-        assert(slotdef->name != NULL);
-        PyList_SET_ITEM(names, i, Py_NewRef(slotdef->name_strobj));
+        assert(slotdef->base.name != NULL);
+        PyList_SET_ITEM(names, i, Py_NewRef(slotdef->base.name_strobj));
     }
     return names;
 }
@@ -12542,7 +12551,7 @@ recurse_down_subclasses(PyTypeObject *type, PyObject *attr_name,
 static int
 slot_inherited(PyTypeObject *type, pytype_slotdef *slotdef, void **slot)
 {
-    void **slot_base = slotptr(type->tp_base, slotdef->offset);
+    void **slot_base = slotptr(type->tp_base, slotdef->base.offset);
     if (slot_base == NULL || *slot != *slot_base) {
         return 0;
     }
@@ -12597,10 +12606,10 @@ add_operators(PyTypeObject *type)
     PyObject *descr;
     void **ptr;
 
-    for (p = slotdefs; p->name; p++) {
-        if (p->wrapper == NULL)
+    for (p = slotdefs; p->base.name; p++) {
+        if (p->base.wrapper == NULL)
             continue;
-        ptr = slotptr(type, p->offset);
+        ptr = slotptr(type, p->base.offset);
         if (!ptr || !*ptr)
             continue;
         /* Also ignore when the type slot has been inherited. */
@@ -12610,7 +12619,7 @@ add_operators(PyTypeObject *type)
         {
             continue;
         }
-        int r = PyDict_Contains(dict, p->name_strobj);
+        int r = PyDict_Contains(dict, p->base.name_strobj);
         if (r > 0)
             continue;
         if (r < 0) {
@@ -12620,14 +12629,14 @@ add_operators(PyTypeObject *type)
             /* Classes may prevent the inheritance of the tp_hash
                slot by storing PyObject_HashNotImplemented in it. Make it
                visible as a None value for the __hash__ attribute. */
-            if (PyDict_SetItem(dict, p->name_strobj, Py_None) < 0)
+            if (PyDict_SetItem(dict, p->base.name_strobj, Py_None) < 0)
                 return -1;
         }
         else {
-            descr = PyDescr_NewWrapper(type, p, *ptr);
+            descr = PyDescr_NewWrapper(type, &p->base, *ptr);
             if (descr == NULL)
                 return -1;
-            if (PyDict_SetItem(dict, p->name_strobj, descr) < 0) {
+            if (PyDict_SetItem(dict, p->base.name_strobj, descr) < 0) {
                 Py_DECREF(descr);
                 return -1;
             }

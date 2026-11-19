@@ -729,7 +729,15 @@ struct callable_cache {
    appropriate to declare fixed-size arrays for this. */
 #define MAX_EQUIV 10
 
-typedef struct wrapperbase pytype_slotdef;
+// A wrapperfunc taking its arguments (without self) as an array
+typedef PyObject *(*_Py_wrapperfunc_fast)(PyObject *self,
+                                          PyObject *const *args,
+                                          Py_ssize_t nargs, void *wrapped);
+
+typedef struct {
+    struct wrapperbase base;
+    _Py_wrapperfunc_fast fast;  // variant of base.wrapper, or NULL
+} pytype_slotdef;
 
 
 struct _Py_interp_cached_objects {
