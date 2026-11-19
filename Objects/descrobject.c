@@ -601,6 +601,41 @@ _PyWrapperDescr_Vectorcall(PyObject *_descr, PyObject *const *args,
     return result;
 }
 
+/* Call a "__call__" wrapper whose slot is PyVectorcall_Call(): call the
+   vectorcall function of 'self', as the slot does, without creating a tuple
+   and a dict.  The arguments are borrowed from the caller, as in any call of
+   'self': a type which implements vectorcall has to support that. */
+PyObject *
+_PyWrapperDescr_VectorcallCall(PyObject *_descr, PyObject *const *args,
+                               size_t nargsf, PyObject *kwnames)
+{
+    PyWrapperDescrObject *descr = (PyWrapperDescrObject *)_descr;
+    Py_ssize_t nargs = PyVectorcall_NARGS(nargsf);
+
+    if (wrapperdescr_check_self(descr, args, nargs) < 0) {
+        return NULL;
+    }
+    PyObject *self = args[0];
+    Py_ssize_t offset = Py_TYPE(self)->tp_vectorcall_offset;
+    vectorcallfunc func = NULL;
+    if (offset > 0) {
+        memcpy(&func, (char *)self + offset, sizeof(func));
+    }
+    if (func == NULL) {
+        PyErr_Format(PyExc_TypeError,
+                     "'%.200s' object does not support vectorcall",
+                     Py_TYPE(self)->tp_name);
+        return NULL;
+    }
+    PyThreadState *tstate = _PyThreadState_GET();
+    if (_Py_EnterRecursiveCallTstate(tstate, " while calling a Python object")) {
+        return NULL;
+    }
+    PyObject *result = func(self, args + 1, nargs - 1, kwnames);
+    _Py_LeaveRecursiveCallTstate(tstate);
+    return result;
+}
+
 /* Only used if the wrapper needs a tuple (no vectorcall) */
 static PyObject *
 wrapperdescr_call(PyObject *_descr, PyObject *args, PyObject *kwds)
@@ -1082,7 +1117,8 @@ PyDescr_NewWrapper(PyTypeObject *type, struct wrapperbase *base, void *wrapped)
     if (descr != NULL) {
         descr->d_base = base;
         descr->d_wrapped = wrapped;
-        descr->vectorcall = _PyType_GetWrapperVectorcall(base->wrapper);
+        descr->vectorcall = _PyType_GetWrapperVectorcall(base->wrapper,
+                                                         wrapped);
     }
     return (PyObject *)descr;
 }

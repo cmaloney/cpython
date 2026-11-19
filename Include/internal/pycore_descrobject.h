@@ -27,7 +27,8 @@ typedef PyObject *(*_Py_wrapperfunc_fast)(PyObject *self,
                                           PyObject *const *args,
                                           Py_ssize_t nargs, void *wrapped);
 
-extern vectorcallfunc _PyType_GetWrapperVectorcall(wrapperfunc wrapper);
+extern vectorcallfunc _PyType_GetWrapperVectorcall(wrapperfunc wrapper,
+                                                   void *wrapped);
 
 // The vectorcall function of a wrapper descriptor, given the array variant
 // of its wrapperfunc
@@ -35,6 +36,13 @@ extern PyObject* _PyWrapperDescr_Vectorcall(PyObject *descr,
                                             PyObject *const *args,
                                             size_t nargsf, PyObject *kwnames,
                                             _Py_wrapperfunc_fast fast);
+
+// The vectorcall function of a "__call__" wrapper descriptor whose slot is
+// PyVectorcall_Call()
+extern PyObject* _PyWrapperDescr_VectorcallCall(PyObject *descr,
+                                                PyObject *const *args,
+                                                size_t nargsf,
+                                                PyObject *kwnames);
 
 extern void *_PyMember_GetOffset(PyObject *, PyMemberDef *);
 

@@ -10535,11 +10535,18 @@ static const struct {
 #undef X
 };
 
-/* Return the vectorcall function of a wrapper descriptor for 'wrapper', or
-   NULL if it is not one of the wrappers above and needs a tuple. */
+/* Return the vectorcall function of a wrapper descriptor for 'wrapper'
+   wrapping the slot 'wrapped', or NULL if it needs a tuple. */
 vectorcallfunc
-_PyType_GetWrapperVectorcall(wrapperfunc wrapper)
+_PyType_GetWrapperVectorcall(wrapperfunc wrapper, void *wrapped)
 {
+    if (wrapper == _Py_FUNC_CAST(wrapperfunc, wrap_call)
+        && wrapped == (void *)PyVectorcall_Call)
+    {
+        /* tp_call only unpacks the tuple to call the vectorcall function of
+           the object: call it. */
+        return _PyWrapperDescr_VectorcallCall;
+    }
     for (size_t i = 0; i < Py_ARRAY_LENGTH(fast_wrappers); i++) {
         if (fast_wrappers[i].wrapper == wrapper) {
             return fast_wrappers[i].vectorcall;
