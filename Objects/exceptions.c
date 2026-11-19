@@ -110,6 +110,9 @@ BaseException_init_fast(PyObject *op, PyObject *const *args, Py_ssize_t nargs,
     Py_RETURN_NONE;
 }
 
+#define BASEEXCEPTION_INIT_METHODDEF    \
+    {"__init__", _PyCFunction_CAST(BaseException_init_fast), METH_FASTCALL|METH_KEYWORDS, NULL},
+
 static PyObject *
 BaseException_vectorcall(PyObject *type_obj, PyObject * const*args,
                          size_t nargsf, PyObject *kwnames)
@@ -337,9 +340,8 @@ static PyMethodDef BaseException_methods[] = {
     BASEEXCEPTION___REDUCE___METHODDEF
     BASEEXCEPTION___SETSTATE___METHODDEF
     BASEEXCEPTION_WITH_TRACEBACK_METHODDEF
+    BASEEXCEPTION_INIT_METHODDEF
     BASEEXCEPTION_ADD_NOTE_METHODDEF
-    {"__init__", _PyCFunction_CAST(BaseException_init_fast),
-     METH_FASTCALL | METH_KEYWORDS, NULL},
     {NULL, NULL, 0, NULL},
 };
 

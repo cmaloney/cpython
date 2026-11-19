@@ -7367,6 +7367,10 @@ object_init_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
     Py_RETURN_NONE;
 }
 
+/* tp_init taking an array: see _PyType_GetFastWrapper() */
+#define OBJECT_INIT_METHODDEF    \
+    {"__init__", _PyCFunction_CAST(object_init_fast), METH_FASTCALL|METH_KEYWORDS, NULL},
+
 static PyObject *
 object_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 {
@@ -8547,9 +8551,7 @@ static PyMethodDef object_methods[] = {
     {"__init_subclass__", object_init_subclass, METH_CLASS | METH_NOARGS,
      object_init_subclass_doc},
     OBJECT___FORMAT___METHODDEF
-    /* tp_init taking an array: see _PyType_GetFastWrapper() */
-    {"__init__", _PyCFunction_CAST(object_init_fast),
-     METH_FASTCALL | METH_KEYWORDS, NULL},
+    OBJECT_INIT_METHODDEF
     OBJECT___SIZEOF___METHODDEF
     OBJECT___DIR___METHODDEF
     {0}
