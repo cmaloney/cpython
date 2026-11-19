@@ -3,6 +3,7 @@ import copyreg
 import gc
 import itertools
 import math
+import operator
 import pickle
 import random
 import string
@@ -5200,6 +5201,198 @@ class ClassPropertiesAndMethods(unittest.TestCase):
         foo = Foo()
         self.assertRaises(RecursionError, str, foo)
         self.assertRaises(RecursionError, repr, foo)
+
+    def test_slot_wrapper_calls(self):
+        # Slot wrappers are called with an array of arguments or with a
+        # tuple (and a dict): both must behave the same.
+        class C:
+            pass
+        def f(a, b=2, *, c=3):
+            return a, b, c
+        function = type(f)
+        c = C()
+        e = Exception()
+        calls = [
+            (int.__add__, (1, 2), {}, 3),
+            (int.__radd__, (1, 2), {}, 3),
+            (int.__pow__, (2, 3, 5), {}, 3),
+            (int.__lt__, (1, 2), {}, True),
+            (list.__len__, ([1],), {}, 1),
+            (list.__getitem__, ([5, 6], -1), {}, 6),
+            (object.__setattr__, (c, 'x', 1), {}, None),
+            (object.__init__, (c,), {}, None),
+            (BaseException.__init__, (e, 1, 2), {}, None),
+            (function.__call__, (f, 1), {'c': 4}, (1, 2, 4)),
+        ]
+        for wrapper, args, kwargs, expected in calls:
+            with self.subTest(wrapper=wrapper):
+                self.assertEqual(wrapper(*args, **kwargs), expected)
+        self.assertEqual(function.__call__(f, 1, c=4), (1, 2, 4))
+        self.assertEqual(c.x, 1)
+        self.assertEqual(e.args, (1, 2))
+
+        errors = [
+            (int.__add__, (), {}, "needs an argument"),
+            (int.__add__, ('a', 1), {}, "requires a 'int' object"),
+            (int.__add__, (1,), {}, "expected 1 argument, got 0"),
+            (int.__add__, (1, 2), {'x': 1}, "takes no keyword arguments"),
+            (object.__setattr__, (c, 'x'), {}, "expected 2 arguments, got 1"),
+            (object.__init__, (), {}, "needs an argument"),
+            (object.__init__, (c, 1), {}, "takes exactly one argument"),
+            (object.__init__, (c,), {'x': 1}, "takes exactly one argument"),
+            (BaseException.__init__, (1,), {}, "requires a 'BaseException'"),
+            (BaseException.__init__, (e,), {'x': 1}, "no keyword arguments"),
+            (function.__call__, (1,), {}, "requires a 'function' object"),
+        ]
+        for wrapper, args, kwargs, message in errors:
+            with self.subTest(wrapper=wrapper, args=args, kwargs=kwargs):
+                with self.assertRaisesRegex(TypeError, message):
+                    wrapper(*args, **kwargs)
+        with self.assertRaisesRegex(TypeError, "takes no keyword arguments"):
+            int.__add__(1, 2, x=1)
+        with self.assertRaisesRegex(TypeError, "takes exactly one argument"):
+            object.__init__(c, x=1)
+
+    def test_slot_wrapper_holds_arguments(self):
+        # A slot wrapper holds a reference to its arguments during the call:
+        # accumulate() passes its total, which it releases when the slot
+        # calls it again.
+        again = True
+        class Evil:
+            def __eq__(self, other):
+                nonlocal again
+                if again:
+                    again = False
+                    next(acc)
+                return False
+        def source():
+            yield [Evil() for _ in range(50)]
+            yield from range(5)
+        acc = itertools.accumulate(source(), list.__contains__)
+        next(acc)
+        self.assertIs(next(acc), False)
+
+    def test_inherited_slot_direct_call(self):
+        # A generic slot function calls an inherited C slot function without
+        # its slot wrapper, if the wrapper found is the one of this slot.
+        class OnlyEq(list):
+            def __eq__(self, other):
+                return 'eq'
+        self.assertIs(OnlyEq([1]) != [1], False)
+        self.assertIs(OnlyEq([1]) < [2], True)
+        self.assertEqual(OnlyEq([1]) == [2], 'eq')
+
+        class OnlyDel(dict):
+            def __delitem__(self, key):
+                pass
+        d = OnlyDel()
+        d['a'] = 1
+        del d['a']
+        self.assertEqual(d, {'a': 1})
+        self.assertRaises(TypeError, operator.setitem, d, [], 1)
+
+        class OnlySet:
+            def __setattr__(self, name, value):
+                object.__setattr__(self, name, value)
+        o = OnlySet()
+        o.x = 1
+        del o.x
+        self.assertNotHasAttr(o, 'x')
+        self.assertRaises(AttributeError, delattr, o, 'x')
+
+        class OnlyDelete(property):
+            def __delete__(self, obj):
+                pass
+        class HasProperty:
+            values = []
+            p = OnlyDelete(None, lambda self, value: self.values.append(value))
+            q = OnlyDelete(None)
+        h = HasProperty()
+        h.p = 1
+        del h.p
+        self.assertEqual(h.values, [1])
+        self.assertRaises(AttributeError, setattr, h, 'q', 1)
+
+        # The wrapper of another slot, or of an unrelated type
+        class Swapped(int):
+            __eq__ = int.__ne__
+            __hash__ = int.__hash__
+            def __lt__(self, other):
+                return NotImplemented
+        self.assertIs(Swapped(1) == 1, False)
+        self.assertIs(Swapped(1) == 2, True)
+        class Unrelated:
+            __setitem__ = dict.__setitem__
+            def __delitem__(self, key):
+                pass
+        with self.assertRaisesRegex(TypeError, "requires a 'dict' object"):
+            Unrelated()[1] = 2
+
+        # hackcheck() still applies
+        class Meta(type):
+            __setattr__ = object.__setattr__
+            def __delattr__(cls, name):
+                pass
+        class WithMeta(metaclass=Meta):
+            pass
+        with self.assertRaisesRegex(TypeError, "can't apply this __setattr__"):
+            WithMeta.x = 1
+
+    def test_inherited_slot_direct_call_holds_arguments(self):
+        # Like a slot wrapper, a direct call of a C slot function holds a
+        # reference to its arguments.
+        class OnlySet(dict):
+            def __setitem__(self, key, value):
+                pass
+        again = True
+        alive = None
+        class Key:
+            def __hash__(self):
+                return 1
+            def __eq__(self, other):
+                nonlocal again, alive
+                if again:
+                    again = False
+                    next(acc)
+                    alive = ref() is not None
+                return False
+        def source():
+            nonlocal ref
+            total = OnlySet()
+            dict.__setitem__(total, Key(), 1)
+            dict.__setitem__(total, 5, 1)
+            ref = weakref.ref(total)
+            yield total
+            del total
+            yield from [Key(), 5]
+        ref = None
+        acc = itertools.accumulate(source(), operator.delitem)
+        next(acc)
+        self.assertRaises(KeyError, next, acc)
+        self.assertIs(alive, True)
+
+    def test_super_method_in_metaclass(self):
+        # super() method calls on a class do not bind the method, in
+        # instance mode only.
+        class Meta(type):
+            def __setattr__(cls, name, value):
+                super().__setattr__(name, value)
+            def subs(cls):
+                return super().__subclasses__()
+            @classmethod
+            def unbound(mcls):
+                return super().__subclasses__(mcls)
+            @classmethod
+            def missing_self(mcls):
+                return super().__subclasses__()
+        class WithMeta(metaclass=Meta):
+            pass
+        for i in range(20):
+            WithMeta.x = i
+            self.assertEqual(WithMeta.x, i)
+            self.assertEqual(WithMeta.subs(), [])
+            self.assertEqual(Meta.unbound(), [])
+            self.assertRaises(TypeError, Meta.missing_self)
 
     def test_mixing_slot_wrappers(self):
         class X(dict):
