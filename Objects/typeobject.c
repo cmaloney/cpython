@@ -9855,39 +9855,28 @@ remove_all_subclasses(PyTypeObject *type, PyObject *bases)
 }
 
 static int
-check_num_args(PyObject *ob, int n)
+check_num_args(Py_ssize_t nargs, int n)
 {
-    if (!PyTuple_CheckExact(ob)) {
-        PyErr_SetString(PyExc_SystemError,
-            "PyArg_UnpackTuple() argument list is not a tuple");
-        return 0;
-    }
-    if (n == PyTuple_GET_SIZE(ob))
+    if (n == nargs)
         return 1;
     PyErr_Format(
         PyExc_TypeError,
-        "expected %d argument%s, got %zd", n, n == 1 ? "" : "s", PyTuple_GET_SIZE(ob));
+        "expected %d argument%s, got %zd", n, n == 1 ? "" : "s", nargs);
     return 0;
 }
 
 static Py_ssize_t
-check_pow_args(PyObject *ob)
+check_pow_args(Py_ssize_t size)
 {
     // Returns the argument count on success or `-1` on error.
     int min = 1;
     int max = 2;
-    if (!PyTuple_CheckExact(ob)) {
-        PyErr_SetString(PyExc_SystemError,
-            "PyArg_UnpackTuple() argument list is not a tuple");
-        return -1;
-    }
-    Py_ssize_t size = PyTuple_GET_SIZE(ob);
     if (size >= min && size <= max) {
         return size;
     }
     PyErr_Format(
         PyExc_TypeError,
-        "expected %d or %d arguments, got %zd", min, max, PyTuple_GET_SIZE(ob));
+        "expected %d or %d arguments, got %zd", min, max, size);
     return -1;
 }
 
@@ -9900,12 +9889,13 @@ check_pow_args(PyObject *ob)
    entries, one regular and one with reversed arguments. */
 
 static PyObject *
-wrap_lenfunc(PyObject *self, PyObject *args, void *wrapped)
+wrap_lenfunc_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                  void *wrapped)
 {
     lenfunc func = (lenfunc)wrapped;
     Py_ssize_t res;
 
-    if (!check_num_args(args, 0))
+    if (!check_num_args(nargs, 0))
         return NULL;
     res = (*func)(self);
     if (res == -1 && PyErr_Occurred())
@@ -9914,12 +9904,13 @@ wrap_lenfunc(PyObject *self, PyObject *args, void *wrapped)
 }
 
 static PyObject *
-wrap_inquirypred(PyObject *self, PyObject *args, void *wrapped)
+wrap_inquirypred_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                      void *wrapped)
 {
     inquiry func = (inquiry)wrapped;
     int res;
 
-    if (!check_num_args(args, 0))
+    if (!check_num_args(nargs, 0))
         return NULL;
     res = (*func)(self);
     if (res == -1 && PyErr_Occurred())
@@ -9928,43 +9919,47 @@ wrap_inquirypred(PyObject *self, PyObject *args, void *wrapped)
 }
 
 static PyObject *
-wrap_binaryfunc(PyObject *self, PyObject *args, void *wrapped)
+wrap_binaryfunc_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                     void *wrapped)
 {
     binaryfunc func = (binaryfunc)wrapped;
     PyObject *other;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    other = PyTuple_GET_ITEM(args, 0);
+    other = args[0];
     return (*func)(self, other);
 }
 
 static PyObject *
-wrap_binaryfunc_l(PyObject *self, PyObject *args, void *wrapped)
+wrap_binaryfunc_l_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                       void *wrapped)
 {
     binaryfunc func = (binaryfunc)wrapped;
     PyObject *other;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    other = PyTuple_GET_ITEM(args, 0);
+    other = args[0];
     return (*func)(self, other);
 }
 
 static PyObject *
-wrap_binaryfunc_r(PyObject *self, PyObject *args, void *wrapped)
+wrap_binaryfunc_r_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                       void *wrapped)
 {
     binaryfunc func = (binaryfunc)wrapped;
     PyObject *other;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    other = PyTuple_GET_ITEM(args, 0);
+    other = args[0];
     return (*func)(other, self);
 }
 
 static PyObject *
-wrap_ternaryfunc(PyObject *self, PyObject *args, void *wrapped)
+wrap_ternaryfunc_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                      void *wrapped)
 {
     ternaryfunc func = (ternaryfunc)wrapped;
     PyObject *other;
@@ -9972,20 +9967,21 @@ wrap_ternaryfunc(PyObject *self, PyObject *args, void *wrapped)
 
     /* Note: This wrapper only works for __pow__() */
 
-    Py_ssize_t size = check_pow_args(args);
+    Py_ssize_t size = check_pow_args(nargs);
     if (size == -1) {
         return NULL;
     }
-    other = PyTuple_GET_ITEM(args, 0);
+    other = args[0];
     if (size == 2) {
-       third = PyTuple_GET_ITEM(args, 1);
+       third = args[1];
     }
 
     return (*func)(self, other, third);
 }
 
 static PyObject *
-wrap_ternaryfunc_r(PyObject *self, PyObject *args, void *wrapped)
+wrap_ternaryfunc_r_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                        void *wrapped)
 {
     ternaryfunc func = (ternaryfunc)wrapped;
     PyObject *other;
@@ -9993,38 +9989,40 @@ wrap_ternaryfunc_r(PyObject *self, PyObject *args, void *wrapped)
 
     /* Note: This wrapper only works for __rpow__() */
 
-    Py_ssize_t size = check_pow_args(args);
+    Py_ssize_t size = check_pow_args(nargs);
     if (size == -1) {
         return NULL;
     }
-    other = PyTuple_GET_ITEM(args, 0);
+    other = args[0];
     if (size == 2) {
-       third = PyTuple_GET_ITEM(args, 1);
+       third = args[1];
     }
 
     return (*func)(other, self, third);
 }
 
 static PyObject *
-wrap_unaryfunc(PyObject *self, PyObject *args, void *wrapped)
+wrap_unaryfunc_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                    void *wrapped)
 {
     unaryfunc func = (unaryfunc)wrapped;
 
-    if (!check_num_args(args, 0))
+    if (!check_num_args(nargs, 0))
         return NULL;
     return (*func)(self);
 }
 
 static PyObject *
-wrap_indexargfunc(PyObject *self, PyObject *args, void *wrapped)
+wrap_indexargfunc_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                       void *wrapped)
 {
     ssizeargfunc func = (ssizeargfunc)wrapped;
     PyObject* o;
     Py_ssize_t i;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    o = PyTuple_GET_ITEM(args, 0);
+    o = args[0];
     i = PyNumber_AsSsize_t(o, PyExc_OverflowError);
     if (i == -1 && PyErr_Occurred())
         return NULL;
@@ -10054,33 +10052,35 @@ getindex(PyObject *self, PyObject *arg)
 }
 
 static PyObject *
-wrap_sq_item(PyObject *self, PyObject *args, void *wrapped)
+wrap_sq_item_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                  void *wrapped)
 {
     ssizeargfunc func = (ssizeargfunc)wrapped;
     PyObject *arg;
     Py_ssize_t i;
 
-    if (PyTuple_GET_SIZE(args) == 1) {
-        arg = PyTuple_GET_ITEM(args, 0);
+    if (nargs == 1) {
+        arg = args[0];
         i = getindex(self, arg);
         if (i == -1 && PyErr_Occurred())
             return NULL;
         return (*func)(self, i);
     }
-    check_num_args(args, 1);
+    check_num_args(nargs, 1);
     assert(PyErr_Occurred());
     return NULL;
 }
 
 static PyObject *
-wrap_sq_setitem(PyObject *self, PyObject *args, void *wrapped)
+wrap_sq_setitem_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                     void *wrapped)
 {
     ssizeobjargproc func = (ssizeobjargproc)wrapped;
     Py_ssize_t i;
     int res;
     PyObject *arg, *value;
 
-    if (!PyArg_UnpackTuple(args, "__setitem__", 2, 2, &arg, &value))
+    if (!_PyArg_UnpackStack(args, nargs, "__setitem__", 2, 2, &arg, &value))
         return NULL;
     i = getindex(self, arg);
     if (i == -1 && PyErr_Occurred())
@@ -10092,16 +10092,17 @@ wrap_sq_setitem(PyObject *self, PyObject *args, void *wrapped)
 }
 
 static PyObject *
-wrap_sq_delitem(PyObject *self, PyObject *args, void *wrapped)
+wrap_sq_delitem_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                     void *wrapped)
 {
     ssizeobjargproc func = (ssizeobjargproc)wrapped;
     Py_ssize_t i;
     int res;
     PyObject *arg;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    arg = PyTuple_GET_ITEM(args, 0);
+    arg = args[0];
     i = getindex(self, arg);
     if (i == -1 && PyErr_Occurred())
         return NULL;
@@ -10113,15 +10114,16 @@ wrap_sq_delitem(PyObject *self, PyObject *args, void *wrapped)
 
 /* XXX objobjproc is a misnomer; should be objargpred */
 static PyObject *
-wrap_objobjproc(PyObject *self, PyObject *args, void *wrapped)
+wrap_objobjproc_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                     void *wrapped)
 {
     objobjproc func = (objobjproc)wrapped;
     int res;
     PyObject *value;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    value = PyTuple_GET_ITEM(args, 0);
+    value = args[0];
     res = (*func)(self, value);
     if (res == -1 && PyErr_Occurred())
         return NULL;
@@ -10130,13 +10132,14 @@ wrap_objobjproc(PyObject *self, PyObject *args, void *wrapped)
 }
 
 static PyObject *
-wrap_objobjargproc(PyObject *self, PyObject *args, void *wrapped)
+wrap_objobjargproc_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                        void *wrapped)
 {
     objobjargproc func = (objobjargproc)wrapped;
     int res;
     PyObject *key, *value;
 
-    if (!PyArg_UnpackTuple(args, "__setitem__", 2, 2, &key, &value))
+    if (!_PyArg_UnpackStack(args, nargs, "__setitem__", 2, 2, &key, &value))
         return NULL;
     res = (*func)(self, key, value);
     if (res == -1 && PyErr_Occurred())
@@ -10145,15 +10148,16 @@ wrap_objobjargproc(PyObject *self, PyObject *args, void *wrapped)
 }
 
 static PyObject *
-wrap_delitem(PyObject *self, PyObject *args, void *wrapped)
+wrap_delitem_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                  void *wrapped)
 {
     objobjargproc func = (objobjargproc)wrapped;
     int res;
     PyObject *key;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    key = PyTuple_GET_ITEM(args, 0);
+    key = args[0];
     res = (*func)(self, key, NULL);
     if (res == -1 && PyErr_Occurred())
         return NULL;
@@ -10227,13 +10231,14 @@ hackcheck(PyObject *self, setattrofunc func, const char *what)
 }
 
 static PyObject *
-wrap_setattr(PyObject *self, PyObject *args, void *wrapped)
+wrap_setattr_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                  void *wrapped)
 {
     setattrofunc func = (setattrofunc)wrapped;
     int res;
     PyObject *name, *value;
 
-    if (!PyArg_UnpackTuple(args, "__setattr__", 2, 2, &name, &value))
+    if (!_PyArg_UnpackStack(args, nargs, "__setattr__", 2, 2, &name, &value))
         return NULL;
     if (!hackcheck(self, func, "__setattr__"))
         return NULL;
@@ -10244,15 +10249,16 @@ wrap_setattr(PyObject *self, PyObject *args, void *wrapped)
 }
 
 static PyObject *
-wrap_delattr(PyObject *self, PyObject *args, void *wrapped)
+wrap_delattr_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                  void *wrapped)
 {
     setattrofunc func = (setattrofunc)wrapped;
     int res;
     PyObject *name;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    name = PyTuple_GET_ITEM(args, 0);
+    name = args[0];
     if (!hackcheck(self, func, "__delattr__"))
         return NULL;
     res = (*func)(self, name, NULL);
@@ -10262,12 +10268,13 @@ wrap_delattr(PyObject *self, PyObject *args, void *wrapped)
 }
 
 static PyObject *
-wrap_hashfunc(PyObject *self, PyObject *args, void *wrapped)
+wrap_hashfunc_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                   void *wrapped)
 {
     hashfunc func = (hashfunc)wrapped;
     Py_hash_t res;
 
-    if (!check_num_args(args, 0))
+    if (!check_num_args(nargs, 0))
         return NULL;
     res = (*func)(self);
     if (res == -1 && PyErr_Occurred())
@@ -10284,11 +10291,12 @@ wrap_call(PyObject *self, PyObject *args, void *wrapped, PyObject *kwds)
 }
 
 static PyObject *
-wrap_del(PyObject *self, PyObject *args, void *wrapped)
+wrap_del_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+              void *wrapped)
 {
     destructor func = (destructor)wrapped;
 
-    if (!check_num_args(args, 0))
+    if (!check_num_args(nargs, 0))
         return NULL;
 
     (*func)(self);
@@ -10296,23 +10304,25 @@ wrap_del(PyObject *self, PyObject *args, void *wrapped)
 }
 
 static PyObject *
-wrap_richcmpfunc(PyObject *self, PyObject *args, void *wrapped, int op)
+wrap_richcmpfunc(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                 void *wrapped, int op)
 {
     richcmpfunc func = (richcmpfunc)wrapped;
     PyObject *other;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    other = PyTuple_GET_ITEM(args, 0);
+    other = args[0];
     return (*func)(self, other, op);
 }
 
 #undef RICHCMP_WRAPPER
 #define RICHCMP_WRAPPER(NAME, OP) \
 static PyObject * \
-richcmp_##NAME(PyObject *self, PyObject *args, void *wrapped) \
+richcmp_##NAME##_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs, \
+                      void *wrapped) \
 { \
-    return wrap_richcmpfunc(self, args, wrapped, OP); \
+    return wrap_richcmpfunc(self, args, nargs, wrapped, OP); \
 }
 
 RICHCMP_WRAPPER(lt, Py_LT)
@@ -10323,12 +10333,13 @@ RICHCMP_WRAPPER(gt, Py_GT)
 RICHCMP_WRAPPER(ge, Py_GE)
 
 static PyObject *
-wrap_next(PyObject *self, PyObject *args, void *wrapped)
+wrap_next_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+               void *wrapped)
 {
     unaryfunc func = (unaryfunc)wrapped;
     PyObject *res;
 
-    if (!check_num_args(args, 0))
+    if (!check_num_args(nargs, 0))
         return NULL;
     res = (*func)(self);
     if (res == NULL && !PyErr_Occurred())
@@ -10337,13 +10348,14 @@ wrap_next(PyObject *self, PyObject *args, void *wrapped)
 }
 
 static PyObject *
-wrap_descr_get(PyObject *self, PyObject *args, void *wrapped)
+wrap_descr_get_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                    void *wrapped)
 {
     descrgetfunc func = (descrgetfunc)wrapped;
     PyObject *obj;
     PyObject *type = NULL;
 
-    if (!PyArg_UnpackTuple(args, "__get__", 1, 2, &obj, &type))
+    if (!_PyArg_UnpackStack(args, nargs, "__get__", 1, 2, &obj, &type))
         return NULL;
     if (obj == Py_None)
         obj = NULL;
@@ -10358,13 +10370,14 @@ wrap_descr_get(PyObject *self, PyObject *args, void *wrapped)
 }
 
 static PyObject *
-wrap_descr_set(PyObject *self, PyObject *args, void *wrapped)
+wrap_descr_set_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                    void *wrapped)
 {
     descrsetfunc func = (descrsetfunc)wrapped;
     PyObject *obj, *value;
     int ret;
 
-    if (!PyArg_UnpackTuple(args, "__set__", 2, 2, &obj, &value))
+    if (!_PyArg_UnpackStack(args, nargs, "__set__", 2, 2, &obj, &value))
         return NULL;
     ret = (*func)(self, obj, value);
     if (ret < 0)
@@ -10373,15 +10386,16 @@ wrap_descr_set(PyObject *self, PyObject *args, void *wrapped)
 }
 
 static PyObject *
-wrap_descr_delete(PyObject *self, PyObject *args, void *wrapped)
+wrap_descr_delete_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                       void *wrapped)
 {
     descrsetfunc func = (descrsetfunc)wrapped;
     PyObject *obj;
     int ret;
 
-    if (!check_num_args(args, 1))
+    if (!check_num_args(nargs, 1))
         return NULL;
-    obj = PyTuple_GET_ITEM(args, 0);
+    obj = args[0];
     ret = (*func)(self, obj, NULL);
     if (ret < 0)
         return NULL;
@@ -10389,11 +10403,12 @@ wrap_descr_delete(PyObject *self, PyObject *args, void *wrapped)
 }
 
 static PyObject *
-wrap_buffer(PyObject *self, PyObject *args, void *wrapped)
+wrap_buffer_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                 void *wrapped)
 {
     PyObject *arg = NULL;
 
-    if (!PyArg_UnpackTuple(args, "__buffer__", 1, 1, &arg)) {
+    if (!_PyArg_UnpackStack(args, nargs, "__buffer__", 1, 1, &arg)) {
         return NULL;
     }
     Py_ssize_t flags = PyNumber_AsSsize_t(arg, PyExc_OverflowError);
@@ -10411,10 +10426,11 @@ wrap_buffer(PyObject *self, PyObject *args, void *wrapped)
 }
 
 static PyObject *
-wrap_releasebuffer(PyObject *self, PyObject *args, void *wrapped)
+wrap_releasebuffer_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+                        void *wrapped)
 {
     PyObject *arg = NULL;
-    if (!PyArg_UnpackTuple(args, "__release_buffer__", 1, 1, &arg)) {
+    if (!_PyArg_UnpackStack(args, nargs, "__release_buffer__", 1, 1, &arg)) {
         return NULL;
     }
     if (!PyMemoryView_Check(arg)) {
@@ -10453,6 +10469,83 @@ wrap_init(PyObject *self, PyObject *args, void *wrapped, PyObject *kwds)
     if (func(self, args, kwds) < 0)
         return NULL;
     Py_RETURN_NONE;
+}
+
+/* The wrappers above take their arguments as an array.  Define for each one
+   its wrapperfunc, which takes a tuple, and the vectorcall function of its
+   wrapper descriptors.  The wrapperfunc is what struct wrapperbase holds and
+   what code outside of this file can call: map it to the vectorcall
+   function. */
+#define FAST_WRAPPERS(X) \
+    X(wrap_lenfunc) \
+    X(wrap_inquirypred) \
+    X(wrap_binaryfunc) \
+    X(wrap_binaryfunc_l) \
+    X(wrap_binaryfunc_r) \
+    X(wrap_ternaryfunc) \
+    X(wrap_ternaryfunc_r) \
+    X(wrap_unaryfunc) \
+    X(wrap_indexargfunc) \
+    X(wrap_sq_item) \
+    X(wrap_sq_setitem) \
+    X(wrap_sq_delitem) \
+    X(wrap_objobjproc) \
+    X(wrap_objobjargproc) \
+    X(wrap_delitem) \
+    X(wrap_setattr) \
+    X(wrap_delattr) \
+    X(wrap_hashfunc) \
+    X(wrap_del) \
+    X(wrap_next) \
+    X(wrap_descr_get) \
+    X(wrap_descr_set) \
+    X(wrap_descr_delete) \
+    X(wrap_buffer) \
+    X(wrap_releasebuffer) \
+    X(richcmp_lt) \
+    X(richcmp_le) \
+    X(richcmp_eq) \
+    X(richcmp_ne) \
+    X(richcmp_gt) \
+    X(richcmp_ge)
+
+#define X(NAME) \
+static PyObject * \
+NAME(PyObject *self, PyObject *args, void *wrapped) \
+{ \
+    return NAME##_fast(self, _PyTuple_ITEMS(args), PyTuple_GET_SIZE(args), \
+                       wrapped); \
+} \
+static PyObject * \
+NAME##_vectorcall(PyObject *descr, PyObject *const *args, size_t nargsf, \
+                  PyObject *kwnames) \
+{ \
+    return _PyWrapperDescr_Vectorcall(descr, args, nargsf, kwnames, \
+                                      NAME##_fast); \
+}
+FAST_WRAPPERS(X)
+#undef X
+
+static const struct {
+    wrapperfunc wrapper;
+    vectorcallfunc vectorcall;
+} fast_wrappers[] = {
+#define X(NAME) {NAME, NAME##_vectorcall},
+    FAST_WRAPPERS(X)
+#undef X
+};
+
+/* Return the vectorcall function of a wrapper descriptor for 'wrapper', or
+   NULL if it is not one of the wrappers above and needs a tuple. */
+vectorcallfunc
+_PyType_GetWrapperVectorcall(wrapperfunc wrapper)
+{
+    for (size_t i = 0; i < Py_ARRAY_LENGTH(fast_wrappers); i++) {
+        if (fast_wrappers[i].wrapper == wrapper) {
+            return fast_wrappers[i].vectorcall;
+        }
+    }
+    return NULL;
 }
 
 static PyObject *

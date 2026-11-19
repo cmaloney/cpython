@@ -5201,6 +5201,76 @@ class ClassPropertiesAndMethods(unittest.TestCase):
         self.assertRaises(RecursionError, str, foo)
         self.assertRaises(RecursionError, repr, foo)
 
+    def test_slot_wrapper_calls(self):
+        # Slot wrappers are called with an array of arguments or with a
+        # tuple (and a dict): both must behave the same.
+        class C:
+            pass
+        def f(a, b=2, *, c=3):
+            return a, b, c
+        function = type(f)
+        c = C()
+        e = Exception()
+        calls = [
+            (int.__add__, (1, 2), {}, 3),
+            (int.__radd__, (1, 2), {}, 3),
+            (int.__pow__, (2, 3, 5), {}, 3),
+            (int.__lt__, (1, 2), {}, True),
+            (list.__len__, ([1],), {}, 1),
+            (list.__getitem__, ([5, 6], -1), {}, 6),
+            (object.__setattr__, (c, 'x', 1), {}, None),
+            (object.__init__, (c,), {}, None),
+            (BaseException.__init__, (e, 1, 2), {}, None),
+            (function.__call__, (f, 1), {'c': 4}, (1, 2, 4)),
+        ]
+        for wrapper, args, kwargs, expected in calls:
+            with self.subTest(wrapper=wrapper):
+                self.assertEqual(wrapper(*args, **kwargs), expected)
+        self.assertEqual(function.__call__(f, 1, c=4), (1, 2, 4))
+        self.assertEqual(c.x, 1)
+        self.assertEqual(e.args, (1, 2))
+
+        errors = [
+            (int.__add__, (), {}, "needs an argument"),
+            (int.__add__, ('a', 1), {}, "requires a 'int' object"),
+            (int.__add__, (1,), {}, "expected 1 argument, got 0"),
+            (int.__add__, (1, 2), {'x': 1}, "takes no keyword arguments"),
+            (object.__setattr__, (c, 'x'), {}, "expected 2 arguments, got 1"),
+            (object.__init__, (), {}, "needs an argument"),
+            (object.__init__, (c, 1), {}, "takes exactly one argument"),
+            (object.__init__, (c,), {'x': 1}, "takes exactly one argument"),
+            (BaseException.__init__, (1,), {}, "requires a 'BaseException'"),
+            (BaseException.__init__, (e,), {'x': 1}, "no keyword arguments"),
+            (function.__call__, (1,), {}, "requires a 'function' object"),
+        ]
+        for wrapper, args, kwargs, message in errors:
+            with self.subTest(wrapper=wrapper, args=args, kwargs=kwargs):
+                with self.assertRaisesRegex(TypeError, message):
+                    wrapper(*args, **kwargs)
+        with self.assertRaisesRegex(TypeError, "takes no keyword arguments"):
+            int.__add__(1, 2, x=1)
+        with self.assertRaisesRegex(TypeError, "takes exactly one argument"):
+            object.__init__(c, x=1)
+
+    def test_slot_wrapper_holds_arguments(self):
+        # A slot wrapper holds a reference to its arguments during the call:
+        # accumulate() passes its total, which it releases when the slot
+        # calls it again.
+        again = True
+        class Evil:
+            def __eq__(self, other):
+                nonlocal again
+                if again:
+                    again = False
+                    next(acc)
+                return False
+        def source():
+            yield [Evil() for _ in range(50)]
+            yield from range(5)
+        acc = itertools.accumulate(source(), list.__contains__)
+        next(acc)
+        self.assertIs(next(acc), False)
+
     def test_mixing_slot_wrappers(self):
         class X(dict):
             __setattr__ = dict.__setitem__
