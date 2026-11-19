@@ -10502,44 +10502,50 @@ wrap_init(PyObject *self, PyObject *args, void *wrapped, PyObject *kwds)
 
 /* The wrappers above take their arguments as an array.  Define for each one
    its wrapperfunc, which takes a tuple: it is what struct wrapperbase holds
-   and what code outside of this file can call. */
+   and what code outside of this file can call.  CHECK is the check which the
+   wrapper did on the tuple before. */
 #define FAST_WRAPPERS(X) \
-    X(wrap_lenfunc) \
-    X(wrap_inquirypred) \
-    X(wrap_binaryfunc) \
-    X(wrap_binaryfunc_l) \
-    X(wrap_binaryfunc_r) \
-    X(wrap_ternaryfunc) \
-    X(wrap_ternaryfunc_r) \
-    X(wrap_unaryfunc) \
-    X(wrap_indexargfunc) \
-    X(wrap_sq_item) \
-    X(wrap_sq_setitem) \
-    X(wrap_sq_delitem) \
-    X(wrap_objobjproc) \
-    X(wrap_objobjargproc) \
-    X(wrap_delitem) \
-    X(wrap_setattr) \
-    X(wrap_delattr) \
-    X(wrap_hashfunc) \
-    X(wrap_del) \
-    X(wrap_next) \
-    X(wrap_descr_get) \
-    X(wrap_descr_set) \
-    X(wrap_descr_delete) \
-    X(wrap_buffer) \
-    X(wrap_releasebuffer) \
-    X(richcmp_lt) \
-    X(richcmp_le) \
-    X(richcmp_eq) \
-    X(richcmp_ne) \
-    X(richcmp_gt) \
-    X(richcmp_ge)
+    X(wrap_lenfunc, PyTuple_CheckExact) \
+    X(wrap_inquirypred, PyTuple_CheckExact) \
+    X(wrap_binaryfunc, PyTuple_CheckExact) \
+    X(wrap_binaryfunc_l, PyTuple_CheckExact) \
+    X(wrap_binaryfunc_r, PyTuple_CheckExact) \
+    X(wrap_ternaryfunc, PyTuple_CheckExact) \
+    X(wrap_ternaryfunc_r, PyTuple_CheckExact) \
+    X(wrap_unaryfunc, PyTuple_CheckExact) \
+    X(wrap_indexargfunc, PyTuple_CheckExact) \
+    X(wrap_sq_item, PyTuple_Check) \
+    X(wrap_sq_setitem, PyTuple_Check) \
+    X(wrap_sq_delitem, PyTuple_CheckExact) \
+    X(wrap_objobjproc, PyTuple_CheckExact) \
+    X(wrap_objobjargproc, PyTuple_Check) \
+    X(wrap_delitem, PyTuple_CheckExact) \
+    X(wrap_setattr, PyTuple_Check) \
+    X(wrap_delattr, PyTuple_CheckExact) \
+    X(wrap_hashfunc, PyTuple_CheckExact) \
+    X(wrap_del, PyTuple_CheckExact) \
+    X(wrap_next, PyTuple_CheckExact) \
+    X(wrap_descr_get, PyTuple_Check) \
+    X(wrap_descr_set, PyTuple_Check) \
+    X(wrap_descr_delete, PyTuple_CheckExact) \
+    X(wrap_buffer, PyTuple_Check) \
+    X(wrap_releasebuffer, PyTuple_Check) \
+    X(richcmp_lt, PyTuple_CheckExact) \
+    X(richcmp_le, PyTuple_CheckExact) \
+    X(richcmp_eq, PyTuple_CheckExact) \
+    X(richcmp_ne, PyTuple_CheckExact) \
+    X(richcmp_gt, PyTuple_CheckExact) \
+    X(richcmp_ge, PyTuple_CheckExact)
 
-#define X(NAME) \
+#define X(NAME, CHECK) \
 static PyObject * \
 NAME(PyObject *self, PyObject *args, void *wrapped) \
 { \
+    if (!CHECK(args)) { \
+        PyErr_SetString(PyExc_SystemError, \
+            "PyArg_UnpackTuple() argument list is not a tuple"); \
+        return NULL; \
+    } \
     return NAME##_fast(self, _PyTuple_ITEMS(args), PyTuple_GET_SIZE(args), \
                        wrapped); \
 }
@@ -10550,7 +10556,7 @@ static const struct {
     wrapperfunc wrapper;
     _Py_wrapperfunc_fast fast;
 } fast_wrappers[] = {
-#define X(NAME) {NAME, NAME##_fast},
+#define X(NAME, CHECK) {NAME, NAME##_fast},
     FAST_WRAPPERS(X)
 #undef X
     {_Py_FUNC_CAST(wrapperfunc, wrap_call), wrap_call_fast},
