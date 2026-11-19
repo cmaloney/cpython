@@ -534,17 +534,16 @@ wrapperdescr_raw_call(PyWrapperDescrObject *descr, PyObject *self,
     return (*wrapper)(self, args, descr->d_wrapped);
 }
 
-static PyObject *
-wrapperdescr_call(PyObject *_descr, PyObject *args, PyObject *kwds)
+/* Call a wrapper_descriptor with 'self' as args[0] */
+PyObject *
+_PyWrapperDescr_Vectorcall(PyObject *_descr, PyObject *const *args,
+                           Py_ssize_t nargs, PyObject *kwds)
 {
     PyWrapperDescrObject *descr = (PyWrapperDescrObject *)_descr;
-    Py_ssize_t argc;
     PyObject *self, *result;
 
     /* Make sure that the first argument is acceptable as 'self' */
-    assert(PyTuple_Check(args));
-    argc = PyTuple_GET_SIZE(args);
-    if (argc < 1) {
+    if (nargs < 1) {
         PyErr_Format(PyExc_TypeError,
                      "descriptor '%V' of '%.100s' "
                      "object needs an argument",
@@ -552,7 +551,7 @@ wrapperdescr_call(PyObject *_descr, PyObject *args, PyObject *kwds)
                      PyDescr_TYPE(descr)->tp_name);
         return NULL;
     }
-    self = PyTuple_GET_ITEM(args, 0);
+    self = args[0];
     if (!_PyObject_RealIsSubclass((PyObject *)Py_TYPE(self),
                                   (PyObject *)PyDescr_TYPE(descr))) {
         PyErr_Format(PyExc_TypeError,
@@ -565,13 +564,25 @@ wrapperdescr_call(PyObject *_descr, PyObject *args, PyObject *kwds)
         return NULL;
     }
 
-    args = PyTuple_GetSlice(args, 1, argc);
-    if (args == NULL) {
+    PyObject *argstuple = PyTuple_FromArray(args + 1, nargs - 1);
+    if (argstuple == NULL) {
         return NULL;
     }
-    result = wrapperdescr_raw_call(descr, self, args, kwds);
-    Py_DECREF(args);
+    /* _PyObject_MakeTpCall() passes the array of its caller, which may not
+       own 'self' */
+    Py_INCREF(self);
+    result = wrapperdescr_raw_call(descr, self, argstuple, kwds);
+    Py_DECREF(self);
+    Py_DECREF(argstuple);
     return result;
+}
+
+static PyObject *
+wrapperdescr_call(PyObject *descr, PyObject *args, PyObject *kwds)
+{
+    assert(PyTuple_Check(args));
+    return _PyWrapperDescr_Vectorcall(descr, _PyTuple_ITEMS(args),
+                                      PyTuple_GET_SIZE(args), kwds);
 }
 
 

@@ -1,6 +1,7 @@
 #include "Python.h"
 #include "pycore_call.h"          // _PyObject_CallNoArgsTstate()
 #include "pycore_ceval.h"         // _Py_EnterRecursiveCallTstate()
+#include "pycore_descrobject.h"   // _PyWrapperDescr_Vectorcall()
 #include "pycore_dict.h"          // _PyDict_FromItems()
 #include "pycore_function.h"      // _PyFunction_Vectorcall() definition
 #include "pycore_modsupport.h"    // _Py_VaBuildStack()
@@ -211,6 +212,17 @@ _PyObject_MakeTpCall(PyThreadState *tstate, PyObject *callable,
     if (call == NULL) {
         object_is_not_callable(tstate, callable);
         return NULL;
+    }
+
+    if (keywords == NULL && Py_IS_TYPE(callable, &PyWrapperDescr_Type)) {
+        /* A slot wrapper takes its arguments without 'self' */
+        PyObject *result = NULL;
+        if (!_Py_EnterRecursiveCallTstate(tstate,
+                                          " while calling a Python object")) {
+            result = _PyWrapperDescr_Vectorcall(callable, args, nargs, NULL);
+            _Py_LeaveRecursiveCallTstate(tstate);
+        }
+        return _Py_CheckFunctionResult(tstate, callable, result, NULL);
     }
 
     PyObject *argstuple = PyTuple_FromArray(args, nargs);

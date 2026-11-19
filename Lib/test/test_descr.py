@@ -1,5 +1,6 @@
 import builtins
 import copyreg
+import functools
 import gc
 import itertools
 import math
@@ -5200,6 +5201,20 @@ class ClassPropertiesAndMethods(unittest.TestCase):
         foo = Foo()
         self.assertRaises(RecursionError, str, foo)
         self.assertRaises(RecursionError, repr, foo)
+
+    def test_slot_wrapper_holds_self(self):
+        # cmp_to_key() does not own the objects which it passes
+        class L(list):
+            pass
+        class Evil:
+            def __eq__(evil, other):
+                k.obj = None
+                self.assertIsNotNone(wr())
+                return True
+        K = functools.cmp_to_key(list.__eq__)
+        k = K(L([Evil()]))
+        wr = weakref.ref(k.obj)
+        k < K([1])
 
     def test_mixing_slot_wrappers(self):
         class X(dict):

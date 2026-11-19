@@ -22,6 +22,10 @@ typedef propertyobject _PyPropertyObject;
 
 extern PyTypeObject _PyMethodWrapper_Type;
 
+extern PyObject* _PyWrapperDescr_Vectorcall(PyObject *descr,
+                                            PyObject *const *args,
+                                            Py_ssize_t nargs, PyObject *kwds);
+
 extern void *_PyMember_GetOffset(PyObject *, PyMemberDef *);
 
 #ifdef __cplusplus
