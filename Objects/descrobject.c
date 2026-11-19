@@ -534,6 +534,32 @@ wrapperdescr_raw_call(PyWrapperDescrObject *descr, PyObject *self,
     return (*wrapper)(self, args, descr->d_wrapped);
 }
 
+/* Make sure that the first argument is acceptable as 'self' */
+static int
+wrapperdescr_check_self(PyWrapperDescrObject *descr, PyObject *const *args,
+                        Py_ssize_t nargs)
+{
+    if (nargs < 1) {
+        PyErr_Format(PyExc_TypeError,
+                     "descriptor '%V' of '%.100s' "
+                     "object needs an argument",
+                     descr_name((PyDescrObject *)descr), "?",
+                     PyDescr_TYPE(descr)->tp_name);
+        return -1;
+    }
+    if (!PyObject_TypeCheck(args[0], PyDescr_TYPE(descr))) {
+        PyErr_Format(PyExc_TypeError,
+                     "descriptor '%V' "
+                     "requires a '%.100s' object "
+                     "but received a '%.100s'",
+                     descr_name((PyDescrObject *)descr), "?",
+                     PyDescr_TYPE(descr)->tp_name,
+                     Py_TYPE(args[0])->tp_name);
+        return -1;
+    }
+    return 0;
+}
+
 static PyObject *
 wrapperdescr_call(PyObject *_descr, PyObject *args, PyObject *kwds)
 {
@@ -541,28 +567,18 @@ wrapperdescr_call(PyObject *_descr, PyObject *args, PyObject *kwds)
     Py_ssize_t argc;
     PyObject *self, *result;
 
-    /* Make sure that the first argument is acceptable as 'self' */
     assert(PyTuple_Check(args));
     argc = PyTuple_GET_SIZE(args);
-    if (argc < 1) {
-        PyErr_Format(PyExc_TypeError,
-                     "descriptor '%V' of '%.100s' "
-                     "object needs an argument",
-                     descr_name((PyDescrObject *)descr), "?",
-                     PyDescr_TYPE(descr)->tp_name);
+    if (wrapperdescr_check_self(descr, _PyTuple_ITEMS(args), argc) < 0) {
         return NULL;
     }
     self = PyTuple_GET_ITEM(args, 0);
-    if (!_PyObject_RealIsSubclass((PyObject *)Py_TYPE(self),
-                                  (PyObject *)PyDescr_TYPE(descr))) {
-        PyErr_Format(PyExc_TypeError,
-                     "descriptor '%V' "
-                     "requires a '%.100s' object "
-                     "but received a '%.100s'",
-                     descr_name((PyDescrObject *)descr), "?",
-                     PyDescr_TYPE(descr)->tp_name,
-                     Py_TYPE(self)->tp_name);
-        return NULL;
+
+    _Py_wrapperfunc_fast fast = _PyType_GetFastWrapper(descr->d_base);
+    if (fast != NULL && kwds == NULL) {
+        /* The tuple holds the references needed during the call */
+        return fast(self, _PyTuple_ITEMS(args) + 1, argc - 1,
+                    descr->d_wrapped);
     }
 
     args = PyTuple_GetSlice(args, 1, argc);
@@ -1458,6 +1474,68 @@ wrapper_call(PyObject *self, PyObject *args, PyObject *kwds)
 {
     wrapperobject *wp = (wrapperobject *)self;
     return wrapperdescr_raw_call(wp->descr, wp->self, args, kwds);
+}
+
+/* Call a wrapper_descriptor (with 'self' as the first argument) or a
+   method-wrapper with positional arguments, for _PyObject_MakeTpCall().
+
+   If the wrapper has an array variant, no tuple is created.  A tuple holds a
+   reference to 'self' and to each argument for the duration of the call, and
+   callers and slots rely on it: a caller can pass arguments which it does not
+   own, and a slot can run code which makes their owner release them.  So hold
+   these references here.  Otherwise, a single tuple is created. */
+PyObject *
+_PyWrapper_Vectorcall(PyThreadState *tstate, PyObject *callable,
+                      PyObject *const *args, Py_ssize_t nargs)
+{
+    PyWrapperDescrObject *descr;
+    PyObject *self;
+    PyObject *result = NULL;
+
+    /* The wrapped slot can call this wrapper again,
+       e.g. with "__repr__ = object.__str__" */
+    if (_Py_EnterRecursiveCallTstate(tstate, " while calling a Python object")) {
+        return NULL;
+    }
+    if (Py_IS_TYPE(callable, &PyWrapperDescr_Type)) {
+        descr = (PyWrapperDescrObject *)callable;
+        if (wrapperdescr_check_self(descr, args, nargs) < 0) {
+            goto done;
+        }
+        self = args[0];
+        args++;
+        nargs--;
+    }
+    else {
+        assert(Py_IS_TYPE(callable, &_PyMethodWrapper_Type));
+        descr = ((wrapperobject *)callable)->descr;
+        self = ((wrapperobject *)callable)->self;
+    }
+
+    Py_INCREF(self);
+    PyObject *held[2];  /* no array variant takes more arguments */
+    _Py_wrapperfunc_fast fast = _PyType_GetFastWrapper(descr->d_base);
+    if (fast != NULL && nargs <= (Py_ssize_t)Py_ARRAY_LENGTH(held)) {
+        for (Py_ssize_t i = 0; i < nargs; i++) {
+            held[i] = Py_NewRef(args[i]);
+        }
+        result = fast(self, held, nargs, descr->d_wrapped);
+        for (Py_ssize_t i = 0; i < nargs; i++) {
+            Py_DECREF(held[i]);
+        }
+    }
+    else {
+        PyObject *argstuple = PyTuple_FromArray(args, nargs);
+        if (argstuple != NULL) {
+            result = wrapperdescr_raw_call(descr, self, argstuple, NULL);
+            Py_DECREF(argstuple);
+        }
+    }
+    Py_DECREF(self);
+
+done:
+    _Py_LeaveRecursiveCallTstate(tstate);
+    return result;
 }
 
 static int
