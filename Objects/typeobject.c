@@ -12958,7 +12958,17 @@ do_super_lookup(superobject *su, PyTypeObject *su_type, PyObject *su_obj,
 
     res = _PySuper_LookupDescr(su_type, su_obj_type, name);
     if (res != NULL) {
-        if (method && _PyType_HasFeature(Py_TYPE(res), Py_TPFLAGS_METHOD_DESCRIPTOR)) {
+        /* A method descriptor is only bound to 'su_obj' by an instance-mode
+           super: for super(type, cls), it is called unbound.  'su_obj' can
+           be a type too: a class is an instance of its metaclass.
+           Objects with the generic tp_getattro were the only ones accepted
+           before, even if 'su_obj_type' is their __class__ and not their
+           type: keep accepting them. */
+        if (method && _PyType_HasFeature(Py_TYPE(res), Py_TPFLAGS_METHOD_DESCRIPTOR)
+            && ((su_obj != (PyObject *)su_obj_type
+                 && Py_IS_TYPE(su_obj, su_obj_type))
+                || Py_TYPE(su_obj)->tp_getattro == PyObject_GenericGetAttr))
+        {
             *method = 1;
         }
         else {

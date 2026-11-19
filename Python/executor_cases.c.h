@@ -11799,8 +11799,7 @@
                 ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
                 _PyFrame_SetStackPointer(frame, stack_pointer);
                 _PyFrame_StackPointerValidate(frame);
-                attr_o = _PySuper_Lookup(cls, self, name,
-                    Py_TYPE(self)->tp_getattro == PyObject_GenericGetAttr ? method_found_ptr : NULL);
+                attr_o = _PySuper_Lookup(cls, self, name, method_found_ptr);
                 _PyFrame_StackPointerInvalidate(frame);
             }
             if (attr_o == NULL) {

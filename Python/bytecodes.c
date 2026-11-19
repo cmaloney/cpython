@@ -2762,8 +2762,7 @@ dummy_func(
             {
                 // scope to tell MSVC that method_found_ptr is not escaping
                 int *method_found_ptr = &method_found;
-                attr_o = _PySuper_Lookup(cls, self, name,
-                    Py_TYPE(self)->tp_getattro == PyObject_GenericGetAttr ? method_found_ptr : NULL);
+                attr_o = _PySuper_Lookup(cls, self, name, method_found_ptr);
             }
             if (attr_o == NULL) {
                 ERROR_NO_POP();
