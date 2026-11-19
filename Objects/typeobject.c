@@ -10291,6 +10291,34 @@ wrap_call(PyObject *self, PyObject *args, void *wrapped, PyObject *kwds)
     return (*func)(self, args, kwds);
 }
 
+/* The array variant of wrap_call(), for a call without keyword arguments */
+static PyObject *
+wrap_call_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
+               void *wrapped)
+{
+    ternaryfunc func = (ternaryfunc)wrapped;
+
+    if (func == PyVectorcall_Call) {
+        /* The slot only unpacks the tuple to call the vectorcall function
+           of the object: call it */
+        Py_ssize_t offset = Py_TYPE(self)->tp_vectorcall_offset;
+        vectorcallfunc vectorcall = NULL;
+        if (offset > 0) {
+            memcpy(&vectorcall, (char *)self + offset, sizeof(vectorcall));
+        }
+        if (vectorcall != NULL) {
+            return vectorcall(self, args, nargs, NULL);
+        }
+    }
+    PyObject *argstuple = PyTuple_FromArray(args, nargs);
+    if (argstuple == NULL) {
+        return NULL;
+    }
+    PyObject *result = (*func)(self, argstuple, NULL);
+    Py_DECREF(argstuple);
+    return result;
+}
+
 static PyObject *
 wrap_del_fast(PyObject *self, PyObject *const *args, Py_ssize_t nargs,
               void *wrapped)
@@ -10525,6 +10553,7 @@ static const struct {
 #define X(NAME) {NAME, NAME##_fast},
     FAST_WRAPPERS(X)
 #undef X
+    {_Py_FUNC_CAST(wrapperfunc, wrap_call), wrap_call_fast},
 };
 
 static PyObject *

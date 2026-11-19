@@ -1513,7 +1513,7 @@ _PyWrapper_Vectorcall(PyThreadState *tstate, PyObject *callable,
     }
 
     Py_INCREF(self);
-    PyObject *held[2];  /* no array variant takes more arguments */
+    PyObject *held[3];  /* only __call__ can take more arguments */
     _Py_wrapperfunc_fast fast = _PyType_GetFastWrapper(descr->d_base);
     if (fast != NULL && nargs <= (Py_ssize_t)Py_ARRAY_LENGTH(held)) {
         for (Py_ssize_t i = 0; i < nargs; i++) {
