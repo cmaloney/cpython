@@ -5009,6 +5009,9 @@ skip_optional:
     return return_value;
 }
 
+#define VC_POSORKW_INIT_METHODDEF    \
+    {"__init__", _PyCFunction_CAST(vc_posorkw_init_fast), METH_FASTCALL|METH_KEYWORDS, NULL},
+
 static int
 vc_posorkw_init_impl(PyObject *self, PyObject *a, PyObject *b);
 
@@ -5076,6 +5079,18 @@ vc_posorkw_init(PyObject *self, PyObject *args, PyObject *kwargs)
         PyTuple_GET_SIZE(args),
         kwargs ? PyDict_GET_SIZE(kwargs) : 0,
         kwargs, NULL);
+}
+
+static inline PyObject *
+vc_posorkw_init_fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    if (vc_posorkw_init_helper(self, args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
 }
 
 static PyObject *
@@ -5309,4 +5324,4 @@ vc_kwonly_vectorcall(PyObject *type, PyObject *const *args,
         kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
         NULL, kwnames);
 }
-/*[clinic end generated code: output=b54b37db716469cd input=a9049054013a1b77]*/
+/*[clinic end generated code: output=9aa4184206c8d108 input=a9049054013a1b77]*/

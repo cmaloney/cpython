@@ -184,6 +184,23 @@ METHODDEF_PROTOTYPE_DEFINE: Final[str] = libclinic.normalize_snippet(r"""
     #define {methoddef_name}    \
         {{"{name}", {methoddef_cast}{c_basename}{methoddef_cast_end}, {methoddef_flags}, {c_basename}__doc__}},
 """)
+INIT_FAST_DEFINITION: Final[str] = libclinic.normalize_snippet("""
+    static inline PyObject *
+    {c_basename}_fast(PyObject *self, PyObject *const *args,
+        Py_ssize_t nargs, PyObject *kwnames)
+    {{
+        if ({c_basename}_helper(self, args, nargs,
+                kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+                NULL, kwnames) < 0) {{
+            return NULL;
+        }}
+        Py_RETURN_NONE;
+    }}
+""")
+INIT_FAST_METHODDEF_DEFINE: Final[str] = libclinic.normalize_snippet(r"""
+    #define {methoddef_name}    \
+        {{"__init__", _PyCFunction_CAST({c_basename}_fast), METH_FASTCALL|METH_KEYWORDS, NULL}},
+""")
 # An accessor which is compiled conditionally announces the function which
 # implements it.  Only the preprocessor knows which of them are compiled, so
 # the entry is composed of these announcements
@@ -1480,6 +1497,12 @@ class ParseArgsCodeGen:
             '        kwargs, NULL);',
             '}}',
         ])
+        if self.func.kind is METHOD_INIT:
+            # tp_init taking an array of arguments.  A type adds the entry
+            # to its tp_methods to have the "__init__" slot wrapper call it
+            # without creating a tuple and a dict.
+            self.parser_definition += '\n\n' + INIT_FAST_DEFINITION
+            self.methoddef_define = INIT_FAST_METHODDEF_DEFINE
 
     def _new_or_init_parser_body(self) -> None:
         """Rebuild the parser body with the checks tp_new / tp_init need."""

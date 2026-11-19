@@ -87,6 +87,9 @@ bytearray_setitem(PyObject *self, Py_ssize_t i, PyObject *value)
     return return_value;
 }
 
+#define BYTEARRAY___INIT___METHODDEF    \
+    {"__init__", _PyCFunction_CAST(bytearray___init___fast), METH_FASTCALL|METH_KEYWORDS, NULL},
+
 static int
 bytearray___init___impl(PyByteArrayObject *self, PyObject *arg,
                         const char *encoding, const char *errors);
@@ -179,6 +182,18 @@ bytearray___init__(PyObject *self, PyObject *args, PyObject *kwargs)
         PyTuple_GET_SIZE(args),
         kwargs ? PyDict_GET_SIZE(kwargs) : 0,
         kwargs, NULL);
+}
+
+static inline PyObject *
+bytearray___init___fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    if (bytearray___init___helper(self, args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
 }
 
 static PyObject *
@@ -2037,4 +2052,4 @@ bytearray_sizeof(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
     return bytearray_sizeof_impl((PyByteArrayObject *)self);
 }
-/*[clinic end generated code: output=b8e659fe4b2f770e input=a9049054013a1b77]*/
+/*[clinic end generated code: output=4f221ceb22d4f30b input=a9049054013a1b77]*/

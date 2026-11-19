@@ -367,6 +367,9 @@ BaseExceptionGroup_subgroup(PyObject *self, PyObject *matcher_value)
     return return_value;
 }
 
+#define IMPORTERROR_INIT_METHODDEF    \
+    {"__init__", _PyCFunction_CAST(ImportError_init_fast), METH_FASTCALL|METH_KEYWORDS, NULL},
+
 static int
 ImportError_init_impl(PyImportErrorObject *self, PyObject *args,
                       PyObject *name, PyObject *path, PyObject *name_from);
@@ -455,6 +458,18 @@ ImportError_init(PyObject *self, PyObject *args, PyObject *kwargs)
         kwargs, NULL);
 }
 
+static inline PyObject *
+ImportError_init_fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    if (ImportError_init_helper(self, args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
 static PyObject *
 ImportError_vectorcall(PyObject *type, PyObject *const *args,
     size_t nargsf, PyObject *kwnames)
@@ -481,6 +496,9 @@ ImportError_vectorcall(PyObject *type, PyObject *const *args,
     }
     return self;
 }
+
+#define NAMEERROR_INIT_METHODDEF    \
+    {"__init__", _PyCFunction_CAST(NameError_init_fast), METH_FASTCALL|METH_KEYWORDS, NULL},
 
 static int
 NameError_init_impl(PyNameErrorObject *self, PyObject *args, PyObject *name);
@@ -555,6 +573,18 @@ NameError_init(PyObject *self, PyObject *args, PyObject *kwargs)
         kwargs, NULL);
 }
 
+static inline PyObject *
+NameError_init_fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    if (NameError_init_helper(self, args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
 static PyObject *
 NameError_vectorcall(PyObject *type, PyObject *const *args,
     size_t nargsf, PyObject *kwnames)
@@ -581,6 +611,9 @@ NameError_vectorcall(PyObject *type, PyObject *const *args,
     }
     return self;
 }
+
+#define ATTRIBUTEERROR_INIT_METHODDEF    \
+    {"__init__", _PyCFunction_CAST(AttributeError_init_fast), METH_FASTCALL|METH_KEYWORDS, NULL},
 
 static int
 AttributeError_init_impl(PyAttributeErrorObject *self, PyObject *args,
@@ -663,6 +696,18 @@ AttributeError_init(PyObject *self, PyObject *args, PyObject *kwargs)
         kwargs, NULL);
 }
 
+static inline PyObject *
+AttributeError_init_fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    if (AttributeError_init_helper(self, args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
 static PyObject *
 AttributeError_vectorcall(PyObject *type, PyObject *const *args,
     size_t nargsf, PyObject *kwnames)
@@ -697,4 +742,4 @@ AttributeError_vectorcall(PyObject *type, PyObject *const *args,
 
 #define BASEEXCEPTION___CAUSE___GETSETDEF {"__cause__", (getter)BaseException___cause___get, (setter)BaseException___cause___set, NULL},
 
-/*[clinic end generated code: output=c8eaffee13bc041d input=a9049054013a1b77]*/
+/*[clinic end generated code: output=a14b30e5204f7f28 input=a9049054013a1b77]*/

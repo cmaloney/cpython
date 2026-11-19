@@ -712,6 +712,9 @@ PyDoc_STRVAR(_io_BytesIO___init____doc__,
 "\n"
 "Buffered I/O implementation using an in-memory bytes buffer.");
 
+#define _IO_BYTESIO___INIT___METHODDEF    \
+    {"__init__", _PyCFunction_CAST(_io_BytesIO___init___fast), METH_FASTCALL|METH_KEYWORDS, NULL},
+
 static int
 _io_BytesIO___init___impl(bytesio *self, PyObject *initvalue);
 
@@ -777,6 +780,18 @@ _io_BytesIO___init__(PyObject *self, PyObject *args, PyObject *kwargs)
         PyTuple_GET_SIZE(args),
         kwargs ? PyDict_GET_SIZE(kwargs) : 0,
         kwargs, NULL);
+}
+
+static inline PyObject *
+_io_BytesIO___init___fast(PyObject *self, PyObject *const *args,
+    Py_ssize_t nargs, PyObject *kwnames)
+{
+    if (_io_BytesIO___init___helper(self, args, nargs,
+            kwnames ? PyTuple_GET_SIZE(kwnames) : 0,
+            NULL, kwnames) < 0) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
 }
 
 static PyObject *
@@ -856,4 +871,4 @@ _io_BytesIO___sizeof__(PyObject *self, PyObject *Py_UNUSED(ignored))
 }
 #define _IO_BYTESIO_CLOSED_GETSETDEF {"closed", (getter)_io_BytesIO_closed_get, (setter)NULL, _io_BytesIO_closed__doc__},
 
-/*[clinic end generated code: output=b9d367ad8e0b44d2 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=5ce42e6392400e2f input=a9049054013a1b77]*/
