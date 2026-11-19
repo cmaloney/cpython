@@ -3,6 +3,7 @@
 #include "Python.h"
 #include "pycore_abstract.h"      // _PySequence_IterSearch()
 #include "pycore_call.h"          // _PyObject_VectorcallTstate()
+#include "pycore_ceval.h"         // _Py_EnterRecursiveCallTstate()
 #include "pycore_code.h"          // CO_FAST_FREE
 #include "pycore_descrobject.h"   // _PyMember_GetOffset()
 #include "pycore_dict.h"          // _PyDict_KeysSize()
@@ -10638,6 +10639,91 @@ add_tp_new_wrapper(PyTypeObject *type)
 /* Slot wrappers that call the corresponding __foo__ slot.  See comments
    below at override_slots() for more explanation. */
 
+/* A generic slot function found 'func' as the special method of 'self'.
+   If it is a slot wrapper of a base type which would only pass its
+   arguments to a C slot function with the signature of 'wrapper', return
+   that function, to call it without the wrapper: the generic slot function
+   has the same arguments.  Otherwise return NULL.
+
+   This happens when several special methods share a slot and a class
+   overrides only some of them (__eq__ and not __ne__, or __delitem__ and not
+   __setitem__): update_one_slot() cannot put the C function in the slot.
+
+   As when calling the wrapper, the caller must check for recursion (the C
+   function can call the slot again, e.g. with "__repr__ = object.__str__")
+   and hold a reference to each argument during the call. */
+static inline void *
+wrapped_slot(PyObject *self, PyObject *func, wrapperfunc wrapper)
+{
+    if (!Py_IS_TYPE(func, &PyWrapperDescr_Type)) {
+        return NULL;
+    }
+    PyWrapperDescrObject *descr = (PyWrapperDescrObject *)func;
+    if (descr->d_base->wrapper != wrapper
+        || !PyObject_TypeCheck(self, PyDescr_TYPE(descr)))
+    {
+        return NULL;
+    }
+    return descr->d_wrapped;
+}
+
+/* Common code of the slots which set a value, or delete it if it is NULL:
+   call the special method 'set_name' or 'del_name'.  'set_wrapper' and
+   'del_wrapper' are the slot wrappers of these methods for this slot. */
+static int
+slot_set_or_del(PyObject *self, PyObject *arg, PyObject *value,
+                PyObject *set_name, wrapperfunc set_wrapper,
+                PyObject *del_name, wrapperfunc del_wrapper)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *name = value != NULL ? set_name : del_name;
+    wrapperfunc wrapper = value != NULL ? set_wrapper : del_wrapper;
+    int res = -1;
+    _PyCStackRef cref;
+    _PyThreadState_PushCStackRef(tstate, &cref);
+    int unbound = lookup_method(self, name, &cref.ref);
+    if (unbound < 0) {
+        goto done;
+    }
+    PyObject *func = PyStackRef_AsPyObjectBorrow(cref.ref);
+    /* objobjargproc, setattrofunc and descrsetfunc are the same type */
+    objobjargproc slot = NULL;
+    if (unbound) {
+        slot = (objobjargproc)wrapped_slot(self, func, wrapper);
+    }
+    if (slot != NULL) {
+        if (_Py_EnterRecursiveCallTstate(tstate,
+                                         " while calling a Python object")) {
+            goto done;
+        }
+        if ((wrapper != wrap_setattr && wrapper != wrap_delattr)
+            || hackcheck(self, (setattrofunc)slot,
+                         value != NULL ? "__setattr__" : "__delattr__"))
+        {
+            Py_INCREF(self);
+            Py_INCREF(arg);
+            Py_XINCREF(value);
+            res = slot(self, arg, value) < 0 ? -1 : 0;
+            Py_DECREF(self);
+            Py_DECREF(arg);
+            Py_XDECREF(value);
+        }
+        _Py_LeaveRecursiveCallTstate(tstate);
+    }
+    else {
+        PyObject *stack[3] = {self, arg, value};
+        PyObject *retval = vectorcall_unbound(tstate, unbound, func, stack,
+                                              value != NULL ? 3 : 2);
+        if (retval != NULL) {
+            Py_DECREF(retval);
+            res = 0;
+        }
+    }
+done:
+    _PyThreadState_PopCStackRef(tstate, &cref);
+    return res;
+}
+
 #define SLOT0(FUNCNAME, DUNDER) \
 static PyObject * \
 FUNCNAME(PyObject *self) \
@@ -10834,23 +10920,9 @@ SLOT1(slot_mp_subscript, __getitem__, PyObject *)
 static int
 slot_mp_ass_subscript(PyObject *self, PyObject *key, PyObject *value)
 {
-    PyObject *stack[3];
-    PyObject *res;
-
-    stack[0] = self;
-    stack[1] = key;
-    if (value == NULL) {
-        res = vectorcall_method(&_Py_ID(__delitem__), stack, 2);
-    }
-    else {
-        stack[2] = value;
-        res = vectorcall_method(&_Py_ID(__setitem__), stack, 3);
-    }
-
-    if (res == NULL)
-        return -1;
-    Py_DECREF(res);
-    return 0;
+    return slot_set_or_del(self, key, value,
+                           &_Py_ID(__setitem__), wrap_objobjargproc,
+                           &_Py_ID(__delitem__), wrap_delitem);
 }
 
 SLOT1BIN(slot_nb_add, nb_add, __add__, __radd__)
@@ -11158,22 +11230,9 @@ _Py_slot_tp_getattr_hook(PyObject *self, PyObject *name)
 static int
 slot_tp_setattro(PyObject *self, PyObject *name, PyObject *value)
 {
-    PyObject *stack[3];
-    PyObject *res;
-
-    stack[0] = self;
-    stack[1] = name;
-    if (value == NULL) {
-        res = vectorcall_method(&_Py_ID(__delattr__), stack, 2);
-    }
-    else {
-        stack[2] = value;
-        res = vectorcall_method(&_Py_ID(__setattr__), stack, 3);
-    }
-    if (res == NULL)
-        return -1;
-    Py_DECREF(res);
-    return 0;
+    return slot_set_or_del(self, name, value,
+                           &_Py_ID(__setattr__), wrap_setattr,
+                           &_Py_ID(__delattr__), wrap_delattr);
 }
 
 static PyObject *name_op[] = {
@@ -11185,10 +11244,45 @@ static PyObject *name_op[] = {
     &_Py_ID(__ge__),
 };
 
+static const wrapperfunc wrapper_op[] = {
+    richcmp_lt,
+    richcmp_le,
+    richcmp_eq,
+    richcmp_ne,
+    richcmp_gt,
+    richcmp_ge,
+};
+
 static PyObject *
 slot_tp_richcompare(PyObject *self, PyObject *other, int op)
 {
-    PyObject *res = _PyObject_MaybeCallSpecialOneArg(self, name_op[op], other);
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *res = NULL;
+    _PyCStackRef cref;
+    _PyThreadState_PushCStackRef(tstate, &cref);
+    int unbound = lookup_maybe_method(self, name_op[op], &cref.ref);
+    PyObject *func = PyStackRef_AsPyObjectBorrow(cref.ref);
+    richcmpfunc slot = NULL;
+    if (func != NULL && unbound) {
+        slot = (richcmpfunc)wrapped_slot(self, func, wrapper_op[op]);
+    }
+    if (slot != NULL) {
+        /* An inherited comparison, e.g. object.__ne__ */
+        if (!_Py_EnterRecursiveCallTstate(tstate,
+                                          " while calling a Python object")) {
+            Py_INCREF(self);
+            Py_INCREF(other);
+            res = slot(self, other, op);
+            Py_DECREF(self);
+            Py_DECREF(other);
+            _Py_LeaveRecursiveCallTstate(tstate);
+        }
+    }
+    else if (func != NULL) {
+        PyObject *args[] = { self, other };
+        res = vectorcall_unbound(tstate, unbound, func, args, 2);
+    }
+    _PyThreadState_PopCStackRef(tstate, &cref);
     if (res == NULL) {
         if (PyErr_Occurred()) {
             return NULL;
@@ -11275,22 +11369,9 @@ slot_tp_descr_get(PyObject *self, PyObject *obj, PyObject *type)
 static int
 slot_tp_descr_set(PyObject *self, PyObject *target, PyObject *value)
 {
-    PyObject* stack[3];
-    PyObject *res;
-
-    stack[0] = self;
-    stack[1] = target;
-    if (value == NULL) {
-        res = vectorcall_method(&_Py_ID(__delete__), stack, 2);
-    }
-    else {
-        stack[2] = value;
-        res = vectorcall_method(&_Py_ID(__set__), stack, 3);
-    }
-    if (res == NULL)
-        return -1;
-    Py_DECREF(res);
-    return 0;
+    return slot_set_or_del(self, target, value,
+                           &_Py_ID(__set__), wrap_descr_set,
+                           &_Py_ID(__delete__), wrap_descr_delete);
 }
 
 static int
