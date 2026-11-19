@@ -22,6 +22,14 @@ typedef propertyobject _PyPropertyObject;
 
 extern PyTypeObject _PyMethodWrapper_Type;
 
+// A wrapperfunc taking its arguments (without self) as an array
+typedef PyObject *(*_Py_wrapperfunc_fast)(PyObject *self,
+                                          PyObject *const *args,
+                                          Py_ssize_t nargs, void *wrapped);
+
+extern void *_PyType_GetFastWrapper(PyTypeObject *type,
+                                    struct wrapperbase *base, void *wrapped);
+
 extern void *_PyMember_GetOffset(PyObject *, PyMemberDef *);
 
 #ifdef __cplusplus

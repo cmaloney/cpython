@@ -55,6 +55,8 @@ typedef struct {
     PyDescr_COMMON;
     struct wrapperbase *d_base;
     void *d_wrapped; /* This can be any function pointer */
+    vectorcallfunc vectorcall;  /* NULL if d_fast is NULL */
+    void *d_fast;  /* See _PyType_GetFastWrapper() */
 } PyWrapperDescrObject;
 
 PyAPI_FUNC(PyObject *) PyDescr_NewWrapper(PyTypeObject *,

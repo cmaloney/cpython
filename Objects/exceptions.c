@@ -93,6 +93,23 @@ BaseException_init(PyObject *op, PyObject *args, PyObject *kwds)
 }
 
 
+/* tp_init taking an array: see _PyType_GetFastWrapper() */
+static PyObject *
+BaseException_init_fast(PyObject *op, PyObject *const *args, Py_ssize_t nargs,
+                        PyObject *kwnames)
+{
+    PyBaseExceptionObject *self = PyBaseExceptionObject_CAST(op);
+    if (!_PyArg_NoKwnames(Py_TYPE(self)->tp_name, kwnames)) {
+        return NULL;
+    }
+    PyObject *args_tuple = PyTuple_FromArray(args, nargs);
+    if (args_tuple == NULL) {
+        return NULL;
+    }
+    Py_XSETREF(self->args, args_tuple);
+    Py_RETURN_NONE;
+}
+
 static PyObject *
 BaseException_vectorcall(PyObject *type_obj, PyObject * const*args,
                          size_t nargsf, PyObject *kwnames)
@@ -321,6 +338,8 @@ static PyMethodDef BaseException_methods[] = {
     BASEEXCEPTION___SETSTATE___METHODDEF
     BASEEXCEPTION_WITH_TRACEBACK_METHODDEF
     BASEEXCEPTION_ADD_NOTE_METHODDEF
+    {"__init__", _PyCFunction_CAST(BaseException_init_fast),
+     METH_FASTCALL | METH_KEYWORDS, NULL},
     {NULL, NULL, 0, NULL},
 };
 
