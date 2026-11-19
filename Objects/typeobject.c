@@ -10732,10 +10732,19 @@ slot_set_or_del(PyObject *self, PyObject *arg, PyObject *value,
             Py_INCREF(self);
             Py_INCREF(arg);
             Py_XINCREF(value);
-            res = slot(self, arg, value) < 0 ? -1 : 0;
+            int r = slot(self, arg, value);
             Py_DECREF(self);
             Py_DECREF(arg);
             Py_XDECREF(value);
+            /* Same result as the wrapper, also for a slot which returns
+               without an exception or with an unexpected one */
+            int failed = (wrapper == wrap_objobjargproc
+                          || wrapper == wrap_delitem)
+                         ? (r == -1 && _PyErr_Occurred(tstate)) : r < 0;
+            if (_Py_CheckFunctionResult(tstate, func, failed ? NULL : Py_None,
+                                        NULL) != NULL) {
+                res = 0;
+            }
         }
         _Py_LeaveRecursiveCallTstate(tstate);
     }
@@ -11304,6 +11313,7 @@ slot_tp_richcompare(PyObject *self, PyObject *other, int op)
             res = slot(self, other, op);
             Py_DECREF(self);
             Py_DECREF(other);
+            res = _Py_CheckFunctionResult(tstate, func, res, NULL);
             _Py_LeaveRecursiveCallTstate(tstate);
         }
     }
