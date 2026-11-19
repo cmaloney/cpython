@@ -115,12 +115,12 @@ id(42)
         cmd = textwrap.dedent('''
             class MyList(list):
                 def __init__(self):
-                    super(*[]).__init__()   # wrapper_call()
+                    super(*[]).__init__()   # _PyWrapper_Vectorcall()
 
             id("first break point")
             l = MyList()
         ''')
-        cmds_after_breakpoint = ['break wrapper_call', 'continue']
+        cmds_after_breakpoint = ['break _PyWrapper_Vectorcall', 'continue']
         if CET_PROTECTION:
             # bpo-32962: same case as in get_stack_trace():
             # we need an additional 'next' command in order to read

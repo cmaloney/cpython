@@ -1835,8 +1835,8 @@ class Frame(object):
             except RuntimeError:
                 return 'PyCFunction invocation (unable to read %s)' % arg_name
 
-        if caller == 'wrapper_call':
-            arg_name = 'wp'
+        if caller in ('wrapper_call', '_PyWrapper_Vectorcall'):
+            arg_name = 'wp' if caller == 'wrapper_call' else 'callable'
             try:
                 func = frame.read_var(arg_name)
                 return str(func)
