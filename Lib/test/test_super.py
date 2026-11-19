@@ -467,6 +467,41 @@ class TestSuper(unittest.TestCase):
         for _ in range(_testinternalcapi.SPECIALIZATION_THRESHOLD):
             test("foo1")
 
+    def test_classmethod_generic_metaclass_getattro(self):
+        class Meta(type):
+            __getattribute__ = object.__getattribute__
+
+        class A(metaclass=Meta):
+            def f(self, x=None):
+                return self, x
+
+        class B(A):
+            @classmethod
+            def g(cls):
+                return super().f(1)
+
+        g = B.__dict__['g'].__get__(None, B)
+        _testinternalcapi = import_helper.import_module("_testinternalcapi")
+        for _ in range(_testinternalcapi.SPECIALIZATION_THRESHOLD):
+            self.assertEqual(g(), (1, None))
+
+    def test_method_of_another_type(self):
+        class A:
+            m = dict.__setitem__
+
+        class B(A):
+            def __getattribute__(self, name):
+                return object.__getattribute__(self, name)
+
+            def f(self):
+                # binding fails before the arguments are evaluated
+                super().m(1 / 0, 2)
+
+        _testinternalcapi = import_helper.import_module("_testinternalcapi")
+        for _ in range(_testinternalcapi.SPECIALIZATION_THRESHOLD):
+            with self.assertRaisesRegex(TypeError, "doesn't apply"):
+                B().f()
+
     def test_reassigned_new(self):
         class A:
             def __new__(cls):

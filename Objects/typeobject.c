@@ -12997,16 +12997,19 @@ do_super_lookup(superobject *su, PyTypeObject *su_type, PyObject *su_obj,
 
     res = _PySuper_LookupDescr(su_type, su_obj_type, name);
     if (res != NULL) {
-        /* A method descriptor is only bound to 'su_obj' by an instance-mode
-           super: for super(type, cls), it is called unbound.  'su_obj' can
-           be a type too: a class is an instance of its metaclass.
-           Objects with the generic tp_getattro were the only ones accepted
-           before, even if 'su_obj_type' is their __class__ and not their
-           type: keep accepting them. */
+        /* Leave a method descriptor unbound if calling it with 'su_obj' does
+           what calling the bound method does.  A class-mode super binds
+           nothing.  'su_obj' can be a type: a class is an instance of its
+           metaclass.  A slot wrapper or a method of another type fails when
+           bound, before the arguments are evaluated: bind it.  Objects with
+           the generic tp_getattro always got the unbound method. */
         if (method && _PyType_HasFeature(Py_TYPE(res), Py_TPFLAGS_METHOD_DESCRIPTOR)
-            && ((su_obj != (PyObject *)su_obj_type
-                 && Py_IS_TYPE(su_obj, su_obj_type))
-                || Py_TYPE(su_obj)->tp_getattro == PyObject_GenericGetAttr))
+            && su_obj != (PyObject *)su_obj_type
+            && (Py_TYPE(su_obj)->tp_getattro == PyObject_GenericGetAttr
+                || (Py_IS_TYPE(su_obj, su_obj_type)
+                    && ((!Py_IS_TYPE(res, &PyWrapperDescr_Type)
+                         && !Py_IS_TYPE(res, &PyMethodDescr_Type))
+                        || PyObject_TypeCheck(su_obj, PyDescr_TYPE(res))))))
         {
             *method = 1;
         }
