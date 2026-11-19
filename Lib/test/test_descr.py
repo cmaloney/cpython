@@ -1,4 +1,5 @@
 import builtins
+import collections
 import copyreg
 import gc
 import itertools
@@ -5270,6 +5271,112 @@ class ClassPropertiesAndMethods(unittest.TestCase):
         acc = itertools.accumulate(source(), list.__contains__)
         next(acc)
         self.assertIs(next(acc), False)
+
+    def test_method_wrapper_holds_arguments(self):
+        # Same as above for a bound slot wrapper: the OrderedDict hashes
+        # the total, which accumulate() releases when __hash__() calls it
+        # again, and then stores it.
+        again = True
+        class Evil:
+            def __hash__(self):
+                nonlocal again
+                if again:
+                    again = False
+                    next(acc)
+                    d.clear()
+                return 1
+        def source():
+            yield Evil()
+            yield from range(5)
+        d = collections.OrderedDict()
+        acc = itertools.accumulate(source(), d.__setitem__)
+        next(acc)
+        self.assertIsNone(next(acc))
+        gc.collect()
+        self.assertEqual([(type(k), hash(k), v) for k, v in d.items()],
+                         [(Evil, 1, 0)])
+
+    def test_method_wrapper_calls(self):
+        # Calls of bound slot wrappers, with an array and with a tuple
+        add = (40).__add__
+        self.assertEqual(add(2), 42)
+        self.assertEqual(add(*(2,)), 42)
+        self.assertEqual(add(*(2,), **{}), 42)
+        with self.assertRaisesRegex(TypeError, "expected 1 argument, got 0"):
+            add()
+        with self.assertRaisesRegex(TypeError, "expected 1 argument, got 5"):
+            add(1, 2, 3, 4, 5)
+        with self.assertRaisesRegex(TypeError, "expected 1 argument, got 5"):
+            add(*range(5))
+        with self.assertRaisesRegex(TypeError,
+                                    r"wrapper __add__\(\) takes no keyword"):
+            add(2, x=1)
+        with self.assertRaisesRegex(TypeError,
+                                    r"wrapper __add__\(\) takes no keyword"):
+            add(*(2,), **{'x': 1})
+        lst = [1, 2, 3]
+        self.assertEqual(lst.__len__(), 3)
+        setitem = lst.__setitem__
+        self.assertIsNone(setitem(0, 'a'))
+        self.assertIsNone(setitem(*(1, 'b')))
+        self.assertEqual(lst, ['a', 'b', 3])
+        self.assertEqual(list(iter(iter(lst).__next__, 3)), ['a', 'b'])
+        # wrappers taking keyword arguments
+        class C:
+            def __init__(self, *args, **kwargs):
+                init = super().__init__
+                init(*args, **kwargs)
+        C()
+        with self.assertRaisesRegex(TypeError, "takes exactly one argument"):
+            C(1)
+        with self.assertRaisesRegex(TypeError, "takes exactly one argument"):
+            C(x=1)
+        d = {}
+        init = d.__init__
+        init(x=1)
+        self.assertEqual(d, {'x': 1})
+        init(*({'y': 2},), **{'z': 3})
+        self.assertEqual(d, {'x': 1, 'y': 2, 'z': 3})
+        call = len.__call__
+        self.assertEqual(call(lst), 3)
+        self.assertEqual(call(*(lst,)), 3)
+        e = ValueError()
+        e.__init__(1, 2)
+        getattr(e, '__init__')(3, 4)
+        self.assertEqual(e.args, (3, 4))
+
+    def test_method_wrapper_recursion(self):
+        class A:
+            def __repr__(self):
+                return getattr(self, '__str__')()
+        with self.assertRaises(RecursionError):
+            with support.infinite_recursion():
+                repr(A())
+
+    def test_classmethod_descriptor_calls(self):
+        fromkeys = dict.__dict__['fromkeys']
+        self.assertEqual(fromkeys(dict, 'ab'), {'a': None, 'b': None})
+        self.assertEqual(fromkeys(dict, 'ab', 1), {'a': 1, 'b': 1})
+        self.assertEqual(fromkeys(*(dict, 'ab', 1)), {'a': 1, 'b': 1})
+        class D(dict):
+            pass
+        self.assertIs(type(fromkeys(D, 'ab')), D)
+        with self.assertRaisesRegex(TypeError, "needs an argument"):
+            fromkeys()
+        with self.assertRaisesRegex(TypeError, "needs an argument"):
+            fromkeys(*())
+        with self.assertRaisesRegex(TypeError, "needs a type, not a 'int'"):
+            fromkeys(1, 'ab')
+        with self.assertRaisesRegex(TypeError, "requires a subtype of 'dict'"):
+            fromkeys(list, 'ab')
+        with self.assertRaisesRegex(TypeError, "takes no keyword arguments"):
+            fromkeys(dict, 'ab', value=1)
+        with self.assertRaisesRegex(TypeError, "takes no keyword arguments"):
+            fromkeys(*(dict, 'ab'), **{'value': 1})
+        from_bytes = int.__dict__['from_bytes']
+        self.assertEqual(from_bytes(int, b'\x01\x00', byteorder='little'), 1)
+        self.assertEqual(from_bytes(*(int, b'\x01\x00'),
+                                    **{'byteorder': 'little'}), 1)
 
     def test_mixing_slot_wrappers(self):
         class X(dict):

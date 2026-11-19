@@ -1774,7 +1774,7 @@ class SizeofTest(unittest.TestCase):
         # wrapper_descriptor (descriptor object)
         check(int.__add__, size('3P4P'))
         # method-wrapper (descriptor object)
-        check({}.__iter__, size('2P'))
+        check({}.__iter__, size('3P'))
         # empty dict
         check({}, size('nQ2P'))
         # dict (string key)
