@@ -26,8 +26,9 @@
 /*[clinic input]
 module _json
 class _json.make_encoder "PyEncoderObject *" ""
+class _json.Scanner "PyObject *" "&PyScannerType_spec"
 [clinic start generated code]*/
-/*[clinic end generated code: output=da39a3ee5e6b4b0d input=f3373cb3d646c5f1]*/
+/*[clinic end generated code: output=da39a3ee5e6b4b0d input=07ca1722003bbec6]*/
 
 typedef struct _PyScannerObject {
     PyObject_HEAD
@@ -1202,24 +1203,21 @@ scan_once_unicode(PyScannerObject *s, PyObject *memo, PyObject *pystr, Py_ssize_
     return _match_number_unicode(s, pystr, idx, next_idx_ptr);
 }
 
-static PyObject *
-scanner_call(PyObject *self, PyObject *args, PyObject *kwds)
-{
-    /* Python callable interface to scan_once_{str,unicode} */
-    PyObject *pystr;
-    PyObject *rval;
-    Py_ssize_t idx;
-    Py_ssize_t next_idx = -1;
-    static char *kwlist[] = {"string", "idx", NULL};
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "On:scan_once", kwlist, &pystr, &idx))
-        return NULL;
+/*[clinic input]
+@disable fastcall
+_json.Scanner.scan_once as scanner_call
 
-    if (!PyUnicode_Check(pystr)) {
-        PyErr_Format(PyExc_TypeError,
-                     "first argument must be a string, not %.80s",
-                     Py_TYPE(pystr)->tp_name);
-        return NULL;
-    }
+    string as pystr: unicode
+    idx: Py_ssize_t
+
+[clinic start generated code]*/
+
+static PyObject *
+scanner_call_impl(PyObject *self, PyObject *pystr, Py_ssize_t idx)
+/*[clinic end generated code: output=812e06bd8bbf833b input=7439d5a7a6a986e0]*/
+{
+    PyObject *rval;
+    Py_ssize_t next_idx = -1;
 
     PyObject *memo = PyDict_New();
     if (memo == NULL) {

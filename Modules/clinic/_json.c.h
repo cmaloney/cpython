@@ -130,6 +130,82 @@ exit:
     return return_value;
 }
 
+PyDoc_STRVAR(scanner_call__doc__,
+"scan_once($self, /, string, idx)\n"
+"--\n"
+"\n");
+
+#define SCANNER_CALL_METHODDEF    \
+    {"scan_once", _PyCFunction_CAST(scanner_call), METH_VARARGS|METH_KEYWORDS, scanner_call__doc__},
+
+static PyObject *
+scanner_call_impl(PyObject *self, PyObject *pystr, Py_ssize_t idx);
+
+static PyObject *
+scanner_call(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    PyObject *return_value = NULL;
+    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
+
+    #define NUM_KEYWORDS 2
+    static struct {
+        PyGC_Head _this_is_not_used;
+        PyObject_VAR_HEAD
+        Py_hash_t ob_hash;
+        PyObject *ob_item[NUM_KEYWORDS];
+    } _kwtuple = {
+        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
+        .ob_hash = -1,
+        .ob_item = { &_Py_ID(string), &_Py_ID(idx), },
+    };
+    #undef NUM_KEYWORDS
+    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
+
+    #else  // !Py_BUILD_CORE
+    #  define KWTUPLE NULL
+    #endif  // !Py_BUILD_CORE
+
+    static const char * const _keywords[] = {"string", "idx", NULL};
+    static _PyArg_Parser _parser = {
+        .keywords = _keywords,
+        .fname = "scan_once",
+        .kwtuple = KWTUPLE,
+    };
+    #undef KWTUPLE
+    PyObject *argsbuf[2];
+    PyObject * const *fastargs;
+    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
+    PyObject *pystr;
+    Py_ssize_t idx;
+
+    fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser,
+            /*minpos*/ 2, /*maxpos*/ 2, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
+    if (!fastargs) {
+        goto exit;
+    }
+    if (!PyUnicode_Check(fastargs[0])) {
+        _PyArg_BadArgument("scan_once", "argument 'string'", "str", fastargs[0]);
+        goto exit;
+    }
+    pystr = fastargs[0];
+    {
+        Py_ssize_t ival = -1;
+        PyObject *iobj = _PyNumber_Index(fastargs[1]);
+        if (iobj != NULL) {
+            ival = PyLong_AsSsize_t(iobj);
+            Py_DECREF(iobj);
+        }
+        if (ival == -1 && PyErr_Occurred()) {
+            goto exit;
+        }
+        idx = ival;
+    }
+    return_value = scanner_call_impl(self, pystr, idx);
+
+exit:
+    return return_value;
+}
+
 static PyObject *
 encoder_new_impl(PyTypeObject *type, PyObject *markers, PyObject *defaultfn,
                  PyObject *encoder, PyObject *indent,
@@ -282,4 +358,4 @@ encoder_vectorcall(PyObject *type, PyObject *const *args,
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=19476c429c7246c1 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=642bfac7cabbe84f input=a9049054013a1b77]*/

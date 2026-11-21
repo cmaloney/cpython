@@ -545,6 +545,7 @@ _PyStaticObjects_CheckAll(PyInterpreterState *interp) {
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(id), "id", 2);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(ident), "ident", 5);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(identity_hint), "identity_hint", 13);
+    _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(idx), "idx", 3);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(ignore), "ignore", 6);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(ignorechars), "ignorechars", 11);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(imag), "imag", 4);
