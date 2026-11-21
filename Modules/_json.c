@@ -21,14 +21,12 @@
 
 #include <stdbool.h>              // bool
 
-#include "clinic/_json.c.h"
-
 /*[clinic input]
 module _json
 class _json.make_encoder "PyEncoderObject *" ""
-class _json.Scanner "PyObject *" "&PyScannerType_spec"
+class _json.Scanner "PyScannerObject *" ""
 [clinic start generated code]*/
-/*[clinic end generated code: output=da39a3ee5e6b4b0d input=07ca1722003bbec6]*/
+/*[clinic end generated code: output=da39a3ee5e6b4b0d input=6d0650fd3c1028ed]*/
 
 typedef struct _PyScannerObject {
     PyObject_HEAD
@@ -70,6 +68,8 @@ typedef struct _PyEncoderObject {
 
 #define PyEncoderObject_CAST(op)    ((PyEncoderObject *)(op))
 
+#include "clinic/_json.c.h"
+
 static PyMemberDef encoder_members[] = {
     {"markers", _Py_T_OBJECT, offsetof(PyEncoderObject, markers), Py_READONLY, "markers"},
     {"default", _Py_T_OBJECT, offsetof(PyEncoderObject, defaultfn), Py_READONLY, "default"},
@@ -93,8 +93,6 @@ static PyObject *
 scan_once_unicode(PyScannerObject *s, PyObject *memo, PyObject *pystr, Py_ssize_t idx, Py_ssize_t *next_idx_ptr);
 static PyObject *
 _build_rval_index_tuple(PyObject *rval, Py_ssize_t idx);
-static PyObject *
-scanner_new(PyTypeObject *type, PyObject *args, PyObject *kwds);
 static void
 scanner_dealloc(PyObject *self);
 static int
@@ -1213,8 +1211,8 @@ _json.Scanner.scan_once as scanner_call
 [clinic start generated code]*/
 
 static PyObject *
-scanner_call_impl(PyObject *self, PyObject *pystr, Py_ssize_t idx)
-/*[clinic end generated code: output=812e06bd8bbf833b input=7439d5a7a6a986e0]*/
+scanner_call_impl(PyScannerObject *self, PyObject *pystr, Py_ssize_t idx)
+/*[clinic end generated code: output=c62ec2098c45164b input=7439d5a7a6a986e0]*/
 {
     PyObject *rval;
     Py_ssize_t next_idx = -1;
@@ -1223,24 +1221,27 @@ scanner_call_impl(PyObject *self, PyObject *pystr, Py_ssize_t idx)
     if (memo == NULL) {
         return NULL;
     }
-    rval = scan_once_unicode(PyScannerObject_CAST(self),
-                             memo, pystr, idx, &next_idx);
+    rval = scan_once_unicode(self, memo, pystr, idx, &next_idx);
     Py_DECREF(memo);
     if (rval == NULL)
         return NULL;
     return _build_rval_index_tuple(rval, next_idx);
 }
 
+/*[clinic input]
+@classmethod
+_json.Scanner.__new__ as scanner_new
+
+    context as ctx: object
+
+[clinic start generated code]*/
+
 static PyObject *
-scanner_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+scanner_new_impl(PyTypeObject *type, PyObject *ctx)
+/*[clinic end generated code: output=1ba3d8eb49bded43 input=628e15d6f1669517]*/
 {
     PyScannerObject *s;
-    PyObject *ctx;
     PyObject *strict;
-    static char *kwlist[] = {"context", NULL};
-
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O:make_scanner", kwlist, &ctx))
-        return NULL;
 
     s = (PyScannerObject *)type->tp_alloc(type, 0);
     if (s == NULL) {
@@ -1248,30 +1249,30 @@ scanner_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
     }
 
     /* All of these will fail "gracefully" so we don't need to verify them */
-    strict = PyObject_GetAttrString(ctx, "strict");
+    strict = PyObject_GetAttr(ctx, &_Py_ID(strict));
     if (strict == NULL)
         goto bail;
     s->strict = PyObject_IsTrue(strict);
     Py_DECREF(strict);
     if (s->strict < 0)
         goto bail;
-    s->object_hook = PyObject_GetAttrString(ctx, "object_hook");
+    s->object_hook = PyObject_GetAttr(ctx, &_Py_ID(object_hook));
     if (s->object_hook == NULL)
         goto bail;
-    s->object_pairs_hook = PyObject_GetAttrString(ctx, "object_pairs_hook");
+    s->object_pairs_hook = PyObject_GetAttr(ctx, &_Py_ID(object_pairs_hook));
     if (s->object_pairs_hook == NULL)
         goto bail;
-    s->array_hook = PyObject_GetAttrString(ctx, "array_hook");
+    s->array_hook = PyObject_GetAttr(ctx, &_Py_ID(array_hook));
     if (s->array_hook == NULL) {
         goto bail;
     }
-    s->parse_float = PyObject_GetAttrString(ctx, "parse_float");
+    s->parse_float = PyObject_GetAttr(ctx, &_Py_ID(parse_float));
     if (s->parse_float == NULL)
         goto bail;
-    s->parse_int = PyObject_GetAttrString(ctx, "parse_int");
+    s->parse_int = PyObject_GetAttr(ctx, &_Py_ID(parse_int));
     if (s->parse_int == NULL)
         goto bail;
-    s->parse_constant = PyObject_GetAttrString(ctx, "parse_constant");
+    s->parse_constant = PyObject_GetAttr(ctx, &_Py_ID(parse_constant));
     if (s->parse_constant == NULL)
         goto bail;
 
@@ -1449,19 +1450,20 @@ write_newline_indent(PyUnicodeWriter *writer,
 }
 
 
+/*[clinic input]
+@disable fastcall
+_json.make_encoder._iterencode as encoder_call
+
+    obj: object
+    _current_indent_level as indent_level: Py_ssize_t
+
+[clinic start generated code]*/
+
 static PyObject *
-encoder_call(PyObject *op, PyObject *args, PyObject *kwds)
+encoder_call_impl(PyEncoderObject *self, PyObject *obj,
+                  Py_ssize_t indent_level)
+/*[clinic end generated code: output=bd00e7617dd42e9c input=89bb2787320ada3c]*/
 {
-    /* Python callable interface to encoder_listencode_obj */
-    static char *kwlist[] = {"obj", "_current_indent_level", NULL};
-    PyObject *obj;
-    Py_ssize_t indent_level;
-    PyEncoderObject *self = PyEncoderObject_CAST(op);
-
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "On:_iterencode", kwlist,
-                                     &obj, &indent_level))
-        return NULL;
-
     PyUnicodeWriter *writer = PyUnicodeWriter_Create(0);
     if (writer == NULL) {
         return NULL;

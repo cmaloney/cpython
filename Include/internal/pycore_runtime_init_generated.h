@@ -1539,6 +1539,7 @@ extern "C" {
     INIT_ID(_bootstrap), \
     INIT_ID(_bootstrap_external), \
     INIT_ID(_check_retval_), \
+    INIT_ID(_current_indent_level), \
     INIT_ID(_dealloc_warn), \
     INIT_ID(_feature_version), \
     INIT_ID(_field_types), \
@@ -1597,6 +1598,7 @@ extern "C" {
     INIT_ID(args), \
     INIT_ID(arguments), \
     INIT_ID(argv), \
+    INIT_ID(array_hook), \
     INIT_ID(as_integer_ratio), \
     INIT_ID(asend), \
     INIT_ID(assoclen), \
@@ -1981,6 +1983,8 @@ extern "C" {
     INIT_ID(number), \
     INIT_ID(obj), \
     INIT_ID(object), \
+    INIT_ID(object_hook), \
+    INIT_ID(object_pairs_hook), \
     INIT_ID(offset), \
     INIT_ID(offset_dst), \
     INIT_ID(offset_src), \
@@ -2011,6 +2015,9 @@ extern "C" {
     INIT_ID(pair), \
     INIT_ID(parameter), \
     INIT_ID(parent), \
+    INIT_ID(parse_constant), \
+    INIT_ID(parse_float), \
+    INIT_ID(parse_int), \
     INIT_ID(password), \
     INIT_ID(path), \
     INIT_ID(pattern), \

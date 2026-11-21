@@ -252,6 +252,7 @@ _PyStaticObjects_CheckAll(PyInterpreterState *interp) {
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(_bootstrap), "_bootstrap", 10);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(_bootstrap_external), "_bootstrap_external", 19);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(_check_retval_), "_check_retval_", 14);
+    _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(_current_indent_level), "_current_indent_level", 21);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(_dealloc_warn), "_dealloc_warn", 13);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(_feature_version), "_feature_version", 16);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(_field_types), "_field_types", 12);
@@ -310,6 +311,7 @@ _PyStaticObjects_CheckAll(PyInterpreterState *interp) {
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(args), "args", 4);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(arguments), "arguments", 9);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(argv), "argv", 4);
+    _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(array_hook), "array_hook", 10);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(as_integer_ratio), "as_integer_ratio", 16);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(asend), "asend", 5);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(assoclen), "assoclen", 8);
@@ -694,6 +696,8 @@ _PyStaticObjects_CheckAll(PyInterpreterState *interp) {
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(number), "number", 6);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(obj), "obj", 3);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(object), "object", 6);
+    _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(object_hook), "object_hook", 11);
+    _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(object_pairs_hook), "object_pairs_hook", 17);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(offset), "offset", 6);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(offset_dst), "offset_dst", 10);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(offset_src), "offset_src", 10);
@@ -724,6 +728,9 @@ _PyStaticObjects_CheckAll(PyInterpreterState *interp) {
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(pair), "pair", 4);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(parameter), "parameter", 9);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(parent), "parent", 6);
+    _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(parse_constant), "parse_constant", 14);
+    _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(parse_float), "parse_float", 11);
+    _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(parse_int), "parse_int", 9);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(password), "password", 8);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(path), "path", 4);
     _PyStaticObject_CheckUnicodeSingleton((PyObject *)&_Py_ID(pattern), "pattern", 7);

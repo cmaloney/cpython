@@ -139,7 +139,7 @@ PyDoc_STRVAR(scanner_call__doc__,
     {"scan_once", _PyCFunction_CAST(scanner_call), METH_VARARGS|METH_KEYWORDS, scanner_call__doc__},
 
 static PyObject *
-scanner_call_impl(PyObject *self, PyObject *pystr, Py_ssize_t idx);
+scanner_call_impl(PyScannerObject *self, PyObject *pystr, Py_ssize_t idx);
 
 static PyObject *
 scanner_call(PyObject *self, PyObject *args, PyObject *kwargs)
@@ -200,7 +200,58 @@ scanner_call(PyObject *self, PyObject *args, PyObject *kwargs)
         }
         idx = ival;
     }
-    return_value = scanner_call_impl(self, pystr, idx);
+    return_value = scanner_call_impl((PyScannerObject *)self, pystr, idx);
+
+exit:
+    return return_value;
+}
+
+static PyObject *
+scanner_new_impl(PyTypeObject *type, PyObject *ctx);
+
+static PyObject *
+scanner_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    PyObject *return_value = NULL;
+    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
+
+    #define NUM_KEYWORDS 1
+    static struct {
+        PyGC_Head _this_is_not_used;
+        PyObject_VAR_HEAD
+        Py_hash_t ob_hash;
+        PyObject *ob_item[NUM_KEYWORDS];
+    } _kwtuple = {
+        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
+        .ob_hash = -1,
+        .ob_item = { &_Py_ID(context), },
+    };
+    #undef NUM_KEYWORDS
+    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
+
+    #else  // !Py_BUILD_CORE
+    #  define KWTUPLE NULL
+    #endif  // !Py_BUILD_CORE
+
+    static const char * const _keywords[] = {"context", NULL};
+    static _PyArg_Parser _parser = {
+        .keywords = _keywords,
+        .fname = "Scanner",
+        .kwtuple = KWTUPLE,
+    };
+    #undef KWTUPLE
+    PyObject *argsbuf[1];
+    PyObject * const *fastargs;
+    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
+    PyObject *ctx;
+
+    fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser,
+            /*minpos*/ 1, /*maxpos*/ 1, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
+    if (!fastargs) {
+        goto exit;
+    }
+    ctx = fastargs[0];
+    return_value = scanner_new_impl(type, ctx);
 
 exit:
     return return_value;
@@ -358,4 +409,77 @@ encoder_vectorcall(PyObject *type, PyObject *const *args,
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=642bfac7cabbe84f input=a9049054013a1b77]*/
+
+PyDoc_STRVAR(encoder_call__doc__,
+"_iterencode($self, /, obj, _current_indent_level)\n"
+"--\n"
+"\n");
+
+#define ENCODER_CALL_METHODDEF    \
+    {"_iterencode", _PyCFunction_CAST(encoder_call), METH_VARARGS|METH_KEYWORDS, encoder_call__doc__},
+
+static PyObject *
+encoder_call_impl(PyEncoderObject *self, PyObject *obj,
+                  Py_ssize_t indent_level);
+
+static PyObject *
+encoder_call(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    PyObject *return_value = NULL;
+    #if defined(Py_BUILD_CORE) && !defined(Py_BUILD_CORE_MODULE)
+
+    #define NUM_KEYWORDS 2
+    static struct {
+        PyGC_Head _this_is_not_used;
+        PyObject_VAR_HEAD
+        Py_hash_t ob_hash;
+        PyObject *ob_item[NUM_KEYWORDS];
+    } _kwtuple = {
+        .ob_base = PyVarObject_HEAD_INIT(&PyTuple_Type, NUM_KEYWORDS)
+        .ob_hash = -1,
+        .ob_item = { &_Py_ID(obj), &_Py_ID(_current_indent_level), },
+    };
+    #undef NUM_KEYWORDS
+    #define KWTUPLE (&_kwtuple.ob_base.ob_base)
+
+    #else  // !Py_BUILD_CORE
+    #  define KWTUPLE NULL
+    #endif  // !Py_BUILD_CORE
+
+    static const char * const _keywords[] = {"obj", "_current_indent_level", NULL};
+    static _PyArg_Parser _parser = {
+        .keywords = _keywords,
+        .fname = "_iterencode",
+        .kwtuple = KWTUPLE,
+    };
+    #undef KWTUPLE
+    PyObject *argsbuf[2];
+    PyObject * const *fastargs;
+    Py_ssize_t nargs = PyTuple_GET_SIZE(args);
+    PyObject *obj;
+    Py_ssize_t indent_level;
+
+    fastargs = _PyArg_UnpackKeywords(_PyTuple_CAST(args)->ob_item, nargs, kwargs, NULL, &_parser,
+            /*minpos*/ 2, /*maxpos*/ 2, /*minkw*/ 0, /*varpos*/ 0, argsbuf);
+    if (!fastargs) {
+        goto exit;
+    }
+    obj = fastargs[0];
+    {
+        Py_ssize_t ival = -1;
+        PyObject *iobj = _PyNumber_Index(fastargs[1]);
+        if (iobj != NULL) {
+            ival = PyLong_AsSsize_t(iobj);
+            Py_DECREF(iobj);
+        }
+        if (ival == -1 && PyErr_Occurred()) {
+            goto exit;
+        }
+        indent_level = ival;
+    }
+    return_value = encoder_call_impl((PyEncoderObject *)self, obj, indent_level);
+
+exit:
+    return return_value;
+}
+/*[clinic end generated code: output=2a8e70e33653d3a4 input=a9049054013a1b77]*/
