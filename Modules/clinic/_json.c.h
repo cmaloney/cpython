@@ -10,7 +10,7 @@ preserve
 #include "pycore_modsupport.h"    // _PyArg_CheckPositional()
 
 PyDoc_STRVAR(py_scanstring__doc__,
-"scanstring($module, pystr, end, strict=True, /)\n"
+"scanstring($module, s, end, strict=True, /)\n"
 "--\n"
 "\n"
 "Scan the string s for a JSON string.\n"
@@ -73,7 +73,7 @@ exit:
 }
 
 PyDoc_STRVAR(py_encode_basestring_ascii__doc__,
-"encode_basestring_ascii($module, pystr, /)\n"
+"encode_basestring_ascii($module, s, /)\n"
 "--\n"
 "\n"
 "Return an ASCII-only JSON representation of a Python string");
@@ -102,7 +102,7 @@ exit:
 }
 
 PyDoc_STRVAR(py_encode_basestring__doc__,
-"encode_basestring($module, pystr, /)\n"
+"encode_basestring($module, s, /)\n"
 "--\n"
 "\n"
 "Return a JSON representation of a Python string");
@@ -206,6 +206,12 @@ exit:
     return return_value;
 }
 
+PyDoc_STRVAR(scanner_new__doc__,
+"Scanner(context)\n"
+"--\n"
+"\n"
+"JSON scanner object");
+
 static PyObject *
 scanner_new_impl(PyTypeObject *type, PyObject *ctx);
 
@@ -257,6 +263,13 @@ exit:
     return return_value;
 }
 
+PyDoc_STRVAR(encoder_new__doc__,
+"Encoder(markers, default, encoder, indent, key_separator,\n"
+"        item_separator, sort_keys, skipkeys, allow_nan)\n"
+"--\n"
+"\n"
+"JSON encoder object");
+
 static PyObject *
 encoder_new_impl(PyTypeObject *type, PyObject *markers, PyObject *defaultfn,
                  PyObject *encoder, PyObject *indent,
@@ -291,7 +304,7 @@ encoder_new_helper(PyTypeObject *type, PyObject *const *args,
     static const char * const _keywords[] = {"markers", "default", "encoder", "indent", "key_separator", "item_separator", "sort_keys", "skipkeys", "allow_nan", NULL};
     static _PyArg_Parser _parser = {
         .keywords = _keywords,
-        .fname = "make_encoder",
+        .fname = "Encoder",
         .kwtuple = KWTUPLE,
     };
     #undef KWTUPLE
@@ -317,12 +330,12 @@ encoder_new_helper(PyTypeObject *type, PyObject *const *args,
     encoder = fastargs[2];
     indent = fastargs[3];
     if (!PyUnicode_Check(fastargs[4])) {
-        _PyArg_BadArgument("make_encoder", "argument 'key_separator'", "str", fastargs[4]);
+        _PyArg_BadArgument("Encoder", "argument 'key_separator'", "str", fastargs[4]);
         goto exit;
     }
     key_separator = fastargs[4];
     if (!PyUnicode_Check(fastargs[5])) {
-        _PyArg_BadArgument("make_encoder", "argument 'item_separator'", "str", fastargs[5]);
+        _PyArg_BadArgument("Encoder", "argument 'item_separator'", "str", fastargs[5]);
         goto exit;
     }
     item_separator = fastargs[5];
@@ -383,12 +396,12 @@ encoder_vectorcall(PyObject *type, PyObject *const *args,
     encoder = args[2];
     indent = args[3];
     if (!PyUnicode_Check(args[4])) {
-        _PyArg_BadArgument("make_encoder", "argument 'key_separator'", "str", args[4]);
+        _PyArg_BadArgument("Encoder", "argument 'key_separator'", "str", args[4]);
         goto exit;
     }
     key_separator = args[4];
     if (!PyUnicode_Check(args[5])) {
-        _PyArg_BadArgument("make_encoder", "argument 'item_separator'", "str", args[5]);
+        _PyArg_BadArgument("Encoder", "argument 'item_separator'", "str", args[5]);
         goto exit;
     }
     item_separator = args[5];
@@ -482,4 +495,4 @@ encoder_call(PyObject *self, PyObject *args, PyObject *kwargs)
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=2a8e70e33653d3a4 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=f8a12070a0e710fd input=a9049054013a1b77]*/

@@ -64,7 +64,7 @@ class TestEncode(CTest):
         # https://bugs.python.org/issue45269
         with self.assertRaisesRegex(
             TypeError,
-            r'make_encoder\(\) argument 1 must be dict or None, not int',
+            r'Encoder\(\) argument 1 must be dict or None, not int',
         ):
             self.json.encoder.c_make_encoder(1, None, None, None, ': ', ', ',
                                              False, False, False)

@@ -23,10 +23,10 @@
 
 /*[clinic input]
 module _json
-class _json.make_encoder "PyEncoderObject *" ""
+class _json.Encoder "PyEncoderObject *" ""
 class _json.Scanner "PyScannerObject *" ""
 [clinic start generated code]*/
-/*[clinic end generated code: output=da39a3ee5e6b4b0d input=6d0650fd3c1028ed]*/
+/*[clinic end generated code: output=da39a3ee5e6b4b0d input=b5df6bcaa9ff07a2]*/
 
 typedef struct _PyScannerObject {
     PyObject_HEAD
@@ -645,7 +645,7 @@ bail:
 
 /*[clinic input]
 _json.scanstring as py_scanstring
-    pystr: unicode
+    s as pystr: unicode
     end: Py_ssize_t
     strict: bool = True
     /
@@ -664,7 +664,7 @@ s after the end quote.
 static PyObject *
 py_scanstring_impl(PyObject *module, PyObject *pystr, Py_ssize_t end,
                    int strict)
-/*[clinic end generated code: output=961740cfae07cdb3 input=6d5abb5947ccc297]*/
+/*[clinic end generated code: output=961740cfae07cdb3 input=72a68051ab925dda]*/
 {
     Py_ssize_t next_end = -1;
     PyObject *rval = scanstring_unicode(pystr, end, strict, &next_end);
@@ -673,7 +673,7 @@ py_scanstring_impl(PyObject *module, PyObject *pystr, Py_ssize_t end,
 
 /*[clinic input]
 _json.encode_basestring_ascii as py_encode_basestring_ascii
-    pystr: unicode
+    s as pystr: unicode
     /
 
 Return an ASCII-only JSON representation of a Python string
@@ -681,14 +681,14 @@ Return an ASCII-only JSON representation of a Python string
 
 static PyObject *
 py_encode_basestring_ascii_impl(PyObject *module, PyObject *pystr)
-/*[clinic end generated code: output=7b3841287cf211df input=4f3609498aff2de5]*/
+/*[clinic end generated code: output=7b3841287cf211df input=62826b4c33521469]*/
 {
     return ascii_escape_unicode(pystr);
 }
 
 /*[clinic input]
 _json.encode_basestring as py_encode_basestring
-    pystr: unicode
+    s as pystr: unicode
     /
 
 Return a JSON representation of a Python string
@@ -696,7 +696,7 @@ Return a JSON representation of a Python string
 
 static PyObject *
 py_encode_basestring_impl(PyObject *module, PyObject *pystr)
-/*[clinic end generated code: output=900950f95df3f1c9 input=d42ef714b2c07386]*/
+/*[clinic end generated code: output=900950f95df3f1c9 input=5306231d64c52fe5]*/
 {
     return escape_unicode(pystr);
 }
@@ -1234,11 +1234,12 @@ _json.Scanner.__new__ as scanner_new
 
     context as ctx: object
 
+JSON scanner object
 [clinic start generated code]*/
 
 static PyObject *
 scanner_new_impl(PyTypeObject *type, PyObject *ctx)
-/*[clinic end generated code: output=1ba3d8eb49bded43 input=628e15d6f1669517]*/
+/*[clinic end generated code: output=1ba3d8eb49bded43 input=055358bad007213d]*/
 {
     PyScannerObject *s;
     PyObject *strict;
@@ -1283,10 +1284,8 @@ bail:
     return NULL;
 }
 
-PyDoc_STRVAR(scanner_doc, "JSON scanner object");
-
 static PyType_Slot PyScannerType_slots[] = {
-    {Py_tp_doc, (void *)scanner_doc},
+    {Py_tp_doc, (void *)scanner_new__doc__},
     {Py_tp_dealloc, scanner_dealloc},
     {Py_tp_call, scanner_call},
     {Py_tp_traverse, scanner_traverse},
@@ -1307,7 +1306,7 @@ static PyType_Spec PyScannerType_spec = {
 /*[clinic input]
 @vectorcall
 @classmethod
-_json.make_encoder.__new__ as encoder_new
+_json.Encoder.__new__ as encoder_new
 
     markers: object
     default as defaultfn: object
@@ -1318,6 +1317,8 @@ _json.make_encoder.__new__ as encoder_new
     sort_keys: bool
     skipkeys: bool
     allow_nan: bool
+
+JSON encoder object
 [clinic start generated code]*/
 
 static PyObject *
@@ -1325,13 +1326,13 @@ encoder_new_impl(PyTypeObject *type, PyObject *markers, PyObject *defaultfn,
                  PyObject *encoder, PyObject *indent,
                  PyObject *key_separator, PyObject *item_separator,
                  int sort_keys, int skipkeys, int allow_nan)
-/*[clinic end generated code: output=46071d17c87596ef input=d3e48f5426deb209]*/
+/*[clinic end generated code: output=46071d17c87596ef input=3004c96004618e8b]*/
 {
     PyEncoderObject *s;
 
     if (markers != Py_None && !PyDict_Check(markers)) {
         PyErr_Format(PyExc_TypeError,
-                     "make_encoder() argument 1 must be dict or None, "
+                     "Encoder() argument 1 must be dict or None, "
                      "not %.200s", Py_TYPE(markers)->tp_name);
         return NULL;
     }
@@ -1452,7 +1453,7 @@ write_newline_indent(PyUnicodeWriter *writer,
 
 /*[clinic input]
 @disable fastcall
-_json.make_encoder._iterencode as encoder_call
+_json.Encoder._iterencode as encoder_call
 
     obj: object
     _current_indent_level as indent_level: Py_ssize_t
@@ -1462,7 +1463,7 @@ _json.make_encoder._iterencode as encoder_call
 static PyObject *
 encoder_call_impl(PyEncoderObject *self, PyObject *obj,
                   Py_ssize_t indent_level)
-/*[clinic end generated code: output=bd00e7617dd42e9c input=89bb2787320ada3c]*/
+/*[clinic end generated code: output=bd00e7617dd42e9c input=2779020e194b8332]*/
 {
     PyUnicodeWriter *writer = PyUnicodeWriter_Create(0);
     if (writer == NULL) {
@@ -2040,10 +2041,8 @@ encoder_clear(PyObject *op)
     return 0;
 }
 
-PyDoc_STRVAR(encoder_doc, "Encoder(markers, default, encoder, indent, key_separator, item_separator, sort_keys, skipkeys, allow_nan)");
-
 static PyType_Slot PyEncoderType_slots[] = {
-    {Py_tp_doc, (void *)encoder_doc},
+    {Py_tp_doc, (void *)encoder_new__doc__},
     {Py_tp_dealloc, encoder_dealloc},
     {Py_tp_call, encoder_call},
     {Py_tp_traverse, encoder_traverse},
