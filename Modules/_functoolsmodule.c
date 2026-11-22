@@ -14,8 +14,9 @@
 /*[clinic input]
 module _functools
 class _functools._lru_cache_wrapper "PyObject *" "&lru_cache_type_spec"
+class _functools.KeyWrapper "PyObject *" "&keyobject_type_spec"
 [clinic start generated code]*/
-/*[clinic end generated code: output=da39a3ee5e6b4b0d input=bece4053896b09c0]*/
+/*[clinic end generated code: output=da39a3ee5e6b4b0d input=1de7738f4ea3e822]*/
 
 /* _functools module written and maintained
    by Hye-Shik Chang <perky@FreeBSD.org>
@@ -910,16 +911,20 @@ static PyType_Spec keyobject_type_spec = {
     .slots = keyobject_type_slots
 };
 
-static PyObject *
-keyobject_call(PyObject *self, PyObject *args, PyObject *kwds)
-{
-    PyObject *object;
-    keyobject *result;
-    static char *kwargs[] = {"obj", NULL};
-    keyobject *ko = keyobject_CAST(self);
+/*[clinic input]
+@disable fastcall
+_functools.KeyWrapper.KeyWrapper as keyobject_call
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "O:K", kwargs, &object))
-        return NULL;
+    obj as object: object
+
+[clinic start generated code]*/
+
+static PyObject *
+keyobject_call_impl(PyObject *self, PyObject *object)
+/*[clinic end generated code: output=7748691b5fcd05ee input=105055cd599a53e0]*/
+{
+    keyobject *result;
+    keyobject *ko = keyobject_CAST(self);
 
     result = PyObject_GC_New(keyobject, Py_TYPE(ko));
     if (result == NULL) {
@@ -1544,23 +1549,41 @@ bounded_lru_cache_wrapper(lru_cache_object *self, PyObject *args, PyObject *kwds
     return result;
 }
 
+/*[clinic input]
+@vectorcall
+@classmethod
+_functools._lru_cache_wrapper.__new__ as lru_cache_new
+
+    user_function as func: object
+    maxsize as maxsize_O: object
+    typed: bool
+    cache_info_type: object
+
+Create a cached callable that wraps another function.
+
+user_function:      the function being cached
+
+maxsize:  0         for no caching
+          None      for unlimited cache size
+          n         for a bounded cache
+
+typed:    False     cache f(3) and f(3.0) as identical calls
+          True      cache f(3) and f(3.0) as distinct calls
+
+cache_info_type:    namedtuple class with the fields:
+                        hits misses currsize maxsize
+[clinic start generated code]*/
+
 static PyObject *
-lru_cache_new(PyTypeObject *type, PyObject *args, PyObject *kw)
+lru_cache_new_impl(PyTypeObject *type, PyObject *func, PyObject *maxsize_O,
+                   int typed, PyObject *cache_info_type)
+/*[clinic end generated code: output=c8524bb90afb9d24 input=e5277a6fdb6e4017]*/
 {
-    PyObject *func, *maxsize_O, *cache_info_type, *cachedict;
-    int typed;
+    PyObject *cachedict;
     lru_cache_object *obj;
     Py_ssize_t maxsize;
     PyObject *(*wrapper)(lru_cache_object *, PyObject *, PyObject *);
     _functools_state *state;
-    static char *keywords[] = {"user_function", "maxsize", "typed",
-                               "cache_info_type", NULL};
-
-    if (!PyArg_ParseTupleAndKeywords(args, kw, "OOpO:lru_cache", keywords,
-                                     &func, &maxsize_O, &typed,
-                                     &cache_info_type)) {
-        return NULL;
-    }
 
     if (!PyCallable_Check(func)) {
         PyErr_SetString(PyExc_TypeError,
@@ -1797,22 +1820,6 @@ lru_cache_tp_traverse(PyObject *op, visitproc visit, void *arg)
 }
 
 
-PyDoc_STRVAR(lru_cache_doc,
-"Create a cached callable that wraps another function.\n\
-\n\
-user_function:      the function being cached\n\
-\n\
-maxsize:  0         for no caching\n\
-          None      for unlimited cache size\n\
-          n         for a bounded cache\n\
-\n\
-typed:    False     cache f(3) and f(3.0) as identical calls\n\
-          True      cache f(3) and f(3.0) as distinct calls\n\
-\n\
-cache_info_type:    namedtuple class with the fields:\n\
-                        hits misses currsize maxsize\n"
-);
-
 static PyMethodDef lru_cache_methods[] = {
     _FUNCTOOLS__LRU_CACHE_WRAPPER_CACHE_INFO_METHODDEF
     _FUNCTOOLS__LRU_CACHE_WRAPPER_CACHE_CLEAR_METHODDEF
@@ -1838,7 +1845,7 @@ static PyMemberDef lru_cache_memberlist[] = {
 static PyType_Slot lru_cache_type_slots[] = {
     {Py_tp_dealloc, lru_cache_dealloc},
     {Py_tp_call, lru_cache_call},
-    {Py_tp_doc, (void *)lru_cache_doc},
+    {Py_tp_doc, (void *)lru_cache_new__doc__},
     {Py_tp_traverse, lru_cache_tp_traverse},
     {Py_tp_clear, lru_cache_tp_clear},
     {Py_tp_methods, lru_cache_methods},
@@ -1846,6 +1853,7 @@ static PyType_Slot lru_cache_type_slots[] = {
     {Py_tp_getset, lru_cache_getsetlist},
     {Py_tp_descr_get, lru_cache_descr_get},
     {Py_tp_new, lru_cache_new},
+    {Py_tp_vectorcall, lru_cache_vectorcall},
     {0, 0}
 };
 

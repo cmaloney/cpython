@@ -1633,6 +1633,7 @@ extern "C" {
     INIT_ID(c_return), \
     INIT_ID(c_stack), \
     INIT_ID(cache_frames), \
+    INIT_ID(cache_info_type), \
     INIT_ID(cached_datetime_module), \
     INIT_ID(cached_statements), \
     INIT_ID(cadata), \
@@ -2173,6 +2174,7 @@ extern "C" {
     INIT_ID(txt), \
     INIT_ID(type), \
     INIT_ID(type_params), \
+    INIT_ID(typed), \
     INIT_ID(tz), \
     INIT_ID(tzinfo), \
     INIT_ID(tzname), \
@@ -2183,6 +2185,7 @@ extern "C" {
     INIT_ID(updates), \
     INIT_ID(uri), \
     INIT_ID(usedforsecurity), \
+    INIT_ID(user_function), \
     INIT_ID(utcoffset), \
     INIT_ID(value), \
     INIT_ID(values), \
