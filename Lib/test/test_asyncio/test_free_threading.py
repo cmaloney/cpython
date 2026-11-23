@@ -1,5 +1,6 @@
 import asyncio
 import threading
+import time
 import unittest
 from threading import Thread
 from unittest import TestCase
@@ -117,8 +118,15 @@ class TestFreeThreading:
         self.assertIsNone(wr())
 
     def test_unregister_lingering_tasks_of_exited_thread(self) -> None:
-        # gh-159449: a new thread can get the same OS thread id as
-        # an exited thread whose tasks linger on the interpreter's list.
+        # gh-159449: only the thread state that registered a task may
+        # remove it from a task list without stopping the world.  When a
+        # thread exits, its pending tasks linger on the interpreter's list,
+        # and a new thread often reuses the exited thread's OS thread id and
+        # thread state memory, so neither identifies the registering thread.
+        #
+        # Several threads remove lingering tasks at the same moment.  If any
+        # of them wrongly skips stopping the world, the list gets corrupted
+        # and the all_tasks() call at the end of the round crashes.
         class InertLoop:
             def get_debug(self):
                 return False
@@ -130,44 +138,111 @@ class TestFreeThreading:
                 pass
 
         loop = InertLoop()
-        done = threading.Event()
+        nthreads = 4
+        ntasks = 64
+        timeout = support.SHORT_TIMEOUT
 
         async def coro():
             pass
 
-        def worker(handoff):
-            while handoff:
-                for task in handoff.pop():
+        def new_task():
+            c = coro()
+            task = self.factory(loop, c)
+            c.close()
+            task._log_destroy_pending = False
+            return task
+
+        def run_round(paired):
+            # Each creator registers its tasks, then the creators exit one
+            # at a time, so the interpreter's list holds each creator's
+            # tasks contiguously, in creator order.
+            blocks = [None] * nthreads
+            creator_of = {}
+            exits = [threading.Event() for _ in range(nthreads)]
+            ready = []
+            stop_inspector = threading.Event()
+
+            def creator(i):
+                blocks[i] = [new_task() for _ in range(ntasks)]
+                creator_of[threading.get_ident()] = i
+                exits[i].wait(timeout)
+
+            def remover(i=None):
+                if i is None:
+                    i = creator_of.get(threading.get_ident())
+                # Spin instead of using a Barrier: wake-ups from a Barrier
+                # are spread out more than the removals take, so the
+                # removers would rarely overlap.
+                ready.append(None)
+                deadline = time.monotonic() + timeout
+                while len(ready) < nthreads:
+                    if time.monotonic() > deadline:
+                        return
+                if i is None:
+                    return
+                # Removers of neighbouring blocks 0 and 1 (and 2 and 3)
+                # start at the boundary between their blocks.
+                tasks = blocks[i] if i % 2 else reversed(blocks[i])
+                for task in tasks:
                     # complete the task right away, unlike Task.cancel()
                     asyncio.Future.cancel(task)
-            tasks = []
-            for _ in range(32):
-                c = coro()
-                task = self.factory(loop, c)
-                c.close()
-                task._log_destroy_pending = False
-                tasks.append(task)
-            handoff.append(tasks)
 
-        def spawner():
-            handoff = []
-            for _ in range(100):
-                thread = Thread(target=worker, args=(handoff,))
-                thread.start()
-                thread.join()
+            def inspector():
+                while not stop_inspector.is_set():
+                    asyncio.all_tasks(loop)
 
-        def inspector():
-            while not done.is_set():
-                asyncio.all_tasks(loop)
-
-        inspectors = [Thread(target=inspector) for _ in range(2)]
-        with threading_helper.start_threads(inspectors):
+            # Also call all_tasks() while tasks are registered and while
+            # exiting creators move their tasks to the interpreter's list.
+            # Stop it before the removals start: it stops the world, which
+            # would keep the removers from overlapping.
+            inspector_thread = Thread(target=inspector)
+            creators = [Thread(target=creator, args=(i,))
+                        for i in range(nthreads)]
+            removers = []
             try:
-                spawners = [Thread(target=spawner) for _ in range(4)]
-                with threading_helper.start_threads(spawners):
-                    pass
+                inspector_thread.start()
+                for thread in creators:
+                    thread.start()
+                for i, thread in enumerate(creators):
+                    exits[i].set()
+                    thread.join()
+                    if paired:
+                        if i == nthreads - 1:
+                            stop_inspector.set()
+                            inspector_thread.join()
+                        # Started right after the creator exits, the
+                        # remover typically reuses its thread state memory.
+                        removers.append(Thread(target=remover, args=(i,)))
+                        removers[-1].start()
+                stop_inspector.set()
+                inspector_thread.join()
+                if not paired:
+                    # Each remover completes the tasks of the creator whose
+                    # OS thread id it reused.  threading.get_ident() is the
+                    # id compared by the original bug on pthreads platforms,
+                    # but not on Windows, where these rounds are weaker.
+                    removers = [Thread(target=remover)
+                                for _ in range(nthreads)]
+                    for thread in removers:
+                        thread.start()
             finally:
-                done.set()
+                stop_inspector.set()
+                for event in exits:
+                    event.set()
+                for thread in [inspector_thread, *creators, *removers]:
+                    if thread.ident is not None:
+                        thread.join()
+
+            # Complete the tasks of creators whose thread id was not reused.
+            for tasks in blocks:
+                for task in tasks:
+                    if not task.done():
+                        asyncio.Future.cancel(task)
+            # Walking a corrupted list crashes.
+            self.assertEqual(asyncio.all_tasks(loop), set())
+
+        for paired in (False, True) * 3:
+            run_round(paired)
 
     def test_run_coroutine_threadsafe(self) -> None:
         results = []
