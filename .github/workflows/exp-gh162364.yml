@@ -1,0 +1,132 @@
+# Experiment for gh-162364 (not for upstream): cross-platform check that the
+# rewritten test_unregister_lingering_tasks_of_exited_thread passes on the
+# fixed build and catches gh-159449 when the C fix is reverted.
+name: exp gh-162364 lingering tasks
+
+on:
+  push:
+    branches:
+    - 'exp/gh-162364*'
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Runs per job
+        default: '20'
+
+permissions:
+  contents: read
+
+env:
+  FORCE_COLOR: 1
+  RUNS: ${{ inputs.runs || '20' }}
+  TEST: >-
+    test_asyncio.test_free_threading
+    -m test_unregister_lingering_tasks_of_exited_thread
+    --timeout 300
+
+jobs:
+  posix:
+    name: ${{ matrix.os }} ${{ matrix.variant }}${{ matrix.cpus && format(' {0}cpu', matrix.cpus) || '' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, ubuntu-26.04-arm, macos-26]
+        variant: [fixed, unfixed]
+        include:
+        # Oversubscribed: all threads on 2 CPUs.
+        - { os: ubuntu-26.04, variant: fixed, cpus: 2 }
+        - { os: ubuntu-26.04, variant: unfixed, cpus: 2 }
+    steps:
+    - uses: actions/checkout@v7.0.1
+      with:
+        persist-credentials: false
+    - name: Revert the gh-159449 C fix
+      if: matrix.variant == 'unfixed'
+      run: git apply .github/exp-gh162364/unfix-gh159449.patch && git diff --stat
+    - name: Build (free-threaded, debug)
+      run: |
+        ./configure --with-pydebug --disable-gil
+        make -j8
+    - name: Lingering-tasks test x RUNS
+      run: |
+        PY=./python; [ -x ./python.exe ] && PY=./python.exe
+        PREFIX=""
+        if [ -n "${CPUS}" ]; then PREFIX="taskset -c 0-$((CPUS-1))"; fi
+        $PREFIX $PY .github/exp-gh162364/repeat.py --runs "$RUNS" \
+          --expect ${{ matrix.variant == 'fixed' && 'pass' || 'catch' }} \
+          --label "${{ matrix.os }} ${{ matrix.variant }} ${CPUS:+${CPUS}cpu}" \
+          -- $TEST
+      env:
+        CPUS: ${{ matrix.cpus }}
+    - name: Whole file with -R 3:3 (timing, leaks)
+      if: matrix.variant == 'fixed' && !matrix.cpus
+      run: |
+        PY=./python; [ -x ./python.exe ] && PY=./python.exe
+        time $PY -m test test_asyncio.test_free_threading -R 3:3 \
+          --fail-env-changed --timeout 1200
+
+  windows:
+    name: windows ${{ matrix.arch }} ${{ matrix.variant }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'windows-11-arm' || 'windows-2025' }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+        variant: [fixed, unfixed]
+    steps:
+    - uses: actions/checkout@v7.0.1
+      with:
+        persist-credentials: false
+    - name: Revert the gh-159449 C fix
+      if: matrix.variant == 'unfixed'
+      run: git apply .github/exp-gh162364/unfix-gh159449.patch && git diff --stat
+      shell: bash
+    - name: Build (free-threaded, debug)
+      run: .\\PCbuild\\build.bat -e -d -p "${{ matrix.arch }}" --disable-gil
+      shell: bash
+    - name: Lingering-tasks test x RUNS
+      run: >-
+        cmd //c "python.bat .github\\exp-gh162364\\repeat.py
+        --runs $RUNS
+        --expect ${{ matrix.variant == 'fixed' && 'pass' || 'catch' }}
+        --label windows-${{ matrix.arch }}-${{ matrix.variant }}
+        -- $TEST"
+      shell: bash
+    - name: Whole file with -R 3:3 (timing, leaks)
+      if: matrix.variant == 'fixed'
+      run: >-
+        time cmd //c "python.bat -m test test_asyncio.test_free_threading
+        -R 3:3 --fail-env-changed --timeout 1200"
+      shell: bash
+
+  tsan:
+    name: tsan ubuntu-26.04 fixed
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v7.0.1
+      with:
+        persist-credentials: false
+    - name: TSan setup
+      run: |
+        sudo sysctl -w vm.mmap_rnd_bits=28  # Reduce ASLR to avoid TSan crashing
+        echo "CC=clang" >> "$GITHUB_ENV"
+        echo "CXX=clang++" >> "$GITHUB_ENV"
+        echo "TSAN_OPTIONS=suppressions=${GITHUB_WORKSPACE}/Tools/tsan/suppressions_free_threading.txt handle_segv=0" >> "$GITHUB_ENV"
+    - name: Build (free-threaded, TSan, debug)
+      run: |
+        ./configure --config-cache OPT="-O2 -g" --with-thread-sanitizer \
+          --with-pydebug --disable-gil
+        make -j4
+    - name: Lingering-tasks test x RUNS
+      run: >-
+        ./python .github/exp-gh162364/repeat.py --runs "$RUNS"
+        --expect pass --label "tsan lingering" -- $TEST
+    - name: Whole file x 5
+      run: >-
+        ./python .github/exp-gh162364/repeat.py --runs 5
+        --expect pass --label "tsan whole file" --
+        test_asyncio.test_free_threading --timeout 1200
