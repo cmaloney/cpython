@@ -3,6 +3,7 @@ preserve
 [clinic start generated code]*/
 
 #include "pycore_modsupport.h"    // _PyArg_CheckPositional()
+#include "pycore_unicodeobject.h" // _PyUnicode_AsUTF8NoNUL()
 
 PyDoc_STRVAR(_testcapi_pyobject_fastcalldict__doc__,
 "pyobject_fastcalldict($module, func, func_args, kwargs, /)\n"
@@ -63,6 +64,65 @@ _testcapi_pyobject_vectorcall(PyObject *module, PyObject *const *args, Py_ssize_
     func_args = args[1];
     __clinic_kwnames = args[2];
     return_value = _testcapi_pyobject_vectorcall_impl(module, func, func_args, __clinic_kwnames);
+
+exit:
+    return return_value;
+}
+
+PyDoc_STRVAR(_testcapi_call_with_borrowed_args__doc__,
+"call_with_borrowed_args($module, func, args, kwargs, mode, /)\n"
+"--\n"
+"\n"
+"Call func with arguments that are only borrowed from args and kwargs.\n"
+"\n"
+"Python code run by func can clear args or kwargs, which releases the\n"
+"arguments while func is still using them.\n"
+"\n"
+"\"vectorcall\" lends the items of args and the values of kwargs in a\n"
+"vectorcall array (as a C caller lending references from a mutable\n"
+"container does).  \"tp_call\" passes kwargs itself to the tp_call slot\n"
+"(as PyObject_Call() does for callables without vectorcall).");
+
+#define _TESTCAPI_CALL_WITH_BORROWED_ARGS_METHODDEF    \
+    {"call_with_borrowed_args", _PyCFunction_CAST(_testcapi_call_with_borrowed_args), METH_FASTCALL, _testcapi_call_with_borrowed_args__doc__},
+
+static PyObject *
+_testcapi_call_with_borrowed_args_impl(PyObject *module, PyObject *func,
+                                       PyObject *args, PyObject *kwargs,
+                                       const char *mode);
+
+static PyObject *
+_testcapi_call_with_borrowed_args(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
+{
+    PyObject *return_value = NULL;
+    PyObject *func;
+    PyObject *__clinic_args;
+    PyObject *__clinic_kwargs;
+    const char *mode;
+
+    if (!_PyArg_CheckPositional("call_with_borrowed_args", nargs, 4, 4)) {
+        goto exit;
+    }
+    func = args[0];
+    if (!PyList_Check(args[1])) {
+        _PyArg_BadArgument("call_with_borrowed_args", "argument 2", "list", args[1]);
+        goto exit;
+    }
+    __clinic_args = args[1];
+    if (!PyDict_Check(args[2])) {
+        _PyArg_BadArgument("call_with_borrowed_args", "argument 3", "dict", args[2]);
+        goto exit;
+    }
+    __clinic_kwargs = args[2];
+    if (!PyUnicode_Check(args[3])) {
+        _PyArg_BadArgument("call_with_borrowed_args", "argument 4", "str", args[3]);
+        goto exit;
+    }
+    mode = _PyUnicode_AsUTF8NoNUL(args[3]);
+    if (mode == NULL) {
+        goto exit;
+    }
+    return_value = _testcapi_call_with_borrowed_args_impl(module, func, __clinic_args, __clinic_kwargs, mode);
 
 exit:
     return return_value;
@@ -206,4 +266,4 @@ _testcapi_has_vectorcall_flag(PyObject *module, PyObject *arg)
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=210ae67caab177ba input=a9049054013a1b77]*/
+/*[clinic end generated code: output=7f8b52518f855fc1 input=a9049054013a1b77]*/

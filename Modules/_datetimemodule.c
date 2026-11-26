@@ -2807,6 +2807,17 @@ delta_new_impl(PyTypeObject *type, PyObject *days, PyObject *seconds,
     PyObject *y = NULL;         /* temp sum of microseconds */
     double leftover_us = 0.0;
 
+    /* The arguments may be borrowed references (from a vectorcall array or
+       a keyword dict) and accum() can call arbitrary Python code, which
+       could release them. Hold strong references until we are done. */
+    Py_XINCREF(days);
+    Py_XINCREF(seconds);
+    Py_XINCREF(microseconds);
+    Py_XINCREF(milliseconds);
+    Py_XINCREF(minutes);
+    Py_XINCREF(hours);
+    Py_XINCREF(weeks);
+
     x = PyLong_FromLong(0);
     if (x == NULL)
         goto Done;
@@ -2886,6 +2897,13 @@ delta_new_impl(PyTypeObject *type, PyObject *days, PyObject *seconds,
     Py_DECREF(x);
 
 Done:
+    Py_XDECREF(days);
+    Py_XDECREF(seconds);
+    Py_XDECREF(microseconds);
+    Py_XDECREF(milliseconds);
+    Py_XDECREF(minutes);
+    Py_XDECREF(hours);
+    Py_XDECREF(weeks);
     RELEASE_CURRENT_STATE(st, current_mod);
     return self;
 

@@ -101,6 +101,80 @@ _testcapi_pyobject_vectorcall_impl(PyObject *module, PyObject *func,
     return PyObject_Vectorcall(func, stack, nargs, kwnames);
 }
 
+/*[clinic input]
+_testcapi.call_with_borrowed_args
+    func: object
+    args: object(subclass_of='&PyList_Type')
+    kwargs: object(subclass_of='&PyDict_Type')
+    mode: str
+    /
+
+Call func with arguments that are only borrowed from args and kwargs.
+
+Python code run by func can clear args or kwargs, which releases the
+arguments while func is still using them.
+
+"vectorcall" lends the items of args and the values of kwargs in a
+vectorcall array (as a C caller lending references from a mutable
+container does).  "tp_call" passes kwargs itself to the tp_call slot
+(as PyObject_Call() does for callables without vectorcall).
+[clinic start generated code]*/
+
+static PyObject *
+_testcapi_call_with_borrowed_args_impl(PyObject *module, PyObject *func,
+                                       PyObject *args, PyObject *kwargs,
+                                       const char *mode)
+/*[clinic end generated code: output=06c10e3b0766da04 input=b130c15fdc4d8957]*/
+{
+    if (strcmp(mode, "vectorcall") == 0) {
+        Py_ssize_t nargs = PyList_GET_SIZE(args);
+        Py_ssize_t nkw = PyDict_GET_SIZE(kwargs);
+        PyObject *kwnames = NULL;
+        if (nkw) {
+            kwnames = PyTuple_New(nkw);
+            if (kwnames == NULL) {
+                return NULL;
+            }
+        }
+        /* +1 so that the allocation is never empty. */
+        PyObject **stack = PyMem_New(PyObject *, nargs + nkw + 1);
+        if (stack == NULL) {
+            Py_XDECREF(kwnames);
+            return PyErr_NoMemory();
+        }
+        for (Py_ssize_t i = 0; i < nargs; i++) {
+            stack[i] = PyList_GET_ITEM(args, i);  /* borrowed */
+        }
+        Py_ssize_t pos = 0, i = 0;
+        PyObject *key, *value;
+        while (PyDict_Next(kwargs, &pos, &key, &value)) {
+            stack[nargs + i] = value;  /* borrowed */
+            PyTuple_SET_ITEM(kwnames, i, Py_NewRef(key));
+            i++;
+        }
+        PyObject *res = PyObject_Vectorcall(func, stack, nargs, kwnames);
+        PyMem_Free(stack);
+        Py_XDECREF(kwnames);
+        return res;
+    }
+    if (strcmp(mode, "tp_call") == 0) {
+        ternaryfunc call = Py_TYPE(func)->tp_call;
+        if (call == NULL) {
+            PyErr_Format(PyExc_TypeError, "'%T' object is not callable", func);
+            return NULL;
+        }
+        PyObject *tuple = PyList_AsTuple(args);
+        if (tuple == NULL) {
+            return NULL;
+        }
+        PyObject *res = call(func, tuple, kwargs);
+        Py_DECREF(tuple);
+        return res;
+    }
+    PyErr_Format(PyExc_ValueError, "unknown mode %s", mode);
+    return NULL;
+}
+
 static PyObject *
 override_vectorcall(PyObject *callable, PyObject *const *args, size_t nargsf,
                     PyObject *kwnames)
@@ -262,6 +336,7 @@ _testcapi_has_vectorcall_flag_impl(PyObject *module, PyTypeObject *type)
 static PyMethodDef TestMethods[] = {
     _TESTCAPI_PYOBJECT_FASTCALLDICT_METHODDEF
     _TESTCAPI_PYOBJECT_VECTORCALL_METHODDEF
+    _TESTCAPI_CALL_WITH_BORROWED_ARGS_METHODDEF
     {"function_setvectorcall", function_setvectorcall, METH_O},
     _TESTCAPI_PYVECTORCALL_CALL_METHODDEF
     _TESTCAPI_MAKE_VECTORCALL_CLASS_METHODDEF
